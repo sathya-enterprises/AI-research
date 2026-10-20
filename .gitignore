@@ -1,0 +1,40 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python environments
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend dependencies and builds
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Local caches and generated research data
+*cache*.json
+research_capture_*.json
+*.local.pdf
+
+# Local editor configuration
+.vscode/
+.idea/
