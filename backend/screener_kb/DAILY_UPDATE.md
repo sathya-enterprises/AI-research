@@ -4,9 +4,10 @@ The Growth Gradual deployment now contains the Screener stock refresh job.
 
 ## Production (Render)
 
-The root `render.yaml` declares a separate Render Cron Job named
-`growth-gradual-screener-daily`. It runs at **06:30 UTC every day, which is
-12:00 IST**, and executes:
+Create a separate **Cron Job** in the Render dashboard (for example
+`growth-gradual-screener-daily`, root directory `backend`, build command
+`pip install -r requirements.txt`). Schedule it for **06:30 UTC every day
+(`30 6 * * *`), which is 12:00 IST**, with this command:
 
 ```bash
 python jobs/update_screener_daily.py --mode daily --from-db

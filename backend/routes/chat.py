@@ -193,7 +193,7 @@ async def _store_image_extractions(
     """
     Persist newly extracted image text back into the existing `files` table
     (upsert on file_hash) and upload raw bytes to the `paperly-uploads` bucket
-    so the file-service and RAG pipeline can also see them.
+    so later requests in any session can reuse the extracted text.
     """
     if not _SUPABASE_URL or not _SUPABASE_KEY:
         return

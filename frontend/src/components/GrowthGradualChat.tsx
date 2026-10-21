@@ -651,151 +651,6 @@ function isValidChart(spec: ChartSpec): boolean {
 }
 
 // ─── Mini SVG Charts ──────────────────────────────────────────────────────────
-function BarChart({ spec }: { spec: ChartSpec }) {
-  const data = (spec.series ?? [])[0]?.data ?? [];
-  if (data.length < 2) return null;
-  const absVals = data.map(d => Math.abs(d.value));
-  const max = Math.max(...absVals, 1);
-  const W = 320, H = 150, pad = 32;
-  const barW = Math.max(8, Math.floor((W - pad * 2) / data.length - 6));
-  const COLORS = ['#1a1f4e','#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
-  // Y-axis grid lines
-  const gridVals = [0.25, 0.5, 0.75, 1.0];
-  // With many bars (e.g. 10+ monthly points), narrow bars can't fit a value
-  // label or full category label without text overlapping its neighbors.
-  // Thin those out rather than letting them collide.
-  const showValueLabel = barW >= 22;
-  const labelStep = data.length > 8 ? Math.ceil(data.length / 6) : 1;
-  const maxLabelChars = barW >= 28 ? 9 : barW >= 18 ? 5 : 3;
-  return (
-    <div className="chart-wrap">
-      <div className="chart-title">{spec.title}</div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }}>
-        {gridVals.map(f => (
-          <line key={f} x1={pad} y1={H-22-(f*(H-44))} x2={W-pad} y2={H-22-(f*(H-44))}
-            stroke="#f0f2f8" strokeWidth="1"/>
-        ))}
-        <line x1={pad} y1={H-22} x2={W-pad} y2={H-22} stroke="#e2e6f0" strokeWidth="1"/>
-        {data.map((d, i) => {
-          const x = pad + i * ((W-pad*2)/data.length) + ((W-pad*2)/data.length - barW)/2;
-          const bH = Math.max(2,(Math.abs(d.value)/max)*(H-44));
-          const isNeg = d.value < 0;
-          const color = isNeg ? '#ef4444' : COLORS[i % COLORS.length];
-          return (
-            <g key={i}>
-              <rect x={x} y={isNeg ? H-22 : H-22-bH} width={barW} height={bH} rx="3" fill={color} opacity=".88"/>
-              {i % labelStep === 0 && (
-                <text x={x+barW/2} y={H-6} textAnchor="middle" fontSize="8" fill="#8b93b5" fontFamily="DM Sans,sans-serif">
-                  {d.label.length > maxLabelChars ? d.label.slice(0,maxLabelChars)+ '…' : d.label}
-                </text>
-              )}
-              {showValueLabel && (
-                <text x={x+barW/2} y={isNeg ? H-22+bH+10 : H-22-bH-4} textAnchor="middle" fontSize="8" fill={color} fontFamily="DM Mono,monospace" fontWeight="700">
-                  {spec.unit==='%' ? `${d.value>0?'+':''}${d.value.toFixed(2)}%` : d.value.toLocaleString('en-IN')}
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
-
-function LineChart({ spec }: { spec: ChartSpec }) {
-  const W = 320, H = 130, pad = 32;
-  const series = spec.series ?? [];
-  const allV = series.flatMap(s => s.data.map(d => d.value));
-  // Need at least 2 distinct time points to draw a meaningful line
-  const allLabels = series.flatMap(s => s.data.map(d => d.label));
-  const uniqueLabels = new Set(allLabels);
-  if (allV.length < 2 || uniqueLabels.size < 2) return null;
-  let mn = Math.min(...allV), mx = Math.max(...allV);
-  // add 10% padding so line isn't glued to top/bottom edges
-  const range = mx - mn || Math.abs(mx) * 0.1 || 1;
-  mn -= range * 0.1; mx += range * 0.1;
-  const COLORS = ['#1a1f4e','#3b82f6','#22c55e','#f59e0b'];
-  function pts(data: ChartDataPoint[]) {
-    return data.map((d,i) => {
-      const x = pad + (i/Math.max(data.length-1,1))*(W-pad*2);
-      const y = (H-28) - ((d.value-mn)/(mx-mn))*(H-48);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-  }
-  const labels = series[0]?.data ?? [];
-  const step = Math.max(1, Math.ceil(labels.length/5));
-  return (
-    <div className="chart-wrap">
-      <div className="chart-title">{spec.title}</div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`}>
-        {[0.25,0.5,0.75,1.0].map(f => (
-          <line key={f} x1={pad} y1={(H-28)-(f*(H-48))} x2={W-pad} y2={(H-28)-(f*(H-48))}
-            stroke="#f0f2f8" strokeWidth="1"/>
-        ))}
-        <line x1={pad} y1={H-28} x2={W-pad} y2={H-28} stroke="#e2e6f0" strokeWidth="1"/>
-        {series.map((s,si) => (
-          <polyline key={si} points={pts(s.data)} fill="none"
-            stroke={s.color ?? COLORS[si%COLORS.length]} strokeWidth="2"
-            strokeLinecap="round" strokeLinejoin="round"/>
-        ))}
-        {labels.filter((_,i) => i%step===0 || i===labels.length-1).map((d,_idx) => {
-          const oi = labels.indexOf(d);
-          const x = pad + (oi/Math.max(labels.length-1,1))*(W-pad*2);
-          return <text key={oi} x={x} y={H-12} textAnchor="middle" fontSize="8" fill="#8b93b5" fontFamily="DM Sans,sans-serif">{d.label}</text>;
-        })}
-      </svg>
-      {series.length > 1 && (
-        <div className="chart-legend">
-          {series.map((s,i) => (
-            <span key={i} className="chart-leg">
-              <i style={{ background: s.color ?? COLORS[i%COLORS.length] }}/>
-              {s.name}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PieChart({ spec, donut = false }: { spec: ChartSpec; donut?: boolean }) {
-  const data = (spec.series ?? [])[0]?.data ?? [];
-  if (data.length < 2) return null;
-  const total = data.reduce((s,d) => s+Math.abs(d.value),0) || 1;
-  const COLORS = ['#1a1f4e','#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6'];
-  let angle = -Math.PI/2;
-  const R=52, cx=68, cy=68;
-  const slices = data.map((d,i) => {
-    const frac = Math.abs(d.value)/total;
-    const sweep = frac*2*Math.PI;
-    const x1=cx+R*Math.cos(angle), y1=cy+R*Math.sin(angle);
-    angle += sweep;
-    const x2=cx+R*Math.cos(angle), y2=cy+R*Math.sin(angle);
-    return { path:`M${cx} ${cy}L${x1.toFixed(2)} ${y1.toFixed(2)}A${R} ${R} 0 ${sweep>Math.PI?1:0} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}Z`,
-      color: COLORS[i%COLORS.length], label: d.label, pct: (frac*100).toFixed(1) };
-  });
-  return (
-    <div className="chart-wrap">
-      <div className="chart-title">{spec.title}</div>
-      <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-        <svg width="136" height="136" viewBox="0 0 136 136">
-          {slices.map((s,i) => <path key={i} d={s.path} fill={s.color} stroke="#fff" strokeWidth="1.5" opacity=".9"/>)}
-          {donut ? <circle cx={cx} cy={cy} r={25} fill="#ffffff" stroke="#e3e8f2" strokeWidth="1"/> : null}
-        </svg>
-        <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
-          {slices.map((s,i) => (
-            <div key={i} style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, fontFamily:'DM Sans,sans-serif' }}>
-              <span style={{ width:9, height:9, borderRadius:2, background:s.color, flexShrink:0, display:'inline-block' }}/>
-              <span style={{ color:'#4b5680' }}>{s.label}</span>
-              <span style={{ color:s.color, fontWeight:700, fontFamily:'DM Mono,monospace', marginLeft:'auto', paddingLeft:8 }}>{s.pct}%</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Editorial charts (v93) ───────────────────────────────────────────────────
 // Premium in-app chart renderers shared by chat answers and the report preview.
 // Presentation only: every value drawn is the value in the chart spec, at the
@@ -1127,47 +982,6 @@ function EdPieChart({ spec, donut = false }: { spec: ChartSpec; donut?: boolean 
   );
 }
 
-// ─── Datawrapper chart embed ──────────────────────────────────────────────────
-function DatawrapperChart({ spec }: { spec: ChartSpec }) {
-  const dw = spec.datawrapper!;
-  const [loaded, setLoaded] = useState(false);
-  // Taller for multi-series / more data points
-  const nPts = (spec.series ?? []).flatMap(s => s.data ?? []).length;
-  const iframeH = spec.type === 'pie' ? 320 : nPts > 8 ? 380 : 300;
-  return (
-    <div className="chart-wrap dw-chart-wrap">
-      <div style={{ position: 'relative', minHeight: iframeH }}>
-        {!loaded && (
-          <div style={{
-            position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center', gap: 8,
-            background: 'linear-gradient(135deg,#f8f9fc,#f0f2f8)',
-            borderRadius: 10,
-          }}>
-            <div className="chip-spinner" style={{ width: 18, height: 18, borderWidth: 2.5, borderColor: '#1a1f4e33', borderTopColor: '#1a1f4e' }}/>
-            <span style={{ fontSize: 11, color: '#8b93b5', fontFamily: 'DM Sans,sans-serif' }}>Loading chart…</span>
-          </div>
-        )}
-        <iframe
-          title={spec.title}
-          src={dw.embedUrl}
-          style={{ width: '100%', border: 0, height: iframeH, display: 'block', borderRadius: 10, opacity: loaded ? 1 : 0, transition: 'opacity .3s' }}
-          scrolling="no"
-          allowFullScreen
-          onLoad={() => setLoaded(true)}
-        />
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-        <span style={{ fontSize: 10, color: '#8b93b5', fontFamily: 'DM Sans,sans-serif' }}>{spec.title}</span>
-        <a href={dw.publicUrl} target="_blank" rel="noopener noreferrer"
-          style={{ fontSize: 10, color: '#3b82f6', fontFamily: 'DM Sans,sans-serif', textDecoration: 'none' }}>
-          Open ↗
-        </a>
-      </div>
-    </div>
-  );
-}
-
 // ─── Table fallback (used only if Datawrapper isn't configured/available) ────
 function TableChart({ spec }: { spec: ChartSpec }) {
   const columns = spec.columns ?? [];
@@ -1237,8 +1051,7 @@ function ChartBlock({ spec }: { spec: ChartSpec }) {
   const type = normalizeInlineChartType(spec.type);
   const dwLink = spec.datawrapper?.publicUrl;
   let inner: React.ReactNode;
-  // v93: editorial renderers (EdBarChart/EdLineChart/EdPieChart). The legacy
-  // BarChart/LineChart/PieChart components are kept above for reference.
+  // v93: editorial renderers (EdBarChart/EdLineChart/EdPieChart).
   if (type === 'table') inner = <TableChart spec={spec}/>;
   else if (type === 'pie') inner = <EdPieChart spec={spec}/>;
   else if (type === 'doughnut') inner = <EdPieChart spec={spec} donut />;
@@ -1871,11 +1684,6 @@ function isSpreadsheetFile(f: { name: string; type: string }): boolean {
   );
 }
 const MAX_ATTACH = 10;
-function fmtSize(b: number) {
-  if (b < 1024) return `${b}B`;
-  if (b < 1048576) return `${(b/1024).toFixed(0)}KB`;
-  return `${(b/1048576).toFixed(1)}MB`;
-}
 function wordCount(s: string) { return s.trim().split(/\s+/).filter(Boolean).length; }
 function readAsDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -2034,72 +1842,6 @@ async function authHeader(): Promise<Record<string, string>> {
   }
 }
 
-async function* streamReply(
-  messages: { role:string; content:string }[],
-  signal: AbortSignal,
-  onMeta: (m:StreamMeta) => void,
-  fileContext?: string,
-  sessionId?: string,
-  hasRag?: boolean,
-  fileImages?: { name:string; mimeType:string; data:string }[],
-): AsyncGenerator<string> {
-  let res: Response;
-  try {
-    res = await fetch('/api/chat', {
-      method:'POST', headers:{'Content-Type':'application/json', ...(await authHeader())},
-      body: JSON.stringify({
-        messages,
-        fileContext: fileContext ?? '',
-        sessionId:  sessionId  ?? '',
-        hasRag:     hasRag     ?? false,
-        fileImages: fileImages ?? [],
-      }), signal,
-    });
-  } catch (err) {
-    throw new Error(`Failed to fetch: ${(err as Error).message}`);
-  }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    if (res.status === 429) {
-      yield '⚠️ AI providers are rate-limited. Please wait 60 seconds and try again.';
-    } else {
-      yield `*Error ${res.status}${body ? ': ' + body.slice(0, 100) : ''}*`;
-    }
-    return;
-  }
-
-  const reader = res.body!.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  while (true) {
-    let value: Uint8Array | undefined, done: boolean;
-    try {
-      ({ value, done } = await reader.read());
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        throw new Error(`Stream read error: ${(err as Error).message}`);
-      }
-      return;
-    }
-    if (done) break;
-    buf += dec.decode(value, { stream:true });
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const raw = line.slice(6).trim();
-      if (raw === '[DONE]') return;
-      try {
-        const json = JSON.parse(raw);
-        if (json.type === 'meta') { onMeta(json as StreamMeta); continue; }
-        const t = json.choices?.[0]?.delta?.content;
-        if (t) yield t;
-      } catch { /* skip malformed chunk */ }
-    }
-  }
-}
-
 // ─── Suggestions ──────────────────────────────────────────────────────────────
 const SUGGESTIONS = [
   { icon:'📈', label:'Nifty outlook today' },
@@ -2157,7 +1899,6 @@ export default function GrowthGradualChat() {
   }, [isMobile]);
 
   // Welcome mode: null = home, 'chat' = ask anything, 'attach' = file mode, 'news' = market news
-  const [welcomeMode, setWelcomeMode] = useState<null|'chat'|'attach'|'news'>(null);
 
   // Chat state
   const [input, setInput]       = useState('');
@@ -2355,11 +2096,10 @@ export default function GrowthGradualChat() {
     const sessionId = getOrCreateSessionId();
     setRagIndexing(true);
 
-    // ── Strategy: index directly to HF Space immediately (don't wait for gateway) ──
-    // The Paperly gateway does OCR + storage (useful) but its RAG index step
-    // silently fails ~100% of the time (133s upload → 0 chunks indexed).
-    // We index directly using the text already extracted by processFile() — this
-    // is instant and reliable. The gateway upload runs in the background for storage.
+    // ── Index attachments directly into rag-service ──
+    // Text is already extracted in the browser by processFile(); rag-service
+    // indexes it for chat and report retrieval. (The old background upload to the
+    // Paperly gateway was removed — those services are no longer deployed.)
     try {
       const toIndex = results.filter((f): f is AttachedFile => f !== null && !!f.extractedText);
 
@@ -2411,22 +2151,6 @@ export default function GrowthGradualChat() {
       } else {
         console.warn('[RAG] No extracted text available to index');
       }
-
-      // ── Fire gateway upload in background for Supabase storage / OCR ──
-      // We don't await this — it takes 60-180s and we already have RAG working.
-      const fd = new FormData();
-      fd.append('sessionId', sessionId);
-      for (const file of toProcess) fd.append('files', file, file.name);
-      fetch('/api/upload', {
-        method: 'POST',
-        body: fd,
-        signal: AbortSignal.timeout(300_000),
-      }).then(res => {
-        if (res.ok) console.log('[Upload] Paperly gateway storage complete (background)');
-        else console.warn('[Upload] Paperly gateway storage failed (non-critical):', res.status);
-      }).catch(e => {
-        console.warn('[Upload] Paperly gateway storage error (non-critical):', e);
-      });
 
     } catch (e) {
       console.warn('[RAG] Direct index failed:', e);
@@ -2632,7 +2356,6 @@ export default function GrowthGradualChat() {
     setPastedTexts([]);
     setRagIndexed(false);
     setRagIndexing(false);
-    setWelcomeMode(null);
     setTimeout(() => inputRef.current?.focus(), 100);
   }, [sdkStop]);
 

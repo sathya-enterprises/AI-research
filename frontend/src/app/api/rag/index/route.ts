@@ -5,7 +5,9 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // 5 min — covers HF cold start (up to 90s) + indexing
 
 const BACKEND = getBackendBaseUrl();
-const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'https://sandy31-paperly-rag-service.hf.space').replace(/\/$/, '');
+// Same default as the backend (utils/rag_client.py) so attachments are indexed into the
+// rag-service the backend reads from. Set RAG_SERVICE_URL to your deployed rag-service in production.
+const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'http://127.0.0.1:7860').replace(/\/$/, '');
 
 export async function POST(req: NextRequest) {
   try {

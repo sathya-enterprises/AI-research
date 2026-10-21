@@ -2,7 +2,7 @@
 RAG Service Client
 ==================
 Thin async wrapper around the Paperly RAG Service running on HuggingFace Spaces.
-URL: https://sandy31-paperly-rag-service.hf.space  (set via RAG_SERVICE_URL env)
+URL: RAG_SERVICE_URL env (default http://127.0.0.1:7860, the local backend/rag-service)
 
 Endpoints used:
   POST /index   — index extracted text from uploaded files
