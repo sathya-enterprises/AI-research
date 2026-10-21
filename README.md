@@ -20,10 +20,7 @@ and an editorial PDF export.
 growth-gradual/
 ├── README.md                     ← you are here
 ├── .env.example                  shared variables (frontend + backend URLs, LLM keys)
-├── START_GROWTH_GRADUAL_WINDOWS.bat   one-click local start (backend, RAG, frontend)
-├── docs/
-│   ├── guides/                   Supabase research store, Render deployment
-│   └── history/                  change notes for each release (latest: UPDATE_PUBLICATION_RELIABILITY_2026-10-20.md)
+|
 ├── backend/                      FastAPI app — `uvicorn main:app`
 │   ├── main.py                   app + router registration (/api/chat, /api/chat/report, …)
 │   ├── routes/                   API routers + their tests (tests live beside the code)
@@ -40,7 +37,7 @@ growth-gradual/
 │   ├── jobs/                     daily Screener → Supabase updater (cron)
 │   ├── scripts/                  install_chromium.ps1, check_gemini_keys.py (manual key/model check)
 │   ├── diagnostics/              research captures are written here when enabled
-│   └── supabase_*.sql            one-time SQL to run in the Supabase SQL editor
+│ 
 └── frontend/                     Next.js app
     ├── src/app/                  pages + API routes (thin proxies to the backend)
     ├── src/components/           GrowthGradualChat (workspace), feed, auth, market widgets
