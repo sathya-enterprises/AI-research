@@ -1,0 +1,41 @@
+{
+  "name": "finbot-next",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "dev:clean": "node scripts/clean-next-cache.mjs && next dev",
+    "diagnose:api": "node scripts/api-route-smoke-test.mjs",
+    "qa:capture-export": "node scripts/capture-report-export.cjs",
+    "qa:test-feed-pagination": "node --test scripts/test-feed-pagination.cjs",
+    "qa:test-report-mode-toggle": "node --test scripts/test-report-mode-toggle.cjs",
+    "qa:test-chat-stream-animation": "node --test scripts/test-chat-stream-animation.cjs",
+    "qa:test-report-stream-html-fallback": "node --test scripts/test-report-stream-html-fallback.cjs"
+  },
+  "dependencies": {
+    "next": "16.2.6",
+    "node-html-parser": "^7.1.0",
+    "puppeteer-core": "^25.0.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "pdfjs-dist": "^4.4.168",
+    "xlsx": "^0.18.5",
+    "@supabase/supabase-js": "^2.45.4",
+    "ws": "^8.21.0",
+    "@ai-sdk/react": "4.0.139",
+    "ai": "7.0.136"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.6",
+    "tailwindcss": "^4",
+    "typescript": "^5.9.3"
+  }
+}

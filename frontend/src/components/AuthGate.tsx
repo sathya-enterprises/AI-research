@@ -1,0 +1,212 @@
+'use client';
+
+import { useState, FormEvent, ReactNode } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+
+type Mode = 'login' | 'signup';
+
+export default function AuthGate({ children }: { children: ReactNode }) {
+  const { user, loading, initializationError, retryInitialization } = useAuth();
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '80px 20px', color: 'rgba(15,23,42,0.4)', fontFamily: "'DM Sans',sans-serif", fontSize: '13px' }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (initializationError) {
+    return (
+      <div role="alert" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', padding: '64px 20px', color: '#334155', fontFamily: "'DM Sans',sans-serif", textAlign: 'center' }}>
+        <div style={{ fontSize: '16px', fontWeight: 700, color: '#0f172a' }}>Could not verify the saved session</div>
+        <div style={{ maxWidth: '420px', fontSize: '13px', lineHeight: 1.6 }}>{initializationError}</div>
+        <button type="button" onClick={retryInitialization} style={{ background: '#c8922a', color: '#fff', border: 'none', borderRadius: '8px', padding: '10px 16px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}>
+          Retry session check
+        </button>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
+  return <>{children}</>;
+}
+
+function AuthScreen() {
+  const { signIn, signUp } = useAuth();
+  const [mode, setMode] = useState<Mode>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setInfo(null);
+
+    if (mode === 'signup' && password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      const result = mode === 'login'
+        ? await signIn(email, password)
+        : await signUp(email, password);
+
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
+
+      if (mode === 'signup') {
+        setInfo('Account created. Check your email to confirm, then log in.');
+        setMode('login');
+        setPassword('');
+        setConfirmPassword('');
+      }
+      // On login success, AuthContext's onAuthStateChange updates `user` and
+      // AuthGate re-renders into the app automatically.
+    } catch {
+      setError('Authentication could not be completed. Please retry.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'center', alignItems: 'center',
+      minHeight: '70vh', padding: '40px 16px',
+    }}>
+      <div style={{
+        width: '100%', maxWidth: '380px',
+        background: 'linear-gradient(135deg, #fefdf9 0%, #f9f6ef 50%, #faf8f3 100%)',
+        borderRadius: '14px',
+        border: '1px solid rgba(200,146,42,0.18)',
+        boxShadow: '0 8px 32px rgba(15,23,42,0.1)',
+        padding: '32px 28px',
+      }}>
+        <div style={{
+          fontFamily: "'DM Sans',sans-serif", fontSize: '20px', fontWeight: 700,
+          color: '#0f172a', marginBottom: '4px', textAlign: 'center',
+        }}>
+          {mode === 'login' ? 'Log in' : 'Create account'}
+        </div>
+        <div style={{
+          fontSize: '11.5px', color: 'rgba(15,23,42,0.5)', marginBottom: '22px', textAlign: 'center',
+        }}>
+          Growth Gradual · Indian Financial Markets
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <input
+            type="email"
+            required
+            autoComplete="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            style={inputStyle}
+          />
+          <input
+            type="password"
+            required
+            minLength={6}
+            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={inputStyle}
+          />
+          {mode === 'signup' && (
+            <input
+              type="password"
+              required
+              minLength={6}
+              autoComplete="new-password"
+              placeholder="Confirm password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              style={inputStyle}
+            />
+          )}
+
+          {error && (
+            <div style={{ fontSize: '12px', color: '#dc2626', lineHeight: 1.4 }}>{error}</div>
+          )}
+          {info && (
+            <div style={{ fontSize: '12px', color: '#16a34a', lineHeight: 1.4 }}>{info}</div>
+          )}
+
+          <button
+            type="submit"
+            disabled={submitting}
+            style={{
+              marginTop: '4px',
+              background: submitting ? '#c8922a99' : '#c8922a',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '8px',
+              padding: '11px 16px',
+              fontSize: '13px',
+              fontWeight: 700,
+              fontFamily: "'DM Sans',sans-serif",
+              letterSpacing: '0.3px',
+              cursor: submitting ? 'default' : 'pointer',
+            }}
+          >
+            {submitting ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Sign up'}
+          </button>
+        </form>
+
+        <div style={{ marginTop: '18px', fontSize: '12px', color: 'rgba(15,23,42,0.55)', textAlign: 'center' }}>
+          {mode === 'login' ? (
+            <>
+              No account?{' '}
+              <button type="button" onClick={() => { setMode('signup'); setError(null); setInfo(null); }} style={linkStyle}>
+                Sign up
+              </button>
+            </>
+          ) : (
+            <>
+              Already have an account?{' '}
+              <button type="button" onClick={() => { setMode('login'); setError(null); setInfo(null); setConfirmPassword(''); }} style={linkStyle}>
+                Log in
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const inputStyle: React.CSSProperties = {
+  padding: '10px 12px',
+  borderRadius: '8px',
+  border: '1px solid rgba(15,23,42,0.15)',
+  fontSize: '13px',
+  fontFamily: "'DM Sans',sans-serif",
+  outline: 'none',
+  background: '#fff',
+  color: '#0f172a',
+};
+
+const linkStyle: React.CSSProperties = {
+  background: 'transparent',
+  border: 'none',
+  color: '#c8922a',
+  fontWeight: 700,
+  cursor: 'pointer',
+  padding: 0,
+  fontSize: '12px',
+};

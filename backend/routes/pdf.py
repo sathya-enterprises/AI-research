@@ -4701,9 +4701,11 @@ body .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {
             '<style id="gg-pdf-v93-editorial">' + _editorial_css()
             + _editorial_print_css().replace("{short_title}", short_title) + "</style>"
         )
+    # Appended to the premium layer so it stays last in the cascade.
+    premium_print_overrides = premium_print_overrides + editorial_print
     return html_doc.replace(
         "</head>",
-        print_css.replace("{short_title}", short_title) + final_print_overrides + premium_print_overrides + editorial_print + "</head>",
+        print_css.replace("{short_title}", short_title) + final_print_overrides + premium_print_overrides + "</head>",
         1,
     )
 
