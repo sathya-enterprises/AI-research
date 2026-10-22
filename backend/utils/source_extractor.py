@@ -7,10 +7,13 @@ blocked or cannot be parsed. It never generates or repairs source content.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
+import os
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -52,8 +55,22 @@ _PDF_FIN_RE = re.compile(
 )
 
 
-def _extract_pdf(payload: bytes, max_chars: int) -> str:
-    """Extract selectable text from a PDF; scanned image-only PDFs remain empty."""
+def _pdf_time_budget() -> float:
+    try:
+        return max(2.0, min(60.0, float(os.getenv("GG_PDF_EXTRACT_BUDGET_SECONDS", "8"))))
+    except (TypeError, ValueError):
+        return 8.0
+
+
+def _extract_pdf(payload: bytes, max_chars: int, time_budget: float | None = None) -> str:
+    """Extract selectable text from a PDF; scanned image-only PDFs remain empty.
+
+    ``time_budget`` (seconds) bounds the page-scoring loop: pypdf needs roughly
+    0.1-0.5 s per page, so scoring 90 pages of a large NITI/PIB report could
+    take 20-40 s. When the budget runs out the densest pages scored so far are
+    kept. ``None`` keeps the previous unbounded behaviour for direct callers.
+    """
+    deadline = (time.monotonic() + time_budget) if time_budget else None
     try:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(payload), strict=False)
@@ -66,6 +83,8 @@ def _extract_pdf(payload: bytes, max_chars: int) -> str:
         page_count = len(reader.pages)
         if page_count <= 12:
             for page in reader.pages[:page_count]:
+                if deadline is not None and output and time.monotonic() > deadline:
+                    break
                 text = page.extract_text() or ""
                 text = _normalize_lines(text, minimum=5)
                 if text:
@@ -76,6 +95,8 @@ def _extract_pdf(payload: bytes, max_chars: int) -> str:
             return "\n\n".join(output)[:max_chars].strip()
         scored: list[tuple[float, int, str]] = []
         for idx, page in enumerate(reader.pages[:min(page_count, 90)]):
+            if deadline is not None and scored and time.monotonic() > deadline:
+                break
             text = _normalize_lines(page.extract_text() or "", minimum=5)
             if not text:
                 continue
@@ -397,8 +418,14 @@ async def fetch_source_document(
         return base
     try:
         timeout = httpx.Timeout(connect=5, read=12, write=8, pool=5)
+        # httpx's read timeout is per chunk, so a slow server trickling a 20 MB
+        # PDF could hold a fetch slot indefinitely. Bound the whole download.
+        try:
+            total_seconds = max(5.0, float(os.getenv("GG_SOURCE_FETCH_TOTAL_SECONDS", "20")))
+        except (TypeError, ValueError):
+            total_seconds = 20.0
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.get(raw_url, headers=_DEFAULT_HEADERS)
+            response = await asyncio.wait_for(client.get(raw_url, headers=_DEFAULT_HEADERS), timeout=total_seconds)
         base.update({
             "http_status": int(response.status_code),
             "final_url": str(response.url),
@@ -416,7 +443,10 @@ async def fetch_source_document(
         final_path = urlparse(str(response.url)).path.casefold()
         is_pdf = "application/pdf" in content_type or final_path.endswith(".pdf") or body[:5] == b"%PDF-"
         if is_pdf:
-            extracted = _extract_pdf(body, max_chars)
+            # pypdf is CPU-bound; parsing on the event loop froze every other
+            # concurrent fetch, SSE progress and in-flight LLM call for the
+            # whole document. Run it in a worker thread with a time budget.
+            extracted = await asyncio.to_thread(_extract_pdf, body, max_chars, _pdf_time_budget())
             base["status"] = "ok" if extracted.strip() else "empty_pdf_text"
             base["text"] = extracted
             log.debug("Source PDF extracted chars=%d host=%s", len(extracted), parsed.hostname)
@@ -438,11 +468,14 @@ async def fetch_source_document(
             base["text"] = plain[:max_chars]
             return base
         base.update(_extract_publisher_metadata(raw_text, str(response.url)))
-        extracted = _extract_html(raw_text, max_chars, include_script_data)
+        if len(raw_text) > 200_000:
+            extracted = await asyncio.to_thread(_extract_html, raw_text, max_chars, include_script_data)
+        else:
+            extracted = _extract_html(raw_text, max_chars, include_script_data)
         base["status"] = "ok" if extracted else "empty_extraction"
         base["text"] = extracted
         return base
-    except httpx.TimeoutException:
+    except (httpx.TimeoutException, asyncio.TimeoutError):
         base["status"] = "timeout"
         return base
     except httpx.RequestError as exc:

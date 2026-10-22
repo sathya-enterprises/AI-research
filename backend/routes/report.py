@@ -5381,6 +5381,30 @@ GEMINI_TIME_BUDGET_SECONDS = 150
 GEMINI_MAX_503_PER_MODEL = 3
 GEMINI_MODEL_COOLDOWN_MS = 30_000
 GEMINI_KEY_COOLDOWN_MS = 60_000
+GEMINI_TIMEOUT_KEY_COOLDOWN_MS = 10_000
+
+# Hedged waves. Firing every key of a wave at the same model at once sends 4
+# identical full-report prompts per attempt: 4x the quota, and when the model
+# is overloaded all four get the same 503. Instead start one request, add a
+# hedge (another key) only if it hasn't answered after the delay below, and
+# launch the next key immediately when one fails fast (429/exception). A 503
+# or 400/404 stops the wave so the scheduler moves straight to the next model.
+# GEMINI_REPORT_HEDGE_DELAY_SECONDS=0 restores the old all-at-once behaviour.
+_GEMINI_HEDGE_DELAYS = {"brief": 10.0, "detailed": 15.0, "in_depth": 20.0}
+
+
+def _gemini_hedge_delay(depth: str) -> float:
+    raw = _os.environ.get("GEMINI_REPORT_HEDGE_DELAY_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return _GEMINI_HEDGE_DELAYS.get(depth, 15.0)
+
+
+def _gemini_model_cooling(model: str) -> bool:
+    return bool(is_rate_limited(f"gemini:model:{model}"))
 
 _GEMINI_MAX_OUTPUT = {
     "gemini-3.6-flash":       65_536,
@@ -5465,6 +5489,16 @@ async def _gemini_one_attempt(
                     "generationConfig": generation_config,
                 },
             )
+    except asyncio.CancelledError:
+        raise
+    except httpx.TimeoutException as exc:
+        # A slow response means the model is busy, not that this key is bad.
+        # The old 60 s key cooldown removed healthy keys from the pool for the
+        # rest of the report (and from the analysts/audit that share it).
+        log.warning("Gemini attempt timeout model=%s key=...%s after %.0fms: %s",
+                    model, key[-4:], (time.perf_counter() - t0) * 1000, type(exc).__name__)
+        mark_rate_limited(f"report:gemini:{key}:{model}", GEMINI_TIMEOUT_KEY_COOLDOWN_MS)
+        return "", model, "timeout"
     except Exception as exc:
         log.warning(
             "Gemini attempt exception model=%s key=...%s: %s%s",
@@ -5539,30 +5573,60 @@ async def _run_gemini_wave(
     keys: list[str],
     started: float,
     deadline: float,
+    launched_out: list[str] | None = None,
 ) -> tuple[str, str, dict[str, int], int]:
-    """Run a small concurrent wave and return the best usable response.
+    """Run one hedged wave on a single model and return the first usable response.
 
-    The first qualifying successful response wins; slower sibling requests are
-    cancelled so one good key does not wait for three dead/overloaded keys.
-    ``stats`` records simple per-status counts for diagnostics.
+    With a hedge delay > 0 the keys are launched one at a time: the next key
+    starts after ``hedge_delay`` seconds without an answer, or immediately when
+    an in-flight attempt fails fast for a key-specific reason. A 503/400/404 is
+    model-wide, so no further keys are launched on this model. With a delay of
+    0 every key starts at once (legacy behaviour). Slower siblings are cancelled
+    as soon as one response is accepted. ``launched_out`` (optional) receives
+    the keys that were actually used so unused ones can go back to the pool.
     """
-    tasks = {
-        asyncio.create_task(_gemini_one_attempt(user_prompt, depth, key, model)): key
-        for key in keys
-    }
+    hedge_delay = _gemini_hedge_delay(depth)
+    queue = list(keys)
+    tasks: dict[asyncio.Task, str] = {}
     stats: dict[str, int] = {}
     best_text = ""
     best_model = ""
+    stop_launching = False
+
+    def _launch() -> None:
+        key = queue.pop(0)
+        task = asyncio.create_task(_gemini_one_attempt(user_prompt, depth, key, model))
+        tasks[task] = key
+        if launched_out is not None:
+            launched_out.append(key)
+
+    # ``deadline`` is the absolute perf_counter timestamp computed by call_gemini.
+    def _remaining() -> float:
+        return max(0.0, deadline - time.perf_counter())
 
     try:
+        if queue:
+            _launch()
+        if hedge_delay <= 0:
+            while queue:
+                _launch()
+        next_hedge_at = time.perf_counter() + hedge_delay
         pending = set(tasks)
-        while pending:
-            remaining = max(0.1, deadline - (time.perf_counter() - started))
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-            )
-            if not done:
+        while pending or (queue and not stop_launching):
+            remaining = _remaining()
+            if remaining <= 0:
                 break
+            if not pending:
+                _launch()
+                pending = {t for t in tasks if not t.done()}
+                next_hedge_at = time.perf_counter() + hedge_delay
+                continue
+            wait_for = remaining
+            if queue and not stop_launching and hedge_delay > 0:
+                wait_for = max(0.05, min(wait_for, next_hedge_at - time.perf_counter()))
+            done, pending = await asyncio.wait(
+                pending, timeout=wait_for, return_when=asyncio.FIRST_COMPLETED
+            )
             for task in done:
                 key = tasks[task]
                 try:
@@ -5577,10 +5641,22 @@ async def _run_gemini_wave(
                     best_text, best_model = text, model_id
                 if text and text.strip():
                     # The API layer has already rejected empty, truncated and
-                    # runaway responses. Do not keep other model calls running
-                    # merely to chase an arbitrary character count; structured
-                    # parsing and evidence/publication audits determine quality.
+                    # runaway responses; structured parsing and the evidence/
+                    # publication audits judge quality downstream.
                     return text.strip(), model_id, stats, len(tasks)
+                if status in {"503", "400", "404"}:
+                    stop_launching = True
+                elif queue and not stop_launching:
+                    # Key-specific fast failure: replace it right away.
+                    _launch()
+                    pending = pending | {t for t in tasks if not t.done() and t not in done}
+                    next_hedge_at = time.perf_counter() + hedge_delay
+            if (not done and queue and not stop_launching and hedge_delay > 0
+                    and time.perf_counter() >= next_hedge_at):
+                log.info("Gemini wave: no answer after %.0fs on model=%s, adding a hedge request", hedge_delay, model)
+                _launch()
+                pending = {t for t in tasks if not t.done()}
+                next_hedge_at = time.perf_counter() + hedge_delay
 
         return best_text, best_model, stats, len(tasks)
     finally:
@@ -5627,6 +5703,13 @@ async def call_gemini(user_prompt: str, report_tier: str | None = None) -> tuple
         model = GEMINI_MODELS[model_cursor % len(GEMINI_MODELS)]
         model_cursor += 1
         model_round += 1
+        # A model that returned 503 in the last 30 s (here, in the analysts or
+        # in another report) is overloaded; skip it while any other model is
+        # healthy instead of spending a wave on a near-certain 503.
+        if _gemini_model_cooling(model) and any(not _gemini_model_cooling(m) for m in GEMINI_MODELS):
+            if model_round <= len(GEMINI_MODELS) * 2:
+                log.info("Gemini scheduler: skipping model=%s (503 cooldown active)", model)
+                continue
 
         model_keys = _gemini_candidate_keys(remaining, model, GEMINI_MAX_KEYS_PER_MODEL)
         if not model_keys:
@@ -5651,10 +5734,15 @@ async def call_gemini(user_prompt: str, report_tier: str | None = None) -> tuple
             "Gemini scheduler: model=%s round=%d keys=%d",
             model, model_round, len(wave),
         )
+        launched_keys: list[str] = []
         text, chosen_model, stats, wave_attempts = await _run_gemini_wave(
-            user_prompt, depth, model, wave, started, deadline_at
+            user_prompt, depth, model, wave, started, deadline_at, launched_keys,
         )
         attempts_done += wave_attempts
+        # Keys the hedged wave never needed go back to the pool for later models.
+        unused = [k for k in model_keys if k not in set(launched_keys)]
+        if unused:
+            remaining = unused + remaining
 
         if text and text.strip():
             log.info(
@@ -6402,7 +6490,14 @@ async def _parallel_gemini_analyst_once(prompt: str, report_tier: str, key: str,
     the entire Gemini pool. Transient connect/read timeouts get a short cooldown
     so a reserve key can retry promptly within the shared stage deadline.
     """
-    per_call_seconds = max(4.0, min(7.0, float(os.getenv("REPORT_PARALLEL_REQUEST_TIMEOUT_SECONDS", "6.5"))))
+    # 6.5 s was too short for a 12k-28k char evidence prompt with up to 3,072
+    # output tokens: only flash-lite finished, and the 3.6-flash/3.5-flash
+    # analysts timed out (2 of 5 analysts lost in the EV run). Default by tier.
+    _tier_call_default = {"brief": 10.0, "detailed": 12.0, "in_depth": 14.0}.get(report_tier, 12.0)
+    try:
+        per_call_seconds = max(4.0, min(30.0, float(os.getenv("REPORT_PARALLEL_REQUEST_TIMEOUT_SECONDS", str(_tier_call_default)))))
+    except (TypeError, ValueError):
+        per_call_seconds = _tier_call_default
     quota_cooldown_ms = max(60_000, int(os.getenv("REPORT_PARALLEL_QUOTA_COOLDOWN_MS", "300000")))
     transient_cooldown_ms = max(2_000, min(30_000, int(os.getenv("REPORT_PARALLEL_TRANSIENT_COOLDOWN_MS", "12000"))))
     timeout = httpx.Timeout(connect=2.5, read=max(2.0, per_call_seconds - 1.0), write=2.5, pool=1.5)
@@ -6473,8 +6568,11 @@ async def _parallel_groq_analyst(question: str, report_tier: str, prompt: str) -
         if is_rate_limited(f"report:groq:{key}") or is_rate_limited(f"report:groq:{key}:{model}"):
             continue
         try:
-            async with asyncio.timeout(max(4.0, min(7.0, float(os.getenv("REPORT_PARALLEL_REQUEST_TIMEOUT_SECONDS", "6.5"))))):
-                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.5, read=4.5, write=2.5, pool=1.5)) as client:
+            # Groq's 120B model needed more than the old 4.5 s read timeout for
+            # a full evidence prompt (the EV run's reviewer returned nothing).
+            _groq_call_s = max(4.0, min(30.0, float(os.getenv("REPORT_PARALLEL_GROQ_TIMEOUT_SECONDS", "11"))))
+            async with asyncio.timeout(_groq_call_s):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.5, read=max(3.0, _groq_call_s - 1.0), write=2.5, pool=1.5)) as client:
                     response = await client.post(
                         "https://api.groq.com/openai/v1/chat/completions",
                         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
@@ -6547,12 +6645,20 @@ async def run_parallel_evidence_analysis(
     reserved_pool_keys: set[str] = set()
     assignments: list[dict] = []
     model_pool = list(GEMINI_MODELS) or ["gemini-3.5-flash-lite"]
+    # Evidence extraction is a short structured task: run every analyst on the
+    # fastest model first (REPORT_PARALLEL_PRIMARY_MODEL, default the first
+    # configured model, flash-lite) and keep the heavier models as backups.
+    # Spreading primaries across 3.6-flash/3.5-flash made 2 of 5 analysts time out.
+    _primary_pref = os.getenv("REPORT_PARALLEL_PRIMARY_MODEL", "").strip() or model_pool[0]
+    _spread_models = os.getenv("REPORT_PARALLEL_SPREAD_MODELS", "0").strip().casefold() in {"1", "true", "yes", "on"}
+    if _primary_pref in model_pool:
+        model_pool = [_primary_pref] + [m for m in model_pool if m != _primary_pref]
 
     # Allocate primary keys to every analyst first, then reserve spare keys for
     # retries. This prevents the first analyst's backup allocation from consuming
     # the only key that could have served a later analyst.
     for index, role in enumerate(roles):
-        primary_model = model_pool[index % len(model_pool)]
+        primary_model = model_pool[index % len(model_pool)] if _spread_models else model_pool[0]
         primary_key = reserve_provider_key(
             available_keys, "report:gemini", model=primary_model,
             lease_ms=90_000, exclude=used_keys,
@@ -6560,12 +6666,8 @@ async def run_parallel_evidence_analysis(
         if primary_key:
             used_keys.add(primary_key)
             reserved_pool_keys.add(primary_key)
-        backup_model = next(
-            (model_pool[(index + offset) % len(model_pool)]
-             for offset in range(1, len(model_pool) + 1)
-             if model_pool[(index + offset) % len(model_pool)] != primary_model),
-            primary_model,
-        )
+        _backups = [m for m in model_pool if m != primary_model]
+        backup_model = _backups[index % len(_backups)] if _backups else primary_model
         assignments.append({
             "role": role, "primaryKey": primary_key, "primaryModel": primary_model,
             "backupKey": None, "backupModel": backup_model,
@@ -6669,7 +6771,7 @@ async def run_parallel_evidence_analysis(
         return {"enabled": True, "findings": [], "gaps": [], "analysts": 0, "reason": "no_healthy_provider_keys"}
 
     started = time.perf_counter()
-    deadline_s = max(8.0, min(20.0, float(os.getenv("REPORT_PARALLEL_ANALYSIS_DEADLINE_SECONDS", "18"))))
+    deadline_s = max(8.0, min(45.0, float(os.getenv("REPORT_PARALLEL_ANALYSIS_DEADLINE_SECONDS", "20"))))
     tasks = [asyncio.create_task(job) for job in jobs]
     done, pending = await asyncio.wait(tasks, timeout=deadline_s)
     results = []
@@ -7795,6 +7897,94 @@ def _interleave_by_entity(sources: list[dict], question: str, intent: "RequestIn
         depth += 1
     rest = [i for i in range(len(sources)) if i not in seen]
     return [sources[i] for i in chosen + rest]
+
+
+# Questions about stock-market index levels (they get verified Yahoo quotes).
+_INDEX_QUESTION_RE = re.compile(
+    r"\b(nifty|sensex|bse|nse|bank nifty|"
+    r"(?:stock|equity|share|benchmark|sectoral|sector|market)\s+(?:index|indices)|"
+    r"indian stock market|indian equity|indian share market|"
+    r"sector rotation|stock markets? in india|stock market|equity market)\b",
+    re.IGNORECASE,
+)
+_TOPIC_RANK_STOPWORDS = frozenset(
+    "about above after again against analyze analyse analysis based before being below between both brief compare "
+    "comparing comparison could detail detailed does doing during each explain from give growth have having identify into "
+    "just like latest major more most other over provide report research same short should show some such than that "
+    "their them then there these they this those through trends under using very what when where which while will with "
+    "would year years india indian".split()
+)
+_TOPIC_DATA_RE = re.compile(
+    r"(?i)\d[\d,]*(?:\.\d+)?\s*(?:%|per\s*cent|lakh|crore|million|billion|units?|vehicles|mn|bn|gw|mw|kwh)"
+    r"|\b(?:fy|cy)\s?\d{2,4}\b|\b20[12]\d\b"
+)
+
+
+def _rank_sources_by_topic(sources: list[dict], question: str, limit: int, per_domain_cap: int = 2) -> list[dict]:
+    """Order sources for enrichment when the question names no company.
+
+    Previously only company questions were ranked; topic questions ("EV adoption
+    in India") were enriched in raw search order, so the Brief tier's 10 fetch
+    slots went to whatever the first queries returned (an RBI bulletin, PIB
+    landing pages) while the data-dense sources (sales trackers, annual EV
+    reports) sat at positions 29-37 and were never fetched.
+
+    Score = question-term coverage (title/snippet weighted higher) + numeric data
+    density + a small primary-document bonus. The first ``limit`` slots are then
+    filled with at most ``per_domain_cap`` pages per host so one publisher cannot
+    take the whole fetch budget. Nothing is dropped; only the order changes.
+    """
+    internal = [s for s in sources if str((s or {}).get("url") or "").startswith("internal://")]
+    web = [s for s in sources if s not in internal]
+    if len(web) <= 1:
+        return sources
+    norm_q = re.sub(r"[^a-z0-9]+", " ", (question or "").lower())
+    terms = [t for t in dict.fromkeys(norm_q.split()) if len(t) >= 4 and t not in _TOPIC_RANK_STOPWORDS]
+    terms += [a for a in re.findall(r"\b[A-Z]{2,5}\b", question or "") if a.lower() not in terms][:6]
+    terms = [t.lower() for t in terms]
+    if not terms:
+        return sources
+
+    def _host(row: dict) -> str:
+        host = (urlparse(str(row.get("url") or "")).netloc or "").lower().split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+
+    scored: list[tuple[float, int, dict]] = []
+    for idx, row in enumerate(web):
+        head = re.sub(r"[^a-z0-9]+", " ", " ".join(str(row.get(k) or "") for k in ("title", "snippet")).lower())
+        body_raw = str(row.get("fullContent") or row.get("pageContent") or "")[:8000]
+        body = re.sub(r"[^a-z0-9]+", " ", body_raw.lower())
+        head_hits = sum(1 for t in terms if f" {t}" in f" {head}")
+        body_hits = sum(1 for t in terms if f" {t}" in f" {body}")
+        coverage = (head_hits * 2.0 + body_hits) / max(1, len(terms))   # 0..3
+        data_hits = min(40, len(_TOPIC_DATA_RE.findall(body_raw)))
+        # Sales/registration dashboards are mostly bare numbers in table cells
+        # ("| 252642 | 728054 |"); count those as data too.
+        table_numbers = len(re.findall(r"\|\s*\d[\d,]{3,}(?:\.\d+)?\s*(?=\|)", body_raw))
+        data_hits = min(60, data_hits + table_numbers)
+        host = _host(row)
+        path = urlparse(str(row.get("url") or "")).path or ""
+        score = coverage * 10.0 + data_hits * 0.25
+        if _PRIMARY_PATH_RE.search(path) or path.lower().endswith(".pdf"):
+            score += 1.5
+        if _OFFICIAL_SOURCE_HOST_RE.search(host):
+            score += 1.0
+        if _LOW_VALUE_HOST_RE.search(host):
+            score -= 6.0
+        scored.append((score, idx, row))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    chosen: list[dict] = []
+    deferred: list[dict] = []
+    per_host: dict[str, int] = {}
+    for _score, _idx, row in scored:
+        host = _host(row)
+        if len(chosen) < limit and per_host.get(host, 0) < per_domain_cap:
+            chosen.append(row)
+            per_host[host] = per_host.get(host, 0) + 1
+        else:
+            deferred.append(row)
+    return internal + chosen + deferred
 
 
 def _filter_relevant_sources(
@@ -11293,15 +11483,25 @@ async def _gemini_independent_report_audit(
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 5000},
     }
     last_reason = "provider_unavailable"
+    # The old 10 s read timeout was shorter than a ~60 KB prompt with up to
+    # 5,000 JSON output tokens usually needs, so many reviewers timed out and
+    # the audit came back "unavailable" or from whichever reviewer was fastest.
+    try:
+        _audit_read_s = max(6.0, min(40.0, float(os.getenv("GG_AUDIT_REQUEST_TIMEOUT_SECONDS", "20"))))
+    except (TypeError, ValueError):
+        _audit_read_s = 20.0
 
     async def _attempt(model: str, key: str) -> dict:
         """One bounded audit call. Return metadata only; never log the API key."""
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=10, write=4, pool=4)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=_audit_read_s, write=4, pool=4)) as client:
                 response = await client.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
                     json=request_body,
                 )
+            if response.status_code == 503:
+                mark_rate_limited(f"gemini:model:{model}", GEMINI_MODEL_COOLDOWN_MS)
+                return {"reason": "http_503", "model": model}
             if response.status_code == 429:
                 return {"reason": "rate_limited", "model": model}
             if response.status_code in (401, 403):
@@ -11337,10 +11537,91 @@ async def _gemini_independent_report_audit(
             log.warning("Gemini report audit attempt failed model=%s error=%s", model, type(exc).__name__)
             return {"reason": type(exc).__name__, "model": model}
 
-    # Use bounded parallel waves instead of serially spending the complete audit
-    # budget on one timed-out key. A valid review is preferred; if reviewers
-    # disagree, keep the most conservative valid status for the deterministic
-    # publication gate to reconcile.
+    # Legacy mode (GG_AUDIT_STRATEGY=parallel): 4 simultaneous reviewers (2
+    # models x the same first 2 keys) and the MOST SEVERE verdict wins. That
+    # sent 4-8 copies of the full report per audit, always hammered keys[0:2]
+    # (429s), and with several stochastic reviewers one of them saying FAIL
+    # became likely (p=0.2 each -> 59% for four), which triggered the repair
+    # and re-audit loops even for sound reports.
+    #
+    # Default (hedged): one reviewer on the first healthy model with a rotated
+    # healthy key; a second reviewer on a different model/key only if the
+    # first hasn't answered after GG_AUDIT_HEDGE_SECONDS or failed. The first
+    # valid structured review is used. The deterministic publication gate is
+    # still applied by the caller and remains authoritative.
+    strategy = os.getenv("GG_AUDIT_STRATEGY", "hedged").strip().casefold()
+    severity_rank = {"PASS": 0, "WARNING": 1, "FAIL": 2}
+
+    def _pick_keys(model: str, n: int, exclude: set[str]) -> list[str]:
+        picked: list[str] = []
+        for candidate in round_robin([k for k in keys if _is_rest_api_key(k)] or list(keys)):
+            if candidate in exclude or candidate in picked:
+                continue
+            if is_rate_limited(candidate) or is_rate_limited(f"report:gemini:{candidate}:{model}"):
+                continue
+            picked.append(candidate)
+            if len(picked) >= n:
+                break
+        return picked
+
+    if strategy != "parallel":
+        healthy_models = [m for m in models if not is_rate_limited(f"gemini:model:{m}")] or list(models)
+        plan: list[tuple[str, str]] = []
+        used: set[str] = set()
+        for model in healthy_models[:3]:
+            # Prefer a key not used by an earlier reviewer; with a single
+            # configured key, reuse it on the next model rather than skip it.
+            for key in (_pick_keys(model, 1, used) or _pick_keys(model, 1, set())):
+                used.add(key)
+                plan.append((model, key))
+        if not plan:
+            plan = [(models[0], keys[0])]
+        try:
+            hedge_s = max(1.0, min(30.0, float(os.getenv("GG_AUDIT_HEDGE_SECONDS", "9"))))
+        except (TypeError, ValueError):
+            hedge_s = 9.0
+        tasks: dict[asyncio.Task, tuple[str, str]] = {}
+        try:
+            queue = list(plan)
+
+            def _launch_next() -> None:
+                model, key = queue.pop(0)
+                tasks[asyncio.create_task(_attempt(model, key))] = (model, key)
+
+            _launch_next()
+            log.info("Gemini report audit (hedged) model=%s reviewers_planned=%d", plan[0][0], len(plan))
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=hedge_s if queue else None, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    if queue:
+                        log.info("Gemini report audit: no answer after %.0fs, adding a hedge reviewer", hedge_s)
+                        _launch_next()
+                        pending = {t for t in tasks if not t.done()}
+                    continue
+                for task in done:
+                    item = task.result()
+                    if item.get("status") in severity_rank:
+                        log.info("Gemini report audit provider result model=%s status=%s reviewers=1",
+                                 item.get("model", "unknown"), item.get("status"))
+                        return item
+                    if item.get("reason"):
+                        last_reason = str(item["reason"])
+                if queue:
+                    _launch_next()
+                    pending = {t for t in tasks if not t.done()}
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        return {"status": "unavailable", "reason": last_reason, "findings": [], "blocking": False,
+                "provider": "Gemini API", "note": "Report generation continued; independent Gemini review was unavailable."}
+
+    # ── legacy parallel strategy ──
     first_wave = [(model, key) for model in models[:2] for key in keys[:2]]
     second_wave = ([(models[2], key) for key in keys[:2]] if len(models) > 2 else []) + [
         (model, key) for model in models[:2] for key in keys[2:4]
@@ -11352,7 +11633,6 @@ async def _gemini_independent_report_audit(
         results = await asyncio.gather(*(_attempt(model, key) for model, key in wave), return_exceptions=False)
         valid = [item for item in results if item.get("status") in {"PASS", "WARNING", "FAIL"}]
         if valid:
-            severity_rank = {"PASS": 0, "WARNING": 1, "FAIL": 2}
             chosen = max(valid, key=lambda item: severity_rank.get(item.get("status", "WARNING"), 1))
             if len(valid) > 1:
                 chosen = dict(chosen)
@@ -11364,8 +11644,6 @@ async def _gemini_independent_report_audit(
         for item in results:
             if item.get("reason"):
                 last_reason = str(item["reason"])
-        # Give the second wave a chance only when the first wave had no valid
-        # structured review. The caller still enforces a strict overall deadline.
     return {"status": "unavailable", "reason": last_reason, "findings": [], "blocking": False,
             "provider": "Gemini API", "note": "Report generation continued; independent Gemini review was unavailable."}
 
@@ -14271,6 +14549,30 @@ async def _ensure_report_page_budget(
     # rounds even after a valid 6-page brief was ready. Longer tiers still aim
     # toward their preferred target because depth is part of their contract.
     expansion_threshold = minimum if report_tier == "brief" else target
+    # Thin evidence: with few sources whose publisher page was actually fetched,
+    # every extra expansion round mostly restates the same facts or adds
+    # unsupported claims, which the audit then flags (repair -> re-audit). Aim
+    # only for the tier minimum and cap the rounds in that case.
+    _src_rows = sources if isinstance(sources, list) else ([sources] if isinstance(sources, dict) else [])
+    _fetched_sources = sum(
+        1 for row in _src_rows
+        if isinstance(row, dict) and (
+            (row.get("pageFetchStatus") or row.get("page_fetch_status")) == "ok"
+            or len(str(row.get("pageContent") or "")) >= 1500
+        )
+    )
+    _thin_limit = {"brief": 0, "detailed": 8, "in_depth": 12}.get(report_tier, 8)
+    if report_tier != "brief" and _fetched_sources < _thin_limit:
+        expansion_threshold = minimum
+        max_rounds = min(max_rounds, 2)
+        log.info("Report page-band: thin evidence (%d fetched sources < %d) — aiming for the tier minimum with at most %d round(s)",
+                 _fetched_sources, _thin_limit, max_rounds)
+    try:
+        _rounds_cap = int(os.getenv("GG_PAGE_BUDGET_MAX_ROUNDS", "0") or 0)
+    except ValueError:
+        _rounds_cap = 0
+    if _rounds_cap > 0:
+        max_rounds = min(max_rounds, _rounds_cap)
     if pages < expansion_threshold:
         if len(str(evidence_text or "").strip()) < 900:
             log.warning(
@@ -19289,6 +19591,57 @@ async def generate_report(request: Request):
     except Exception as exc:
         log.warning("Report: stored web research lookup unavailable: %s: %s", type(exc).__name__, str(exc)[:140])
 
+    # Scraped market-news knowledge base: full articles that readers opened in
+    # the feed (ET, Business Standard, Mint, Moneycontrol, ...) are stored with
+    # their extracted publisher text. The generic lookup above is skipped when
+    # search already returned >= 12 sources, so recent news never reached
+    # market/economy reports. Add a few of these full-text articles for
+    # news-sensitive questions; they still pass the same relevance gate,
+    # and RSS-summary-only rows are excluded.
+    try:
+        _news_kb_enabled = os.getenv("GG_REPORT_USE_NEWS_KB", "1").strip().casefold() not in {"0", "false", "no", "off"}
+        _news_question = bool(re.search(
+            r"\b(latest|recent|current|today|this\s+(?:week|month|quarter|year)|news|market|markets|sensex|nifty|stocks?|shares?|"
+            r"economy|economic|inflation|gdp|rbi|repo|monetary|ipo|results?|earnings|mutual\s+funds?|banking|banks?|"
+            r"rupee|bond|yield|commodit(?:y|ies)|crude|gold|output|infrastructure|sector|outlook|20\d\d)\b",
+            question, re.I,
+        ))
+        if _news_kb_enabled and _news_question and not has_file_data:
+            from utils.research_store import retrieve_web_research as _retrieve_kb
+            _kb_query = str(getattr(intent, "resolved_topic", "") or question).strip()
+            _kb_limit = {"brief": 3, "detailed": 5, "in_depth": 8}.get(report_tier, 4)
+            _kb_rows = await asyncio.wait_for(asyncio.to_thread(
+                _retrieve_kb, _kb_query, _kb_limit, int(os.getenv("GG_REPORT_NEWS_KB_MAX_AGE_DAYS", "45")),
+                source_type="market_news_article", require_page_text=True,
+            ), timeout=6.0)
+            _known = {str(x.get("url") or "").strip().lower().rstrip("/") for x in sources if isinstance(x, dict)}
+            _kb_added = 0
+            for _row in _kb_rows or []:
+                _url = str(_row.get("url") or "").strip()
+                _text = str(_row.get("pageContent") or _row.get("fullContent") or "")
+                if not _url or _url.lower().rstrip("/") in _known or len(_text) < 500:
+                    continue
+                sources.append({
+                    "title": str(_row.get("title") or "Market news article"),
+                    "url": _url,
+                    "publisher": str(_row.get("publisher") or ""),
+                    "snippet": _text[:1200],
+                    "fullContent": _text,
+                    "pageContent": _text,
+                    "pageFetchStatus": "ok",
+                    "pageFetchUrl": str(_row.get("pageFetchUrl") or _url),
+                    "evidenceOrigin": "publisher_page",
+                    "published": str(_row.get("published_at") or ""),
+                    "stored_research": True,
+                    "source_type": "Stored news article",
+                })
+                _known.add(_url.lower().rstrip("/"))
+                _kb_added += 1
+            if _kb_added:
+                log.info("Report: added %d stored full-text news article(s) from the feed knowledge base", _kb_added)
+    except Exception as exc:
+        log.info("Report: news knowledge-base lookup skipped: %s", type(exc).__name__)
+
     # Enforce topic relevance before any source enrichment/writing. This is especially important
     # for scientific requests: an absence of H5N1 evidence must never be filled with unrelated Ebola,
     # dengue, Alzheimer's, or AI articles simply because Tavily returned broadly related science news.
@@ -19364,14 +19717,14 @@ async def generate_report(request: Request):
     sector_rotation_request = _is_sector_rotation_report_request(question)
     quarterly_rows: list[dict] = []
     quarterly_source: dict | None = None
-    _is_index_question = bool(re.search(
-        r"\b(nifty|sensex|bse|nse|bank nifty|index|indices|"
-        r"indian stock market|indian equity|indian share market|"
-        r"sector rotation|stock markets? in india)\b",
-        question, re.IGNORECASE,
-    )) or bool(
+    # Only questions that are actually about stock-market index levels get the
+    # Yahoo index blocks. The old pattern matched bare "index"/"market", so an
+    # EV question mentioning "market share" (or "India Electric Mobility
+    # Index") received Nifty/Sensex quotes that took 2 of the 10 Brief
+    # enrichment slots and confused the writer.
+    _is_index_question = bool(_INDEX_QUESTION_RE.search(question)) or bool(
         "market_data" in intent.evidence_needed
-        and re.search(r"\bindex|indices|market\b", question, re.IGNORECASE)
+        and re.search(r"\b(?:stock|equity|share)\s+(?:market|index|indices)\b", question, re.IGNORECASE)
     )
     if _is_index_question:
         try:
@@ -19566,6 +19919,9 @@ async def generate_report(request: Request):
         sources = [item[2] for item in scored_sources]
         sources = _interleave_by_entity(sources, question, intent, _TIER_ENRICH_LIMITS.get(report_tier, 25))
         log.info("Report: prioritized %d sources against extracted entities %r (entity-balanced fetch order)", len(sources), _company_names_for_ranking)
+    elif os.getenv("GG_REPORT_TOPIC_RANKING", "1").strip().casefold() not in {"0", "false", "no", "off"}:
+        sources = _rank_sources_by_topic(sources, question, _TIER_ENRICH_LIMITS.get(report_tier, 25))
+        log.info("Report: prioritized %d sources by topic coverage, data density and publisher diversity", len(sources))
 
     # Fetch real page content (not just Tavily's snippet) for as many sources
     # as we reasonably can — this is where the actual chartable numbers live.
@@ -19603,8 +19959,13 @@ async def generate_report(request: Request):
 
     log.info("Report: enriching %d source pages (limit=%d, concurrency=%d); long search extracts are not treated as proof of page fetching",
              min(len(sources), ENRICH_SOURCE_COUNT), ENRICH_SOURCE_COUNT, _source_fetch_concurrency)
+    # internal:// blocks (verified market data) are never fetched, so they must
+    # not consume publisher-page slots: the tier limit applies to web pages only.
+    _internal_rows = [s for s in sources if str((s or {}).get("url") or "").startswith("internal://")]
+    _web_rows = [s for s in sources if not str((s or {}).get("url") or "").startswith("internal://")]
+    _enrich_queue = _internal_rows + _web_rows[:ENRICH_SOURCE_COUNT]
     enriched_raw = list(await asyncio.gather(
-        *[enrich(s, i) for i, s in enumerate(sources[:ENRICH_SOURCE_COUNT])]
+        *[enrich(s, i) for i, s in enumerate(_enrich_queue)]
     ))
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):

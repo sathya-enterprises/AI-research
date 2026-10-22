@@ -560,8 +560,16 @@ def persist_web_search_results(
     return {"sources": saved_sources, "versions": saved_versions, "chunks": saved_chunks, "events": saved_events}
 
 
-def retrieve_web_research(query: str, limit: int = 12, max_age_days: int | None = None) -> list[dict]:
-    """Retrieve previously stored web research across report/chat sessions."""
+def retrieve_web_research(
+    query: str, limit: int = 12, max_age_days: int | None = None,
+    *, source_type: str | None = None, require_page_text: bool = False,
+) -> list[dict]:
+    """Retrieve previously stored web research across report/chat sessions.
+
+    ``source_type`` restricts results (e.g. ``"market_news_article"`` for the
+    scraped-feed knowledge base); ``require_page_text`` keeps only versions whose
+    text came from an actual publisher-page extraction (not RSS summaries).
+    """
     initialise()
     terms = [t for t in re.findall(r"[A-Za-z0-9]{3,}", str(query or "").lower()) if t not in {"the", "and", "for", "with", "from", "into", "through", "about"}]
     if not terms:
@@ -574,6 +582,12 @@ def retrieve_web_research(query: str, limit: int = 12, max_age_days: int | None 
     if max_age_days is not None:
         freshness_clause = "AND wsv.retrieved_at >= now() - (%s || ' days')::interval"
         params.append(int(max_age_days))
+    if source_type:
+        freshness_clause += " AND wsl.source_type = %s"
+        params.append(str(source_type)[:80])
+    if require_page_text:
+        freshness_clause += (" AND wsv.metadata_json->>'pageFetchStatus' = 'ok'"
+                             " AND wsv.metadata_json->>'evidenceOrigin' IN ('publisher_page','publisher_page_and_search_extract')")
     params.append(max(1, int(limit)))
     sql = f"""
         WITH ranked AS (

@@ -1924,6 +1924,23 @@ export default function GrowthGradualChat() {
   const [ragIndexed, setRagIndexed]       = useState(false);
   const [ragIndexing, setRagIndexing]     = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Full-width workspace: measure where the shell starts (below the navbar and
+  // ticker, whose heights differ by breakpoint) so it fills the rest of the
+  // viewport exactly, with no page scroll.
+  const chatShellRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = chatShellRef.current;
+    if (!el || typeof window === 'undefined') return;
+    const update = () => {
+      const top = Math.max(0, Math.round(el.getBoundingClientRect().top + window.scrollY));
+      el.style.setProperty('--gg-chat-top', `${top}px`);
+    };
+    update();
+    window.addEventListener('resize', update);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    if (ro && el.parentElement) ro.observe(document.body);
+    return () => { window.removeEventListener('resize', update); ro?.disconnect(); };
+  }, []);
 
   const bottomRef      = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -4706,6 +4723,23 @@ export default function GrowthGradualChat() {
         @media (prefers-reduced-motion: reduce) {
           .chat-shell.gg-premium * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
         }
+
+        /* ── Full-width workspace (v95): the chat fills the page edge to edge
+           below the navbar + ticker instead of sitting in a boxed card.
+           The page container around it drops its max-width and padding. ── */
+        .main-container:has(.chat-shell.gg-full) {
+          max-width: none !important; padding: 0 !important; margin: 0 !important;
+        }
+        .chat-shell.gg-premium.gg-full {
+          height: calc(100dvh - var(--gg-chat-top, 92px)) !important;
+          max-width: none !important; width: 100% !important; margin: 0 !important;
+          border: 0 !important; border-top: 1px solid var(--ed-rule) !important;
+          border-radius: 0 !important; box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-main { background: var(--ed-paper); }
+        @media (min-width: 1920px) {
+          .chat-shell.gg-premium.gg-full .msg-inner { max-width: 960px; }
+        }
       `}</style>
 
 
@@ -4724,7 +4758,8 @@ export default function GrowthGradualChat() {
       />
 
       <div
-        className={`chat-shell gg-premium${dragOver ? ' chat-shell--drag' : ''}`}
+        ref={chatShellRef}
+        className={`chat-shell gg-premium gg-full${dragOver ? ' chat-shell--drag' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleAreaDrop}

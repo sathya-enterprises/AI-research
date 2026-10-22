@@ -251,10 +251,11 @@ function ArticleReader() {
                 // falling back to content.source or displaySource.
                 const publisherName = source || content?.source || displaySource || 'the publisher';
                 // "Content sourced from" footer: show real publisher domain if we have sourceUrl
-                let sourceDomain = 'news.google.com';
+                // Name the real publisher, never the Google News redirect host.
+                let sourceDomain = publisherName;
                 try {
-                  sourceDomain = sourceUrl ? new URL(sourceUrl).hostname.replace(/^www\./, '') : 'news.google.com';
-                } catch { /* keep default */ }
+                  if (sourceUrl) sourceDomain = new URL(sourceUrl).hostname.replace(/^www\./, '');
+                } catch { /* keep publisher name */ }
 
                 return (
                   <div style={{ textAlign: 'center', padding: '40px 24px' }}>

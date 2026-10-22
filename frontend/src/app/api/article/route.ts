@@ -19,6 +19,18 @@ import { createLogger } from '@/lib/logger';
 import { canSyncScrapedArticlesToKnowledgeBase, syncScrapedArticlesToKnowledgeBase } from '@/lib/server/article-knowledge-sync';
 
 const log = createLogger('api/article');
+// Pure clean-up helpers (dates, titles, related-link lines, duplicate images);
+// CommonJS so `node --test scripts/test-article-cleanup.cjs` can test them.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const articleCleanup = require('../../../lib/server/article-cleanup.cjs') as {
+  formatArticleDate: (raw: unknown) => string;
+  isoArticleDate: (raw: unknown) => string;
+  stripPublisherSuffix: (title: string, siteNames?: string[]) => string;
+  isRelatedLinkLine: (text: string) => boolean;
+  isMostlyLinkText: (text: string, linkText: string) => boolean;
+  dedupeImages: (urls: string[]) => string[];
+  cleanParagraphs: (paragraphs: string[]) => string[];
+};
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,6 +55,8 @@ export interface ArticleContent {
   // Set true when the page is a live-blog (schema.org LiveBlogPosting) rather
   // than a standard NewsArticle — `paragraphs` holds chronological updates.
   isLiveBlog?: boolean;
+  // ISO-8601 publication time (UTC) for storage; '' when unknown.
+  publishedAtIso?: string;
 }
 
 // ─── "Read More" link patterns per site ──────────────────────────────────────
@@ -597,14 +611,12 @@ function extractMeta(root: ReturnType<typeof parse>, pageUrl: string) {
     const timeEl = root.querySelector('time.jsdtTime') ?? root.querySelector('time[datetime]');
     publishedAt = timeEl?.getAttribute('datetime') || timeEl?.text || '';
   }
-  let formattedDate = '';
-  if (publishedAt) {
-    try {
-      formattedDate = new Date(publishedAt).toLocaleDateString('en-IN', {
-        day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit'
-      });
-    } catch { formattedDate = publishedAt; }
-  }
+  // new Date("Oct 21, 2026, 04:18 PM IST") does not throw — it returns an
+  // Invalid Date that rendered as "Invalid Date". Parse publisher formats
+  // explicitly and show nothing rather than a broken date.
+  const formattedDate = publishedAt ? articleCleanup.formatArticleDate(publishedAt) : '';
+  const publishedIso = publishedAt ? articleCleanup.isoArticleDate(publishedAt) : '';
+  const siteName = getMeta('og:site_name', 'application-name');
 
   const heroImage = getMeta('og:image','twitter:image:src','twitter:image','og:image:secure_url');
 
@@ -613,7 +625,7 @@ function extractMeta(root: ReturnType<typeof parse>, pageUrl: string) {
     return absoluteUrl(el?.getAttribute('href') || '/favicon.ico', pageUrl);
   })();
 
-  return { title, author, publishedAt: formattedDate, heroImage, favicon };
+  return { title, author, publishedAt: formattedDate, publishedIso, siteName, heroImage, favicon };
 }
 
 // ─── Image extraction ─────────────────────────────────────────────────────────
@@ -670,6 +682,8 @@ function extractParagraphs(container: HTMLElement, useBrSplit: boolean): string[
     for (const chunk of chunks) {
       const text = cleanText(chunk.replace(/<[^>]+>/g, ' '));
       if (text.length < 40) continue;
+      const chunkLinkText = cleanText((chunk.match(/<a\b[^>]*>[\s\S]*?<\/a>/gi) || []).join(' ').replace(/<[^>]+>/g, ' '));
+      if (articleCleanup.isMostlyLinkText(text, chunkLinkText) || articleCleanup.isRelatedLinkLine(text)) continue;
       if (SKIP_RE.test(text) && text.length < 180) continue;
       if (CSS_NOISE_RE.test(text)) continue;
       if (text.includes('{') && text.includes(':') && text.includes('}') && text.length < 400) continue;
@@ -694,6 +708,10 @@ function extractParagraphs(container: HTMLElement, useBrSplit: boolean): string[
 
   if (text.length < 20) continue;
   if (SKIP_RE.test(text) && text.length < 180) continue;
+  // Related-story / stock-quote links ("HCL Tech share price") are navigation,
+  // not article prose.
+  const linkText = cleanText(el.querySelectorAll('a').map(a => a.text).join(' '));
+  if (articleCleanup.isMostlyLinkText(text, linkText) || articleCleanup.isRelatedLinkLine(text)) continue;
 
   paragraphs.push(text);
 }
@@ -1381,9 +1399,10 @@ async function scrapeArticle(articleUrl: string): Promise<ArticleContent> {
   const source = rule?.name ?? new URL(articleUrl).hostname.replace(/^www\./, '');
 
   return {
-    title: meta.title || '',
+    title: articleCleanup.stripPublisherSuffix(meta.title || '', [String((meta as { siteName?: string }).siteName || ''), source]),
     author: meta.author,
     publishedAt: meta.publishedAt,
+    publishedAtIso: (meta as { publishedIso?: string }).publishedIso || '',
     heroImage: hero,
     heroImagePosition,
     images: allImages.slice(0, 10),
@@ -1837,6 +1856,42 @@ async function resolveGoogleNewsUrl(url: string, depth = 0): Promise<string> {
   return url;
 }
 
+// ─── Short-lived response cache + in-flight de-duplication ───────────────────
+// The reader page (and React StrictMode in dev) requests the same article
+// twice; each request re-fetched the publisher page, followed read-more links
+// and re-ran the knowledge-base capture. Share one extraction per URL.
+const ARTICLE_CACHE_TTL_MS = 10 * 60 * 1000;
+const ARTICLE_CACHE_MAX = 200;
+const articleResultCache = new Map<string, { at: number; content: ArticleContent }>();
+const articleInFlight = new Map<string, Promise<ArticleContent>>();
+const recentKbCaptures = new Map<string, number>();
+
+function cacheArticle(key: string, content: ArticleContent) {
+  articleResultCache.set(key, { at: Date.now(), content });
+  while (articleResultCache.size > ARTICLE_CACHE_MAX) {
+    const oldest = articleResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    articleResultCache.delete(oldest);
+  }
+}
+
+/** Final clean-up applied to every extraction path before it reaches the reader or the KB. */
+function finalizeArticleContent(content: ArticleContent, requestedSource: string): ArticleContent {
+  const paragraphs = articleCleanup.cleanParagraphs(Array.isArray(content.paragraphs) ? content.paragraphs : []);
+  const images = articleCleanup.dedupeImages([
+    ...(content.heroImage ? [content.heroImage] : []),
+    ...(Array.isArray(content.images) ? content.images : []),
+  ]);
+  return {
+    ...content,
+    title: articleCleanup.stripPublisherSuffix(content.title || '', [requestedSource, content.source]),
+    paragraphs,
+    images,
+    heroImage: images[0] || '',
+    readingTime: paragraphs.length ? estimateReadingTime(paragraphs) : content.readingTime,
+  };
+}
+
 export async function GET(req: NextRequest) {
   const rawUrl    = req.nextUrl.searchParams.get('url');
   const sourceUrl = req.nextUrl.searchParams.get('sourceUrl') || '';  // real publisher URL hint
@@ -1873,10 +1928,26 @@ export async function GET(req: NextRequest) {
       resolvedUrl = sourceUrl;
     }
 
-    let content;
+    let content: ArticleContent;
+    const cacheKey = resolvedUrl;
+    const cached = articleResultCache.get(cacheKey);
+    const inFlight = articleInFlight.get(cacheKey);
 
 try {
-    content = await scrapeArticle(resolvedUrl);
+    if (cached && Date.now() - cached.at < ARTICLE_CACHE_TTL_MS) {
+      content = cached.content;
+    } else if (inFlight) {
+      content = await inFlight;
+    } else {
+      const job = scrapeArticle(resolvedUrl).then(result => finalizeArticleContent(result, requestedSource));
+      articleInFlight.set(cacheKey, job);
+      try {
+        content = await job;
+        if (content.paragraphs.length > 0) cacheArticle(cacheKey, content);
+      } finally {
+        articleInFlight.delete(cacheKey);
+      }
+    }
 } catch (err) {
 
     log.warn(
@@ -1912,20 +1983,32 @@ try {
     const authHeader = req.headers.get('authorization') || '';
     const accessToken = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || null;
     const bodyText = Array.isArray(content.paragraphs) ? content.paragraphs.join('\n\n').trim() : '';
-    if (canSyncScrapedArticlesToKnowledgeBase(accessToken) && content.fullContentFetched && bodyText.length >= 500) {
-      const persistence = await syncScrapedArticlesToKnowledgeBase(accessToken, [{
+    const kbKey = content.sourceUrl || resolvedUrl;
+    const lastKb = recentKbCaptures.get(kbKey) || 0;
+    if (canSyncScrapedArticlesToKnowledgeBase(accessToken) && content.fullContentFetched && bodyText.length >= 500
+        && Date.now() - lastKb > ARTICLE_CACHE_TTL_MS) {
+      recentKbCaptures.set(kbKey, Date.now());
+      if (recentKbCaptures.size > ARTICLE_CACHE_MAX * 2) {
+        const oldest = recentKbCaptures.keys().next().value;
+        if (oldest !== undefined) recentKbCaptures.delete(oldest);
+      }
+      // Fire-and-forget: the reader must not wait for the knowledge-base write
+      // (it waited up to 15 s per retry when the backend was down). If the
+      // backend is unreachable the record is spooled and sent later.
+      void syncScrapedArticlesToKnowledgeBase(accessToken, [{
         title: content.title || requestedTitle || 'Untitled market article',
         source: content.source || requestedSource,
         url: content.sourceUrl || resolvedUrl,
-        published_at: content.publishedAt || '',
+        published_at: content.publishedAtIso || '',
         category: requestedCategory,
         tag: requestedTag,
         summary: content.paragraphs.slice(0, 2).join(' ').slice(0, 1200),
         content: bodyText,
         full_content_fetched: true,
         metadata: { author: content.author || '', reading_time_minutes: content.readingTime || 0, capture_stage: 'article_reader' },
-      }], `article-reader-${Date.now()}`);
-      log.info('Article KB capture completed: status=%s stored_versions=%d', persistence.status, persistence.storedVersions);
+      }], `article-reader-${Date.now()}`)
+        .then(persistence => log.info('Article KB capture: status=%s stored_versions=%d%s', persistence.status, persistence.storedVersions, persistence.reason ? ` (${persistence.reason})` : ''))
+        .catch(error => log.warn('Article KB capture failed: %s', error instanceof Error ? error.name : 'error'));
     }
 
     return NextResponse.json(content, {

@@ -1,4 +1,6 @@
 import { createHash } from 'crypto';
+import { promises as fs } from 'fs';
+import path from 'path';
 import { getBackendBaseUrl } from '@/lib/backend-url';
 
 export interface KnowledgeArticle {
@@ -44,6 +46,105 @@ const QUEUED_BATCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const SUCCESSFUL_BATCH_CACHE_MAX = 500;
 const recentSuccessfulBatches = new Map<string, { at: number; storedSources: number; storedVersions: number; storedChunks: number }>();
 const recentQueuedBatches = new Map<string, { at: number }>();
+
+// ─── Backend-unreachable circuit breaker + local spool ───────────────────────
+// When only the frontend is running (or the backend is restarting), every feed
+// crawl used to fire 5 failing batches with retries and log ~10 lines each, and
+// the scraped articles were simply lost. Now the first connection failure opens
+// a short circuit (no further requests for BACKEND_DOWN_MS), the records are
+// appended to a bounded local JSONL spool, and the spool is replayed to the
+// backend after the next successful ingest.
+const BACKEND_DOWN_MS = Math.max(10_000, Number(process.env.ARTICLE_KB_BACKOFF_MS || 60_000));
+const SPOOL_MAX_RECORDS = Math.max(500, Number(process.env.ARTICLE_KB_SPOOL_MAX_RECORDS || 20_000));
+let backendDownUntil = 0;
+let lastDownNoticeAt = 0;
+let spoolFlushing = false;
+let spoolWriteChain: Promise<void> = Promise.resolve();
+
+function spoolFile(): string {
+  const dir = String(process.env.ARTICLE_KB_SPOOL_DIR || '').trim() || path.join(process.cwd(), '.cache');
+  return path.join(dir, 'article-kb-spool.jsonl');
+}
+
+function isConnectionRefused(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: string } } | null)?.cause;
+  const code = String(cause?.code || (error as { code?: string } | null)?.code || '');
+  return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ECONNRESET', 'UND_ERR_CONNECT_TIMEOUT'].includes(code);
+}
+
+function markBackendDown(reason: string, spooled: number) {
+  backendDownUntil = Date.now() + BACKEND_DOWN_MS;
+  if (Date.now() - lastDownNoticeAt > BACKEND_DOWN_MS) {
+    lastDownNoticeAt = Date.now();
+    console.warn(`[article-kb] backend not reachable (${reason}); ${spooled} article record(s) saved to the local spool and will be sent when the backend is back. Pausing ingest for ${Math.round(BACKEND_DOWN_MS / 1000)}s.`);
+  }
+}
+
+/** Append records to the local spool (bounded; newest kept). Never throws. */
+function spoolRecords(records: Record<string, unknown>[], crawlId: string): Promise<void> {
+  if (!records.length || process.env.ARTICLE_KB_SPOOL === '0') return Promise.resolve();
+  spoolWriteChain = spoolWriteChain.then(async () => {
+    try {
+      const file = spoolFile();
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      const lines = records.map(record => JSON.stringify({ crawlId, record, at: Date.now() })).join('\n') + '\n';
+      await fs.appendFile(file, lines, 'utf8');
+      const stat = await fs.stat(file);
+      if (stat.size > 40 * 1024 * 1024) {
+        const all = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean);
+        await fs.writeFile(file, all.slice(-SPOOL_MAX_RECORDS).join('\n') + '\n', 'utf8');
+      }
+    } catch (error) {
+      console.warn(`[article-kb] could not write local spool (${error instanceof Error ? error.name : 'error'})`);
+    }
+  });
+  return spoolWriteChain;
+}
+
+/** Number of records currently waiting in the spool (for diagnostics). */
+export async function articleKnowledgeSpoolSize(): Promise<number> {
+  try {
+    return (await fs.readFile(spoolFile(), 'utf8')).split('\n').filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Replay spooled records once the backend is reachable again. Single-flight. */
+async function flushSpool(accessToken: string | null): Promise<void> {
+  if (spoolFlushing || Date.now() < backendDownUntil) return;
+  spoolFlushing = true;
+  const file = spoolFile();
+  const sending = `${file}.sending`;
+  try {
+    await spoolWriteChain;
+    try { await fs.rename(file, sending); } catch { return; }
+    const lines = (await fs.readFile(sending, 'utf8')).split('\n').filter(Boolean);
+    // De-duplicate by URL, keeping the richest record (full article over RSS summary).
+    const byUrl = new Map<string, { crawlId: string; record: Record<string, unknown> }>();
+    for (const line of lines.slice(-SPOOL_MAX_RECORDS)) {
+      try {
+        const row = JSON.parse(line) as { crawlId?: string; record?: Record<string, unknown> };
+        const record = row.record;
+        if (!record || typeof record.url !== 'string') continue;
+        const prev = byUrl.get(record.url);
+        const size = String(record.content || record.summary || '').length;
+        if (!prev || size >= String(prev.record.content || prev.record.summary || '').length) {
+          byUrl.set(record.url, { crawlId: String(row.crawlId || 'spool'), record });
+        }
+      } catch { /* skip corrupt line */ }
+    }
+    await fs.unlink(sending).catch(() => undefined);
+    const records = [...byUrl.values()].map(item => item.record);
+    if (!records.length) return;
+    const result = await sendRecords(accessToken, records, `spool-replay-${Date.now()}`);
+    console.info(`[article-kb] replayed ${records.length} spooled article record(s): status=${result.status}${result.reason ? ` (${result.reason})` : ''}`);
+  } catch (error) {
+    console.warn(`[article-kb] spool replay failed (${error instanceof Error ? error.name : 'error'})`);
+  } finally {
+    spoolFlushing = false;
+  }
+}
 
 /** Server-only shared credential for background crawl ingestion. Never use a NEXT_PUBLIC_ name. */
 function articleKnowledgeIngestToken(): string {
@@ -116,6 +217,25 @@ export async function syncScrapedArticlesToKnowledgeBase(
   if (!mapped.length) {
     return { status: 'skipped', received: articles.length, accepted: 0, storedSources: 0, storedVersions: 0, storedChunks: 0, batchesSucceeded: 0, batchesFailed: 0, reason: 'no_valid_article_records' };
   }
+  if (Date.now() < backendDownUntil) {
+    // Circuit open: don't hammer an unreachable backend; keep the records.
+    await spoolRecords(mapped, crawlId);
+    return { status: 'failed', received: articles.length, accepted: mapped.length, storedSources: 0, storedVersions: 0, storedChunks: 0, batchesSucceeded: 0, batchesFailed: 0, reason: 'backend_unreachable_spooled' };
+  }
+  const result = await sendRecords(accessToken, mapped, crawlId);
+  if ((result.batchesSucceeded > 0 || (result.batchesQueued || 0) > 0) && !spoolFlushing) {
+    void flushSpool(accessToken);
+  }
+  return { ...result, received: articles.length };
+}
+
+async function sendRecords(
+  accessToken: string | null,
+  mapped: Record<string, unknown>[],
+  crawlId: string,
+): Promise<KnowledgeSyncResult> {
+  const internalToken = articleKnowledgeIngestToken();
+  const deliveredBatches = new Set<number>();
 
   const batches: Record<string, unknown>[][] = [];
   for (let i = 0; i < mapped.length; i += BATCH_SIZE) batches.push(mapped.slice(i, i + BATCH_SIZE));
@@ -150,11 +270,13 @@ export async function syncScrapedArticlesToKnowledgeBase(
         storedVersions += cachedSuccess.storedVersions;
         storedChunks += cachedSuccess.storedChunks;
         batchesSucceeded += 1;
+        deliveredBatches.add(index);
         continue;
       }
       const cachedQueued = recentQueuedBatches.get(fingerprint);
       if (cachedQueued && now - cachedQueued.at <= QUEUED_BATCH_CACHE_TTL_MS) {
         batchesQueued += 1;
+        deliveredBatches.add(index);
         continue;
       }
       try {
@@ -186,7 +308,8 @@ export async function syncScrapedArticlesToKnowledgeBase(
             lastNetworkError = error;
             const err = error instanceof Error ? error : new Error(String(error));
             const transientNetworkError = ['TypeError', 'TimeoutError', 'AbortError'].includes(err.name);
-            if (!transientNetworkError || attempt >= MAX_TRANSIENT_BATCH_RETRIES) throw error;
+            // "Connection refused" is deterministic (backend not running): no retry.
+            if (!transientNetworkError || isConnectionRefused(error) || attempt >= MAX_TRANSIENT_BATCH_RETRIES) throw error;
             console.warn(`[article-kb] transient network failure for batch ${index + 1}/${batches.length} (${err.name}); retrying once`);
             await new Promise((resolve) => setTimeout(resolve, 400));
           }
@@ -216,6 +339,7 @@ export async function syncScrapedArticlesToKnowledgeBase(
         }
         if (data.queued === true || data.status === 'queued') {
           batchesQueued += 1;
+          deliveredBatches.add(index);
           recentQueuedBatches.set(fingerprint, { at: Date.now() });
           while (recentQueuedBatches.size > SUCCESSFUL_BATCH_CACHE_MAX) {
             const oldest = recentQueuedBatches.keys().next().value;
@@ -234,6 +358,7 @@ export async function syncScrapedArticlesToKnowledgeBase(
         storedVersions += saved.storedVersions;
         storedChunks += saved.storedChunks;
         batchesSucceeded += 1;
+        deliveredBatches.add(index);
         recentSuccessfulBatches.set(fingerprint, saved);
         while (recentSuccessfulBatches.size > SUCCESSFUL_BATCH_CACHE_MAX) {
           const oldest = recentSuccessfulBatches.keys().next().value;
@@ -251,6 +376,11 @@ export async function syncScrapedArticlesToKnowledgeBase(
         const stackLocation = String(err.stack || '').split('\n').slice(1, 3).join(' ').replace(/https?:\/\/\S+/gi, '[url]').slice(0, 180);
         if (['TypeError', 'AbortError', 'TimeoutError'].includes(err.name)) {
           consecutiveTransientNetworkFailures += 1;
+          if (isConnectionRefused(error)) {
+            // Backend not running/reachable: stop at once, spool below, log once.
+            fatalIngestFailure = 'backend_unreachable';
+            return;
+          }
           if (consecutiveTransientNetworkFailures >= 3) {
             fatalIngestFailure = `client_${err.name.toLowerCase()}`;
             console.warn(`[article-kb] ingest paused after ${consecutiveTransientNetworkFailures} transient network failures; last batch ${index + 1}/${batches.length} (${err.name}): ${safeMessage}${stackLocation ? ` | ${stackLocation}` : ''}; remaining batches were not sent`);
@@ -273,9 +403,16 @@ export async function syncScrapedArticlesToKnowledgeBase(
   };
   await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL_BATCHES, batches.length) }, () => worker()));
 
+  if (fatalIngestFailure === 'backend_unreachable' || (fatalIngestFailure || '').startsWith('client_')) {
+    const undelivered = batches.filter((_batch, index) => !deliveredBatches.has(index)).flat();
+    await spoolRecords(undelivered, crawlId);
+    markBackendDown(fatalIngestFailure || 'network', undelivered.length);
+    fatalIngestFailure = 'backend_unreachable_spooled';
+  }
+
   return {
-    status: batchesFailed === 0 ? (batchesQueued > 0 ? 'syncing' : mapped.length > 0 ? 'stored' : 'skipped') : (batchesSucceeded > 0 || batchesQueued > 0 ? 'partial' : 'failed'),
-    received: articles.length,
+    status: batchesFailed === 0 && !fatalIngestFailure ? (batchesQueued > 0 ? 'syncing' : mapped.length > 0 ? 'stored' : 'skipped') : (batchesSucceeded > 0 || batchesQueued > 0 ? 'partial' : 'failed'),
+    received: mapped.length,
     accepted: mapped.length,
     storedSources,
     storedVersions,

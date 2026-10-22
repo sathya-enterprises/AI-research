@@ -11,11 +11,43 @@ function timestamp(): string {
   return new Date().toTimeString().slice(0, 8); // HH:MM:SS
 }
 
+function stringify(a: unknown): string {
+  if (a instanceof Error) return `${a.name}: ${a.message}`;
+  if (typeof a === 'object' && a !== null) {
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }
+  return String(a);
+}
+
+/**
+ * printf-style placeholders (%s %d %i %f %.Nf %o %j %%), matching how the
+ * routes already call the logger. Previously the placeholders were printed
+ * literally and the values appended ("✓ %s: %d visible … Moneycontrol 12").
+ */
+export function formatLogMessage(msg: string, args: unknown[]): string {
+  let used = 0;
+  const out = String(msg).replace(/%(%|s|d|i|f|o|O|j|\.(\d+)f)/g, (token, kind: string, digits?: string) => {
+    if (kind === '%') return '%';
+    if (used >= args.length) return token;
+    const value = args[used++];
+    if (kind === 'd' || kind === 'i') {
+      const n = Number(value);
+      return Number.isFinite(n) ? String(Math.trunc(n)) : stringify(value);
+    }
+    if (kind === 'f') return String(Number(value));
+    if (digits !== undefined) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(Number(digits)) : stringify(value);
+    }
+    return stringify(value);
+  });
+  const rest = args.slice(used);
+  return rest.length ? `${out} ${rest.map(stringify).join(' ')}` : out;
+}
+
 function write(level: Level, scope: string, msg: string, ...args: unknown[]) {
   const prefix = `${timestamp()} [GG-Frontend] ${level.padEnd(5)}  [${scope}]`;
-  const formatted = args.length
-    ? `${msg} ${args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`
-    : msg;
+  const formatted = args.length ? formatLogMessage(msg, args) : msg;
   const line = `${prefix} — ${formatted}`;
 
   if (level === 'ERROR') {
