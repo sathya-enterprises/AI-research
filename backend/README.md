@@ -31,6 +31,8 @@ Pure-Python backend replacing all Next.js API routes. No browser automation, no 
 | `LOGO_B64` | (Optional) Base64-encoded logo image for PDF cover |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Also powers the Screener.in fundamentals knowledge base (see `screener_kb/README.md`) unless overridden below |
 | `ARTICLE_KB_INGEST_TOKEN` | Optional shared server-to-server secret for authenticated website-crawl ingestion. Set the same random value on the frontend server and backend; never prefix with `NEXT_PUBLIC_`. |
+| `REPORT_TIER_SEARCH_LIMITS` / `REPORT_TIER_ENRICH_LIMITS` / `REPORT_TIER_CRAWL_PAGES` / `REPORT_TIER_NUMERIC_OBSERVATIONS` / `REPORT_TIER_EVIDENCE_CONTEXT_CHARS` | (Optional) Per-tier scraping and evidence capacity as `brief,detailed,in_depth` integers. Defaults: `20,60,100` search results per query, `20,50,80` fetched pages, `6,24,48` crawled pages, `120,250,400` numeric observations and `40000,85000,140000` evidence characters passed to the writer. Higher values mean more chart data points, more search spend and longer report jobs. |
+| `REPORT_BRAND_ARN` | (Optional) Registration line printed in the Market Currents footer; defaults to `ARN-351151, Validity Jan'29`. |
 | `SCREENER_SUPABASE_URL` / `SCREENER_SUPABASE_ANON_KEY` | (Optional) Point the fundamentals knowledge base at a separate Supabase project instead of reusing `SUPABASE_URL`/`SUPABASE_ANON_KEY` |
 
 Website crawl records are stored in the existing `gg_research` PostgreSQL research library (`web_source_library`, `web_source_versions`, and related chunk/event tables), not in the Storage bucket and not in the stock-company tables.

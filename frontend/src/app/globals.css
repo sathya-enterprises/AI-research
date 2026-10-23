@@ -4,21 +4,21 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --navy:    #16263f;
-  --navy2:   #2c3b78;
-  --teal:    #0b8766;
-  --teal2:   #11a77c;
-  --gold:    #d29a3b;
-  --gold2:   #efb84f;
-  --cream:   #f5f7fb;
-  --ivory:   #fffdf9;
+  --navy:    #0e1f3d;
+  --navy2:   #162a4e;
+  --teal:    #0d5c45;
+  --teal2:   #127a5b;
+  --gold:    #c49a4a;
+  --gold2:   #d9b77a;
+  --cream:   #f8fafc;
+  --ivory:   #ffffff;
   --surface: #ffffff;
-  --surface2:#f7f8fd;
-  --border:  #dfe5f0;
-  --border2: #eceff6;
-  --muted:   #7f8ba4;
-  --text:    #1a2b45;
-  --text2:   #465770;
+  --surface2:#f1f5f9;
+  --border:  #e2e8f0;
+  --border2: #edf2f7;
+  --muted:   #64748b;
+  --text:    #0f172a;
+  --text2:   #475569;
   /* fluid sidebar columns */
   --col-left:  clamp(160px, 17vw, 230px);
   --col-right: clamp(180px, 18vw, 250px);

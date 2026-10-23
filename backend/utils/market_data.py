@@ -831,7 +831,7 @@ def format_quotes_as_source(quotes: list[dict]) -> Optional[dict]:
     }
 
 
-async def fetch_company_ohlc(stocks: list[dict], range_str: str = "6mo", interval: str = "1wk") -> list[dict]:
+async def fetch_company_ohlc(stocks: list[dict], range_str: str = "1y", interval: str = "1wk") -> list[dict]:
     """Real per-session open/high/low/close bars for resolved company tickers.
 
     ``stocks`` are rows from fetch_stock_fundamentals() (each with ``symbol``

@@ -87,6 +87,9 @@ def test_external_image_source_rendering_does_not_require_unimported_urlparse():
     assert "example.com" in rendered
 
 
-def test_chart_rules_are_not_mandatory_in_report_prompt():
+def test_chart_rules_are_mandatory_and_evidence_driven_in_report_prompt():
+    # Client requirement: charts are mandatory wherever sourced numbers exist,
+    # but must still be built only from source evidence.
     text = Path(__file__).with_name("report.py").read_text(encoding="utf-8")
-    assert "CHARTS ARE OPTIONAL AND EVIDENCE-DRIVEN" in text
+    assert "CHARTS ARE MANDATORY AND EVIDENCE-DRIVEN" in text
+    assert "CHARTS ARE OPTIONAL" not in text

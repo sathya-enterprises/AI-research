@@ -23,8 +23,11 @@ import re
 import time
 import threading
 import unicodedata
-from utils.chart_catalog import normalize_chart_type
-from utils.markdown_normalizer import normalize_report_markdown
+from routes.house_styles import (
+    DEFAULT_REPORT_STYLE, house_css, house_print_css, house_style_from_html, house_theme, normalize_report_style,
+)
+from utils.chart_catalog import fold_slice_tail_for_display, normalize_chart_type
+from utils.markdown_normalizer import normalize_report_markdown, strip_excluded_report_sections
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -2139,6 +2142,7 @@ def _draw_chart(c, spec, x0, y0, w, h):
     spec = dict(spec or {})
     t = normalize_chart_type(spec.get("type") or spec.get("chart_type") or spec.get("chartType") or "bar")
     spec["type"] = t
+    spec = fold_slice_tail_for_display(spec)
     # Types in _NO_DATAWRAPPER_TYPES have no Datawrapper equivalent (see the
     # early return in utils/datawrapper.py's publish_chart) — skip the
     # Datawrapper-image lookup entirely for them rather than wasting a
@@ -3407,6 +3411,14 @@ def _svg_wrap_label(label: object, max_chars: int, max_lines: int = 2) -> list[s
     return out
 
 
+def _svg_point_fill(dataset: object, index: int, default: str) -> str:
+    """Per-bar colour from a Chart.js ``backgroundColor`` list (e.g. sign colours)."""
+    fills = dataset.get("backgroundColor") if isinstance(dataset, dict) else None
+    if isinstance(fills, list) and index < len(fills) and isinstance(fills[index], str) and re.fullmatch(r"#[0-9A-Fa-f]{3,8}", fills[index]):
+        return fills[index]
+    return default
+
+
 def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, theme: dict | None = None) -> str:
     """Render the chart config emitted by html_report as static SVG.
 
@@ -3605,7 +3617,13 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
         if vmax == vmin:
             pad = abs(vmax) * 0.1 or 1.0
             vmax += pad; vmin -= pad
-        if vmin > 0: vmin = 0
+        # Bars and filled areas start at zero. An unfilled line zooms to its
+        # data like the browser chart, unless its values sit close enough to
+        # zero (or the HTML config asked for a zero baseline).
+        _y_options = (options.get("scales") or {}).get("y") or {} if isinstance(options, dict) else {}
+        _unfilled_line = ctype == "line" and not any(isinstance(ds, dict) and ds.get("fill") for ds in datasets)
+        _zoom_line = _unfilled_line and not _y_options.get("beginAtZero") and vmin > vmax * 0.35
+        if vmin > 0 and not _zoom_line: vmin = 0
         # "Nice" axis: steps of 1, 2, 2.5 or 5 x 10^n so ticks read 0, 5k,
         # 10k … instead of 4.158, 8.316, 12.4745k.
         _raw_span = (vmax - vmin) or 1.0
@@ -3647,8 +3665,13 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                 marks.append(f'<rect x="{lx}" y="12" width="10" height="10" rx="2" fill="{colors[ds_i%len(colors)]}"/>')
                 text.append(f'<text x="{lx+15}" y="21" font-size="10" fill="{_SVG_LABEL_INK}">{name}</text>')
     if ctype not in ("doughnut", "pie") and not horizontal_bar:
-        _slot_chars = max(4, int((plot_w / max(1, len(labels))) / 5.6))
-        for i, lbl in enumerate(labels[:40]):
+        # Every point is plotted; with dense series only every n-th category
+        # is labelled so the axis stays legible.
+        _label_stride = max(1, math.ceil(len(labels) / 40))
+        _slot_chars = max(4, int((plot_w * _label_stride / max(1, len(labels))) / 5.6))
+        for i, lbl in enumerate(labels):
+            if i % _label_stride:
+                continue
             x = margin_l + (i + 0.5) * plot_w / max(1, len(labels))
             _lines = _svg_wrap_label(lbl, _slot_chars, max_lines=2)
             _y0 = height - 18 - (len(_lines) - 1) * 11
@@ -3656,7 +3679,10 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                 text.append(f'<text x="{x:.1f}" y="{_y0 + _li * 11:.1f}" text-anchor="middle" font-size="10" fill="{_SVG_LABEL_INK}">{_svg_escape(_line)}</text>')
     elif horizontal_bar:
         _label_chars = max(6, int((margin_l - 16) / 6.1))
-        for i, lbl in enumerate(labels[:40]):
+        _label_stride = max(1, math.ceil(len(labels) / 40))
+        for i, lbl in enumerate(labels):
+            if i % _label_stride:
+                continue
             y = margin_t + (i + 0.5) * plot_h / max(1, len(labels))
             _shown = _svg_wrap_label(lbl, _label_chars, max_lines=1)[0]
             text.append(f'<text x="{margin_l-9}" y="{y+3.5:.1f}" text-anchor="end" font-size="10" fill="{_SVG_LABEL_INK}">{_svg_escape(_shown)}</text>')
@@ -3803,6 +3829,7 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
             xmin,xmax=min(xs),max(xs); ymin,ymax=min(ys),max(ys)
             if xmin==xmax: xmin-=1; xmax+=1
             if ymin==ymax: ymin-=1; ymax+=1
+            _placed_bubble_labels: list[tuple[float, float]] = []
             for ds_i, ds in enumerate(datasets[:4]):
                 col=colors[ds_i%len(colors)]
                 for pnt in ds.get("data") or []:
@@ -3812,7 +3839,27 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                     px=margin_l+(xv-xmin)/(xmax-xmin)*plot_w; py=margin_t+(ymax-yv)/(ymax-ymin)*plot_h
                     marks.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="{max(3,min(20,rv)):.1f}" fill="{col}" fill-opacity="0.35" stroke="{col}" stroke-width="1.5"/>')
                     if pnt.get("label"):
-                        text.append(f'<text x="{px+7:.1f}" y="{py-7:.1f}" font-size="8.2" fill="{_SVG_VALUE_INK}">{_svg_escape(pnt.get("label"))}</text>')
+                        lbl_text = _svg_escape(pnt.get("label"))
+                        # Try candidates to avoid overlapping clustered bubble labels
+                        candidates = [
+                            (px + 7, py - 7, "start"),
+                            (px + 7, py + 14, "start"),
+                            (px - 7, py - 7, "end"),
+                            (px - 7, py + 14, "end"),
+                        ]
+                        chosen = None
+                        for lx, ly, anchor in candidates:
+                            collision = any(abs(lx - plx) < 48 and abs(ly - ply) < 11 for plx, ply in _placed_bubble_labels)
+                            if not collision:
+                                chosen = (lx, ly, anchor)
+                                break
+                        if not chosen and len(_placed_bubble_labels) < 20:
+                            chosen = candidates[len(_placed_bubble_labels) % len(candidates)]
+                        if chosen:
+                            lx, ly, anchor = chosen
+                            _placed_bubble_labels.append((lx, ly))
+                            anchor_attr = f' text-anchor="{anchor}"' if anchor != "start" else ""
+                            text.append(f'<text x="{lx:.1f}" y="{ly:.1f}"{anchor_attr} font-size="8.2" fill="{_SVG_VALUE_INK}">{lbl_text}</text>')
     elif bullet_chart:
         scale_ds = next((ds for ds in datasets if str(ds.get("label") or "").strip().lower() in {"scale", "track"}), datasets[0])
         actual_ds = next((ds for ds in datasets if "actual" in str(ds.get("label") or "").lower()), datasets[1])
@@ -3866,7 +3913,7 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                     if b <= 0:
                         continue
                 xa, xb = x_of(a), x_of(b)
-                marks.append(f'<rect x="{min(xa,xb):.1f}" y="{y:.1f}" width="{max(1,abs(xb-xa)):.1f}" height="{max(2,bar_h-2):.1f}" rx="2" fill="{colors[ds_i%len(colors)]}"/>')
+                marks.append(f'<rect x="{min(xa,xb):.1f}" y="{y:.1f}" width="{max(1,abs(xb-xa)):.1f}" height="{max(2,bar_h-2):.1f}" rx="2" fill="{_svg_point_fill(ds, i, colors[ds_i%len(colors)])}"/>')
     else:  # vertical bar, including floating/bar-like fallback
         n = max(1, len(labels)); series_count=max(1, len(datasets)); group_w=plot_w/n; bar_w=max(4, group_w*0.72/series_count)
         for ds_i, ds in enumerate(datasets[:8]):
@@ -3901,7 +3948,7 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                     raw_val = val
                 x=margin_l+i*group_w+(group_w-series_count*bar_w)/2+ds_i*bar_w
                 bw=max(2,bar_w-2); bh2=max(1,bh)
-                marks.append(f'<rect x="{x:.1f}" y="{top:.1f}" width="{bw:.1f}" height="{bh2:.1f}" rx="2" fill="{colors[ds_i%len(colors)]}"/>')
+                marks.append(f'<rect x="{x:.1f}" y="{top:.1f}" width="{bw:.1f}" height="{bh2:.1f}" rx="2" fill="{_svg_point_fill(ds, i, colors[ds_i%len(colors)])}"/>')
                 if len(labels) <= 14 and isinstance(raw_val, (int, float)):
                     txt = f"{raw_val:,.1f}".rstrip('0').rstrip('.')
                     text.append(f'<text x="{x+bw/2:.1f}" y="{max(margin_t+10, top-4):.1f}" text-anchor="middle" font-size="8.2" fill="{_SVG_VALUE_INK}">{txt}</text>')
@@ -4703,6 +4750,15 @@ body .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {
         )
     # Appended to the premium layer so it stays last in the cascade.
     premium_print_overrides = premium_print_overrides + editorial_print
+    # Client house style page furniture goes after everything else.
+    house_style = house_style_from_html(html_doc)
+    if house_style:
+        running_match = re.search(r'<body[^>]*\bdata-running-title="([^"]*)"', html_doc, flags=re.IGNORECASE)
+        running = html.unescape(running_match.group(1)) if running_match else short_title
+        # The editorial layer above is re-injected here, so repeat the house
+        # CSS after it before the print furniture.
+        premium_print_overrides += ('<style id="gg-pdf-house-style">' + house_css(house_style)
+                                    + house_print_css(house_style, running) + "</style>")
     return html_doc.replace(
         "</head>",
         print_css.replace("{short_title}", short_title) + final_print_overrides + premium_print_overrides + "</head>",
@@ -4878,7 +4934,8 @@ def build_pdf(report: str, title: str, question: str, summary: str,
               key_stats: list, charts: list, logo_b64: str = "",
               file_images: list | None = None, web_images: list | None = None,
               theme: dict | None = None, sources: object = None,
-              presentation: object = None, report_tier: str = "detailed") -> bytes:
+              presentation: object = None, report_tier: str = "detailed",
+              report_style: str | None = None, kicker: str = "") -> bytes:
     """Render PDF from the same presentation-driven HTML composition as HTML reports."""
     from routes.html_report import build_html_report
     try:
@@ -4903,7 +4960,7 @@ def build_pdf(report: str, title: str, question: str, summary: str,
         theme = safe_theme
 
     from utils.report_scanability import strip_generation_markers
-    report = strip_generation_markers(normalize_report_markdown(report))
+    report = strip_excluded_report_sections(strip_generation_markers(normalize_report_markdown(report)))
     images = _prepare_pdf_images([], web_images, file_images)
     # HTML understands WEB_IMG_n placeholders. Preserve the existing FILE_IMG_n
     # / PAGE_IMG_n report references by appending local file images and mapping
@@ -4929,12 +4986,14 @@ def build_pdf(report: str, title: str, question: str, summary: str,
     html_doc = build_html_report(
         report or "", title or "", question or "Research Report", summary or "",
         key_stats or [], charts or [], images, safe_theme, sources, presentation, report_tier,
+        report_style=report_style, kicker=kicker,
     )
     # v93: static SVG charts use the same validated editorial palette as the
     # browser charts so preview and PDF match.
     from routes.report_design import editorial_render_theme as _editorial_render_theme
     theme = dict(theme or {}) if isinstance(theme, dict) else {}
     theme.update(_editorial_render_theme())
+    theme.update(house_theme(house_style_from_html(html_doc)))
     html_doc = _replace_chart_runtime_with_svg(html_doc, theme=theme)
     html_doc = _strip_non_printing_runtime(html_doc)
 
@@ -5300,6 +5359,9 @@ async def generate_pdf(request: Request):
     if report_tier not in ("brief", "detailed", "in_depth"):
         report_tier = "detailed"
     sources = normalise_source_manifest(body.get("sources", []))
+    # Exports use the client house style unless the request names another.
+    report_style = normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE)
+    kicker = str(body.get("kicker") or "")[:60]
     # Normalize the legacy image alias before fallback placement decides
     # whether selected source images already have explicit report positions.
     report = normalize_report_markdown(report)
@@ -5585,7 +5647,7 @@ async def generate_pdf(request: Request):
         pdf_bytes = build_pdf(
             report, title, question, summary, key_stats, charts, logo_b64,
             file_images, web_images, theme, sources, presentation,
-            report_tier=report_tier,
+            report_tier=report_tier, report_style=report_style, kicker=kicker,
         )
     except Exception as e:
         import traceback as _tb
@@ -5640,7 +5702,7 @@ async def generate_pdf(request: Request):
                 pdf_bytes = build_pdf(
                     report, title, question, summary, key_stats, charts, logo_b64,
                     file_images, web_images, theme, sources, presentation,
-                    report_tier=report_tier,
+                    report_tier=report_tier, report_style=report_style, kicker=kicker,
                 )
                 pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
                 pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)
@@ -5668,7 +5730,7 @@ async def generate_pdf(request: Request):
                 pdf_bytes = build_pdf(
                     report, title, question, summary, key_stats, charts, logo_b64,
                     file_images, web_images, theme, sources, presentation,
-                    report_tier=report_tier,
+                    report_tier=report_tier, report_style=report_style, kicker=kicker,
                 )
                 pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
                 pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)

@@ -22,7 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <head />
-      <body style={{ background: 'linear-gradient(145deg,#f7f8fc 0%,#f5f6fb 54%,#f4f9f6 100%)', minHeight: '100dvh' }}>
+      <body style={{ background: '#F8FAFC', minHeight: '100dvh', color: '#0F172A' }}>
         <AuthProvider>
           <Navbar />
           <TickerTape stocks={STOCKS} />

@@ -32,6 +32,8 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse, Response
 
 from routes.source_manifest import normalise_source_manifest
+from utils.chart_catalog import fold_slice_tail_for_display
+from utils.markdown_normalizer import strip_excluded_report_sections
 from utils.chart_evidence_audit import audit_chart_evidence_consistency, sanitize_charts_for_publication
 
 router = APIRouter()
@@ -316,6 +318,7 @@ def _chart_xml_text(value: Any) -> str:
 
 def _chart_native_payload(chart: dict):
     """Return chart tables suitable for a native embedded Excel-backed chart."""
+    chart = fold_slice_tail_for_display(chart)
     series = _chart_series(chart)
     chart_type = str(chart.get("type") or "").casefold().replace("-", "_").replace(" ", "_")
     if chart_type in {"horizontal_bar", "bar_horizontal"}:
@@ -661,6 +664,7 @@ def build_docx_report(
     report_tier: str = "detailed",
 ) -> bytes:
     """Build a fully editable DOCX using only supplied report facts/data."""
+    report = strip_excluded_report_sections(report)
     doc = Document()
     _configure_document(doc)
     registry = normalise_source_manifest(sources or [])

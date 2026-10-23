@@ -137,7 +137,7 @@ def requested_chart_types(question: str) -> list[str]:
 
 
 def mode_env_off() -> bool:
-    return os.getenv("REPORT_CHART_GALLERY", "core").strip().casefold() in {"off", "0", "false", "none"}
+    return os.getenv("REPORT_CHART_GALLERY", "all").strip().casefold() in {"off", "0", "false", "none"}
 
 
 def gallery_types_for(question: str, report_tier: str = "detailed") -> list[str]:
@@ -160,7 +160,7 @@ def gallery_types_for(question: str, report_tier: str = "detailed") -> list[str]
         if mode_env_off():
             return named
         return list(dict.fromkeys(named + CORE_TYPES)) if named else list(GALLERY_ORDER)
-    mode = os.getenv("REPORT_CHART_GALLERY", "core").strip().casefold()
+    mode = os.getenv("REPORT_CHART_GALLERY", "all").strip().casefold()
     if mode in {"off", "0", "false", "none"}:
         return named
     # Default chart selection is domain-aware. The full 50-type catalog remains
@@ -523,7 +523,6 @@ class _Builder:
     def _b_grouped_bar(self):
         # Preferred: one metric, entities × periods.
         for metric, periods, ents in self.trend_metrics(min_periods=2, min_entities=2):
-            periods = periods[-4:]
             obs = [ents[k][p] for k in ents for p in periods if p in ents[k]]
             chart = self.base("grouped_bar", f"{self.label(metric)} by entity and period", obs, x_label="Entity",
                               y_label=self.y_label(metric), unit=self.unit(metric))
@@ -560,7 +559,6 @@ class _Builder:
         for metric, periods, ents in self.trend_metrics(min_periods=2, min_entities=2):
             if self.unit(metric) not in {"₹ crore", "US$ million"}:
                 continue
-            periods = periods[-6:]
             obs = [ents[k][p] for k in ents for p in periods]
             chart = self.base("stacked_bar", f"{self.label(metric)} — combined peer total by period", obs,
                               x_label="Period", y_label=self.y_label(metric), unit=self.unit(metric))
@@ -877,7 +875,7 @@ class _Builder:
         if not rows:
             raise Unsupported("needs open/high/low/close price sessions; none were retrieved for these entities")
         row = rows[min(index, len(rows) - 1)]
-        bars = row["bars"][-26:]
+        bars = row["bars"]
         chart = {
             "type": ctype, "title": f"{row.get('label', 'Price')} — {'weekly ' if row.get('interval') == '1wk' else ''}price sessions",
             "xLabel": "Session", "yLabel": "Price (₹)", "unit": "₹", "evidenceBasis": "market", "gallery": True,
@@ -907,7 +905,8 @@ class _Builder:
             if not prefer_many:
                 tgt = [o for o in obs if o.is_target]
                 obs = tgt if len(tgt) >= min_items else obs
-            obs = sorted(obs, key=lambda o: -o.value)[:12]
+            # Every entity is kept; renderers fold a long slice tail into "Other".
+            obs = sorted(obs, key=lambda o: -o.value)
             if len(obs) < min_items:
                 continue
             name = self.series_name(metric, period)
@@ -956,7 +955,7 @@ class _Builder:
             period, obs = self.cross(metric, nonneg=True)
             tgt = [o for o in obs if o.is_target and not o.is_aggregate]
             obs = tgt if len(tgt) >= 2 else [o for o in obs if not o.is_aggregate]
-            obs = sorted(obs, key=lambda o: -o.value)[:8]
+            obs = sorted(obs, key=lambda o: -o.value)
             if len(obs) < 2:
                 continue
             total = sum(o.value for o in obs)

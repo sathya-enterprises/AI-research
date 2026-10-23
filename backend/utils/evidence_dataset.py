@@ -1037,6 +1037,78 @@ class _Extractor:
             caption_lines = [ln.strip() for ln in lines[max(0, start - 3):start] if ln.strip()][-2:]
             self._table_block(block, caption_lines, source_id, evidence_origin, ref)
 
+    @staticmethod
+    def _matrix_period(cell: str) -> tuple[str, float, str] | None:
+        """A column-header period; "Mar-2025" keeps its month (parse_period
+        reduces it to the bare year, which merges Mar/Jun/Sep/Dec columns)."""
+        match = re.fullmatch(r"([A-Za-z]{3,9})[\s\-/'’]+(\d{4}|\d{2})", cell.strip())
+        if match and match.group(1)[:3].casefold() in _MONTH_ABBR:
+            year = int(match.group(2)) + (2000 if len(match.group(2)) == 2 else 0)
+            return _month_period(match.group(1), year, end_of_month=False)
+        return parse_period(cell) if re.search(r"\d", cell) else None
+
+    def _period_matrix(self, rows: list[list[str]], caption_lines: list[str], source_id: str,
+                       evidence_origin: str) -> bool:
+        """Indicator x period tables (RBI "Average for Mar-2025 | Jun-2025 | …"):
+        one header row holds three or more distinct periods and each later row is
+        a named series whose trailing numeric cells align with those periods.
+        Rows are series (entities) of one table metric, plotted across periods."""
+        for h in range(min(3, len(rows) - 1)):
+            cells = [_clean_cell(c) for c in rows[h]]
+            periods = [(i, self._matrix_period(c)) for i, c in enumerate(cells) if c]
+            periods = [(i, p) for i, p in periods if p]
+            labels = [c for c in cells if c]
+            if (len(periods) < 3 or len(periods) < len(labels) - 2
+                    or len({p[0] for _i, p in periods}) != len(periods)):
+                continue
+            header_text = " ".join(" | ".join(r) for r in rows[:h + 1])
+            # Lines before the table that contain cells are header rows (or the
+            # tail of a previous table), not a prose caption.
+            caption = " ".join(line for line in caption_lines if "|" not in line)
+            header_lines = [line for line in caption_lines[-1:] if "|" in line and not re.search(r"\d", line)]
+            unit_tok, currency = _unit_hint(f"{caption} {header_text}")
+            # Header words such as "Indicator | Average for" are table furniture,
+            # not a metric name; keep only what remains after removing them.
+            label_words = [c for c in cells if c and not self._matrix_period(c)]
+            label_words += [_clean_cell(c) for line in header_lines for c in line.split("|") if c.strip()]
+            furniture = r"\b(?:indicators?|items?|particulars?|variables?|average\s+for|as\s+on|as\s+at|period|month|year|s\.?\s?no)\b"
+            remainder = re.sub(r"\s+", " ", re.sub(furniture, " ", " ".join(label_words), flags=re.I)).strip(" |-:")
+            averaged = re.search(r"\baverage\b", " ".join(label_words), re.I)
+            metric_text = (caption if re.search(r"[A-Za-z]{3,}", caption)
+                           else remainder or ("Period average" if averaged else ""))
+            metric_key, metric_label, kind = _metric_from_header(metric_text) if metric_text else ("", "", "")
+            if not metric_key:
+                metric_key, metric_label, kind = "x_reported_value", "Reported value", "any"
+            context = [*caption_lines, *[" | ".join(r) for r in rows[:h + 1]]]
+            emitted = 0
+            for row in rows[h + 1:]:
+                row_cells = [_clean_cell(c) for c in row]
+                parsed_cells = [_parse_value_cell(c) if c else None for c in row_cells]
+                tail: list[tuple[float, str, str, str]] = []
+                for value in reversed(parsed_cells):
+                    if value is None:
+                        break
+                    tail.append(value)
+                tail.reverse()
+                if len(tail) != len(periods):
+                    continue
+                names = [c for c, v in zip(row_cells, parsed_cells) if c and v is None]
+                name = names[-1] if names else ""
+                if not name or not re.search(r"[A-Za-z]{2,}", name) or _NON_ENTITY_ROW.search(name):
+                    continue
+                for (_col, period), (value, cell_unit, cell_cur, raw) in zip(periods, tail):
+                    self.add(
+                        entity_name=name, metric_key=metric_key, metric_label=metric_label, kind=kind,
+                        value=value, unit_token=cell_unit or unit_tok, currency=cell_cur or currency,
+                        period=period, source_id=source_id, quote=" | ".join(row), raw=raw,
+                        origin="table", evidence_origin=evidence_origin, growth_context=False,
+                        context_lines=context,
+                    )
+                    emitted += 1
+            if emitted:
+                return True
+        return False
+
     def _table_block(self, block: list[str], caption_lines: list[str], source_id: str,
                      evidence_origin: str, ref: date | None) -> None:
         raw_table_rows = [line for line in block if not _is_separator(line)]
@@ -1095,6 +1167,8 @@ class _Extractor:
                 # This matrix is fully represented by the custom path above;
                 # do not reinterpret Q1/Q2/Q3/Q4 headers as generic metrics.
                 return
+        if self._period_matrix(rows, caption_lines, source_id, evidence_origin):
+            return
         # A sparse first row like "| (In Crores) | | | |" is a caption, not a header.
         while len(rows) >= 3:
             populated = [c for c in rows[0] if c.strip()]

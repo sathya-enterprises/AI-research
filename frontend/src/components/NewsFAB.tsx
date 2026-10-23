@@ -54,13 +54,15 @@ export default function NewsFAB() {
     <>
       <style>{`
         /* ── News FAB ─────────────────────────────────────────────────────── */
+        /* Bottom-right, above the chat composer: bottom-left covered the
+           sidebar footer on desktop and the attach button + first tab on phones. */
         .nfab {
           position: fixed;
-          bottom: 28px;
-          left: 28px;
+          bottom: 104px;
+          right: 22px;
           z-index: 9999;
-          width: 62px;
-          height: 62px;
+          width: 54px;
+          height: 54px;
           border-radius: 50%;
           border: none;
           background: #0f172a;
@@ -79,6 +81,9 @@ export default function NewsFAB() {
           box-shadow: 0 8px 32px rgba(15,23,42,.5);
         }
         .nfab:active { transform: scale(.95); }
+        @media (max-width: 680px) {
+          .nfab { bottom: 162px; right: 14px; width: 46px; height: 46px; }
+        }
         .nfab__ring {
           position: absolute; inset: -7px; border-radius: 50%;
           border: 2px solid rgba(15,23,42,.3);

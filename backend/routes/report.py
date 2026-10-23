@@ -48,12 +48,13 @@ from utils.screener_kb import (
     format_screener_snapshots_as_source as _format_screener_snapshots_as_source,
 )
 from utils.intent import resolve_request_intent, RequestIntent, is_search_audit_request, _extract_research_topic
+from routes.house_styles import DEFAULT_REPORT_STYLE, normalize_report_style, writer_style_contract
 from utils.report_tiers import get_report_tier_spec, report_tier_contract
 from utils.chart_catalog import (
     CHART_TYPES, AXIS_CHART_TYPES, normalize_chart_type, chart_density_contract,
     chart_density_assessment, count_chart_points, chart_point_band,
 )
-from utils.markdown_normalizer import normalize_report_markdown
+from utils.markdown_normalizer import normalize_report_markdown, strip_excluded_report_sections
 from routes.source_manifest import normalise_source_manifest, build_source_registry, ensure_cited_source_records, extract_source_citation_ids
 from utils.source_identity import canonical_http_url, source_identity_key
 from utils.chart_evidence_audit import audit_chart_evidence_consistency, prune_unsupported_chart_points, sanitize_charts_for_publication
@@ -965,7 +966,7 @@ CRITICAL DATA INTEGRITY RULES — VIOLATIONS DEGRADE REPORT QUALITY:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CHART RULES — READ CAREFULLY. CHARTS ARE OPTIONAL AND EVIDENCE-DRIVEN.
+CHART RULES — READ CAREFULLY. CHARTS ARE MANDATORY AND EVIDENCE-DRIVEN.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 TABLE vs CHART — THEY MUST NOT SHOW THE SAME NUMBERS TWICE.
@@ -1344,9 +1345,9 @@ CHART JUSTIFICATION AND LABELING — MANDATORY:
 - Avoid repeating the same visual treatment for successive sections. The chart form, annotation density, layout and supporting prose should reflect the evidence shape, not a fixed report skeleton.
 
 CHART COUNT — NO ARTIFICIAL LIMIT:
-- Do NOT target, cap, reserve, or ration charts to a fixed number. There is no minimum or maximum chart count.
-- Create every materially useful chart supported by distinct, non-duplicative evidence. If a complex report contains 3 useful analytical relationships, use 3. If it contains 14, use 14. Never manufacture charts to hit a quota and never discard a valid chart solely because an arbitrary chart budget has been reached.
-- A chart should be included when it makes a relationship easier to understand than prose or a table; otherwise prefer prose/table.
+- Do NOT cap or ration charts. Every section that contains two or more comparable sourced values MUST carry at least one chart; the report should contain as many distinct, evidence-backed charts as the sources support.
+- Create a chart for every distinct sourced series, comparison, ranking or breakdown. If the evidence supports 14 charts, use 14. Never manufacture charts from invented, padded or non-comparable values, and never discard a valid chart because a budget was reached.
+- Prefer a chart over describing numbers in prose; keep prose to a short cited interpretation of what each chart shows.
 - The full supported visualization catalog includes: pie, bar, line, area, scatter, bubble, doughnut, histogram,
   boxplot, waterfall, funnel, radar, polar_area, treemap, heatmap, stacked_bar, grouped_bar, horizontal_bar,
   stacked_area, step_line, spline, combo, candlestick, ohlc, gauge, bullet, pictogram, pareto, dot_plot, arrow,
@@ -3483,6 +3484,22 @@ def _repair_truncated_unit_parens(text: object) -> str:
     return _UNCLOSED_UNIT_PAREN_RE.sub(lambda m: f"({m.group(1).strip()})", value, count=value.count("(") - value.count(")"))
 
 
+def _gallery_data_signature(spec: dict) -> frozenset:
+    """The set of (label, value) points a chart plots, independent of chart type."""
+    points = set()
+    for series in (spec.get("series") or []) if isinstance(spec, dict) else []:
+        if not isinstance(series, dict):
+            continue
+        for point in series.get("data") or []:
+            if not isinstance(point, dict):
+                continue
+            value = point.get("value", point.get("y", point.get("close")))
+            label = point.get("label", point.get("x", point.get("date")))
+            if value is not None and label is not None:
+                points.add((str(label).strip().casefold(), str(value).strip()))
+    return frozenset(points)
+
+
 def _gallery_chart_quality_issue(spec: dict, *, named_types: list | None = None, chart_type: str = "") -> str:
     """Return why a generated gallery chart is not presentation-grade, or ''.
 
@@ -3503,6 +3520,15 @@ def _gallery_chart_quality_issue(spec: dict, *, named_types: list | None = None,
         return "title built from a truncated table header"
     if _RAW_HEADER_LABEL_RE.search(labels):
         return "axis/title is a raw source column header"
+    # Charts about the dataset itself (which source covers which entity, which
+    # periods were extracted) are not evidence about the topic.
+    if str(spec.get("evidenceBasis") or "").casefold() == "provenance" and not named:
+        return "describes the extracted dataset, not the topic"
+    # Download sizes ("300 KB") on publication listings are page furniture.
+    if re.search(r"(?i)\b\d+(?:\.\d+)?\s*(?:kb|mb|gb)\b", labels):
+        return "file-size page furniture, not a reported figure"
+    if not named and re.search(r"(?i)\b(?:violin|density) of observations\b|ridgeline of reported distributions|reporting periods covered", title):
+        return "distribution pooled across unrelated observations"
     if not named and _LOW_VALUE_TITLE_RE.search(title):
         return "rescaled or diagnostic composite, not a reader-facing chart"
     vs = re.match(r"(?i)^(.+?)\s+vs\.?\s+(.+?)(?:\s*\(|$)", title)
@@ -4066,7 +4092,7 @@ def _append_evidence_chart_gallery(
     charts so earlier [CHART_n] placeholders keep their indices.
     """
     meta: dict = {"charts": 0, "observations": 0, "types": []}
-    if os.getenv("REPORT_CHART_GALLERY", "core").strip().casefold() in {"off", "0", "false", "none"}:
+    if os.getenv("REPORT_CHART_GALLERY", "all").strip().casefold() in {"off", "0", "false", "none"}:
         return report_text, charts, meta
     sources = _gallery_source_texts(source_manifest, enriched)
     if not sources:
@@ -4085,15 +4111,26 @@ def _append_evidence_chart_gallery(
     # cannot be traced back to the quoted publisher text. The final PDF audit
     # catches these later, but by then the chart may already have been rendered
     # into a draft PDF. Validate each observation before it reaches chart_gallery.
-    source_text_by_id = {
-        str(row.get("id") or "").strip().upper(): str(row.get("text") or "")
-        for row in sources if isinstance(row, dict)
-    }
+    # One source ID can contribute a fetched publisher page and a separate
+    # search extract. Keying by ID alone kept only the last (search) text, so
+    # every quote from the publisher page's tables was wrongly rejected. Match
+    # each quote against the text it came from (same ID and origin), falling
+    # back to that source's combined text.
+    source_text_by_origin: dict[tuple[str, str], str] = {}
+    source_text_by_id: dict[str, str] = {}
+    for row in sources:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id") or "").strip().upper()
+        row_text = str(row.get("text") or "")
+        source_text_by_origin[(row_id, str(row.get("origin") or ""))] = row_text
+        source_text_by_id[row_id] = (source_text_by_id.get(row_id, "") + "\n" + row_text).strip()
 
     def _observation_has_source_quote(obs) -> bool:
         sid = str(getattr(obs, "source_id", "") or "").strip().upper()
         quote = str(getattr(obs, "quote", "") or "").strip()
-        source_text = source_text_by_id.get(sid, "")
+        source_text = (source_text_by_origin.get((sid, str(getattr(obs, "evidence_origin", "") or "")))
+                       or source_text_by_id.get(sid, ""))
         if not sid or not quote or not source_text:
             return False
         if not _chart_excerpt_matches_source_text(quote, source_text):
@@ -4171,7 +4208,12 @@ def _append_evidence_chart_gallery(
         return report_text, charts, meta
 
     _report_before_evidence_table = report_text
-    report_text, surfaced_points = _insert_source_observation_table(report_text, dataset, question, report_tier)
+    # The client does not want a "Source-Extracted … Data" section; the same
+    # observations are shown as charts. REPORT_SOURCE_EVIDENCE_TABLE=1 restores it.
+    if os.getenv("REPORT_SOURCE_EVIDENCE_TABLE", "0").strip().casefold() in {"1", "true", "on", "yes"}:
+        report_text, surfaced_points = _insert_source_observation_table(report_text, dataset, question, report_tier)
+    else:
+        surfaced_points = 0
     if surfaced_points:
         report_text, surfaced_points, _rejected_table_rows = _verify_inserted_observation_rows(
             _report_before_evidence_table, report_text, source_manifest, enriched,
@@ -4192,8 +4234,10 @@ def _append_evidence_chart_gallery(
     # Report mode controls visualization density as well as prose depth. The
     # gallery is supplemental to writer-authored charts, so it must not add one
     # version of the same small dataset in 20+ chart types.
-    tier_limits = {"brief": 3, "detailed": 5, "in_depth": 8}
-    max_gallery_charts = tier_limits.get(tier_key, 4)
+    # Charts are mandatory and maximised for the client; redundant same-metric
+    # variants are still removed below. Override with REPORT_TIER_GALLERY_CHARTS.
+    tier_limits = _tier_limits("REPORT_TIER_GALLERY_CHARTS", {"brief": 10, "detailed": 20, "in_depth": 40})
+    max_gallery_charts = tier_limits.get(tier_key, 20)
     catalog_audit = bool(re.search(
         r"(?is)\b(?:audit|test|inventory|list|demonstrate)\b.{0,100}\b(?:all\s+50|50|all)\b.{0,50}\bchart\s+types?\b",
         question or "",
@@ -4264,6 +4308,9 @@ def _append_evidence_chart_gallery(
             if original_type == "table":
                 continue
             seen_families.update(metric_families(original))
+        seen_signatures: set[frozenset] = {
+            sig for sig in (_gallery_data_signature(c) for c in (charts or []) if isinstance(c, dict)) if sig
+        }
         unique_charts = []
         omitted_types = set()
         # Prioritise before the tier cap: first the chart types the user named
@@ -4362,9 +4409,16 @@ def _append_evidence_chart_gallery(
             # A chart type the user asked for by name (line, bar, doughnut…) is a
             # different view even when it shares a metric family with another
             # chart (credit growth trend vs credit share by bank group).
-            if families & seen_families and not _named_and_distinct:
+            # Maximum distinct charts: skip only a chart that re-plots the same
+            # observations as one already kept (the same data as bar, pie and
+            # treemap). Different series in one metric family (WACR vs repo
+            # rate, both "rates") are separate evidence and are kept.
+            _signature = _gallery_data_signature(item.chart)
+            if _signature and _signature in seen_signatures and not _named_and_distinct:
                 omitted_types.add(item.type)
                 continue
+            if _signature:
+                seen_signatures.add(_signature)
             if len(unique_charts) >= max_gallery_charts:
                 omitted_types.add(item.type)
                 continue
@@ -5419,8 +5473,32 @@ _DEPTH_OUTPUT_CAPS = {"brief": 16_384, "detailed": 65_536, "in_depth": 65_536}
 # broadens evidence, and Deep Research uses the widest practical source set.
 # Retrieval and publisher-page extraction scale with the selected product tier.
 # These are candidate caps: relevance/evidence filters still reject weak pages.
-_TIER_SEARCH_LIMITS = {"brief": 10, "detailed": 30, "in_depth": 50}
-_TIER_ENRICH_LIMITS = {"brief": 10, "detailed": 25, "in_depth": 40}
+# Defaults favour maximum data-point coverage; each can be overridden with an env
+# var holding "brief,detailed,in_depth" integers (e.g. REPORT_TIER_SEARCH_LIMITS=10,30,50).
+def _tier_limits(env_name: str, defaults: dict[str, int]) -> dict[str, int]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return dict(defaults)
+    try:
+        values = [max(1, int(part.strip())) for part in raw.split(",")]
+    except ValueError:
+        log.warning("%s=%r is not three comma-separated integers; using defaults", env_name, raw)
+        return dict(defaults)
+    if len(values) != 3:
+        log.warning("%s=%r needs exactly three values (brief,detailed,in_depth); using defaults", env_name, raw)
+        return dict(defaults)
+    return dict(zip(("brief", "detailed", "in_depth"), values))
+
+
+# Exa returns at most 100 results per query, so 100 is the useful search ceiling.
+_TIER_SEARCH_LIMITS = _tier_limits("REPORT_TIER_SEARCH_LIMITS", {"brief": 20, "detailed": 60, "in_depth": 100})
+_TIER_ENRICH_LIMITS = _tier_limits("REPORT_TIER_ENRICH_LIMITS", {"brief": 20, "detailed": 50, "in_depth": 80})
+_TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"brief": 6, "detailed": 24, "in_depth": 48})
+# Numeric observations (with provenance) handed to the writer, and the character
+# budget for that evidence block; the budget must grow with the count or the
+# block is truncated before the extra observations reach the model.
+_TIER_NUMERIC_OBSERVATIONS = _tier_limits("REPORT_TIER_NUMERIC_OBSERVATIONS", {"brief": 120, "detailed": 250, "in_depth": 400})
+_TIER_EVIDENCE_CONTEXT_CHARS = _tier_limits("REPORT_TIER_EVIDENCE_CONTEXT_CHARS", {"brief": 40_000, "detailed": 85_000, "in_depth": 140_000})
 
 
 def _extract_requested_depth(user_prompt: str, report_tier: str | None = None) -> str:
@@ -6003,12 +6081,6 @@ def _deterministic_report_json(
 
     rendered=[]
     rendered.append(f"# {topic}\n\n")
-    rendered.append(
-        f"## Evidence-Based Research Record\n\n"
-        f"This report was generated using the evidence retrieved for the request after the configured report-writing providers were temporarily unavailable. "
-        f"The sections below synthesize the available source material without introducing unsupported facts.\n\n"
-    )
-    rendered.append(f"**Selected report depth:** {report_tier}\n\n")
 
     for sec in sections:
         h=str(sec.get("heading") or "Research Findings").strip()
@@ -6024,27 +6096,22 @@ def _deterministic_report_json(
         if not selected:
             selected=srcs[:3]
         rendered.append(f"## {h}\n\n")
-        if purpose:
-            rendered.append(f"{purpose}\n\n")
-        if selected:
-            rendered.append("### Source-Derived Evidence\n\n")
-            for src in selected:
-                ev=re.sub(r"\s+"," ",str(src.get("evidence") or "")).strip()
-                if len(ev)>1200:
-                    ev=ev[:1200].rsplit(" ",1)[0] + "…"
-                rendered.append(f"- **{src.get('id','')} — {src.get('title','')}**: {ev} [{src.get('id','')}]\n")
-            rendered.append("\n")
-            rendered.append("### Evidence Gaps and Interpretation\n\n")
-            rendered.append(
-                "The retrieved material provides evidence for this topic, but the available records do not justify adding unsupported estimates, rankings, or forward projections. "
-                "Where sources disagree or use different scopes/definitions, those differences should be retained rather than collapsed into a single unverified figure.\n\n"
-            )
+        # Short cited findings (sentences that carry figures first) instead of
+        # raw source excerpts; the evidence chart gallery adds the charts.
+        findings: list[str] = []
+        for src in selected:
+            sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", str(src.get("evidence") or "")).strip())
+            sentences = [s for s in sentences if 40 <= len(s) <= 280 and "|" not in s and not s.lower().startswith(("click", "read more", "subscribe"))]
+            sentences.sort(key=lambda s: (0 if re.search(r"\d", s) else 1, -len(hkw & keywords(s))))
+            for sentence in sentences[:2]:
+                findings.append(f"- {sentence.rstrip('.')}. [{src.get('id', '')}]")
+            if len(findings) >= 4:
+                break
+        if findings:
+            rendered.append("\n".join(findings[:4]) + "\n\n")
         else:
             rendered.append("No directly relevant source evidence was available for this section in the collected material.\n\n")
 
-    summary_sources=srcs[:6]
-    rendered.append("## Research Provenance\n\n")
-    rendered.append(f"The report used {len(srcs)} collected source records. The canonical renderer will provide the detailed Data Sources appendix.\n\n")
     rendered_text="".join(rendered)
     # Keep the emergency response bounded; pagination/expansion can still act on it.
     if len(rendered_text)>120_000:
@@ -19136,7 +19203,7 @@ async def report_job_status(job_id: str):
         # envelope but loses the nested `result` object must not turn a real
         # completed report into the misleading "HTTP 200" empty-report error.
         if isinstance(result, dict):
-            for key in ("report", "summary", "title", "reportId", "revision", "reportTier", "pageTarget", "charts", "images", "keyStats", "sources", "theme", "presentation", "recommendedFormat", "publicationStatus", "qualityReview", "geminiAudit",
+            for key in ("report", "summary", "title", "reportId", "revision", "reportTier", "reportStyle", "kicker", "pageTarget", "charts", "images", "keyStats", "sources", "theme", "presentation", "recommendedFormat", "publicationStatus", "qualityReview", "geminiAudit",
                         "publicationOutcome", "failedStage", "blockingCategories", "failureSummary", "draftAvailable", "chartPipeline"):
                 if key in result:
                     response[key] = result[key]
@@ -19213,6 +19280,8 @@ async def generate_report(request: Request):
     if report_tier not in ("brief", "detailed", "in_depth"):
         return JSONResponse({"error": "Invalid reportTier. Use brief, detailed, or in_depth."}, status_code=400)
     tier_spec = get_report_tier_spec(report_tier)
+    # Client house style (Market Currents by default, or Feature Article).
+    report_style = normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE)
     _report_progress("prepare", "Preparing report settings and source context…", 5)
     # Diagnostic capture is completely opt-in (GG_RESEARCH_CAPTURE=1). It saves
     # the real web-search query payloads, article fetch statuses/text, writer evidence,
@@ -20052,7 +20121,7 @@ async def generate_report(request: Request):
         crawl_subject = " ".join((question, str(getattr(intent, "resolved_topic", "") or ""), conversation_context))
         crawled_rows, crawl_stats = await crawl_relevant_internal_pages(
             enriched, crawl_subject, report_tier=report_tier,
-            max_pages={"brief": 3, "detailed": 12, "in_depth": 24}.get(report_tier, 3),
+            max_pages=_TIER_CRAWL_PAGES.get(report_tier, _TIER_CRAWL_PAGES["brief"]),
             max_depth={"brief": 2, "detailed": 2, "in_depth": 3}.get(report_tier, 2),
         )
         if crawled_rows:
@@ -20289,8 +20358,8 @@ async def generate_report(request: Request):
     research_engine_context = build_research_engine_context(_engine_sources, question=report_topic if 'report_topic' in locals() else question)
     research_engine_block = format_engine_context(
         research_engine_context,
-        max_chars={"brief": 12000, "detailed": 22000, "in_depth": 30000}.get(report_tier, 22000),
-        max_numeric_observations={"brief": 55, "detailed": 100, "in_depth": 150}.get(report_tier, 100),
+        max_chars=_TIER_EVIDENCE_CONTEXT_CHARS.get(report_tier, _TIER_EVIDENCE_CONTEXT_CHARS["detailed"]),
+        max_numeric_observations=_TIER_NUMERIC_OBSERVATIONS.get(report_tier, _TIER_NUMERIC_OBSERVATIONS["detailed"]),
     )
     if 0 < len(source_manifest) < 3:
         log.warning("Report: thin evidence (%d source(s)); writing a partial report with explicit gaps", len(source_manifest))
@@ -20606,6 +20675,7 @@ async def generate_report(request: Request):
         + "\n\n"
         f"Research Question / Topic (this — and ONLY this — defines the report's title and subject): {report_topic}\n"
         + tier_execution
+        + writer_style_contract(report_style, report_topic, report_tier)
         + plan_block
         + research_engine_prompt_block
         + (f"\nPRIMARY SOURCE — ANALYSE THIS FIRST (uploaded file data takes highest priority):{file_section}" if file_section else "")
@@ -20634,9 +20704,9 @@ async def generate_report(request: Request):
         "3A. CITATION GRANULARITY: Put citations immediately after the factual clause they support. When a sentence contains separate claims, split it into clauses/sentences and cite each source locally. Do NOT place a grouped citation after a compound sentence unless every listed source supports every material number and fact in that sentence. Cite policy/source A after the policy claim and source B after the separate target/waiver claim, rather than implying each source verifies all figures.\n"
         "3B. TABLE-CELL EVIDENCE: Treat each numeric table cell as a separate factual claim. A citation on a row must be attached to the exact data cell or row values it supports; at least one cited source must explicitly contain each material numeric value or a clearly equivalent unit-normalized value. Do not infer annual sector additions from different-date cumulative totals unless you show the calculation, label the result as a calculated estimate, and cite both inputs. If the supplied source excerpts do not establish a table value, write 'Not available in the retrieved evidence' instead of guessing or borrowing a citation from a general sector overview. Do not let a source cited for a row's capacity value implicitly support another cell's annual addition, policy claim, or driver.\n"
         "3C. INVESTOR DISCOVERY INTEGRITY: Distinguish direct capital providers (VC funds, angel investors and corporate investment arms) from incubators, R&D organizations, export agencies, industry associations and technology parks. Do not label an ecosystem enabler as an investor unless the source documents a direct investment or funding programme. Never invent fund names, check sizes, portfolio valuations, aggregate funding totals, eligibility or pitch access. A numeric funding/check-size/valuation/export claim can appear only when a cited, fetched publisher page supports the exact number, unit, subject and period; otherwise state that it was not verified in retrieved publisher-page evidence. Never emit NaN/Infinity or a computed percentage without valid finite inputs.\n"
-        "4. Follow CHART RULES exactly — use charts only when they materially clarify supported evidence; preserve supplied data exactly and do not fabricate values. When there are chartable series, create explicit chart/mixed analytical sections (or dedicated metric-specific subsections) and place [CHART_n] immediately within the section that interprets the data. Never leave several material charts detached from the relevant analysis; a standalone 'Charts & Data Analysis' section is a valid fallback only when charts cannot be placed contextually.\n"
-        "5. Write the report at the selected tier and its renderer-measured page band. Brief targets 6–10 pages; In-Detail targets 25–30 pages and must retain the core answer while adding substantive source-backed analysis; Deep Research targets 70–100 pages when the available evidence can support that scope and must broaden both the independent source base and analytical depth. Use the planner's question-driven structure; do not impose a fixed section-count template. Grow through unique evidence, comparisons, mechanisms, case examples, historical context, assumptions, counterpoints, methods and implications—not repetition, filler or invented figures. If the evidence cannot support the full band, disclose the shortfall. Insert [CHART_n] inline only where valid chart data exists.\n"
-        "6. Choose prose, tables, charts, bullets, timelines, comparisons, risk matrices, KPI/callout blocks, or images according to the evidence and the selected tier. For analytical research reports, do NOT default to paragraph-after-paragraph prose: use a mixed treatment when the evidence contains distinct drivers, comparisons, rankings, time series, risks, scenarios, or other structures that read better as lists/tables/charts/callouts. Keep paragraphs short and single-purpose; avoid more than two consecutive long analytical paragraphs when a meaningful structured treatment is available. Never create a visual merely because a numeric value exists, and never create decorative visuals to fill space. AI-generated illustrative images are optional and should be used only when they materially improve a genuinely non-numeric/thematic section.\n"
+        "4. Follow CHART RULES exactly — charts are mandatory wherever sourced numeric evidence exists; preserve supplied data exactly and do not fabricate values. When there are chartable series, create explicit chart/mixed analytical sections (or dedicated metric-specific subsections) and place [CHART_n] immediately within the section that interprets the data. Never leave several material charts detached from the relevant analysis; a standalone 'Charts & Data Analysis' section is a valid fallback only when charts cannot be placed contextually.\n"
+        "5. Write the report at the selected tier and its renderer-measured page band. Brief targets 6–10 pages; In-Detail targets 25–30 pages and must retain the core answer while adding substantive source-backed analysis; Deep Research targets 70–100 pages when the available evidence can support that scope and must broaden both the independent source base and analytical depth. Use the planner's question-driven structure; do not impose a fixed section-count template. Grow primarily through additional evidence-backed charts and data tables (every distinct sourced series, comparison, ranking or breakdown gets its own chart), with prose limited to short cited interpretation—not narrative padding, generic background, repetition or invented figures. If the evidence cannot support the full band, disclose the shortfall rather than adding prose. Insert [CHART_n] inline wherever valid chart data exists.\n"
+        "6. Choose prose, tables, charts, bullets, timelines, comparisons, risk matrices, KPI/callout blocks, or images according to the evidence and the selected tier. For analytical research reports, do NOT default to paragraph-after-paragraph prose: use a mixed treatment when the evidence contains distinct drivers, comparisons, rankings, time series, risks, scenarios, or other structures that read better as lists/tables/charts/callouts. Keep paragraphs short and single-purpose; avoid more than two consecutive long analytical paragraphs when a meaningful structured treatment is available. Charts are mandatory: chart every distinct set of sourced observations (two or more comparable values) rather than describing the numbers in prose; never create decorative visuals or charts from invented, padded or non-comparable values. AI-generated illustrative images are optional and should be used only when they materially improve a genuinely non-numeric/thematic section.\n"
         "6A. REPETITION CONTROL: treat every section and subsection as a distinct analytical job. Before writing a new subsection, identify what the report has already established and do not restate the same market-size figures, drivers, history, company facts, or implications under a new heading. A new module must add a genuinely different lens (for example, mechanics, comparison, economics, scenario, sensitivity, risk, or implementation). Do not paraphrase an earlier paragraph just to increase depth.\n"
         + ("7. Insert [FILE_IMG_n] references inline where you reference data visible in that extracted image/chart.\n" if embedded_file_images else "")
         + (
@@ -22829,6 +22899,8 @@ async def generate_report(request: Request):
                     "evidence": _final_chart_gate_findings[:5],
                     "recommended_fix": "Repair or remove the conflicting observation and rerun final validation.",
                 })
+        # Client-excluded sections never leave the backend (see strip_excluded_report_sections).
+        report_text = strip_excluded_report_sections(report_text)
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
         _capture_path = finish_research_capture({
             "reportId": report_id,
@@ -22854,6 +22926,8 @@ async def generate_report(request: Request):
             "summary":    parsed.get("summary", ""),
             "fileImages": embedded_file_images,  # extracted charts/images only — never full pages
             "recommendedFormat": final_format,
+            "reportStyle": report_style,
+            "kicker": str(parsed.get("kicker") or "")[:60],
             "reportTier": report_tier,
             "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
             "estimatedPages": preflight_pages,
@@ -23121,6 +23195,8 @@ async def generate_report(request: Request):
                 "theme":      _salv_theme,
                 "presentation": report_presentation,
                 "sources":    source_manifest,
+                "reportStyle": report_style,
+                "kicker": str(salvaged.get("kicker") or "")[:60],
                 "reportTier": report_tier,
                 "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
                 "estimatedPages": salvaged_pages if report_tier in ("detailed", "in_depth") else None,
@@ -23196,6 +23272,8 @@ async def generate_report(request: Request):
                 "theme":      _rep_theme,
                 "presentation": report_presentation,
                 "sources":    source_manifest,
+                "reportStyle": report_style,
+                "kicker": str(repaired_parsed.get("kicker") or "")[:60],
                 "reportTier": report_tier,
                 "geminiAudit": repaired_audit,
                 "publicationStatus": _publication_status_from_audits(repaired_deterministic),

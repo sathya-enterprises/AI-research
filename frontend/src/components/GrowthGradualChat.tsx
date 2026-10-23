@@ -29,9 +29,16 @@ interface WebImage { url: string; caption?: string; sourceUrl?: string; sourceUR
 type ReportTier = 'brief' | 'detailed' | 'in_depth';
 
 const REPORT_TIER_OPTIONS: { value: ReportTier; label: string; scope: string; description: string }[] = [
-  { value: 'brief', label: 'Brief', scope: '6–10 pages', description: 'Focused core findings and evidence; target 8 pages without repetition or unsupported claims.' },
-  { value: 'detailed', label: 'In-Detail', scope: '25–30 pages', description: 'Includes the core Brief coverage plus materially deeper comparisons, history, risks, methodology and implications.' },
-  { value: 'in_depth', label: 'Deep Research', scope: '70–100 pages', description: 'Broader relevant source base, stronger triangulation and granular analysis; the length depends on defensible evidence.' },
+  { value: 'brief', label: 'Brief', scope: '6–10 pages', description: 'Core findings with the key charts — a fast, focused read.' },
+  { value: 'detailed', label: 'In-Detail', scope: '25–30 pages', description: 'Brief coverage plus deeper comparisons, history and risks, with more charts.' },
+  { value: 'in_depth', label: 'Deep Research', scope: '70–100 pages', description: 'Widest source base and granular, chart-heavy analysis; length follows the evidence.' },
+];
+
+type ReportStyle = 'market_currents' | 'feature_article';
+
+const REPORT_STYLE_OPTIONS: { value: ReportStyle; label: string; summary: string; description: string }[] = [
+  { value: 'market_currents', label: 'Market Currents', summary: 'Branded house report', description: 'Growth Gradual house style: branded navy cover, numbered sections, KPI cards, Desk View notes and ARN footer. Monthly market reviews use the fixed 10-section format.' },
+  { value: 'feature_article', label: 'Feature Article', summary: 'Long-read editorial', description: 'Long-read editorial: kicker, headline, standfirst, narrative sections and infographic charts.' },
 ];
 
 interface ReportTheme { primaryColor?: string; accentColor?: string; toneNote?: string; fontFamily?: string; customCss?: string; richStyleNeeded?: boolean; }
@@ -42,7 +49,7 @@ interface ReportQualityReview { publicationAudit?: ReportPublicationAudit; chart
 interface ReportPageBudget { minimum?: number | null; target?: number | null; maximum?: number | null; renderedPages?: number | null; measured?: boolean; minimumReached?: boolean | null; warning?: string | null; }
 interface ReportRagStatus { requested?: boolean; status?: string; retrievedChunks?: number; sourceCount?: number; sourceIds?: string[]; restoreStatus?: string; rerankerRan?: boolean; message?: string; }
 interface ReportRevision { revision: number; savedAt: number; note: string; report: string; title?: string; charts: ChartSpec[]; images?: WebImage[]; sources?: ReportSource[]; presentation?: Record<string, unknown>; keyStats?: {label:string;value:string;change?:string}[]; summary?: string; theme?: ReportTheme; qualityReview?: ReportQualityReview; publicationStatus?: string; sessionId?: string; ragStatus?: ReportRagStatus; }
-interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf' | 'html'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
+interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; reportStyle?: ReportStyle; kicker?: string; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf' | 'html'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
 interface ReportFailureItem { stage?: string; issue?: string; claim?: string; sources?: string[]; values?: string[]; }
 
 // Human-readable names for the backend's failedStage values.
@@ -844,8 +851,10 @@ function EdBarChart({ spec, horizontal = false }: { spec: ChartSpec; horizontal?
 
   const H = Math.round(Math.max(240, Math.min(340, W * 0.5))), ml = 48, mr = 12, mt = 18;
   const slot = (W - ml - mr) / labels.length;
-  const chars = Math.max(4, Math.floor(slot / 6.4));
-  const wrapped = labels.map((l) => edWrap(l, chars, 2));
+  // Every bar is drawn; dense charts label every n-th category so text never overlaps.
+  const labelStride = Math.max(1, Math.ceil(labels.length / Math.max(1, Math.floor((W - ml - mr) / 44))));
+  const chars = Math.max(4, Math.floor((slot * labelStride) / 6.4));
+  const wrapped = labels.map((l, li) => (li % labelStride === 0 ? edWrap(l, chars, 2) : []));
   const mb = 26 + 14 * Math.max(...wrapped.map((w) => w.length));
   const ph = H - mt - mb;
   const y = (v: number) => mt + ((hi - v) / (hi - lo || 1)) * ph;
@@ -951,8 +960,16 @@ function EdLineChart({ spec }: { spec: ChartSpec }) {
   );
 }
 
+/** Keeps the 10 largest slices (original order) and sums the rest into "Other"; mirrors fold_slice_tail_for_display. */
+function edFoldSliceTail<T extends { label?: unknown; value?: unknown }>(data: T[], limit = 10): Array<T | { label: string; value: number }> {
+  if (data.length <= limit + 1) return data;
+  const keep = new Set(data.map((d, i) => [Math.abs(Number(d.value)), i] as const).sort((a, b) => b[0] - a[0]).slice(0, limit).map(([, i]) => i));
+  const tail = data.filter((_, i) => !keep.has(i));
+  return [...data.filter((_, i) => keep.has(i)), { label: `Other (${tail.length})`, value: tail.reduce((acc, d) => acc + Number(d.value), 0) }];
+}
+
 function EdPieChart({ spec, donut = false }: { spec: ChartSpec; donut?: boolean }) {
-  const data = ((spec.series ?? [])[0]?.data ?? []).filter((d) => Number.isFinite(Number(d?.value)) && Number(d.value) >= 0);
+  const data = edFoldSliceTail(((spec.series ?? [])[0]?.data ?? []).filter((d) => Number.isFinite(Number(d?.value)) && Number(d.value) >= 0));
   const total = data.reduce((acc, d) => acc + Number(d.value), 0);
   if (data.length < 2 || total <= 0) return null;
   const R = 92, r = donut ? 54 : 0, cx = 100, cy = 100;
@@ -1025,7 +1042,6 @@ function StructuredChartPreview({ spec }: { spec: ChartSpec }) {
     ? (spec.rows as unknown as string[]).flatMap((r, i) => (spec.columns as string[]).map((c, j) => [String(r), String(c), String((spec.values as unknown[][])[i]?.[j] ?? '—')]))
     : rows;
   const structuredCols = type === 'heatmap' ? ['Row', 'Column', 'Value'] : cols;
-  const smallRows = structured.slice(0, 18);
   return (
     <div className="chart-wrap">
       <div className="chart-title">{title}</div>
@@ -1038,10 +1054,9 @@ function StructuredChartPreview({ spec }: { spec: ChartSpec }) {
           {(spec.nodes as Array<string | {label?: string; id?: string}>).slice(0, 16).map((n, i) => <span key={i} style={{ border: '1px solid #d9e1ee', borderRadius: 8, padding: '5px 8px', background: '#f7f9fd', fontSize: 11 }}>{typeof n === 'string' ? n : (n.label ?? n.id ?? `Node ${i+1}`)}</span>)}
         </div>
       ) : null}
-      {smallRows.length ? <div style={{ overflowX: 'auto' }}><table className="md-table"><thead><tr>{structuredCols.map((c, i) => <th key={i} className="md-th">{c}</th>)}</tr></thead><tbody>{smallRows.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci} className="md-td">{cell}</td>)}</tr>)}</tbody></table></div> : (
+      {structured.length ? <div style={{ overflow: 'auto', maxHeight: 360 }}><table className="md-table"><thead><tr>{structuredCols.map((c, i) => <th key={i} className="md-th">{c}</th>)}</tr></thead><tbody>{structured.map((row, ri) => <tr key={ri}>{row.map((cell, ci) => <td key={ci} className="md-td">{cell}</td>)}</tr>)}</tbody></table></div> : (
         <div style={{ color: '#69758c', fontSize: 12 }}>This chart uses a specialized structure (such as sets, events, or nodes/links) and is rendered in the full report.</div>
       )}
-      {structured.length > smallRows.length ? <div style={{ color: '#8490a6', fontSize: 10, marginTop: 5 }}>Showing {smallRows.length} of {structured.length} observations in this chat preview.</div> : null}
     </div>
   );
 }
@@ -1294,6 +1309,7 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ report: rd.report, title: rd.title, charts: rd.charts, images: rd.images ?? [], question, keyStats: rd.keyStats, summary: rd.summary, fileImages: rd.fileImages ?? [], sources: rd.sources ?? [], theme: rd.theme ?? null, presentation: rd.presentation ?? null, reportTier: rd.reportTier ?? selectedTier,
+          reportStyle: rd.reportStyle ?? 'market_currents', kicker: rd.kicker ?? '',
           // A draft (generated but not approved) is exported as a labelled
           // draft with the same charts as the preview; approved reports keep
           // the strict export gate.
@@ -1910,6 +1926,10 @@ export default function GrowthGradualChat() {
   const [streamDisplayedText, setStreamDisplayedText] = useState('');
   const [streamVisualMessageId, setStreamVisualMessageId] = useState<string | null>(null);
   const [selectedReportTier, setSelectedReportTier] = useState<ReportTier>('brief');
+  const [selectedReportStyle, setSelectedReportStyle] = useState<ReportStyle>('market_currents');
+  // generateReport reads the style through a ref so its many call sites stay unchanged.
+  const selectedReportStyleRef = useRef<ReportStyle>('market_currents');
+  selectedReportStyleRef.current = selectedReportStyle;
   const [reportModeEnabled, setReportModeEnabled] = useState(false);
   const [reportTierMenuOpen, setReportTierMenuOpen] = useState(false);
   const reportTierHydratedRef = useRef(false);
@@ -1934,6 +1954,11 @@ export default function GrowthGradualChat() {
     const update = () => {
       const top = Math.max(0, Math.round(el.getBoundingClientRect().top + window.scrollY));
       el.style.setProperty('--gg-chat-top', `${top}px`);
+      // On phones a fixed bottom tab bar covers the composer; reserve its height.
+      const bottomNav = document.querySelector('.mobile-bottom-nav');
+      const navHeight = bottomNav && getComputedStyle(bottomNav).display !== 'none'
+        ? Math.round(bottomNav.getBoundingClientRect().height) : 0;
+      el.style.setProperty('--gg-chat-bottom', `${navHeight}px`);
     };
     update();
     window.addEventListener('resize', update);
@@ -1953,6 +1978,8 @@ export default function GrowthGradualChat() {
   const sdkResponseTargetRef = useRef<string | null>(null);
   const sdkExpectedMessagesRef = useRef(0);
   const streamTargetTextRef = useRef('');
+  // "<message id>::<text>" last mirrored from the SDK stream into messages.
+  const sdkMirroredRef = useRef('');
   const streamDisplayedTextRef = useRef('');
   const streamVisualMessageIdRef = useRef<string | null>(null);
   const sdkCompletionRef = useRef<{ resolve: (text: string) => void; reject: (error: unknown) => void } | null>(null);
@@ -1967,6 +1994,10 @@ export default function GrowthGradualChat() {
     stop: sdkStop,
   } = useChat({
     transport: growthGradualAiTransport,
+    // Batch streamed chunks. Unthrottled, every token republished messages and
+    // re-ran the mirror + history effects back to back, which React reports as
+    // "Maximum update depth exceeded" on fast streams (AI SDK's documented fix).
+    throttle: 50,
     onData: (part) => {
       const streamPart = part as unknown as { type?: string; data?: unknown };
       if (streamPart.type === 'data-chat-status' && streamPart.data && typeof streamPart.data === 'object') {
@@ -2024,6 +2055,10 @@ export default function GrowthGradualChat() {
       if (saved === 'brief' || saved === 'detailed' || saved === 'in_depth') {
         setSelectedReportTier(saved);
       }
+      const savedStyle = window.localStorage.getItem('gg-report-style-v1');
+      if (savedStyle === 'market_currents' || savedStyle === 'feature_article') {
+        setSelectedReportStyle(savedStyle);
+      }
     } catch { /* localStorage may be unavailable in privacy-restricted browsers */ }
     reportTierHydratedRef.current = true;
   }, []);
@@ -2034,6 +2069,13 @@ export default function GrowthGradualChat() {
       window.localStorage.setItem('gg-report-tier-v2', selectedReportTier);
     } catch { /* ignore storage failures */ }
   }, [selectedReportTier]);
+
+  useEffect(() => {
+    if (!reportTierHydratedRef.current) return;
+    try {
+      window.localStorage.setItem('gg-report-style-v1', selectedReportStyle);
+    } catch { /* ignore storage failures */ }
+  }, [selectedReportStyle]);
 
   // Close the compact report-depth menu when clicking anywhere outside it.
   useEffect(() => {
@@ -2262,9 +2304,15 @@ export default function GrowthGradualChat() {
       .map(part => part.type === 'text' ? part.text : '')
       .join('');
     streamTargetTextRef.current = streamedText;
-    setMessages(prev => prev.map(message => message.id === targetId
-      ? { ...message, text: streamedText }
-      : message));
+    // Only act on new text. useChat can re-emit an identical messages array;
+    // setting state (even to the same value) on every emission re-renders and
+    // re-runs this effect, which looped into "Maximum update depth exceeded".
+    const mirrorKey = `${targetId}::${streamedText}`;
+    if (sdkMirroredRef.current === mirrorKey) return;
+    sdkMirroredRef.current = mirrorKey;
+    setMessages(prev => (prev.some(message => message.id === targetId && message.text !== streamedText)
+      ? prev.map(message => message.id === targetId ? { ...message, text: streamedText } : message)
+      : prev));
     if (streamedText) {
       setSearching(false);
       setStatusMsg('');
@@ -2995,7 +3043,8 @@ export default function GrowthGradualChat() {
     reportInFlightRef.current.add(botMsgId);
     // Stable per message + tier + question, so the backend can hand back the
     // existing job if the browser retries after a dropped connection.
-    const clientRequestId = `${botMsgId}:${effectiveReportTier}:${question.length}:${Array.from(question).reduce((h, ch) => ((h * 31) + ch.charCodeAt(0)) | 0, 7)}`;
+    const effectiveReportStyle = selectedReportStyleRef.current;
+    const clientRequestId = `${botMsgId}:${effectiveReportTier}:${effectiveReportStyle}:${question.length}:${Array.from(question).reduce((h, ch) => ((h * 31) + ch.charCodeAt(0)) | 0, 7)}`;
     setMessages(prev => prev.map(m => m.id === botMsgId ? {
       ...m, reportLoading: true, reportProgress: 'Preparing report…', reportProgressPercent: 1,
       reportPreview: undefined, reportPreviewTruncated: false, reportError: undefined,
@@ -3176,14 +3225,15 @@ export default function GrowthGradualChat() {
       const useBackgroundReportJob = ['brief', 'detailed', 'in_depth'].includes(effectiveReportTier);
       if (useBackgroundReportJob) {
         console.info('[report] POST /api/chat/report/start', { reportTier: effectiveReportTier });
+        const startPayload = {
+          question, reportTier: effectiveReportTier, reportStyle: effectiveReportStyle, sources: priorSources, fileContext: fileTextContext, clientRequestId,
+          conversationContext: conversationContext || '', fileImages, embeddedFileImages,
+          sourceDocuments, sessionId: getOrCreateSessionId(), hasRag: ragIndexed,
+        };
         const started = await fetch('/api/chat/report/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            question, reportTier: effectiveReportTier, sources: priorSources, fileContext: fileTextContext, clientRequestId,
-            conversationContext: conversationContext || '', fileImages, embeddedFileImages,
-            sourceDocuments, sessionId: getOrCreateSessionId(), hasRag: ragIndexed,
-          }),
+          body: JSON.stringify(startPayload),
         });
         const startContentType = String(started.headers.get('content-type') || '').toLowerCase();
         let startData: any = null;
@@ -3298,12 +3348,39 @@ export default function GrowthGradualChat() {
           console.warn('[report] progress stream interrupted; checking durable job status', streamErr);
           // Keep checking the durable job if an intermediary closes the SSE
           // connection before final validation/PDF creation has completed.
-          const fallbackStarted = Date.now();
+          let fallbackStarted = Date.now();
+          let activeJobId: string = startData.jobId;
+          let restartedLostJob = false;
           while (Date.now() - fallbackStarted < maxWaitMs) {
             await new Promise(resolve => setTimeout(resolve, 2500));
             try {
-              const statusRes = await fetch(`/api/chat/report/status/${encodeURIComponent(startData.jobId)}`, { cache: 'no-store' });
+              const statusRes = await fetch(`/api/chat/report/status/${encodeURIComponent(activeJobId)}`, { cache: 'no-store' });
               const statusContentType = String(statusRes.headers.get('content-type') || '').toLowerCase();
+              // Report jobs live in backend memory, so a backend restart (a deploy,
+              // a crash, or uvicorn --reload picking up a file change) loses the
+              // running job and its status answers 404 JSON. Start it again once.
+              if (statusRes.status === 404 && statusContentType.includes('application/json')) {
+                if (restartedLostJob) {
+                  setStatusMsg('');
+                  return { ok: false, status: 404, data: { error: 'The report server restarted twice while this report was being generated, so the job was lost. Please generate the report again.' } };
+                }
+                restartedLostJob = true;
+                console.warn('[report] backend lost the report job (likely restarted); starting it again', { jobId: activeJobId });
+                setStatusMsg('The report server restarted and lost this job — starting the report again…');
+                const restarted = await fetch('/api/chat/report/start', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ ...startPayload, clientRequestId: `${clientRequestId}:restart` }),
+                });
+                const restartedData = await restarted.json().catch(() => null) as { jobId?: string } | null;
+                if (!restarted.ok || !restartedData?.jobId) {
+                  setStatusMsg('');
+                  return { ok: false, status: restarted.status || 502, data: { error: 'The report server restarted and lost this job, and starting it again failed. Please generate the report again.' } };
+                }
+                activeJobId = restartedData.jobId;
+                fallbackStarted = Date.now();
+                continue;
+              }
               // If the status API path also resolves to a Next.js HTML fallback,
               // stop immediately with an actionable message instead of parsing
               // {} repeatedly for up to 20 minutes.
@@ -3414,6 +3491,8 @@ export default function GrowthGradualChat() {
             revisionHistory: [],
             report:     reportText,
             reportTier: data.reportTier ?? effectiveReportTier,
+            reportStyle: data.reportStyle ?? effectiveReportStyle,
+            kicker: typeof data.kicker === 'string' ? data.kicker : undefined,
             pageTarget: data.pageTarget ?? undefined,
             pageBudget: data.pageBudget ?? undefined,
             title:      data.title      ?? '',
@@ -4044,7 +4123,7 @@ export default function GrowthGradualChat() {
            changed before sending a report request. */
         .report-tier-menu-wrap { position:relative; flex:0 0 auto; align-self:flex-end; }
         .report-tier-trigger {
-          height:clamp(30px,3vw,36px); min-width:112px; max-width:150px; padding:0 9px;
+          height:clamp(30px,3vw,36px); min-width:112px; max-width:230px; padding:0 9px;
           display:flex; align-items:center; gap:7px; border:1px solid #d5ddd9; border-radius:10px;
           background:#fff; color:#31445d; cursor:pointer; font-family:'DM Sans',sans-serif;
           transition:border-color .15s, background .15s, box-shadow .15s, transform .15s;
@@ -4057,19 +4136,23 @@ export default function GrowthGradualChat() {
         .report-tier-trigger:disabled { opacity:.5; cursor:not-allowed; }
         .report-tier-trigger-dot { width:8px; height:8px; border-radius:50%; background:#0d4f3c; flex:0 0 auto; box-shadow:0 0 0 3px #e8f3ee; }
         .report-tier-trigger-text { min-width:0; display:flex; flex-direction:column; align-items:flex-start; line-height:1.05; }
-        .report-tier-trigger-kicker { font-size:8px; font-weight:800; color:#8690a5; text-transform:uppercase; letter-spacing:.08em; }
-        .report-tier-trigger-value { margin-top:2px; font-size:10.5px; font-weight:800; color:#24344e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .report-tier-trigger-kicker { font-size:8px; font-weight:800; color:#8690a5; text-transform:uppercase; letter-spacing:.08em; white-space:nowrap; }
+        .report-tier-trigger-text { max-width:100%; overflow:hidden; }
+        .report-tier-trigger-value { display:block; max-width:100%; margin-top:2px; font-size:10.5px; font-weight:800; color:#24344e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .report-tier-trigger-sep { color:#a3acbd; font-weight:600; }
         .report-tier-trigger-chevron { margin-left:auto; color:#7c879a; flex:0 0 auto; transition:transform .15s ease; }
         .report-tier-trigger.is-open .report-tier-trigger-chevron { transform:rotate(180deg); }
         .report-tier-menu {
-          position:absolute; left:0; bottom:calc(100% + 10px); z-index:80; width:min(300px,78vw);
-          padding:8px; border:1px solid #dbe2e8; border-radius:14px; background:rgba(255,255,255,.98);
+          position:absolute; left:0; bottom:calc(100% + 10px); z-index:80; width:min(340px,86vw);
+          max-height:min(70vh,460px); overflow-y:auto; overscroll-behavior:contain;
+          padding:10px; border:1px solid #dbe2e8; border-radius:14px; background:rgba(255,255,255,.98);
           box-shadow:0 16px 40px rgba(15,23,42,.18), 0 2px 8px rgba(15,23,42,.08);
           backdrop-filter:blur(12px);
           font-family:'DM Sans',sans-serif;
         }
         .report-tier-menu-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:5px 7px 7px; color:#657086; font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
         .report-tier-menu-head span:last-child { color:#9aa3b2; font-size:8px; font-weight:700; letter-spacing:.04em; text-transform:none; }
+        .report-tier-menu-head span:only-child { color:#657086; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
         .report-tier-menu-item {
           position:relative; width:100%; display:flex; align-items:flex-start; gap:9px; padding:9px 8px;
           border:1px solid transparent; border-radius:10px; background:transparent; text-align:left; cursor:pointer;
@@ -4087,12 +4170,33 @@ export default function GrowthGradualChat() {
         .report-tier-menu-description { font-size:11px; line-height:1.4; color:#606c7e; }
         .report-tier-menu-check { position:absolute; right:9px; top:12px; color:#0d4f3c; }
         .report-tier-menu-item:focus-visible { outline:2px solid #1a1f4e; outline-offset:2px; }
+        .report-seg { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; padding:3px; border:1px solid #e3e8ee; border-radius:11px; background:#f4f6f8; }
+        .report-seg-item { min-width:0; display:flex; flex-direction:column; align-items:center; gap:1px; padding:7px 4px; border:0; border-radius:8px; background:transparent; color:#4a5568; cursor:pointer; font-family:'DM Sans',sans-serif; transition:background .15s, box-shadow .15s, color .15s; }
+        .report-seg-item:hover { background:#fff; }
+        .report-seg-item.is-selected { background:#fff; color:#0d4f3c; box-shadow:0 1px 3px rgba(15,23,42,.12), 0 0 0 1px #cfe4da; }
+        .report-seg-label { font-size:12px; font-weight:800; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+        .report-seg-meta { font-size:10px; font-weight:600; color:#7c8799; white-space:nowrap; }
+        .report-seg-item.is-selected .report-seg-meta { color:#3d6d5e; }
+        .report-tier-menu-note { margin:7px 4px 10px; font-size:11px; line-height:1.4; color:#5f6b7d; }
+        .report-style-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+        .report-style-card { min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:3px; padding:9px 10px; border:1px solid #e1e6ec; border-radius:10px; background:#fff; color:#25334c; cursor:pointer; text-align:left; font-family:'DM Sans',sans-serif; transition:border-color .15s, box-shadow .15s, background .15s; }
+        .report-style-card:hover { border-color:#b9cfc5; }
+        .report-style-card.is-selected { border-color:#0d4f3c; background:#eef8f4; box-shadow:0 0 0 1px rgba(13,79,60,.12); }
+        .report-style-desc { font-size:10.5px; color:#6b7686; line-height:1.3; }
+        .report-style-swatch { width:100%; height:20px; border-radius:5px; margin-bottom:3px; }
+        .report-style-swatch--market_currents { background:linear-gradient(90deg,#0e1f3d 0 62%,#c49a4a 62% 70%,#f4f0e8 70%); }
+        .report-style-swatch--feature_article { background:linear-gradient(90deg,#fff 0 55%,#f5a11c 55% 75%,#3b82f6 75%); border:1px solid #e3e6ea; }
+        .report-seg-item:focus-visible, .report-style-card:focus-visible, .report-tier-menu-done:focus-visible { outline:2px solid #1a1f4e; outline-offset:2px; }
+        .report-tier-menu-done { width:100%; margin-top:10px; padding:8px; border:0; border-radius:9px; background:#0d4f3c; color:#fff; font:700 12px 'DM Sans',sans-serif; cursor:pointer; }
+        .report-tier-menu-done:hover { background:#0b4334; }
+        body:has(.report-tier-menu) .nfab { opacity:0; pointer-events:none; }
         @media (prefers-reduced-motion: reduce) { .msg-row { animation:none !important; } .report-mode-btn { transition:none; } .report-mode-btn.is-active { animation:none; } }
         @media (max-width:640px) {
           .report-tier-trigger { min-width:42px; width:42px; padding:0; justify-content:center; gap:0; }
           .report-tier-trigger-text { display:none; }
           .report-tier-trigger-chevron { display:none; }
-          .report-tier-menu { left:auto; right:0; width:min(290px,88vw); }
+          /* Full-width sheet above the composer; anchoring to the trigger ran off-screen. */
+          .report-tier-menu { position:fixed; left:12px; right:12px; width:auto; bottom:calc(var(--gg-chat-bottom, 0px) + 84px); max-height:min(64vh,460px); }
         }
 
         .news-btn {
@@ -4262,163 +4366,146 @@ export default function GrowthGradualChat() {
         .conv-group-label { color: #8a96b0; letter-spacing: .12em; font-weight: 800; }
         .conv-item { border: 1px solid transparent; transition: background .18s ease,border-color .18s ease,transform .18s ease; }
         .conv-item:hover { background: rgba(104,124,198,.075); border-color: rgba(130,145,196,.14); }
-        .conv-item--active {
-          background: linear-gradient(100deg,rgba(16,154,114,.11),rgba(106,90,205,.09));
-          border: 1px solid rgba(105,129,183,.17);
-          border-left: 3px solid #0b9a73;
+                .conv-item--active {
+          background: rgba(14,31,61,.06);
+          border: 1px solid rgba(14,31,61,.12);
+          border-left: 3px solid #0e1f3d;
           padding-left: 9px;
-          box-shadow: 0 3px 10px rgba(44,75,128,.045);
+          box-shadow: none;
         }
-        .conv-item--active .conv-item__title { color: #183653; }
+        .conv-item--active .conv-item__title { color: #0e1f3d; font-weight: 600; }
         .sidebar-footer {
-          background: linear-gradient(110deg,#f0f8f4,#f5f4ff);
-          border-top-color: #e2e8f3;
-          color: #7c8aa4;
+          background: #f8fafc;
+          border-top: 1px solid #e2e8f0;
+          color: #64748b;
         }
-        .chat-main { background: linear-gradient(145deg,#f8f9fd 0%,#f7f8fc 52%,#f4faf8 100%); }
+        .chat-main { background: #f8fafc; }
         .chat-topbar {
           position: relative;
-          overflow: hidden;
-          background: linear-gradient(108deg,#132840 0%,#243968 48%,#4b438d 100%);
-          border-bottom: 1px solid rgba(255,255,255,.12);
-          box-shadow: 0 4px 18px rgba(25,41,83,.18);
+          background: #0e1f3d;
+          border-bottom: 1px solid rgba(255,255,255,.10);
+          box-shadow: 0 1px 3px rgba(15,23,42,.08);
         }
-        .chat-topbar::after {
-          content: ""; position: absolute; inset: 0; pointer-events: none;
-          background: radial-gradient(ellipse at 84% -45%,rgba(120,225,194,.24),transparent 42%),
-                      radial-gradient(ellipse at 60% 140%,rgba(203,172,255,.16),transparent 46%);
-        }
+        .chat-topbar::after { display: none; }
         .chat-topbar > * { position: relative; z-index: 1; }
-        .topbar-toggle { background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.16); color: rgba(255,255,255,.78); }
-        .topbar-toggle:hover { background: rgba(255,255,255,.18); color: #fff; }
-        .topbar-logo { background: linear-gradient(145deg,#fff,#e7f5f0); box-shadow: 0 3px 10px rgba(0,0,0,.12); }
-        .topbar-name { letter-spacing: -.015em; }
-        .topbar-sub { color: rgba(237,243,255,.72); }
-        .topbar-dot { background: #6ee7b7; box-shadow: 0 0 0 4px rgba(110,231,183,.13),0 0 12px rgba(110,231,183,.7); }
+        .topbar-toggle { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.15); color: rgba(255,255,255,.85); }
+        .topbar-toggle:hover { background: rgba(255,255,255,.16); color: #fff; }
+        .topbar-logo { background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.15); border-radius: 6px; }
+        .topbar-name { font-family: 'Playfair Display',Georgia,serif; font-weight: 600; color: #fff; letter-spacing: 0; }
+        .topbar-sub { color: rgba(255,255,255,.72); font-size: 11px; }
+        .topbar-dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; box-shadow: 0 0 0 2px rgba(16,185,129,.25); animation: none; }
         .chat-msgs { background: transparent; }
         .chat-welcome {
           position: relative;
-          isolation: isolate;
-          gap: clamp(12px,1.75vh,20px);
-          background:
-            radial-gradient(ellipse at 50% 35%,rgba(218,231,255,.56),transparent 40%),
-            linear-gradient(145deg,#f8f9fe 0%,#fbfbff 48%,#f0faf6 100%);
-          padding-top: clamp(28px,5vh,54px);
-          padding-bottom: clamp(20px,3vh,34px);
+          gap: clamp(14px,2vh,22px);
+          background: #f8fafc;
+          padding-top: clamp(24px,4.5vh,48px);
+          padding-bottom: clamp(20px,3vh,32px);
         }
-        .chat-welcome::before {
-          content: ""; position: absolute; z-index: -1; pointer-events: none;
-          width: min(620px,90%); height: 280px; top: 12%; left: 50%; transform: translateX(-50%);
-          border-radius: 50%; filter: blur(2px);
-          background: radial-gradient(ellipse,rgba(131,160,244,.11),rgba(123,218,190,.075) 45%,transparent 72%);
-        }
+        .chat-welcome::before { display: none; }
         .welcome-kicker {
           display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-          color: #657695; font-size: clamp(8px,.78vw,10px); font-weight: 800;
-          letter-spacing: .16em; text-transform: uppercase;
-          background: rgba(255,255,255,.76); border: 1px solid rgba(160,174,214,.36);
-          border-radius: 999px; padding: 8px 13px; box-shadow: 0 5px 18px rgba(54,74,127,.055);
-          backdrop-filter: blur(10px);
+          color: #c49a4a; font-size: 10px; font-weight: 700;
+          letter-spacing: .2em; text-transform: uppercase;
+          background: #fff; border: 1px solid #e2e8f0;
+          border-radius: 4px; padding: 6px 12px; box-shadow: 0 1px 3px rgba(15,23,42,.04);
+          backdrop-filter: none;
         }
-        .welcome-kicker-dot { width: 7px; height: 7px; border-radius: 50%; background: #12a477; box-shadow: 0 0 0 4px rgba(18,164,119,.12); }
-        .welcome-kicker-sep { color: #d1a04a; }
+        .welcome-kicker-dot { width: 6px; height: 6px; border-radius: 50%; background: #0e1f3d; box-shadow: none; }
+        .welcome-kicker-sep { color: #c49a4a; }
         .welcome-intro { max-width: 590px; }
         .welcome-title {
           font-family: 'Playfair Display',Georgia,serif;
-          font-size: clamp(25px,3.4vw,38px); line-height: 1.16; font-weight: 800;
-          letter-spacing: -.035em;
-          background: linear-gradient(105deg,#153551 0%,#334d8e 48%,#6552ad 78%,#0c8465 115%);
-          -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-          margin: 0 0 10px;
+          font-size: clamp(26px,3.4vw,38px); line-height: 1.15; font-weight: 700;
+          letter-spacing: -.02em;
+          color: #0e1f3d;
+          background: none; -webkit-text-fill-color: currentColor;
+          margin: 0 0 8px;
         }
-        .welcome-sub { max-width: 490px; margin: 0 auto; color: #66748c; font-size: clamp(12px,1.15vw,14px); line-height: 1.7; }
-        .welcome-capabilities { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; max-width:min(750px,100%); }
+        .welcome-sub { max-width: 520px; margin: 0 auto; color: #64748b; font-size: clamp(12.5px,1.15vw,14px); line-height: 1.65; }
+        .welcome-capabilities { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; max-width:min(720px,100%); margin: 4px 0; }
         .welcome-capability {
-          display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:7px 11px;
-          background:rgba(255,255,255,.76); border:1px solid #e2e7f2; color:#52627b;
-          font-size:clamp(10px,.93vw,11.5px); font-weight:650; box-shadow:0 3px 10px rgba(39,61,106,.045);
+          display:inline-flex; align-items:center; gap:6px; border-radius:4px; padding:6px 12px;
+          background:#fff; border:1px solid #e2e8f0; color:#334155;
+          font-size:11.5px; font-weight:600; box-shadow:0 1px 2px rgba(15,23,42,.03);
         }
-        .welcome-capability-icon { width:19px; height:19px; display:inline-flex; align-items:center; justify-content:center; border-radius:6px; font-size:13px; font-weight:900; }
-        .welcome-capability-icon--mint { background:#dff8ed; color:#07825d; }
-        .welcome-capability-icon--violet { background:#ece8ff; color:#6554c6; }
-        .welcome-capability-icon--gold { background:#fff2d6; color:#ab7415; }
-        .sugs { gap:9px; max-width:min(760px,100%); }
+        .welcome-capability-icon { width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; border-radius:4px; background:#f1f5f9; color:#0e1f3d; font-size:12px; }
+        .sugs { gap:8px; max-width:min(760px,100%); margin-top: 6px; }
         .sug {
-          border:1px solid #dfe5f2; border-radius:13px; background:rgba(255,255,255,.94);
-          padding:10px 13px; font-size:clamp(10.5px,.95vw,12px); color:#253b59;
-          box-shadow:0 4px 14px rgba(42,61,110,.055);
+          border:1px solid #e2e8f0; border-radius:6px; background:#fff;
+          padding:9px 14px; font-size:12px; font-weight:500; color:#1e293b;
+          box-shadow:0 1px 2px rgba(15,23,42,.04); transition:all .15s ease;
         }
-        .sug-icon { display:inline-flex; align-items:center; justify-content:center; width:21px; height:21px; border-radius:7px; background:linear-gradient(145deg,#e2f8ef,#e8eaff); font-size:13px; }
-        .sug:hover { border-color:#a9c9c0; background:linear-gradient(135deg,#fff,#f5fbf8); transform:translateY(-2px); box-shadow:0 8px 18px rgba(37,83,106,.10); }
+        .sug-icon { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:4px; background:#f8fafc; color:#c49a4a; font-size:12px; }
+        .sug:hover { border-color:#c49a4a; background:#fff; color:#0e1f3d; transform:translateY(-1px); box-shadow:0 3px 8px rgba(14,31,61,.08); }
         .msg-row--user .msg-text {
-          background: linear-gradient(126deg,#263a77 0%,#433e91 54%,#6450aa 100%);
-          border:1px solid rgba(255,255,255,.18);
-          box-shadow:0 9px 24px rgba(55,61,132,.17);
-          border-bottom-right-radius:6px;
+          background: #0e1f3d;
+          color: #ffffff;
+          border:1px solid #162a4e;
+          box-shadow:0 2px 6px rgba(14,31,61,.12);
+          border-bottom-right-radius:4px;
+          font-size: 14px;
         }
         .msg-row--bot .msg-text {
-          background:linear-gradient(145deg,rgba(255,255,255,.99),rgba(252,253,255,.97));
-          color:#243651; border:1px solid #e0e6f2;
-          box-shadow:0 5px 18px rgba(34,51,91,.045);
-          border-bottom-left-radius:6px;
+          background:#fff;
+          color:#0f172a; border:1px solid #e2e8f0;
+          box-shadow:0 1px 3px rgba(15,23,42,.04);
+          border-bottom-left-radius:4px;
+          font-size: 14.5px; line-height: 1.65;
         }
-        .msg-text .md-h1,.msg-text .md-h2,.msg-text .md-h3 { color:#233e64; }
-        .msg-text .md-h2 { padding-bottom:5px; border-bottom:1px solid #e7eaf4; }
-        .msg-text .md-th { background:linear-gradient(100deg,#183c55,#2c4b81 58%,#4a478b); border-color:#2c4b72; }
-        .msg-text .md-td { border-color:#e3e8f2; }
-        .msg-text .md-table tbody tr:nth-child(even) td { background:#f4f7fc; }
-        .msg-text .md-table tbody tr:hover td { background:#edf8f4; }
+        .msg-text .md-h1,.msg-text .md-h2,.msg-text .md-h3 { color:#0e1f3d; font-family:'Playfair Display',Georgia,serif; font-weight:600; }
+        .msg-text .md-h2 { padding-bottom:4px; border-bottom:1px solid #e2e8f0; }
+        .msg-text .md-th { background:#0e1f3d; color:#fff; font-weight:600; font-size:11px; letter-spacing:.04em; border-color:#162a4e; }
+        .msg-text .md-td { border-color:#e2e8f0; }
+        .msg-text .md-table tbody tr:nth-child(even) td { background:#f8fafc; }
+        .msg-text .md-table tbody tr:hover td { background:#f1f5f9; }
         .key-stat-card {
-          border:1px solid #e0e7f3; border-radius:14px;
-          background:linear-gradient(145deg,#fff 0%,#fbfcff 72%,#f5fbf8 100%);
-          box-shadow:0 5px 18px rgba(35,56,104,.05);
+          border:1px solid #e2e8f0; border-top:3px solid #0e1f3d; border-radius:6px;
+          background:#fff;
+          box-shadow:0 1px 3px rgba(15,23,42,.04);
         }
-        .key-stat-card:nth-child(4n+1) { border-top:3px solid #15a579; }
-        .key-stat-card:nth-child(4n+2) { border-top:3px solid #7366d8; }
-        .key-stat-card:nth-child(4n+3) { border-top:3px solid #dfa847; }
-        .key-stat-card:nth-child(4n+4) { border-top:3px solid #53a7c8; }
-        .key-stat-label { color:#77849d; }
-        .key-stat-value { color:#20375c; }
+        .key-stat-label { color:#64748b; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+        .key-stat-value { color:#0e1f3d; font-weight:700; font-family:'JetBrains Mono',monospace; }
         .chart-wrap {
-          border:1px solid #dfe6f2; border-radius:15px;
-          background:linear-gradient(145deg,#fff 0%,#fbfcff 100%);
-          box-shadow:0 6px 18px rgba(39,62,113,.045);
+          border:1px solid #e2e8f0; border-radius:8px;
+          background:#fff;
+          box-shadow:0 1px 3px rgba(15,23,42,.04);
         }
-        .chart-wrap:hover { border-color:#c6d5eb; box-shadow:0 12px 26px rgba(39,62,113,.09); }
-        .chart-title { color:#223c63; font-weight:750; }
+        .chart-wrap:hover { border-color:#cbd5e1; box-shadow:0 3px 8px rgba(15,23,42,.06); }
+        .chart-title { color:#0e1f3d; font-weight:700; font-family:'Playfair Display',serif; }
         .chart-legend { gap:10px; }
         .chat-input-area {
-          background:linear-gradient(180deg,rgba(251,252,255,.96),rgba(255,255,255,.99));
-          border-top:1px solid #e2e7f2; box-shadow:0 -8px 22px rgba(31,48,91,.035);
+          background:#fff;
+          border-top:1px solid #e2e8f0; box-shadow:0 -2px 10px rgba(15,23,42,.03);
         }
         .input-row {
-          background:linear-gradient(125deg,#fff 0%,#fbfcff 70%,#f4fbf8 100%);
-          border:1.5px solid #dce4f0; border-radius:18px;
-          box-shadow:0 5px 18px rgba(33,54,104,.045);
+          background:#f8fafc;
+          border:1px solid #cbd5e1; border-radius:10px;
+          box-shadow:none;
         }
-        .input-row:focus-within { border-color:#8b85dc; box-shadow:0 0 0 4px rgba(111,100,213,.12),0 7px 22px rgba(33,54,104,.07); }
-        .chat-textarea { color:#213650; }
+        .input-row:focus-within { border-color:#0e1f3d; box-shadow:0 0 0 3px rgba(14,31,61,.08); background:#fff; }
+        .chat-textarea { color:#0f172a; font-family:'DM Sans',sans-serif; }
         .send-btn {
-          background:linear-gradient(135deg,#0a936b 0%,#187b93 50%,#6152c1 100%);
-          box-shadow:0 6px 16px rgba(45,112,134,.25);
+          background:#0e1f3d; border:1px solid #162a4e; border-radius:8px; color:#fff;
+          box-shadow:0 2px 5px rgba(14,31,61,.15);
         }
-        .send-btn:hover:not(:disabled) { background:linear-gradient(135deg,#08a978 0%,#208ea7 50%,#7160d2 100%); box-shadow:0 9px 22px rgba(45,112,134,.28); }
+        .send-btn:hover:not(:disabled) { background:#162a4e; transform:scale(1.04); box-shadow:0 4px 10px rgba(14,31,61,.22); }
         .report-btn {
-          background:linear-gradient(105deg,#0b8665,#236d91 54%,#4f48a2);
-          border-radius:9px; padding:8px 13px;
-          box-shadow:0 5px 13px rgba(35,97,131,.16);
+          background:#0e1f3d; border:1px solid #162a4e; border-radius:6px; color:#fff;
+          padding:8px 13px; font-weight:600;
+          box-shadow:0 2px 5px rgba(14,31,61,.15);
         }
-        .report-btn:hover:not(:disabled) { box-shadow:0 8px 18px rgba(35,97,131,.22); }
-        .report-btn--experiment { background:linear-gradient(125deg,#f0eaff,#f6f2ff) !important; border:1px solid #ded5ff !important; color:#5b4da7 !important; }
-        .report-btn--action { background:linear-gradient(125deg,#e7f4ff,#eff5ff) !important; border:1px solid #d4e4fb !important; color:#2c5d8c !important; }
-        .report-tier-trigger { border-color:#dce4f1; background:linear-gradient(135deg,#fff,#f5f6ff); box-shadow:0 4px 12px rgba(39,56,102,.05); }
-        .report-tier-trigger:hover:not(:disabled), .report-tier-trigger.is-open { border-color:#a8a1e4; box-shadow:0 0 0 3px rgba(111,100,213,.09); }
-        .report-tier-trigger-dot { background:#0ab17e; box-shadow:0 0 0 4px #e2f8ee; }
-        .report-tier-trigger-kicker { color:#7a85a2; }
-        .report-tier-trigger-value { color:#263e62; }
-        .report-prompt-modal { border:1px solid #dfe5f1; box-shadow:0 24px 70px rgba(21,35,69,.24); }
-        .report-prompt-head { background:linear-gradient(115deg,#17354f,#344581 62%,#6352a8); color:#fff; }
-        .report-prompt-kicker { color:#b4f0dd; }
+        .report-btn:hover:not(:disabled) { background:#162a4e; box-shadow:0 3px 8px rgba(14,31,61,.2); }
+        .report-btn--experiment { background:#f8fafc !important; border:1px solid #e2e8f0 !important; color:#0e1f3d !important; }
+        .report-btn--action { background:#f1f5f9 !important; border:1px solid #cbd5e1 !important; color:#0e1f3d !important; }
+        .report-tier-trigger { border-color:#cbd5e1; background:#fff; border-radius:6px; box-shadow:0 1px 2px rgba(15,23,42,.04); }
+        .report-tier-trigger:hover:not(:disabled), .report-tier-trigger.is-open { border-color:#0e1f3d; box-shadow:0 0 0 2px rgba(14,31,61,.08); }
+        .report-tier-trigger-dot { background:#0e1f3d; box-shadow:none; border-radius:2px; }
+        .report-tier-trigger-kicker { color:#64748b; font-weight:700; }
+        .report-tier-trigger-value { color:#0e1f3d; font-weight:700; }
+        .report-prompt-modal { border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 16px 40px rgba(15,23,42,.15); }
+        .report-prompt-head { background:#0e1f3d; color:#fff; }
+        .report-prompt-kicker { color:#c49a4a; }
         .report-sources { border-color:#e0e6f1; background:linear-gradient(145deg,#fff,#f8faff); }
         .followup-chip { border-color:#dfe5f2; color:#2e4669; box-shadow:0 3px 10px rgba(40,62,110,.05); }
         .followup-chip:hover { background:linear-gradient(135deg,#f3fbf8,#f3f1ff); border-color:#bfd2e2; }
@@ -4731,7 +4818,7 @@ export default function GrowthGradualChat() {
           max-width: none !important; padding: 0 !important; margin: 0 !important;
         }
         .chat-shell.gg-premium.gg-full {
-          height: calc(100dvh - var(--gg-chat-top, 92px)) !important;
+          height: calc(100dvh - var(--gg-chat-top, 92px) - var(--gg-chat-bottom, 0px)) !important;
           max-width: none !important; width: 100% !important; margin: 0 !important;
           border: 0 !important; border-top: 1px solid var(--ed-rule) !important;
           border-radius: 0 !important; box-shadow: none !important;
@@ -4793,11 +4880,11 @@ export default function GrowthGradualChat() {
           {/* Sidebar header */}
           <div className="sidebar-hdr">
             <div className="sidebar-logo">
-              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={32} height={32} style={{ objectFit:'contain', width:32, height:'auto' }}/>
+              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={32} height={32} style={{ objectFit:'cover', objectPosition:'3% 50%', width:32, height:32 }}/>
             </div>
             <div className="sidebar-brand">
               Growth Gradual
-              <span>In The Money</span>
+              <span>Research Intelligence</span>
             </div>
             {/* Mobile close button */}
             {isMobile && (
@@ -4855,8 +4942,8 @@ export default function GrowthGradualChat() {
           </div>
 
           <div className="sidebar-footer">
-            Growth Gradual · Indian Markets AI<br/>
-            Powered by Groq + Web Search
+            <div style={{ fontWeight: 600, color: 'inherit' }}>Growth Gradual LLP</div>
+            <div style={{ fontSize: '9px', opacity: 0.75, marginTop: '2px' }}>Institutional Research · ARN-351151</div>
           </div>
         </aside>
 
@@ -4869,13 +4956,13 @@ export default function GrowthGradualChat() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
             </button>
             <div className="topbar-logo">
-              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={30} height={30} style={{ objectFit:'contain', width:30, height:'auto', mixBlendMode:'luminosity' as React.CSSProperties['mixBlendMode'], opacity:0.88 }}/>
+              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={30} height={30} style={{ objectFit:'cover', objectPosition:'3% 50%', width:30, height:30 }}/>
             </div>
             <div className="topbar-info">
               <div className="topbar-name">Growth Gradual</div>
               <div className="topbar-sub">
                 <span className="topbar-dot"/>
-                In The Money · Indian Markets AI
+                Research Intelligence · Indian Markets
               </div>
             </div>
           </div>
@@ -4898,7 +4985,7 @@ export default function GrowthGradualChat() {
                 </div>
                 <div className="welcome-capabilities" aria-label="Research capabilities">
                   <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--mint">↗</span> Live research</span>
-                  <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--violet">⌁</span> Evidence-linked insights</span>
+                  <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--violet"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg></span> Evidence-linked insights</span>
                   <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--gold">▥</span> Visual reports</span>
                 </div>
 
@@ -4925,7 +5012,7 @@ export default function GrowthGradualChat() {
                   <div key={msg.id} className="msg-row msg-row--bot">
                     <div className="msg-inner">
                       <div className="msg-avatar msg-avatar--bot">
-                        <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'contain', width:28, height:'auto' }}/>
+                        <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'cover', objectPosition:'3% 50%', width:28, height:28 }}/>
                       </div>
                       <div className="msg-bubble">
                         <div className="searching">
@@ -4950,7 +5037,7 @@ export default function GrowthGradualChat() {
                         {isUser ? (
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4b5680" strokeWidth="2" strokeLinecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                         ) : (
-                          <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'contain', width:28, height:'auto' }}/>
+                          <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'cover', objectPosition:'3% 50%', width:28, height:28 }}/>
                         )}
                       </div>
                       {/* Bubble */}
@@ -5201,42 +5288,57 @@ export default function GrowthGradualChat() {
                   disabled={streaming}
                   aria-haspopup="menu"
                   aria-expanded={reportTierMenuOpen}
-                  title="Choose report depth"
+                  title="Choose report depth and style"
                 >
                   <span className="report-tier-trigger-dot" aria-hidden="true" />
                   <span className="report-tier-trigger-text">
                     <span className="report-tier-trigger-kicker">Report</span>
-                    <span className="report-tier-trigger-value">{REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail'}</span>
+                    <span className="report-tier-trigger-value">
+                      {REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail'}
+                      <span className="report-tier-trigger-sep" aria-hidden="true"> · </span>
+                      {REPORT_STYLE_OPTIONS.find(o => o.value === selectedReportStyle)?.label ?? 'Market Currents'}
+                    </span>
                   </span>
                   <svg className="report-tier-trigger-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
 
                 {reportTierMenuOpen && (
-                  <div className="report-tier-menu" role="menu" aria-label="Choose report depth">
-                    <div className="report-tier-menu-head">
-                      <span>Report depth</span>
-                      <span>Applies to reports</span>
+                  <div className="report-tier-menu" role="dialog" aria-label="Report settings">
+                    <div className="report-tier-menu-head"><span>Depth</span></div>
+                    <div className="report-seg" role="radiogroup" aria-label="Report depth">
+                      {REPORT_TIER_OPTIONS.map(option => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={selectedReportTier === option.value}
+                          className={`report-seg-item ${selectedReportTier === option.value ? 'is-selected' : ''}`}
+                          onClick={() => setSelectedReportTier(option.value)}
+                        >
+                          <span className="report-seg-label">{option.label}</span>
+                          <span className="report-seg-meta">{option.scope}</span>
+                        </button>
+                      ))}
                     </div>
-                    {REPORT_TIER_OPTIONS.map(option => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={selectedReportTier === option.value}
-                        className={`report-tier-menu-item ${selectedReportTier === option.value ? 'is-selected' : ''}`}
-                        onClick={() => { setSelectedReportTier(option.value); setReportTierMenuOpen(false); }}
-                      >
-                        <span className="report-tier-menu-radio" aria-hidden="true"><span /></span>
-                        <span className="report-tier-menu-copy">
-                          <span className="report-tier-menu-label">{option.label}</span>
-                          <span className="report-tier-menu-pages">{option.scope}</span>
-                          <span className="report-tier-menu-description">{option.description}</span>
-                        </span>
-                        {selectedReportTier === option.value && (
-                          <svg className="report-tier-menu-check" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
-                        )}
-                      </button>
-                    ))}
+                    <p className="report-tier-menu-note">{REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.description}</p>
+                    <div className="report-tier-menu-head"><span>Style</span></div>
+                    <div className="report-style-grid" role="radiogroup" aria-label="Report style">
+                      {REPORT_STYLE_OPTIONS.map(option => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={selectedReportStyle === option.value}
+                          className={`report-style-card ${selectedReportStyle === option.value ? 'is-selected' : ''}`}
+                          onClick={() => setSelectedReportStyle(option.value)}
+                        >
+                          <span className={`report-style-swatch report-style-swatch--${option.value}`} aria-hidden="true" />
+                          <span className="report-seg-label">{option.label}</span>
+                          <span className="report-style-desc">{option.summary}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <button type="button" className="report-tier-menu-done" onClick={() => setReportTierMenuOpen(false)}>Done</button>
                   </div>
                 )}
               </div>

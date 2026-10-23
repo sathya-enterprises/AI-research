@@ -253,12 +253,13 @@ async def fetch_screener_fundamentals(company_names: list[str], limit: int = 6) 
         return []
 
 
-def _series_for_chart(rows: list[dict], statement: str, line_item: str, n: int = 8) -> list[tuple[str, str]]:
-    """Returns up to n (period, value) pairs, oldest-first (chart-ready order),
-    for one line item of one statement."""
+def _series_for_chart(rows: list[dict], statement: str, line_item: str, n: int | None = None) -> list[tuple[str, str]]:
+    """Returns (period, value) pairs, oldest-first (chart-ready order), for one
+    line item of one statement — every stored period, or the most recent n."""
     matches = [r for r in rows if r.get("statement") == statement and r.get("line_item") == line_item
                and r.get("value") is not None]
-    matches = matches[:n]  # rows arrive period.desc from the query — most recent n
+    if n is not None:
+        matches = matches[:n]  # rows arrive period.desc from the query — most recent n
     matches = list(reversed(matches))  # oldest-first for a left-to-right trend line
     return [(r["period"], _fmt_num(r.get("value"))) for r in matches]
 
@@ -298,7 +299,7 @@ def format_screener_snapshots_as_source(snapshots: list[dict]) -> Optional[dict]
         ratios = snap.get("ratios") or []
         if ratios:
             r_bits = [f"{r['metric']}: {r.get('raw_value') or _fmt_num(r.get('value'))}"
-                      for r in ratios[:15] if r.get("metric")]
+                      for r in ratios if r.get("metric")]
             if r_bits:
                 lines.append("  Key ratios — " + " | ".join(r_bits))
 
@@ -307,9 +308,13 @@ def format_screener_snapshots_as_source(snapshots: list[dict]) -> Optional[dict]
             ("Annual P&L", ["Sales", "Net Profit", "Operating Profit", "EPS in Rs"]),
             ("Balance Sheet", ["Total Assets", "Total Liabilities", "Borrowings", "Reserves"]),
             ("Cash Flow", ["Cash from Operating Activity", "Cash from Investing Activity", "Cash from Financing Activity"]),
+            ("Annual Ratios", []),
         ):
-            for item in items:
-                series = _series_for_chart(fin, statement, item, n=8)
+            # Headline items first, then every other stored line item so no
+            # scraped series is left out of the chartable evidence.
+            items = items + [r["line_item"] for r in fin if r.get("statement") == statement and r.get("line_item")]
+            for item in dict.fromkeys(items):
+                series = _series_for_chart(fin, statement, item)
                 if len(series) >= 2:  # a single point isn't a trend worth charting
                     series_str = ", ".join(f"{p}: {v}" for p, v in series)
                     lines.append(f"  {statement} — {item} by period (oldest→latest): {series_str}")
@@ -327,7 +332,7 @@ def format_screener_snapshots_as_source(snapshots: list[dict]) -> Optional[dict]
             for r in sh:
                 by_holder.setdefault(r["holder_type"], []).append(r)
             for holder, rows in by_holder.items():
-                series = list(reversed(rows[:8]))
+                series = list(reversed(rows))
                 if len(series) >= 2:
                     series_str = ", ".join(f"{r['period']}: {r.get('raw_value') or _fmt_num(r.get('value'))}" for r in series)
                     lines.append(f"  Shareholding — {holder} by period (oldest→latest): {series_str}")
@@ -336,7 +341,7 @@ def format_screener_snapshots_as_source(snapshots: list[dict]) -> Optional[dict]
         if peers:
             for p in peers[:8]:
                 metrics = p.get("metrics") or {}
-                metric_str = ", ".join(f"{k}: {v}" for k, v in list(metrics.items())[:6])
+                metric_str = ", ".join(f"{k}: {v}" for k, v in metrics.items())
                 lines.append(f"  Peer — {p.get('peer_name', '?')}: {metric_str}")
 
         pc = snap.get("pros_cons") or []

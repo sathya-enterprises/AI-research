@@ -40,8 +40,12 @@ from fastapi.responses import JSONResponse, Response
 from routes.report import _sanitize_theme, _enforce_brief_section_cap
 from utils.presentation_schema import ReportPresentationSpec
 from utils.report_document import build_report_document, ReportSectionModel
-from utils.chart_catalog import CHART_TYPES, normalize_chart_type
-from utils.markdown_normalizer import normalize_report_markdown
+from routes.house_styles import (
+    DEFAULT_REPORT_STYLE, house_closing, house_css, house_theme, normalize_report_style, render_house_cover, running_title,
+    transform_section_html,
+)
+from utils.chart_catalog import CHART_TYPES, MAX_DISPLAY_SLICES, fold_slice_tail_for_display, normalize_chart_type
+from utils.markdown_normalizer import normalize_report_markdown, strip_excluded_report_sections
 from utils.report_scanability import strip_generation_markers
 from routes.source_manifest import build_source_registry, normalise_source_manifest, ensure_cited_source_records
 from utils.chart_evidence_audit import audit_chart_evidence_consistency, sanitize_charts_for_publication
@@ -410,7 +414,7 @@ def _render_waterfall_chart_svg(chart: dict, idx: int, theme: dict | None = None
         return ""
 
     width, height = 860, 360
-    left, right, top, bottom = 76, 22, 24, 70
+    left, right, top, bottom = 76, 22, 24, 76
     values = [_strict_chart_number(point.get("value")) or 0.0 for point in points]
     starts: list[float] = []
     ends: list[float] = []
@@ -426,6 +430,8 @@ def _render_waterfall_chart_svg(chart: dict, idx: int, theme: dict | None = None
     zero_y = top + (high / span) * chart_height
     step = (width - left - right) / len(points)
     bar_width = min(72.0, step * 0.60)
+    stagger = step < 85
+    slot_chars = max(5, int((step * (1.7 if stagger else 1.0) - 6) / 5.6))
     palette = _svg_palette(theme)
     positive = palette[0] if palette else "#2E7357"
     total_color = palette[1] if len(palette) > 1 else "#183B56"
@@ -451,13 +457,15 @@ def _render_waterfall_chart_svg(chart: dict, idx: int, theme: dict | None = None
             connector_y = top + (high - end) / span * chart_height
             parts.append(f'<line x1="{center_x+bar_width/2:.1f}" y1="{connector_y:.1f}" x2="{center_x+step-bar_width/2:.1f}" y2="{connector_y:.1f}" stroke="#84939b" stroke-dasharray="3 3"/>')
         label = str(point.get("label") or f"Item {index+1}")
-        parts.append(_svg_text(center_x, height - 31, label[:24], size=9, fill=ink, anchor="middle"))
+        display_label = label if len(label) <= slot_chars else (label[:slot_chars - 1] + "…")
+        label_y = height - 34 if (stagger and index % 2 == 1) else height - 22
+        parts.append(_svg_text(center_x, label_y, display_label, size=9, fill=ink, anchor="middle"))
         shown = values[index] if not is_total else end
         label_y = rect_y - 6 if end >= start else rect_y + rect_h + 13
         parts.append(_svg_text(center_x, label_y, f"{shown:,.4g}", size=9, fill=ink, weight=600, anchor="middle"))
     x_label = str(chart.get("xLabel") or "Driver / Step")
     y_label = str(chart.get("yLabel") or f"Change{f' ({chart.get("unit")})' if chart.get("unit") else ''}")
-    parts.append(_svg_text((left + width - right) / 2, height - 8, x_label, size=12, weight=700, anchor="middle", fill=muted))
+    parts.append(_svg_text((left + width - right) / 2, height - 6, x_label, size=11, weight=700, anchor="middle", fill=muted))
     y_mid = (top + height - bottom) / 2
     parts.append(f'<text x="15" y="{y_mid:.1f}" transform="rotate(-90 15 {y_mid:.1f})" font-family="system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="12px" font-weight="700" fill="{html.escape(str(muted), quote=True)}" text-anchor="middle">{html.escape(y_label)}</text>')
     parts.append("</svg></div>")
@@ -488,6 +496,14 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
     elif ctype == "gauge":
         H = 300
     series=chart.get("series") or []; data=(series[0].get("data") if series and isinstance(series[0],dict) else []) or []
+    # Dynamic left margin clearance for horizontal charts where category labels sit on the left,
+    # ensuring labels never collide with or walk over the rotated Y-axis title at x=14.
+    if ctype in {"dot_plot", "lollipop", "gantt", "timeline", "pictogram"}:
+        _lbl_candidates = [str(p.get("label", "")) for p in data if isinstance(p, dict)]
+        if ctype in {"gantt", "timeline"}:
+            _lbl_candidates.extend([str(e.get("label", "")) for e in (chart.get("events") or []) if isinstance(e, dict)])
+        _max_l = max([len(l) for l in _lbl_candidates] + [0])
+        left = max(90, min(int(W * 0.38), 36 + int(_max_l * 6.5)))
     event_count = len(chart.get("events") or data) if ctype in {"gantt", "timeline"} else 0
     row_count = len(data) if ctype in {"dot_plot", "lollipop", "population_pyramid"} else 0
     if event_count:
@@ -627,7 +643,10 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
             if st is None: continue
             if en is None: en=st
             x=left+(st-lo)/span*(W-left-right); w=max(5,(en-st)/span*(W-left-right)); y=top+i*row+max(2,row*.12)
-            parts.append(_svg_text(left-10,y+15,e.get("label",""),size=9,anchor="end",fill=muted))
+            lbl = str(e.get("label", ""))
+            avail_chars = max(8, int((left - 36) / 6.0))
+            display_lbl = lbl if len(lbl) <= avail_chars else (lbl[:avail_chars - 1] + "…")
+            parts.append(_svg_text(left-10,y+15,display_lbl,size=9,anchor="end",fill=muted))
             bar_h = max(5, min(22, row * .66))
             parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{bar_h:.1f}" rx="4" fill="{pal[i%len(pal)]}"/>')
             label_stride = max(1, int(len(rows) / 45))
@@ -639,9 +658,11 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         vals=sorted([(_to_num(p.get("value")),str(p.get("label",""))) for p in data if isinstance(p,dict)], key=lambda z:z[0])[:89]
         if not vals:return ""
         lo=min(v for v,_ in vals); hi=max(v for v,_ in vals); span=hi-lo or 1; row=(H-top-bottom)/len(vals)
+        avail_chars = max(8, int((left - 36) / 6.2))
         for i,(v,lbl) in enumerate(vals):
             y=top+(i+.55)*row; x=left+(v-lo)/span*(W-left-right)
-            parts.append(_svg_text(left-10,y+4,lbl,size=10,anchor="end",fill=muted))
+            display_lbl = lbl if len(lbl) <= avail_chars else (lbl[:avail_chars - 1] + "…")
+            parts.append(_svg_text(left-10,y+4,display_lbl,size=10,anchor="end",fill=muted))
             if ctype=="lollipop": parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{x:.1f}" y2="{y:.1f}" stroke="#d7dde6" stroke-width="2"/>')
             parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="{accent}"/>')
             parts.append(_svg_text(x,y-9,f"{v:g}{unit}",size=9,anchor="middle",weight=600,fill=ink))
@@ -663,7 +684,7 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         return done()
 
     if ctype in {"funnel","funnel_pyramid"}:
-        vals=[(_to_num(p.get("value")),str(p.get("label",""))) for p in data if isinstance(p,dict)][:8]
+        vals=[(_to_num(p.get("value")),str(p.get("label",""))) for p in data if isinstance(p,dict)][:MAX_DISPLAY_SLICES + 1]
         if not vals:return ""
         maxv=max(v for v,_ in vals) or 1; band=(H-top-bottom)/len(vals); center=W/2
         for i,(v,lbl) in enumerate(vals):
@@ -675,7 +696,7 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         return done()
 
     if ctype=="population_pyramid":
-        rows=[p for p in data if isinstance(p,dict)][:16]
+        rows=[p for p in data if isinstance(p,dict)][:89]
         if not rows:return ""
         mx=max([abs(_to_num(p.get("left",p.get("value",0)))) for p in rows]+[abs(_to_num(p.get("right",0))) for p in rows]+[1]); row=(H-top-bottom)/len(rows); cx=W/2
         for i,p in enumerate(rows):
@@ -687,7 +708,7 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         return done()
 
     if ctype in {"candlestick","ohlc"}:
-        rows=[p for p in data if isinstance(p,dict)][:89]
+        rows=[p for p in data if isinstance(p,dict)]
         if not rows:return ""
         allv=[]
         for p in rows:
@@ -704,7 +725,7 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         return done()
 
     if ctype in {"error_bar","control_chart"}:
-        rows=[p for p in data if isinstance(p,dict)][:89]
+        rows=[p for p in data if isinstance(p,dict)]
         if not rows:return ""
         vals=[]
         for p in rows: vals += [_to_num(p.get("value")),_to_num(p.get("high",p.get("ucl",p.get("value")))),_to_num(p.get("low",p.get("lcl",p.get("value"))))]
@@ -753,13 +774,14 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
         return done()
 
     if ctype=="marimekko":
-        rows=[p for p in data if isinstance(p,dict)][:18]
+        rows=[p for p in data if isinstance(p,dict)]
         if not rows:return ""
         widths=[max(_to_num(p.get("width",1)),0.01) for p in rows]; total=sum(widths) or 1; vmax=max([max(_to_num(p.get("value",0)),0) for p in rows]+[1]); x=left
         for i,p in enumerate(rows):
             w=(widths[i]/total)*(W-left-right); h=max(2,_to_num(p.get("value",0))/vmax*(H-top-bottom)); y=H-bottom-h
             parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" fill="{pal[i%len(pal)]}" opacity=".88"/>')
-            parts.append(_svg_text(x+w/2,y+h/2+4,p.get("label",""),size=8.5,anchor="middle",weight=700,fill="#ffffff")); x+=w
+            if w>=36: parts.append(_svg_text(x+w/2,y+h/2+4,p.get("label",""),size=8.5,anchor="middle",weight=700,fill="#ffffff"))
+            x+=w
         return done()
 
     if ctype=="polar_area":
@@ -853,6 +875,7 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
 def _render_chart_block_inner(chart: dict, idx: int, theme: dict | None = None) -> str:
     ctype = normalize_chart_type(chart.get("type") or "bar")
     chart = dict(chart); chart["type"] = ctype
+    chart = fold_slice_tail_for_display(chart)
     series = chart.get("series") or []
 
     def _category_label(point: object) -> str:
@@ -1087,7 +1110,7 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         # already loaded. A point with "isTotal": true is an anchor (resets
         # the running total to its own value); everything else is a delta
         # off the previous cumulative — same semantics as pdf.py's _waterfall.
-        data_pts = (series[0].get("data") or []) if series else []
+        data_pts = [(d if isinstance(d, dict) else {"label": str(i + 1), "value": _to_num(d)}) for i, d in enumerate((series[0].get("data") or []) if series else [])]
         if len(data_pts) < 1:
             log.warning("HTML report: skipping waterfall chart '%s' — no data points", chart.get("title", "?"))
             return ""
@@ -1145,7 +1168,8 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         # chart plugin/date-adapter — "grouped: false" on the x scale is what
         # makes Chart.js stack multiple bar datasets at the same x position
         # instead of placing them side by side.
-        data_pts = (series[0].get("data") or []) if series else []
+        raw_data = (series[0].get("data") or []) if series else []
+        data_pts = [(d if isinstance(d, dict) else {"label": str(i + 1), "open": _to_num(d), "high": _to_num(d), "low": _to_num(d), "close": _to_num(d)}) for i, d in enumerate(raw_data)]
         if len(data_pts) < 2:
             log.warning("HTML report: skipping candlestick chart '%s' — need ≥2 sessions", chart.get("title", "?"))
             return ""
@@ -1194,7 +1218,8 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         # legend, and no axis titles even if the spec supplied xLabel/yLabel
         # (a sparkline's whole point is to be a quick inline cue, not a full
         # chart). Only the two endpoints get a visible point marker.
-        data_pts = (series[0].get("data") or []) if series else []
+        raw_data = (series[0].get("data") or []) if series else []
+        data_pts = [(d if isinstance(d, dict) else {"label": str(i + 1), "value": _to_num(d)}) for i, d in enumerate(raw_data)]
         if len(data_pts) < 2:
             log.warning("HTML report: skipping sparkline chart '%s' — need ≥2 points", chart.get("title", "?"))
             return ""
@@ -1248,7 +1273,8 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         # target value drawn last, which reads as a tick mark. Matches
         # pdf.py's _bullet semantics (red when below target, navy otherwise)
         # with no extra plugin needed.
-        data_pts = (series[0].get("data") or []) if series else []
+        raw_data = (series[0].get("data") or []) if series else []
+        data_pts = [(d if isinstance(d, dict) else {"label": str(i + 1), "value": _to_num(d), "target": _to_num(d)}) for i, d in enumerate(raw_data)]
         if not data_pts:
             log.warning("HTML report: skipping bullet chart '%s' — no KPI points", chart.get("title", "?"))
             return ""
@@ -1311,7 +1337,8 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         # in candlestick): a thin whisker range (min-max), a wider IQR box
         # (q1-q3) drawn on top, and a thin near-zero-height floating slice at
         # the median drawn last so it reads as a bright line through the box.
-        data_pts = (series[0].get("data") or []) if series else []
+        raw_data = (series[0].get("data") or []) if series else []
+        data_pts = [(d if isinstance(d, dict) else {"label": str(i + 1), "min": _to_num(d), "q1": _to_num(d), "median": _to_num(d), "q3": _to_num(d), "max": _to_num(d)}) for i, d in enumerate(raw_data)]
         if not data_pts:
             log.warning("HTML report: skipping boxplot chart '%s' — no entities", chart.get("title", "?"))
             return ""
@@ -1648,6 +1675,14 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         datasets[0]["backgroundColor"] = [palette[i % len(palette)] for i in range(len(labels))]
         datasets[0]["borderColor"] = "#FFFFFF"
         datasets[0]["borderWidth"] = 2
+
+    # House styles may colour a single bar series by sign (gains green, losses red).
+    sign_colors = (theme or {}).get("barSignColors")
+    if isinstance(sign_colors, dict) and ctype in {"bar", "horizontal_bar"} and len(datasets) == 1:
+        signed = [_to_num(v) for v in datasets[0].get("data") or []]
+        if any(v is not None and v < 0 for v in signed) and any(v is not None and v > 0 for v in signed):
+            datasets[0]["backgroundColor"] = [sign_colors["neg"] if (v or 0) < 0 else sign_colors["pos"] for v in signed]
+            datasets[0]["borderColor"] = datasets[0]["backgroundColor"]
 
     if ctype == "histogram":
         # Same shape as a single-series bar chart — the only thing that
@@ -4487,8 +4522,13 @@ def _chart_size_class(chart: dict) -> str:
     """Select compact/standard/large chart height from evidence cardinality."""
     labels = []
     for series in (chart.get("series") or []):
+        if not isinstance(series, dict):
+            continue
         for point in (series.get("data") or []):
-            label = str(point.get("label", ""))
+            if isinstance(point, dict):
+                label = str(point.get("label", ""))
+            else:
+                label = str(point or "")
             if label and label not in labels:
                 labels.append(label)
     n = len(labels)
@@ -4947,14 +4987,15 @@ def build_html_report(report: str, title: str, question: str, summary: str,
                        theme: dict | None = None, sources: object = None,
                        presentation: object = None, report_tier: str = "detailed",
                        evidence_assets: list | None = None,
-                       asset_uses: list | None = None) -> str:
+                       asset_uses: list | None = None,
+                       report_style: str | None = None, kicker: str = "") -> str:
     # Older report writers use [IMAGE_n] while the presentation layer's
     # canonical web-image token is [WEB_IMG_n]. Normalize at the shared HTML
     # boundary so browser and PDF resolve the same selected image item.
     # Defense-in-depth: structured generation markers are control tokens, not
     # report content. Strip them here because this renderer is shared by both
     # the HTML and PDF export paths, including saved/action-edited reports.
-    report = strip_generation_markers(normalize_report_markdown(report))
+    report = strip_excluded_report_sections(strip_generation_markers(normalize_report_markdown(report)))
     report = re.sub(r"\[IMAGE_(\d+)\]", r"[WEB_IMG_\1]", str(report or ""), flags=re.IGNORECASE)
     report = _recover_chart_placeholders_from_titles(report, charts or [])
     report = _strip_redundant_model_source_appendix(report)
@@ -5006,6 +5047,13 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # v93 editorial design system: one validated palette and type system for
     # browser HTML, preview and PDF. Report mode still changes composition.
     render_theme.update(_editorial_render_theme())
+    # Client house style (Market Currents / Feature Article); None keeps the
+    # editorial look for stored reports and older callers.
+    house_style = normalize_report_style(report_style)
+    render_theme.update(house_theme(house_style))
+    if house_style == "feature_article" and images and isinstance(images[0], dict) and images[0].get("url"):
+        # The first image is placed prominently as the hero image on Page 1; do not repeat it in the article body.
+        report = re.sub(r"\[(?:WEB_IMG|IMAGE)_1\]", "", report, count=1, flags=re.IGNORECASE)
     image_source_records = []
     for image in images or []:
         image_source_url = (image.get("sourceUrl") or image.get("sourceURL")) if isinstance(image, dict) else None
@@ -5146,7 +5194,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     css = _build_css(render_theme, report_tier)
     # v93: bundled Lora/Inter (embedded, offline) + editorial layer, appended
     # after the legacy primitives so it composes rather than replaces them.
-    css = css + "\n" + _editorial_font_faces() + "\n" + _editorial_css()
+    css = css + "\n" + _editorial_font_faces() + "\n" + _editorial_css() + house_css(house_style)
     # Do not emit arbitrary theme.customCss from the LLM; only validated theme tokens are consumed.
     # Keep PDF rendering deterministic/offline. A model-selected fontFamily can still
     # be used when installed locally, while the dynamic renderer does not require
@@ -5196,6 +5244,10 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         # Executive Summary seen in PDF exports.
         show_executive_summary = False
     elif show_executive_summary and raw_summary_heading:
+        show_executive_summary = False
+    if house_style == "feature_article":
+        # Feature articles display the narrative standfirst on the cover header and omit
+        # the corporate boxed Executive Summary card.
         show_executive_summary = False
     if show_executive_summary:
         summary_cls = "gg-summary-wrap gg-summary-wrap--sidebar" if exec_placement == "sidebar" else "gg-summary-wrap--end" if exec_placement == "end_summary" else "gg-summary-wrap"
@@ -5320,9 +5372,19 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         # a synthetic/empty summary slot that is skipped above; using `idx + 1`
         # left the first visible section numbered 02 or 03 in exported PDFs.
         visible_section_no = sum(1 for rendered in body_sections if 'class="gg-section-heading"' in rendered) + 1
+        if house_style == "market_currents" and visible_section_no == 1:
+            if section_title.strip().casefold() in {str(title).strip().casefold(), "report", "research report", "overview"}:
+                section_title = "Executive Summary"
+        section_kicker = f"Section {visible_section_no:02d}" if house_style == "market_currents" else _section_kicker_text(visible_section_no, section_type)
         heading_html = "" if generic_wrapper else (
-            f'<div class="gg-section-heading" data-section-number="{visible_section_no:02d}"><span class="gg-section-index" aria-hidden="true">{visible_section_no:02d}</span><div class="gg-section-heading-copy"><div class="gg-section-kicker">{html.escape(_section_kicker_text(visible_section_no, section_type))}</div><h2>{html.escape(section_title)}</h2></div></div>'
+            f'<div class="gg-section-heading" data-section-number="{visible_section_no:02d}"><span class="gg-section-index" aria-hidden="true">{visible_section_no:02d}</span><div class="gg-section-heading-copy"><div class="gg-section-kicker">{html.escape(section_kicker)}</div><h2>{html.escape(section_title)}</h2></div></div>'
         )
+        body_html = transform_section_html(house_style, body_html)
+        if (house_style == "market_currents" and key_stats and not body_sections and not dashboard_html
+                and "gg-stats-grid" not in body_html and "gg-metric" not in body_html):
+            # The client's format puts the headline-figure cards under the
+            # executive summary of the first section.
+            body_html += '<div class="gg-house-kpis">' + _render_key_stats(key_stats, source_registry, 8) + '</div>'
         # v93 keep-with-next: when a section opens directly with a figure,
         # chart, metric grid or short table, bind the heading to that block so
         # print engines move them together instead of splitting the figure
@@ -5431,6 +5493,11 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         if _cover_sub and _sum_sub and (_cover_sub == _sum_sub or (_len := min(len(_cover_sub), len(_sum_sub))) > 80 and _cover_sub[:_len] in _sum_sub):
             cover_spec["cover"] = {**cover_spec["cover"], "subtitle": ""}
     cover_html = _render_cover(cover_spec, safe_title, safe_summary, date_str, key_stats, source_registry)
+    if house_style:
+        cover_html = render_house_cover(
+            house_style, title=title_text, summary=summary or "", question=str(question or ""), date_str=date_str,
+            key_stats=key_stats, report_text=report, images=images, kicker=kicker,
+        )
     # A real cover already owns the report title/date. Repeating a second title
     # band immediately below it creates a duplicate opening and wastes print space.
     title_band_html = ""
@@ -5489,7 +5556,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
 {font_link}
 <style>{css}</style>
 </head>
-<body data-report-tier="{html.escape(report_tier, quote=True)}" class="{_EDITORIAL_BODY_CLASS} gg-style--{html.escape(str((theme or {}).get("designMode") or "editorial"), quote=True)} gg-cards--{html.escape(str((theme or {}).get("cardMode") or "outlined"), quote=True)} gg-section-treatment--{html.escape(str((theme or {}).get("sectionTreatment") or "rule"), quote=True)} gg-chart-style--{html.escape(str((theme or {}).get("chartStyle") or "annotated"), quote=True)} {visual_classes} {tier_class}{' gg-has-cover' if cover_html else ''}{' gg-cover-bold-banner' if cover_html and str(cover_spec.get("cover", {}).get("treatment") or "minimal").lower() == "bold_banner" else ''}">
+<body data-report-tier="{html.escape(report_tier, quote=True)}"{f' data-report-style="{house_style}" data-running-title="{html.escape(running_title(house_style, title_text, question), quote=True)}"' if house_style else ''} class="{f'gg-house gg-house--{house_style} ' if house_style else ''}{_EDITORIAL_BODY_CLASS} gg-style--{html.escape(str((theme or {}).get("designMode") or "editorial"), quote=True)} gg-cards--{html.escape(str((theme or {}).get("cardMode") or "outlined"), quote=True)} gg-section-treatment--{html.escape(str((theme or {}).get("sectionTreatment") or "rule"), quote=True)} gg-chart-style--{html.escape(str((theme or {}).get("chartStyle") or "annotated"), quote=True)} {visual_classes} {tier_class}{' gg-has-cover' if cover_html else ''}{' gg-cover-bold-banner' if cover_html and str(cover_spec.get("cover", {}).get("treatment") or "minimal").lower() == "bold_banner" else ''}">
 {cover_html}
 {navigation_html}
 <main class="{composition_class}" data-report-tier="{html.escape(report_tier, quote=True)}">
@@ -5501,6 +5568,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
   <div class="gg-report-sections">{"".join(body_sections)}</div>
   {closing_summary}
   {sources_html}
+  {house_closing(house_style)}
 </main>
 <footer class="gg-report-footer"><strong>Growth Gradual · Research Intelligence</strong><span>{safe_title}</span><span>Sources and methodology appear within this report.</span></footer>
 <script>{_JS}</script>
@@ -5579,6 +5647,8 @@ async def generate_html_report(request: Request):
         html_doc = build_html_report(
             report, title, question, summary, key_stats, charts, images,
             theme, sources, presentation, report_tier,
+            report_style=normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE),
+            kicker=str(body.get("kicker") or "")[:60],
         )
     except Exception as e:
         log.error("HTML report: build_html_report failed: %s", e)

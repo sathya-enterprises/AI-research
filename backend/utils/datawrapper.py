@@ -28,6 +28,8 @@ import re
 
 import httpx
 
+from utils.chart_catalog import fold_slice_tail_for_display
+
 log = logging.getLogger("datawrapper")
 
 API_BASE = "https://api.datawrapper.de/v3"
@@ -421,6 +423,7 @@ async def publish_chart(client: httpx.AsyncClient, spec: dict) -> dict | None:
     # boxplot's min/q1/median/q3/max points have no "value" key at all) —
     # skip straight to the purpose-built ReportLab/Chart.js renderers instead.
 
+    spec = fold_slice_tail_for_display(spec)
     try:
         dw_type = _dw_type(spec)
         # NOTE: `spec.get("title") or "Chart"` used to collapse two different

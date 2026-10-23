@@ -24,22 +24,22 @@ export default function Navbar() {
       <style>{`
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
         .nav-link-item {
-          display:flex;align-items:center;gap:5px;
-          padding:7px 13px;border-radius:11px;
-          font-size:10.5px;font-weight:600;
-          font-family:'DM Sans',sans-serif;letter-spacing:0.55px;
+          display:flex;align-items:center;gap:6px;
+          padding:6px 12px;border-radius:6px;
+          font-size:11px;font-weight:600;
+          font-family:'DM Sans',sans-serif;letter-spacing:0.4px;
           text-transform:uppercase;text-decoration:none;
-          color:#65738c;
+          color:#475569;
           border:1px solid transparent;
-          transition:color .18s cubic-bezier(.4,0,.2,1),border-color .18s cubic-bezier(.4,0,.2,1),background .18s cubic-bezier(.4,0,.2,1);
+          transition:all .15s ease;
           white-space:nowrap;
         }
-        .nav-link-item:hover { color:#273b60; background:rgba(112,100,210,0.075); border-color:rgba(112,100,210,0.10); }
+        .nav-link-item:hover { color:#0e1f3d; background:#f1f5f9; border-color:#e2e8f0; }
         .nav-link-item.active {
-          color:#087858;font-weight:700;
-          border-color:rgba(16,163,127,0.14);
-          background:linear-gradient(135deg,rgba(16,185,129,0.13),rgba(124,108,226,0.085));
-          box-shadow:inset 0 0 0 1px rgba(255,255,255,0.35);
+          color:#0e1f3d;font-weight:700;
+          border-color:#cbd5e1;
+          background:#f8fafc;
+          box-shadow:inset 0 -2px 0 #c49a4a;
         }
         .mob-nav-item {
           display:flex;flex-direction:column;align-items:center;gap:3px;
@@ -52,19 +52,19 @@ export default function Navbar() {
       `}</style>
 
       <nav style={{
-        background: 'linear-gradient(115deg, #ffffff 0%, #f1f7ff 40%, #f6f2ff 72%, #effaf5 100%)',
+        background: 'rgba(255, 255, 255, 0.98)',
         position: 'sticky',
         top: 0,
         zIndex: 100,
-        borderBottom: '1px solid rgba(112,100,210,0.14)',
-        boxShadow: '0 8px 28px rgba(30,41,59,0.055), 0 1px 3px rgba(16,163,127,0.055)',
-        backdropFilter: 'blur(16px)',
+        borderBottom: '1px solid #e2e8f0',
+        boxShadow: '0 1px 3px rgba(15,23,42,0.05)',
+        backdropFilter: 'blur(12px)',
       }}>
         {/* Thin gold accent line at very top */}
         <div style={{
           height: '2px',
-          background: 'linear-gradient(90deg, #10b981 0%, #38bdf8 28%, #7c6ce2 56%, #e7ad48 78%, #10b981 100%)',
-          opacity: 0.9,
+          background: 'linear-gradient(90deg, #0e1f3d 0%, #c49a4a 50%, #0e1f3d 100%)',
+          opacity: 1,
         }} />
 
         {/* Top row */}
@@ -84,7 +84,7 @@ export default function Navbar() {
               fontSize:'9.5px', color:'rgba(15,23,42,0.38)',
               fontFamily:"'DM Sans',sans-serif", letterSpacing:'1.2px', textTransform:'uppercase',
             }}>
-              Indian Financial Markets · Live Data
+              Institutional Market Intelligence
             </span>
           </div>
 
@@ -164,7 +164,7 @@ export default function Navbar() {
         {/* Nav links row — hidden on chat page */}
         <div className="nav-links" style={{
           display: pathname === '/' ? 'none' : 'flex',
-          borderTop: '1px solid rgba(112,100,210,0.10)',
+          borderTop: '1px solid #e2e8f0',
         }}>
           {CATEGORIES.map(cat => {
             const href = cat.id === 'all' ? '/feed' : `/${cat.id}`;

@@ -136,7 +136,7 @@ def chart_density_contract(tier: str | None) -> str:
         depth_rule = "Prefer only the most useful evidence-backed visual; a short comparison is valid when it answers the question."
         profile = "Brief"
     return f"""CHART GUIDANCE: {profile}
-- Charts are optional. Choose them only when they make supported evidence easier to understand.
+- Charts are MANDATORY: every section that contains sourced numbers must include at least one chart, and the report should carry as many distinct, evidence-backed charts as the sources support. Prefer charts and data tables over prose; keep prose to short interpretive notes (2–3 sentences) that state what each chart shows, citing sources, with no generic background or filler.
 - Use every relevant observation actually supported by the source, while keeping labels readable; there is no minimum point count or visual quota.
 - {depth_rule}
 - Type-aware exceptions are mandatory: pie/doughnut/polar-area should normally stay at 2–8 meaningful categories; radar should use a small set of comparable dimensions; KPI/gauge/progress/bullet charts should show only the real metrics/targets; funnels should use real stages; Venn charts use sets; Gantt/timeline use actual events; Sankey/chord/network/tree/flowchart count meaningful nodes and links, not scalar observations.
@@ -276,3 +276,56 @@ def chart_density_assessment(chart: dict, tier: str | None) -> dict[str, Any]:
         "within_band": None,
         "series_counts": series_counts,
     }
+
+
+# Slice-based charts stay readable up to roughly ten slices. Report data keeps
+# every scraped observation; renderers call fold_slice_tail_for_display() so
+# the smallest remainder is drawn as one "Other" slice whose value is the exact
+# sum of the folded observations (shares of the total stay correct).
+SLICE_CHART_TYPES: frozenset[str] = frozenset({"pie", "doughnut", "polar_area", "pictogram", "sunburst", "funnel"})
+MAX_DISPLAY_SLICES = 10
+
+
+def _slice_value(point: dict) -> float | None:
+    for key in ("value", "y", "count", "amount"):
+        if key in point:
+            raw = point.get(key)
+            if not _finite_chart_number(raw):
+                return None
+            return float(str(raw).replace(",", "").replace("%", "").strip())
+    return None
+
+
+def fold_slice_tail_for_display(chart: dict, limit: int = MAX_DISPLAY_SLICES) -> dict:
+    """Return a display copy of a slice chart keeping its ``limit`` largest
+    slices (in their original order) plus one derived "Other (n)" slice at the
+    end; other charts pass through unchanged."""
+    if not isinstance(chart, dict):
+        return chart
+    ctype = normalize_chart_type(chart.get("type") or chart.get("chart_type") or chart.get("chartType"))
+    series = chart.get("series")
+    if ctype not in SLICE_CHART_TYPES or not isinstance(series, list) or len(series) != 1 or not isinstance(series[0], dict):
+        return chart
+    data = series[0].get("data")
+    if not isinstance(data, list):
+        return chart
+    rows = [(point, _slice_value(point)) for point in data if isinstance(point, dict)]
+    numeric = [(point, value) for point, value in rows if value is not None]
+    # Fold only when one more slice than the limit exists and every slice has a
+    # number; otherwise "Other" would be a single item or drop a missing value.
+    if len(numeric) <= limit + 1 or len(numeric) != len(rows):
+        return chart
+    ranked = sorted(range(len(numeric)), key=lambda i: -abs(numeric[i][1]))
+    keep = set(ranked[:limit])
+    head = [row for i, row in enumerate(numeric) if i in keep]
+    tail = [row for i, row in enumerate(numeric) if i not in keep]
+    other = {
+        "label": f"Other ({len(tail)})",
+        "value": round(sum(value for _point, value in tail), 6),
+        "derived": True,
+        "foldedLabels": [str(point.get("label") or point.get("name") or "") for point, _value in tail],
+    }
+    display = dict(chart)
+    display["series"] = [{**series[0], "data": [point for point, _value in head] + [other]}]
+    display["foldedSliceCount"] = len(tail)
+    return display

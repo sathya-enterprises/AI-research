@@ -560,3 +560,38 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
         i += 2
 
     return re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+
+
+# Sections the client does not want in any report or export. Older reports and
+# the provider-outage fallback wrote them into the stored Markdown, so they are
+# removed at render time as well as no longer generated.
+_EXCLUDED_SECTION_HEADING_RE = re.compile(
+    r"(?i)^\s*(?:source[-\s]+derived\s+evidence|source[-\s]+extracted\b.*|evidence\s+gaps\s+and\s+interpretation"
+    r"|evidence[-\s]+based\s+research\s+record|research\s+provenance)\s*$"
+)
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+
+
+def strip_excluded_report_sections(value: object) -> str:
+    """Drop excluded headed sections (heading plus body up to the next heading
+    of the same or a higher level) and fallback-only status lines."""
+    lines = str(value or "").split("\n")
+    kept: list[str] = []
+    skip_level = 0
+    for line in lines:
+        heading = _HEADING_LINE_RE.match(line.strip())
+        if heading:
+            level = len(heading.group(1))
+            if skip_level and level > skip_level:
+                continue
+            skip_level = 0
+            title = re.sub(r"[*_`]", "", heading.group(2))
+            if _EXCLUDED_SECTION_HEADING_RE.match(title):
+                skip_level = level
+                continue
+        elif skip_level:
+            continue
+        if re.match(r"(?i)^\s*\*\*selected report depth:\*\*", line):
+            continue
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()

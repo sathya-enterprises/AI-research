@@ -29,7 +29,7 @@ def test_draft_pdf_preserves_charts_and_downloads_with_non_structural_audit_find
     captured = {}
 
     def fake_build_pdf(report, title, question, summary, key_stats, charts, logo_b64,
-                       file_images, web_images, theme, sources, presentation, report_tier="detailed"):
+                       file_images, web_images, theme, sources, presentation, report_tier="detailed", **_style):
         captured["report"] = report
         captured["charts"] = charts
         return b"%PDF-1.4\nmock-pdf-bytes"
