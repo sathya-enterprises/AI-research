@@ -18,7 +18,7 @@ function buildHref(a: Article): string {
 }
 
 const SidePanel = ({ children, title }: { children: React.ReactNode; title: string }) => (
-  <div style={{
+  <div className="gg-sidepanel" style={{
     background:'#fff', border:'1px solid #e6e2d8', borderRadius:'10px',
     padding:'12px 14px', boxShadow:'0 2px 10px rgba(15,23,42,0.06)',
   }}>
@@ -39,6 +39,7 @@ export default function Sidebar({ related }: { related: Article[] }) {
       <SidePanel title="Further Reading">
         {related.slice(0,6).map((a, i) => (
           <div
+            className="gg-related-item"
             key={a.id}
             onClick={() => a.url && a.url !== '#' && router.push(buildHref(a))}
             style={{
@@ -93,7 +94,7 @@ export default function Sidebar({ related }: { related: Article[] }) {
       </SidePanel>
 
       {/* Brand card */}
-      <div style={{
+      <div className="gg-sidebar-brand" style={{
         background:'linear-gradient(135deg,#0d5c45,#0f172a)',
         border:'none', borderRadius:'10px', padding:'16px',
         boxShadow:'0 4px 18px rgba(13,92,69,0.22)',

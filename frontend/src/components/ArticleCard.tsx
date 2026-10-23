@@ -53,8 +53,15 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
   const href    = buildArticleHref(article, pathname || '');
   void TAG_COLORS; // imported but used via TAG_BG override
 
+  const canNavigate = Boolean(article.url && article.url !== '#');
   const navigate = () => {
-    if (article.url && article.url !== '#') router.push(href);
+    if (canNavigate) router.push(href);
+  };
+  const handleCardKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (canNavigate && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      navigate();
+    }
   };
 
   // Shared tag pill
@@ -71,17 +78,23 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
   /* ── COMPACT LIST ROW ── */
   if (compact) return (
     <div
+      className="gg-article-card gg-article-card--compact"
+      role={canNavigate ? 'link' : 'article'}
+      tabIndex={canNavigate ? 0 : undefined}
+      aria-label={canNavigate ? `Read article: ${article.title}` : undefined}
+      onKeyDown={handleCardKeyDown}
       onClick={navigate}
       style={{
         padding:'11px 14px 11px 12px',
         borderBottom:'1px solid #eef0f5',
         borderLeft:'2px solid transparent',
-        cursor:'pointer',
+        cursor:canNavigate ? 'pointer' : 'default',
         borderRadius:'6px',
         transition:'background .18s cubic-bezier(.4,0,.2,1), border-color .18s cubic-bezier(.4,0,.2,1)',
         display:'flex', gap:'12px', alignItems:'flex-start',
       }}
       onMouseEnter={e => {
+        if (!canNavigate) return;
         e.currentTarget.style.background='#f7f8fa';
         e.currentTarget.style.borderLeftColor='#0d5c45';
       }}
@@ -109,14 +122,20 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
   /* ── FEATURED HERO ── */
   if (featured) return (
     <div
+      className="gg-article-card gg-article-card--featured"
+      role={canNavigate ? 'link' : 'article'}
+      tabIndex={canNavigate ? 0 : undefined}
+      aria-label={canNavigate ? `Read article: ${article.title}` : undefined}
+      onKeyDown={handleCardKeyDown}
       onClick={navigate}
       style={{
         background:'#fff', borderRadius:'12px', overflow:'hidden',
-        cursor:'pointer', border:'1px solid #e4e8ef',
+        cursor:canNavigate ? 'pointer' : 'default', border:'1px solid #e4e8ef',
         boxShadow:'0 2px 12px rgba(15,23,42,0.06)',
         transition:'box-shadow .22s cubic-bezier(.4,0,.2,1), transform .22s cubic-bezier(.4,0,.2,1)',
       }}
       onMouseEnter={e => {
+        if (!canNavigate) return;
         e.currentTarget.style.boxShadow='0 8px 32px rgba(13,92,69,0.12)';
         e.currentTarget.style.transform='translateY(-2px)';
       }}
@@ -174,16 +193,22 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
   /* ── GRID CARD ── */
   return (
     <div
+      className="gg-article-card gg-article-card--grid"
+      role={canNavigate ? 'link' : 'article'}
+      tabIndex={canNavigate ? 0 : undefined}
+      aria-label={canNavigate ? `Read article: ${article.title}` : undefined}
+      onKeyDown={handleCardKeyDown}
       onClick={navigate}
       style={{
         background:'#fff', borderRadius:'10px', overflow:'hidden',
-        cursor:'pointer', height:'100%',
+        cursor:canNavigate ? 'pointer' : 'default', height:'100%',
         border:'1px solid #e4e8ef',
         boxShadow:'0 1px 6px rgba(15,23,42,0.05)',
         display:'flex', flexDirection:'column',
         transition:'box-shadow .2s cubic-bezier(.4,0,.2,1), transform .2s cubic-bezier(.4,0,.2,1), border-color .2s cubic-bezier(.4,0,.2,1)',
       }}
       onMouseEnter={e => {
+        if (!canNavigate) return;
         e.currentTarget.style.boxShadow='0 6px 24px rgba(13,92,69,0.1)';
         e.currentTarget.style.borderColor='rgba(13,92,69,0.25)';
         e.currentTarget.style.transform='translateY(-1px)';

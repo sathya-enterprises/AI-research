@@ -73,28 +73,25 @@ export default function NewsFAB() {
           justify-content: center;
           flex-direction: column;
           gap: 2px;
-          transition: transform .22s cubic-bezier(.34,1.56,.64,1), box-shadow .22s, opacity .2s;
+          transition: transform 180ms cubic-bezier(.2,.7,.2,1), box-shadow 180ms cubic-bezier(.2,.7,.2,1), opacity 160ms ease;
           overflow: hidden;
         }
         .nfab:hover {
-          transform: scale(1.1);
+          transform: translateY(-1px) scale(1.035);
           box-shadow: 0 8px 32px rgba(15,23,42,.5);
         }
         .nfab:active { transform: scale(.95); }
         @media (max-width: 680px) {
           .nfab { bottom: 162px; right: 14px; width: 46px; height: 46px; }
         }
-        .nfab__ring {
-          position: absolute; inset: -7px; border-radius: 50%;
-          border: 2px solid rgba(15,23,42,.3);
-          animation: nfab-pulse 2.8s ease-out infinite;
-          pointer-events: none;
+        /* The FAB uses a static status dot; no perpetual pulsing/ring animation. */
+        .nfab__dot {
+          width: 5px; height: 5px; border-radius: 50%;
+          background: #58b889;
+          position: absolute; top: 10px; right: 10px;
+          border: 1px solid rgba(255,255,255,.7);
         }
-        @keyframes nfab-pulse {
-          0%   { transform: scale(1);    opacity: .7; }
-          70%  { transform: scale(1.28); opacity: 0; }
-          100% { transform: scale(1.28); opacity: 0; }
-        }
+
         .nfab__label {
           font-size: 8px;
           font-weight: 700;
@@ -104,15 +101,6 @@ export default function NewsFAB() {
           text-transform: uppercase;
           line-height: 1;
         }
-        .nfab__dot {
-          width: 5px; height: 5px; border-radius: 50%;
-          background: #22c55e;
-          box-shadow: 0 0 5px #22c55e;
-          animation: nfab-blink 2s ease-in-out infinite;
-          position: absolute; top: 10px; right: 10px;
-        }
-        @keyframes nfab-blink { 0%,100% { opacity:1; } 50% { opacity:.25; } }
-
         /* ── Backdrop ─────────────────────────────────────────────────────── */
         .nfab-backdrop {
           position: fixed; inset: 0; z-index: 9997;
@@ -132,7 +120,7 @@ export default function NewsFAB() {
           display: flex;
           flex-direction: column;
           overflow: hidden;
-          transition: transform .28s cubic-bezier(.34,1.56,.64,1), opacity .2s;
+          transition: transform 240ms cubic-bezier(.2,.7,.2,1), opacity 180ms ease;
         }
 
         /* ── Panel header ─────────────────────────────────────────────────── */
@@ -174,6 +162,9 @@ export default function NewsFAB() {
         }
         .nfab-panel__body::-webkit-scrollbar { width: 4px; }
         .nfab-panel__body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) {
+          .nfab, .nfab-backdrop, .nfab-panel, .nfab-panel__close { transition: none !important; }
+        }
 
         /* Override FeedPage layout inside panel — single column, no side panels */
         .nfab-panel__body .page-grid {
@@ -204,7 +195,6 @@ export default function NewsFAB() {
             : undefined
         }
       >
-        {!open && isChatPage && <span className="nfab__ring" />}
         <span className="nfab__dot" />
         {isChatPage ? (
           /* Newspaper icon */

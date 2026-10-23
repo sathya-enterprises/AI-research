@@ -80,8 +80,8 @@ function Pulse({ color = '#22c55e' }: { color?: string }) {
     <span style={{
       width: '6px', height: '6px', borderRadius: '50%',
       background: color, display: 'inline-block',
-      boxShadow: `0 0 6px ${color}80`,
-      animation: 'pulse 2s ease-in-out infinite',
+      boxShadow: 'none',
+      animation: 'none',
     }} />
   );
 }

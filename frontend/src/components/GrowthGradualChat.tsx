@@ -2087,7 +2087,10 @@ export default function GrowthGradualChat() {
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setReportTierMenuOpen(false);
+      if (event.key === 'Escape') {
+        setReportTierMenuOpen(false);
+        reportTierMenuRef.current?.querySelector<HTMLButtonElement>('.report-tier-trigger')?.focus();
+      }
     };
     document.addEventListener('mousedown', handlePointerDown);
     document.addEventListener('keydown', handleKeyDown);
@@ -4811,6 +4814,174 @@ export default function GrowthGradualChat() {
           .chat-shell.gg-premium * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
         }
 
+        /* ── Visual refinement: richer institutional accents, softer surfaces,
+           and clearer interaction affordances. Presentation-only; no behavior changes. ── */
+        .chat-shell.gg-premium {
+          --ed-paper: #F7F8F5;
+          --ed-surface: #FFFFFF;
+          --ed-ink-strong: #14231D;
+          --ed-ink-soft: #53645B;
+          --ed-muted: #718078;
+          --ed-rule: #DCE4DE;
+          --ed-rule-soft: #E9EEE9;
+          --ed-tint: #EEF3EE;
+          --ed-forest: #0D5C45;
+          --ed-forest-hover: #084A37;
+          --ed-navy: #0E1F3D;
+          --ed-gold: #B78A37;
+          border-radius: 12px !important;
+          box-shadow: 0 18px 48px rgba(20, 43, 32, .075) !important;
+        }
+        .chat-shell.gg-premium .sidebar { background: linear-gradient(180deg, #F2F5F0 0%, #EBF1EB 100%) !important; }
+        .chat-shell.gg-premium .sidebar-logo,
+        .chat-shell.gg-premium .topbar-logo { border-radius: 8px !important; }
+        .chat-shell.gg-premium .new-chat-btn {
+          border-radius: 8px !important;
+          background: linear-gradient(135deg, #0D5C45 0%, #14765A 100%) !important;
+          box-shadow: 0 5px 14px rgba(13, 92, 69, .16) !important;
+        }
+        .chat-shell.gg-premium .new-chat-btn:hover { box-shadow: 0 7px 18px rgba(13, 92, 69, .22) !important; }
+        .chat-shell.gg-premium .chat-topbar { background: rgba(255,255,255,.94) !important; }
+        .chat-shell.gg-premium .chat-welcome { padding-top: clamp(34px, 6vh, 68px) !important; }
+        .chat-shell.gg-premium .chat-welcome::before {
+          display: block !important;
+          width: min(76%, 680px) !important;
+          height: 250px !important;
+          background: radial-gradient(ellipse at 28% 36%, rgba(13,92,69,.10), transparent 55%), radial-gradient(ellipse at 75% 25%, rgba(196,154,74,.12), transparent 48%) !important;
+          filter: blur(14px) !important;
+        }
+        .chat-shell.gg-premium .welcome-kicker {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 9px !important;
+          padding: 8px 13px !important;
+          border: 1px solid #D7E4D9 !important;
+          border-radius: 999px !important;
+          background: rgba(255,255,255,.88) !important;
+          color: #37624D !important;
+          box-shadow: 0 4px 14px rgba(24,60,39,.035) !important;
+          letter-spacing: .17em !important;
+        }
+        .chat-shell.gg-premium .welcome-title {
+          background: linear-gradient(105deg, #14231D 0%, #0D5C45 70%, #8B6A2F 100%) !important;
+          -webkit-background-clip: text !important;
+          background-clip: text !important;
+          -webkit-text-fill-color: transparent !important;
+          max-width: 18ch;
+        }
+        .chat-shell.gg-premium .welcome-capabilities {
+          border: 0 !important;
+          gap: 8px !important;
+          padding: 2px 0 !important;
+          justify-content: center;
+          flex-wrap: wrap;
+        }
+        .chat-shell.gg-premium .welcome-capability {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 7px !important;
+          padding: 8px 11px !important;
+          border: 1px solid var(--ed-rule-soft) !important;
+          border-radius: 999px !important;
+          background: rgba(255,255,255,.84) !important;
+          color: #45594D !important;
+          box-shadow: 0 3px 10px rgba(23,48,31,.025) !important;
+        }
+        .chat-shell.gg-premium .welcome-capability + .welcome-capability { border-left: 1px solid var(--ed-rule-soft) !important; }
+        .chat-shell.gg-premium .welcome-capability-icon { color: var(--ed-forest) !important; }
+        .chat-shell.gg-premium .welcome-capability-icon--violet { color: #8A6A2E !important; }
+        .chat-shell.gg-premium .sugs {
+          display: grid !important;
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          gap: 10px !important;
+          width: min(820px, 100%) !important;
+          border-top: 0 !important;
+          margin-top: 8px !important;
+        }
+        .chat-shell.gg-premium .sug {
+          min-height: 62px;
+          display: flex !important;
+          align-items: center !important;
+          gap: 11px !important;
+          padding: 13px 15px !important;
+          border: 1px solid #E1E8E1 !important;
+          border-radius: 10px !important;
+          background: linear-gradient(145deg, #FFFFFF 0%, #FAFCF9 100%) !important;
+          color: #2B4034 !important;
+          box-shadow: 0 3px 12px rgba(20, 43, 32, .035) !important;
+          text-align: left !important;
+          transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease, background .18s ease !important;
+        }
+        .chat-shell.gg-premium .sug:hover {
+          padding-left: 15px !important;
+          border-color: #A9C8B2 !important;
+          background: linear-gradient(145deg, #FFFFFF 0%, #F0F7F0 100%) !important;
+          box-shadow: 0 8px 20px rgba(20, 70, 42, .075) !important;
+          transform: translateY(-2px) !important;
+        }
+        .chat-shell.gg-premium .sug-icon {
+          flex: 0 0 30px !important;
+          width: 30px !important;
+          height: 30px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border-radius: 8px !important;
+          background: #EAF3EC !important;
+          color: #0D5C45 !important;
+        }
+        .chat-shell.gg-premium .msg-row--user .msg-bubble {
+          background: linear-gradient(135deg, #0D5C45 0%, #124A39 100%) !important;
+          border-radius: 10px 10px 3px 10px !important;
+          box-shadow: 0 5px 15px rgba(13,92,69,.12) !important;
+        }
+        .chat-shell.gg-premium .msg-row--bot .msg-bubble {
+          background: #FFFFFF !important;
+          border: 1px solid #E7ECE7 !important;
+          border-left: 3px solid #D2E1D4 !important;
+          border-radius: 3px 10px 10px 10px !important;
+          box-shadow: 0 3px 12px rgba(20,43,32,.025) !important;
+        }
+        .chat-shell.gg-premium .input-row {
+          border-radius: 12px !important;
+          border-color: #D8E2D9 !important;
+          box-shadow: 0 7px 24px rgba(20,43,32,.055) !important;
+          padding: 5px !important;
+        }
+        .chat-shell.gg-premium .input-row:focus-within {
+          border-color: #77A98A !important;
+          box-shadow: 0 0 0 3px rgba(13,92,69,.08), 0 8px 24px rgba(20,43,32,.06) !important;
+        }
+        .chat-shell.gg-premium .send-btn {
+          border-radius: 8px !important;
+          background: linear-gradient(135deg, #0D5C45, #14765A) !important;
+          box-shadow: 0 4px 12px rgba(13,92,69,.16) !important;
+        }
+        .chat-shell.gg-premium .report-body {
+          border-radius: 10px !important;
+          box-shadow: 0 8px 26px rgba(20,43,32,.045) !important;
+        }
+        .chat-shell.gg-premium .report-btn { border-radius: 7px !important; transition: background .16s ease, border-color .16s ease, transform .16s ease !important; }
+        .chat-shell.gg-premium .report-btn--experiment { background: #F7F3E8 !important; color: #775B24 !important; border-color: #E9DDBE !important; }
+        .chat-shell.gg-premium .report-btn--action { background: #EDF4EF !important; color: #245A40 !important; border-color: #D3E3D7 !important; }
+        .chat-shell.gg-premium .report-btn--primary { background: linear-gradient(135deg, #0D5C45, #14765A) !important; border-color: #0D5C45 !important; border-radius: 7px !important; }
+        .chat-shell.gg-premium .inline-report-chart, .chat-shell.gg-premium .chart-wrap {
+          border-color: #DFE7E0 !important;
+          box-shadow: 0 5px 16px rgba(20,43,32,.035) !important;
+        }
+        .chat-shell.gg-premium .report-outline button:hover { background: #F0F5F0 !important; }
+        .chat-shell.gg-premium button:focus-visible, .chat-shell.gg-premium textarea:focus-visible, .chat-shell.gg-premium input:focus-visible {
+          outline: 3px solid rgba(13,92,69,.24) !important;
+          outline-offset: 3px !important;
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium .sugs { grid-template-columns: 1fr !important; gap: 8px !important; }
+          .chat-shell.gg-premium .sug { min-height: 54px; padding: 11px 12px !important; }
+          .chat-shell.gg-premium .welcome-capabilities { align-items: center; }
+          .chat-shell.gg-premium .welcome-capability { padding: 7px 9px !important; }
+          .chat-shell.gg-premium .msg-row--bot .msg-bubble { border-radius: 3px 8px 8px 8px !important; }
+        }
+
         /* ── Full-width workspace (v95): the chat fills the page edge to edge
            below the navbar + ticker instead of sitting in a boxed card.
            The page container around it drops its max-width and padding. ── */
@@ -4827,6 +4998,396 @@ export default function GrowthGradualChat() {
         @media (min-width: 1920px) {
           .chat-shell.gg-premium.gg-full .msg-inner { max-width: 960px; }
         }
+
+        /* ── v96 layout fix: keep the welcome content and composer in flow ──
+           The welcome panel used to center a content block taller than the
+           available messages viewport. CSS then overflowed the top of the
+           panel, clipping the heading, while the messages flex item could
+           keep its min-content height and paint behind the bottom composer.
+           Let the messages viewport shrink, and let it own vertical scrolling. */
+        .chat-shell.gg-premium.gg-full,
+        .chat-shell.gg-premium.gg-full .chat-main {
+          box-sizing: border-box;
+          min-height: 0 !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-main {
+          height: 100%;
+          overflow: hidden;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs {
+          flex: 1 1 0% !important;
+          min-height: 0 !important;
+          overflow-x: hidden !important;
+          overflow-y: auto !important;
+          overscroll-behavior-y: contain;
+          scrollbar-gutter: stable;
+        }
+        .chat-shell.gg-premium.gg-full .chat-welcome {
+          box-sizing: border-box;
+          /* Keep intrinsic content height so the parent can scroll the whole
+             welcome panel rather than clipping a nested, centered panel. */
+          flex: 1 0 auto !important;
+          min-height: max-content !important;
+          justify-content: safe center !important;
+          overflow: visible !important;
+          padding-top: clamp(22px, 3.6vh, 38px) !important;
+          padding-bottom: clamp(24px, 3.6vh, 38px) !important;
+          gap: clamp(12px, 1.7vh, 18px) !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-welcome::before {
+          pointer-events: none;
+        }
+        .chat-shell.gg-premium.gg-full .chat-input-area {
+          position: relative;
+          z-index: 3;
+          flex: 0 0 auto !important;
+          box-sizing: border-box;
+        }
+        .chat-shell.gg-premium.gg-full .sugs {
+          max-height: none !important;
+          overflow: visible !important;
+        }
+        @media (max-height: 760px) {
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            justify-content: flex-start !important;
+            padding-top: 18px !important;
+            padding-bottom: 22px !important;
+            gap: 12px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-title {
+            font-size: clamp(28px, 2rem + .5vw, 38px) !important;
+            line-height: 1.12 !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-sub {
+            line-height: 1.45 !important;
+          }
+          .chat-shell.gg-premium.gg-full .sug {
+            min-height: 52px;
+            padding-top: 10px !important;
+            padding-bottom: 10px !important;
+          }
+        }
+
+        /* ── Premium polish layer: consistent interactions and viewport safety ── */
+        .chat-shell.gg-premium.gg-full {
+          --gg-motion-fast: 140ms;
+          --gg-motion-base: 200ms;
+          --gg-ring: 0 0 0 3px rgba(13, 92, 69, .16);
+          background: var(--ed-paper) !important;
+          color: var(--ed-ink-strong);
+        }
+        .chat-shell.gg-premium .topbar-toggle,
+        .chat-shell.gg-premium .new-chat-btn,
+        .chat-shell.gg-premium .conv-item,
+        .chat-shell.gg-premium .sug,
+        .chat-shell.gg-premium .report-btn,
+        .chat-shell.gg-premium .send-btn,
+        .chat-shell.gg-premium .report-tier-trigger {
+          transition-duration: var(--gg-motion-base, 200ms) !important;
+          transition-timing-function: cubic-bezier(.2,.7,.2,1) !important;
+        }
+        .chat-shell.gg-premium .conv-item:focus-visible,
+        .chat-shell.gg-premium .sug:focus-visible,
+        .chat-shell.gg-premium .new-chat-btn:focus-visible,
+        .chat-shell.gg-premium .topbar-toggle:focus-visible,
+        .chat-shell.gg-premium .report-btn:focus-visible,
+        .chat-shell.gg-premium .send-btn:focus-visible,
+        .chat-shell.gg-premium .report-tier-trigger:focus-visible {
+          outline: 2px solid #B78A37 !important;
+          outline-offset: 3px !important;
+          box-shadow: var(--gg-ring) !important;
+        }
+        .chat-shell.gg-premium .conv-item { border-radius: 7px !important; }
+        .chat-shell.gg-premium .conv-item--active {
+          background: rgba(13,92,69,.085) !important;
+          border-left-color: var(--ed-forest) !important;
+        }
+        .chat-shell.gg-premium .chat-topbar {
+          min-height: 60px;
+          border-bottom-color: var(--ed-rule) !important;
+          box-shadow: 0 1px 0 rgba(20,35,29,.025) !important;
+        }
+        .chat-shell.gg-premium .chat-msgs {
+          scrollbar-color: #C8D4CA transparent;
+          scrollbar-width: thin;
+        }
+        .chat-shell.gg-premium .chat-msgs::-webkit-scrollbar { width: 7px; }
+        .chat-shell.gg-premium .chat-msgs::-webkit-scrollbar-thumb {
+          background: #C8D4CA; border: 2px solid transparent; background-clip: padding-box; border-radius: 999px;
+        }
+        .chat-shell.gg-premium .chat-welcome { overflow-anchor: none; }
+        .chat-shell.gg-premium .welcome-intro { width: min(100%, 620px); }
+        .chat-shell.gg-premium .welcome-title { text-wrap: balance; }
+        .chat-shell.gg-premium .welcome-sub { text-wrap: pretty; }
+        .chat-shell.gg-premium .sug { min-width: 0; overflow-wrap: anywhere; }
+        .chat-shell.gg-premium .input-row {
+          border-radius: 13px !important;
+          border-color: #D4DED5 !important;
+          box-shadow: 0 3px 12px rgba(20,43,32,.035) !important;
+        }
+        .chat-shell.gg-premium .input-row:focus-within {
+          border-color: #6D9B7C !important;
+          box-shadow: 0 0 0 3px rgba(13,92,69,.10), 0 4px 14px rgba(20,43,32,.04) !important;
+        }
+        .chat-shell.gg-premium .chat-textarea { line-height: 1.55; }
+        .chat-shell.gg-premium .send-btn:active:not(:disabled),
+        .chat-shell.gg-premium .report-btn:active:not(:disabled),
+        .chat-shell.gg-premium .new-chat-btn:active { transform: translateY(1px) !important; }
+        .chat-shell.gg-premium button:disabled { cursor: not-allowed; opacity: .58; }
+        @media (max-width: 900px) {
+          .chat-shell.gg-premium.gg-full .sidebar { width: clamp(190px, 27vw, 250px); }
+          .chat-shell.gg-premium.gg-full .welcome-title { max-width: 20ch; }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full { border-radius: 0 !important; }
+          .chat-shell.gg-premium.gg-full .chat-topbar { min-height: 54px; padding: 8px 12px; }
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            align-items: stretch;
+            padding: 24px 16px 28px !important;
+            gap: 16px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-kicker { align-self: center; max-width: 100%; }
+          .chat-shell.gg-premium.gg-full .welcome-intro { text-align: center; margin-inline: auto; }
+          .chat-shell.gg-premium.gg-full .welcome-title { font-size: clamp(27px, 7vw, 34px) !important; }
+          .chat-shell.gg-premium.gg-full .welcome-sub { font-size: 13px !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capabilities { gap: 6px !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capability { font-size: 10px !important; padding: 7px 9px !important; }
+          .chat-shell.gg-premium.gg-full .sugs { grid-template-columns: minmax(0, 1fr) !important; width: 100% !important; }
+          .chat-shell.gg-premium.gg-full .sug { min-height: 52px; }
+          .chat-shell.gg-premium.gg-full .chat-input-area { padding: 10px 12px max(10px, env(safe-area-inset-bottom)) !important; }
+        }
+        @media (max-height: 640px) and (min-width: 681px) {
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            justify-content: flex-start !important;
+            padding-top: 16px !important;
+            padding-bottom: 22px !important;
+            gap: 12px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-title { font-size: clamp(27px, 3vw, 34px) !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capability { padding-block: 6px !important; }
+          .chat-shell.gg-premium.gg-full .sug { min-height: 48px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium .topbar-toggle,
+          .chat-shell.gg-premium .new-chat-btn,
+          .chat-shell.gg-premium .conv-item,
+          .chat-shell.gg-premium .sug,
+          .chat-shell.gg-premium .report-btn,
+          .chat-shell.gg-premium .send-btn { transition: none !important; }
+        }
+
+        /* ── v97 motion + composer layout refinement ───────────────────────
+           Keep the composer geometry stable when Report mode is toggled.
+           Motion should communicate state changes, not attract attention. */
+        .chat-shell.gg-premium .input-row {
+          display: flex !important;
+          align-items: center !important;
+          gap: 8px !important;
+          min-height: 54px !important;
+          padding: 6px !important;
+          box-sizing: border-box !important;
+          transition: border-color 180ms cubic-bezier(.2,.7,.2,1),
+                      box-shadow 180ms cubic-bezier(.2,.7,.2,1),
+                      background-color 180ms ease !important;
+        }
+        .chat-shell.gg-premium .attach-btn {
+          width: 40px !important; min-width: 40px !important;
+          height: 40px !important; min-height: 40px !important;
+          display: inline-flex !important; align-items: center !important; justify-content: center !important;
+          border-radius: 8px !important; flex: 0 0 auto !important;
+        }
+        .chat-shell.gg-premium .chat-textarea {
+          flex: 1 1 auto !important;
+          width: 100% !important; min-width: 0 !important;
+          min-height: 40px !important; max-height: 130px !important;
+          padding: 8px 4px !important; box-sizing: border-box !important;
+          align-self: center !important;
+          transition: color 160ms ease !important;
+        }
+        .chat-shell.gg-premium .report-mode-btn {
+          height: 40px !important; min-height: 40px !important;
+          flex: 0 0 auto !important; padding-inline: 12px !important;
+          border-radius: 8px !important;
+          transition: background-color 160ms ease, border-color 160ms ease,
+                      color 160ms ease, box-shadow 160ms ease, transform 120ms ease !important;
+        }
+        /* Do not use the earlier infinite blue pulse in the premium theme. */
+        .chat-shell.gg-premium .report-mode-btn.is-active {
+          animation: none !important;
+          background: #EEF5EE !important;
+          border-color: #8DAE96 !important;
+          color: var(--ed-forest) !important;
+          box-shadow: inset 3px 0 0 var(--ed-forest) !important;
+        }
+        .chat-shell.gg-premium .report-mode-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+        }
+        .chat-shell.gg-premium .report-mode-btn:active:not(:disabled) {
+          transform: translateY(0) scale(.985);
+        }
+        .chat-shell.gg-premium .send-btn {
+          width: 40px !important; min-width: 40px !important;
+          height: 40px !important; min-height: 40px !important;
+          flex: 0 0 auto !important; border-radius: 8px !important;
+          transition: background-color 160ms ease, border-color 160ms ease,
+                      box-shadow 160ms ease, transform 120ms ease, opacity 160ms ease !important;
+        }
+        .chat-shell.gg-premium .send-btn:not(:disabled):hover {
+          transform: translateY(-1px) !important;
+          box-shadow: 0 5px 14px rgba(13,92,69,.18) !important;
+        }
+        .chat-shell.gg-premium .send-btn:not(:disabled):active {
+          transform: scale(.97) !important;
+        }
+        .chat-shell.gg-premium .report-tier-menu-wrap {
+          flex: 0 0 auto !important;
+          align-self: center !important;
+          animation: ggComposerControlIn 180ms cubic-bezier(.2,.7,.2,1) both;
+        }
+        .chat-shell.gg-premium .report-tier-trigger {
+          height: 40px !important; min-height: 40px !important;
+          min-width: 132px !important; max-width: min(216px, 22vw) !important;
+          border-radius: 7px !important;
+          transition: border-color 160ms ease, background-color 160ms ease,
+                      box-shadow 160ms ease, transform 120ms ease !important;
+        }
+        .chat-shell.gg-premium .report-tier-menu {
+          animation: ggReportMenuIn 170ms cubic-bezier(.2,.7,.2,1) both;
+          transform-origin: bottom left;
+        }
+        .chat-shell.gg-premium .report-tier-menu-item,
+        .chat-shell.gg-premium .report-seg-item,
+        .chat-shell.gg-premium .report-style-card {
+          transition: background-color 150ms ease, border-color 150ms ease,
+                      box-shadow 150ms ease, color 150ms ease, transform 150ms ease;
+        }
+        .chat-shell.gg-premium .report-tier-menu-item:hover,
+        .chat-shell.gg-premium .report-style-card:hover { transform: translateY(-1px); }
+        .chat-shell.gg-premium .input-hint {
+          min-height: 14px;
+          line-height: 1.35;
+          transition: color 160ms ease;
+        }
+        @keyframes ggComposerControlIn {
+          from { opacity: 0; transform: translateX(-5px) scale(.985); }
+          to { opacity: 1; transform: translateX(0) scale(1); }
+        }
+        @keyframes ggReportMenuIn {
+          from { opacity: 0; transform: translateY(5px) scale(.99); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes ggWelcomeItemIn {
+          from { opacity: 0; transform: translateY(7px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .chat-shell.gg-premium.gg-full .welcome-kicker,
+        .chat-shell.gg-premium.gg-full .welcome-intro,
+        .chat-shell.gg-premium.gg-full .welcome-capabilities,
+        .chat-shell.gg-premium.gg-full .sugs {
+          animation: ggWelcomeItemIn 360ms cubic-bezier(.2,.7,.2,1) both;
+        }
+        .chat-shell.gg-premium.gg-full .welcome-intro { animation-delay: 35ms; }
+        .chat-shell.gg-premium.gg-full .welcome-capabilities { animation-delay: 75ms; }
+        .chat-shell.gg-premium.gg-full .sugs { animation-delay: 110ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug { animation: ggWelcomeItemIn 300ms cubic-bezier(.2,.7,.2,1) both; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(1) { animation-delay: 115ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(2) { animation-delay: 145ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(3) { animation-delay: 175ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(4) { animation-delay: 205ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(5) { animation-delay: 235ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(6) { animation-delay: 265ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(7) { animation-delay: 295ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(8) { animation-delay: 325ms; }
+        @media (max-width: 900px) and (min-width: 681px) {
+          .chat-shell.gg-premium .input-row { gap: 6px !important; }
+          .chat-shell.gg-premium .report-tier-trigger { min-width: 118px !important; max-width: 165px !important; padding-inline: 7px !important; }
+          .chat-shell.gg-premium .report-tier-trigger-value { font-size: 10px !important; }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium .input-row { gap: 5px !important; padding: 5px !important; min-height: 50px !important; }
+          .chat-shell.gg-premium .attach-btn,
+          .chat-shell.gg-premium .send-btn { width: 36px !important; min-width: 36px !important; height: 36px !important; min-height: 36px !important; }
+          .chat-shell.gg-premium .chat-textarea { min-height: 36px !important; padding: 7px 2px !important; font-size: 14px !important; }
+          .chat-shell.gg-premium .report-mode-btn { width: 36px !important; min-width: 36px !important; height: 36px !important; min-height: 36px !important; padding: 0 !important; gap: 0 !important; justify-content: center !important; }
+          .chat-shell.gg-premium .report-tier-trigger { width: 36px !important; min-width: 36px !important; max-width: 36px !important; height: 36px !important; min-height: 36px !important; padding: 0 !important; justify-content: center !important; }
+          .chat-shell.gg-premium .report-tier-trigger-text,
+          .chat-shell.gg-premium .report-tier-trigger-chevron { display: none !important; }
+          .chat-shell.gg-premium .report-tier-trigger-dot { width: 3px !important; height: 18px !important; }
+          .chat-shell.gg-premium .chat-input-area { gap: 5px !important; }
+          .chat-shell.gg-premium .input-hint { font-size: 9px !important; }
+        }
+        @media (max-width: 420px) {
+          .chat-shell.gg-premium .report-mode-btn > span { display: none !important; }
+          .chat-shell.gg-premium .report-mode-btn { width: 36px !important; min-width: 36px !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium .report-tier-menu-wrap,
+          .chat-shell.gg-premium .report-tier-menu,
+          .chat-shell.gg-premium.gg-full .welcome-kicker,
+          .chat-shell.gg-premium.gg-full .welcome-intro,
+          .chat-shell.gg-premium.gg-full .welcome-capabilities,
+          .chat-shell.gg-premium.gg-full .sugs,
+          .chat-shell.gg-premium.gg-full .sugs .sug { animation: none !important; }
+          .chat-shell.gg-premium .input-row,
+          .chat-shell.gg-premium .report-mode-btn,
+          .chat-shell.gg-premium .report-tier-trigger,
+          .chat-shell.gg-premium .report-tier-menu-item,
+          .chat-shell.gg-premium .report-seg-item,
+          .chat-shell.gg-premium .report-style-card,
+          .chat-shell.gg-premium .send-btn { transition: none !important; }
+        }
+
+        /* ── v98: keep the conversation visually grouped when the sidebar
+           collapses. Previously each message row spanned the entire viewport:
+           assistant replies stayed at the far left while user prompts moved to
+           the far right, making one conversation feel split into two columns.
+           Center a shared reading lane and let the sidebar reflow it smoothly. */
+        .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile) {
+          min-width: 0;
+          transition: width 240ms cubic-bezier(.2,.7,.2,1),
+                      flex-basis 240ms cubic-bezier(.2,.7,.2,1),
+                      opacity 150ms ease,
+                      border-color 180ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile).sidebar--closed {
+          width: 0 !important;
+          min-width: 0 !important;
+          flex-basis: 0 !important;
+          border-right-width: 0 !important;
+          opacity: 0;
+          pointer-events: none;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs > .msg-row {
+          width: min(100%, 1120px);
+          max-width: 1120px;
+          margin-inline: auto;
+          box-sizing: border-box;
+          flex: 0 0 auto;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs > .chat-welcome {
+          width: min(100%, 1120px);
+          max-width: 1120px;
+          align-self: center;
+          box-sizing: border-box;
+        }
+        .chat-shell.gg-premium.gg-full .topbar-toggle:focus-visible {
+          outline: 2px solid #6D9B7C !important;
+          outline-offset: 2px !important;
+          box-shadow: 0 0 0 3px rgba(13,92,69,.10) !important;
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full .chat-msgs > .msg-row,
+          .chat-shell.gg-premium.gg-full .chat-msgs > .chat-welcome {
+            width: 100%;
+            max-width: 100%;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile) {
+            transition: none !important;
+          }
+        }
+
       `}</style>
 
 
@@ -4876,7 +5437,12 @@ export default function GrowthGradualChat() {
           />
         )}
 
-        <aside className={`sidebar${sidebarOpen ? '' : ' sidebar--closed'}${isMobile ? ' sidebar--mobile' : ''}`}>
+        <aside
+          id="growth-gradual-chat-sidebar"
+          className={`sidebar${sidebarOpen ? '' : ' sidebar--closed'}${isMobile ? ' sidebar--mobile' : ''}`}
+          aria-hidden={!sidebarOpen}
+          inert={!sidebarOpen}
+        >
           {/* Sidebar header */}
           <div className="sidebar-hdr">
             <div className="sidebar-logo">
@@ -4952,7 +5518,13 @@ export default function GrowthGradualChat() {
 
           {/* Top bar */}
           <div className="chat-topbar">
-            <button className="topbar-toggle" onClick={() => setSidebarOpen(o => !o)} aria-label="Toggle sidebar">
+            <button
+              className="topbar-toggle"
+              onClick={() => setSidebarOpen(o => !o)}
+              aria-label={sidebarOpen ? 'Collapse conversation sidebar' : 'Expand conversation sidebar'}
+              aria-expanded={sidebarOpen}
+              aria-controls="growth-gradual-chat-sidebar"
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
             </button>
             <div className="topbar-logo">
@@ -5286,7 +5858,9 @@ export default function GrowthGradualChat() {
                   className={`report-tier-trigger ${reportTierMenuOpen ? 'is-open' : ''}`}
                   onClick={() => setReportTierMenuOpen(prev => !prev)}
                   disabled={streaming}
-                  aria-haspopup="menu"
+                  aria-label="Choose report depth and style"
+                  aria-haspopup="dialog"
+                  aria-controls="report-tier-menu"
                   aria-expanded={reportTierMenuOpen}
                   title="Choose report depth and style"
                 >
@@ -5303,7 +5877,7 @@ export default function GrowthGradualChat() {
                 </button>
 
                 {reportTierMenuOpen && (
-                  <div className="report-tier-menu" role="dialog" aria-label="Report settings">
+                  <div id="report-tier-menu" className="report-tier-menu" role="dialog" aria-label="Report settings">
                     <div className="report-tier-menu-head"><span>Depth</span></div>
                     <div className="report-seg" role="radiogroup" aria-label="Report depth">
                       {REPORT_TIER_OPTIONS.map(option => (
@@ -5314,6 +5888,16 @@ export default function GrowthGradualChat() {
                           aria-checked={selectedReportTier === option.value}
                           className={`report-seg-item ${selectedReportTier === option.value ? 'is-selected' : ''}`}
                           onClick={() => setSelectedReportTier(option.value)}
+                          onKeyDown={event => {
+                            if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) return;
+                            event.preventDefault();
+                            const buttons = Array.from(event.currentTarget.closest('[role="radiogroup"]')?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? []);
+                            const index = buttons.indexOf(event.currentTarget);
+                            const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+                            const nextIndex = (index + step + buttons.length) % buttons.length;
+                            buttons[nextIndex]?.focus();
+                            if (REPORT_TIER_OPTIONS[nextIndex]) setSelectedReportTier(REPORT_TIER_OPTIONS[nextIndex].value);
+                          }}
                         >
                           <span className="report-seg-label">{option.label}</span>
                           <span className="report-seg-meta">{option.scope}</span>
@@ -5331,6 +5915,16 @@ export default function GrowthGradualChat() {
                           aria-checked={selectedReportStyle === option.value}
                           className={`report-style-card ${selectedReportStyle === option.value ? 'is-selected' : ''}`}
                           onClick={() => setSelectedReportStyle(option.value)}
+                          onKeyDown={event => {
+                            if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) return;
+                            event.preventDefault();
+                            const buttons = Array.from(event.currentTarget.closest('[role="radiogroup"]')?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? []);
+                            const index = buttons.indexOf(event.currentTarget);
+                            const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+                            const nextIndex = (index + step + buttons.length) % buttons.length;
+                            buttons[nextIndex]?.focus();
+                            if (REPORT_STYLE_OPTIONS[nextIndex]) setSelectedReportStyle(REPORT_STYLE_OPTIONS[nextIndex].value);
+                          }}
                         >
                           <span className={`report-style-swatch report-style-swatch--${option.value}`} aria-hidden="true" />
                           <span className="report-seg-label">{option.label}</span>
@@ -5338,7 +5932,7 @@ export default function GrowthGradualChat() {
                         </button>
                       ))}
                     </div>
-                    <button type="button" className="report-tier-menu-done" onClick={() => setReportTierMenuOpen(false)}>Done</button>
+                    <button type="button" className="report-tier-menu-done" onClick={() => { setReportTierMenuOpen(false); reportTierMenuRef.current?.querySelector<HTMLButtonElement>('.report-tier-trigger')?.focus(); }}>Done</button>
                   </div>
                 )}
               </div>
@@ -5371,6 +5965,7 @@ export default function GrowthGradualChat() {
                 }}
                 disabled={streaming}
                 aria-pressed={reportModeEnabled}
+                aria-label={reportModeEnabled ? 'Disable Report mode' : 'Enable Report mode'}
                 title={reportModeEnabled
                   ? 'Report mode is enabled. The next query will generate a research report.'
                   : 'Enable Report mode for the next query. Otherwise, answers appear in chat.'}
