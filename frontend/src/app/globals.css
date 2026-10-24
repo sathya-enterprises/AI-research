@@ -979,3 +979,242 @@ button:disabled { cursor: not-allowed; }
   .article-reader-card, .data-metric-chart, .data-kpi-card,
   .data-search-example, .data-export-btn { transition: none !important; }
 }
+
+
+/* ──────────────────────────────────────────────────────────────────────────
+   App appearance: persistent light/dark mode and a focused chat canvas.
+   The global brand/account strip is redundant on the chat route because its
+   sidebar and compact chat header provide the product identity there.
+   ────────────────────────────────────────────────────────────────────────── */
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --navy: #dbe5dd;
+  --navy2: #c7d5cb;
+  --teal: #4da783;
+  --teal2: #61bd98;
+  --gold: #d7ad60;
+  --gold2: #e4c27f;
+  --cream: #111613;
+  --ivory: #181e1a;
+  --surface: #1a211c;
+  --surface2: #242c26;
+  --border: #343e37;
+  --border2: #2a332d;
+  --muted: #a7b2a9;
+  --text: #e8eee9;
+  --text2: #c0cbc2;
+  --gg-ui-green: #4da783;
+  --gg-ui-green-hover: #62ba94;
+  --gg-ui-ink: #e6ece7;
+  --gg-ui-muted: #aab6ad;
+  --gg-ui-line: #343e37;
+  --gg-ui-paper: #111613;
+}
+body:has(.chat-shell) .main-container { padding-top: 8px !important; padding-bottom: 8px !important; }
+.gg-global-navbar--chat { display: none !important; }
+@media (max-width: 680px) {
+  body:has(.chat-shell) .main-container { padding: 8px 8px calc(60px + env(safe-area-inset-bottom, 0px)) !important; }
+}
+
+html[data-theme="dark"] body { background: #111613 !important; color: #e8eee9 !important; }
+html[data-theme="dark"] .gg-global-navbar,
+html[data-theme="dark"] nav:not(.gg-global-navbar--chat),
+html[data-theme="dark"] .mobile-bottom-nav {
+  background: #181e1a !important; border-color: #303a33 !important; box-shadow: none !important;
+}
+html[data-theme="dark"] .nav-link-item { color: #c2cdc4 !important; }
+html[data-theme="dark"] .nav-link-item:hover,
+html[data-theme="dark"] .nav-link-item.active { color: #f0f4f0 !important; background: #252e28 !important; border-color: #3c4a40 !important; }
+html[data-theme="dark"] .gg-account-trigger { background: #242c26 !important; color: #edf2ee !important; border-color: #39443c !important; }
+html[data-theme="dark"] .gg-account-menu { background: #1b221d !important; border-color: #39443c !important; }
+html[data-theme="dark"] .gg-account-menu-item { color: #e4ebe5 !important; }
+html[data-theme="dark"] .gg-account-menu-item:hover { background: #29332c !important; color: #83c9a6 !important; }
+html[data-theme="dark"] .main-container { color: #e5ece6 !important; }
+html[data-theme="dark"] .page-grid,
+html[data-theme="dark"] .feed-page-grid,
+html[data-theme="dark"] .article-page-grid,
+html[data-theme="dark"] .feed-page-main,
+html[data-theme="dark"] .article-page-main,
+html[data-theme="dark"] .data-search-page,
+html[data-theme="dark"] .data-dashboard {
+  color: #e5ece6 !important;
+}
+html[data-theme="dark"] .gg-article-card,
+html[data-theme="dark"] .article-reader-card,
+html[data-theme="dark"] .data-kpi-card,
+html[data-theme="dark"] .data-metric-chart,
+html[data-theme="dark"] .data-search-example,
+html[data-theme="dark"] .chart-wrap,
+html[data-theme="dark"] .key-stat-card,
+html[data-theme="dark"] .stock-panel-left,
+html[data-theme="dark"] .sidebar-right,
+html[data-theme="dark"] .article-reader-card,
+html[data-theme="dark"] .search-result-card,
+html[data-theme="dark"] .data-table-wrap {
+  background: #1a211c !important; color: #e4ebe5 !important; border-color: #343e37 !important; box-shadow: none !important;
+}
+html[data-theme="dark"] .article-title,
+html[data-theme="dark"] .section-header,
+html[data-theme="dark"] .data-dashboard h1,
+html[data-theme="dark"] .data-dashboard h2,
+html[data-theme="dark"] .data-search-page h1,
+html[data-theme="dark"] .data-search-page h2 {
+  color: #eef3ef !important;
+}
+html[data-theme="dark"] .main-container input,
+html[data-theme="dark"] .main-container textarea,
+html[data-theme="dark"] .main-container select {
+  background-color: #1b221d !important; color: #edf2ee !important; border-color: #3b463e !important;
+}
+html[data-theme="dark"] .main-container input::placeholder,
+html[data-theme="dark"] .main-container textarea::placeholder { color: #89968c !important; }
+html[data-theme="dark"] .mobile-bottom-nav .mob-nav-item { color: #9aa99e !important; }
+html[data-theme="dark"] .mobile-bottom-nav .mob-nav-item.active { color: #76c5a0 !important; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Latest News drawer: use the same appearance tokens as the main workspace.
+   FeedPage/ArticleCard still contain legacy inline presentation styles, so
+   scoped overrides keep those surfaces coherent without changing feed logic.
+   ────────────────────────────────────────────────────────────────────────── */
+.nfab-panel__body .feed-page-grid,
+.nfab-panel__body .feed-page-main {
+  background: transparent !important;
+  color: #24352a !important;
+}
+.nfab-panel__body .feed-page-main .section-header h2 {
+  color: #18291f !important;
+}
+.nfab-panel__body .feed-page-main .section-header > div:first-child > div:last-child > span {
+  color: #78887d !important;
+}
+.nfab-panel__body .feed-meta-badge {
+  background: #f1f4ef !important;
+  border-color: #dce5dc !important;
+  color: #476052 !important;
+}
+.nfab-panel__body .feed-meta-badge span {
+  color: #587062 !important;
+}
+.nfab-panel__body .feed-refresh-btn {
+  background: #fff !important;
+  border-color: #d9e2da !important;
+  color: #17563e !important;
+  min-height: 30px;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.nfab-panel__body .feed-refresh-btn:hover:not(:disabled) {
+  background: #f1f6f2 !important;
+  border-color: #a9c4b1 !important;
+}
+.nfab-panel__body .feed-refresh-btn:disabled { opacity: .65; }
+.nfab-panel__body .feed-error-banner { background: #fff4f2 !important; color: #8d2c22 !important; }
+.nfab-panel__body .feed-retry-btn { color: #17563e !important; }
+.nfab-panel__body .feed-more-stories {
+  background: #fff !important;
+  border-color: #dfe6df !important;
+  box-shadow: 0 1px 3px rgba(26,45,33,.035) !important;
+}
+.nfab-panel__body .feed-more-stories > div:first-child { border-bottom-color: #e8eee8 !important; }
+.nfab-panel__body .feed-skeleton-card { background: #fff !important; border-color: #e0e7e0 !important; box-shadow: none !important; }
+.nfab-panel__body .gg-article-card { box-shadow: 0 1px 4px rgba(22,46,31,.045) !important; }
+.nfab-panel__body .gg-article-card--featured > div[style*="linear-gradient"] {
+  background: #fbfcfa !important;
+  border-bottom-color: #e8eee8 !important;
+}
+.nfab-panel__body .gg-article-tag { border-radius: 4px !important; letter-spacing: .08em !important; }
+
+html[data-theme="dark"] .nfab-panel__body .feed-page-grid,
+html[data-theme="dark"] .nfab-panel__body .feed-page-main {
+  background: transparent !important;
+  color: #e5ece6 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .section-header h2 { color: #edf3ee !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-page-main .section-header > div:first-child > div:last-child > span { color: #9ba99e !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-meta-badge {
+  background: #202a23 !important;
+  border-color: #3b4a3e !important;
+  color: #c4d1c7 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-meta-badge span { color: #b5c7ba !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-status-label.is-live { color: #8fd2a9 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-status-label.is-cached { color: #e0bd75 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-kb-status.is-stored { color: #8fd2a9 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-kb-status.is-warning { color: #e0bd75 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-refresh-btn {
+  background: #202923 !important;
+  border-color: #3b493e !important;
+  color: #a9d3b5 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-refresh-btn:hover:not(:disabled) {
+  background: #29372d !important;
+  border-color: #58745f !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-error-banner {
+  background: #352321 !important;
+  border-color: #69403a !important;
+  color: #f0c1b8 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-retry-btn { color: #9bd0ad !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-progress-banner {
+  background: #202a23 !important;
+  border-color: #3b4b40 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-progress-banner span { color: #a9d1b5 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-more-stories {
+  background: #1b241e !important;
+  border-color: #303d33 !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] .nfab-panel__body .feed-more-stories > div:first-child { border-bottom-color: #303d33 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-more-stories > div:first-child span { color: #93a397 !important; }
+html[data-theme="dark"] .nfab-panel__body .feed-skeleton-card {
+  background: #1b241e !important;
+  border-color: #303d33 !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] .nfab-panel__body .skeleton-shine { background-color: #2a342d !important; }
+html[data-theme="dark"] .nfab-panel__body .gg-article-card {
+  background: #1b241e !important;
+  color: #e5ece6 !important;
+  border-color: #303d33 !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured > div[style*="linear-gradient"] {
+  background: #202a23 !important;
+  border-bottom-color: #303d33 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured > div:last-child {
+  background: #1b241e !important;
+  border-top-color: #303d33 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--grid > div:last-child {
+  background: #1b241e !important;
+}
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured h2,
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--grid p,
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--compact p {
+  color: #e7eee8 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured p { color: #acb9ae !important; }
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured > div:last-child span,
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--grid span,
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--compact span { color: #aab9ad !important; }
+html[data-theme="dark"] .nfab-panel__body .gg-article-card--featured > div:last-child span:last-child { color: #9bd0ad !important; }
+html[data-theme="dark"] .nfab-panel__body .gg-article-tag {
+  background: #2a382e !important;
+  color: #a6d4b3 !important;
+  border-color: #405746 !important;
+}
+html[data-theme="dark"] .nfab-panel__body .premium-rule { background: #303d33 !important; }
+html[data-theme="dark"] .nfab-panel__body .mobile-market-bar,
+html[data-theme="dark"] .nfab-panel__body .mobile-market-strip,
+html[data-theme="dark"] .nfab-panel__body .mobile-market-strip-inner {
+  background: #1a231d !important;
+  color: #d3ded5 !important;
+  border-color: #303d33 !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .nfab-panel__body .gg-article-card,
+  .nfab-panel__body .feed-refresh-btn { transition: none !important; }
+}

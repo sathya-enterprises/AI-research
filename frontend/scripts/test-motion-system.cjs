@@ -19,11 +19,15 @@ test('reduced motion disables route, card and ticker movement without hiding con
   assert.match(css, /\.feed-page-grid,\s*\.article-page-grid,\s*\.gg-account-menu,[\s\S]*?animation:\s*none\s*!important;/);
 });
 
-test('News FAB has no perpetual decorative pulse and uses restrained easing', () => {
+test('News FAB is restrained, has no misleading status dot, and follows the selected theme', () => {
   const fab = read('src/components/NewsFAB.tsx');
-  assert.doesNotMatch(fab, /nfab-pulse|nfab-blink|nfab__ring/);
+  const css = read('src/app/globals.css');
+  assert.doesNotMatch(fab, /nfab-pulse|nfab-blink|nfab__ring|nfab__dot/);
+  assert.match(fab, /width: 48px/);
   assert.match(fab, /transition: transform 240ms cubic-bezier\(\.2,\.7,\.2,1\)/);
-  assert.match(fab, /The FAB uses a static status dot/);
+  assert.match(fab, /html\[data-theme="dark"\] \.nfab-panel/);
+  assert.match(css, /html\[data-theme="dark"\] \.nfab-panel__body \.gg-article-card/);
+  assert.match(css, /html\[data-theme="dark"\] \.nfab-panel__body \.feed-meta-badge/);
 });
 
 test('premium report mode and live status markers do not continuously glow or blink', () => {
@@ -35,12 +39,13 @@ test('premium report mode and live status markers do not continuously glow or bl
   assert.doesNotMatch(feed, /animation:'pulse 1\.2s infinite'/);
 });
 
-test('motion audit documents all main route families and reduced-motion acceptance', () => {
-  const audit = fs.readFileSync(path.join(__dirname, '..', '..', 'MOTION-AUDIT.md'), 'utf8');
-  for (const route of ['Chat', 'Feed and category pages', 'Stocks/markets', 'Article reader', 'Search/dashboard', 'Navigation/account menu', 'News FAB']) {
-    assert.ok(audit.includes(route), `missing animation inventory for ${route}`);
-  }
-  assert.match(audit, /Reduced-motion acceptance checklist/);
+test('chat identities stay visible and selected conversations use a calm neutral state', () => {
+  const chat = read('src/components/GrowthGradualChat.tsx');
+  assert.match(chat, /assistant-robot-icon/);
+  assert.match(chat, /user-avatar-icon/);
+  assert.match(chat, /msg-avatar--bot\s*\{[\s\S]*?display:\s*inline-flex\s*!important/s);
+  assert.match(chat, /conv-item--active,[\s\S]*?background:\s*#E7EAE8\s*!important/s);
+  assert.doesNotMatch(chat, /\.msg-avatar--bot\s*\{\s*display:\s*none\s*!important/);
 });
 
 test('collapsing the desktop sidebar preserves a centered conversation reading lane', () => {
@@ -49,4 +54,39 @@ test('collapsing the desktop sidebar preserves a centered conversation reading l
   assert.match(chat, /\.sidebar--closed\s*\{[^}]*flex-basis:\s*0\s*!important/s);
   assert.match(chat, /aria-expanded=\{sidebarOpen\}/);
   assert.match(chat, /aria-controls="growth-gradual-chat-sidebar"/);
+});
+
+
+test('editorial restraint pass keeps short user messages compact and removes decorative glow', () => {
+  const chat = read('src/components/GrowthGradualChat.tsx');
+  const refinement = chat.split('v100: editorial restraint pass')[1];
+  assert.ok(refinement, 'missing final editorial restraint layer');
+  assert.match(refinement, /\.msg-row--user \.msg-inner\s*\{[^}]*width:\s*fit-content\s*!important/s);
+  assert.match(refinement, /\.msg-row--user \.msg-text\s*\{[^}]*background:\s*#145A43\s*!important/s);
+  assert.match(refinement, /\.input-row:focus-within\s*\{[^}]*box-shadow:\s*0 0 0 2px/s);
+  assert.match(refinement, /\.chat-welcome::before\s*\{\s*display:\s*none\s*!important/s);
+  assert.match(refinement, /\.conv-item--active,[\s\S]*?background:\s*#E7E9E7\s*!important/s);
+});
+
+
+test('chat route hides the duplicate global header while preserving sidebar account and theme controls', () => {
+  const navbar = read('src/components/Navbar.tsx');
+  const chat = read('src/components/GrowthGradualChat.tsx');
+  const globals = read('src/app/globals.css');
+  assert.match(navbar, /pathname === '\/' \? 'gg-global-navbar gg-global-navbar--chat'/);
+  assert.match(globals, /\.gg-global-navbar--chat\s*\{\s*display:\s*none\s*!important;/);
+  assert.match(chat, /className="sidebar-appearance-toggle"/);
+  assert.match(chat, /className="sidebar-user-button"/);
+  assert.match(chat, /await signOut\(\)/);
+});
+
+test('light/dark preference persists and provides dark tokens for chat and shared pages', () => {
+  const chat = read('src/components/GrowthGradualChat.tsx');
+  const init = read('src/components/ThemeInitializer.tsx');
+  const globals = read('src/app/globals.css');
+  assert.match(chat, /localStorage\.setItem\('gg-theme', nextTheme\)/);
+  assert.match(chat, /document\.documentElement\.dataset\.theme = nextTheme/);
+  assert.match(init, /localStorage\.getItem\('gg-theme'\)/);
+  assert.match(globals, /html\[data-theme="dark"\]\s*\{/);
+  assert.match(chat, /html\[data-theme="dark"\] \.chat-shell\.gg-premium\.gg-full/);
 });

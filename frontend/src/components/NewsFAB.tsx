@@ -58,45 +58,40 @@ export default function NewsFAB() {
            sidebar footer on desktop and the attach button + first tab on phones. */
         .nfab {
           position: fixed;
-          bottom: 104px;
-          right: 22px;
+          bottom: 100px;
+          right: 20px;
           z-index: 9999;
-          width: 54px;
-          height: 54px;
+          width: 48px;
+          height: 48px;
           border-radius: 50%;
-          border: none;
-          background: #0f172a;
-          box-shadow: 0 4px 20px rgba(15,23,42,.4), 0 0 0 3px rgba(15,23,42,.1);
+          border: 1px solid rgba(255,255,255,.72);
+          background: #123e30;
+          color: #fff;
+          box-shadow: 0 3px 10px rgba(16,42,33,.18), 0 0 0 1px rgba(18,62,48,.06);
           cursor: pointer;
           display: flex;
           align-items: center;
           justify-content: center;
           flex-direction: column;
-          gap: 2px;
-          transition: transform 180ms cubic-bezier(.2,.7,.2,1), box-shadow 180ms cubic-bezier(.2,.7,.2,1), opacity 160ms ease;
+          gap: 1px;
+          transition: transform 160ms cubic-bezier(.2,.7,.2,1), box-shadow 160ms cubic-bezier(.2,.7,.2,1), background-color 160ms ease, opacity 160ms ease;
           overflow: hidden;
         }
         .nfab:hover {
-          transform: translateY(-1px) scale(1.035);
-          box-shadow: 0 8px 32px rgba(15,23,42,.5);
+          transform: translateY(-2px);
+          background: #0e3528;
+          box-shadow: 0 5px 14px rgba(16,42,33,.22);
         }
-        .nfab:active { transform: scale(.95); }
+        .nfab:active { transform: translateY(0) scale(.97); }
+        .nfab:focus-visible { outline: 2px solid #c49a4a; outline-offset: 3px; }
         @media (max-width: 680px) {
-          .nfab { bottom: 162px; right: 14px; width: 46px; height: 46px; }
+          .nfab { bottom: 156px; right: 12px; width: 44px; height: 44px; }
         }
-        /* The FAB uses a static status dot; no perpetual pulsing/ring animation. */
-        .nfab__dot {
-          width: 5px; height: 5px; border-radius: 50%;
-          background: #58b889;
-          position: absolute; top: 10px; right: 10px;
-          border: 1px solid rgba(255,255,255,.7);
-        }
-
         .nfab__label {
-          font-size: 8px;
+          font-size: 7px;
           font-weight: 700;
-          color: rgba(255,255,255,.75);
-          letter-spacing: .08em;
+          color: rgba(255,255,255,.82);
+          letter-spacing: .07em;
           font-family: 'DM Sans', sans-serif;
           text-transform: uppercase;
           line-height: 1;
@@ -115,12 +110,14 @@ export default function NewsFAB() {
           left: 0; top: 0; bottom: 0;
           z-index: 9998;
           width: min(480px, 95vw);
-          background: #f0f4f8;
-          box-shadow: 4px 0 32px rgba(15,23,42,.2);
+          background: #f6f8f6;
+          color: #1a2a21;
+          border-right: 1px solid #dde5de;
+          box-shadow: 8px 0 26px rgba(16,42,33,.14);
           display: flex;
           flex-direction: column;
           overflow: hidden;
-          transition: transform 240ms cubic-bezier(.2,.7,.2,1), opacity 180ms ease;
+          transition: transform 240ms cubic-bezier(.2,.7,.2,1), opacity 180ms ease, background-color 180ms ease;
         }
 
         /* ── Panel header ─────────────────────────────────────────────────── */
@@ -128,8 +125,9 @@ export default function NewsFAB() {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 14px 16px 12px;
-          background: #0f172a;
+          padding: 13px 16px;
+          background: #123e30;
+          border-bottom: 1px solid rgba(255,255,255,.1);
           flex-shrink: 0;
         }
         .nfab-panel__title {
@@ -155,13 +153,23 @@ export default function NewsFAB() {
         /* ── Scroll body ──────────────────────────────────────────────────── */
         .nfab-panel__body {
           flex: 1;
+          min-height: 0;
           overflow-y: auto;
           padding: 0;
+          background: #f6f8f6;
+          color: #1a2a21;
           scrollbar-width: thin;
-          scrollbar-color: #cbd5e1 transparent;
+          scrollbar-color: #c7d3ca transparent;
         }
-        .nfab-panel__body::-webkit-scrollbar { width: 4px; }
-        .nfab-panel__body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .nfab-panel__body::-webkit-scrollbar { width: 5px; }
+        .nfab-panel__body::-webkit-scrollbar-thumb { background: #c7d3ca; border-radius: 8px; }
+        .nfab-panel__close:focus-visible { outline: 2px solid #d6b46f; outline-offset: 2px; }
+        html[data-theme="dark"] .nfab { background: #26382d; border-color: #405044; box-shadow: 0 3px 10px rgba(0,0,0,.28); }
+        html[data-theme="dark"] .nfab:hover { background: #314638; box-shadow: 0 5px 14px rgba(0,0,0,.34); }
+        html[data-theme="dark"] .nfab-panel { background: #151b17; color: #e5ece6; border-right-color: #303a33; box-shadow: 10px 0 32px rgba(0,0,0,.32); }
+        html[data-theme="dark"] .nfab-panel__hdr { background: #1c2821; border-bottom-color: #303a33; }
+        html[data-theme="dark"] .nfab-panel__body { background: #151b17; color: #e5ece6; scrollbar-color: #465349 transparent; }
+        html[data-theme="dark"] .nfab-panel__body::-webkit-scrollbar-thumb { background: #465349; }
         @media (prefers-reduced-motion: reduce) {
           .nfab, .nfab-backdrop, .nfab-panel, .nfab-panel__close { transition: none !important; }
         }
@@ -195,7 +203,6 @@ export default function NewsFAB() {
             : undefined
         }
       >
-        <span className="nfab__dot" />
         {isChatPage ? (
           /* Newspaper icon */
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -243,7 +250,7 @@ export default function NewsFAB() {
                 <path d="M18 14h-8M15 18h-5M10 6h8v4h-8V6Z"/>
               </svg>
               Latest News
-              <span style={{ fontSize: 9, fontWeight: 500, color: 'rgba(255,255,255,.5)', fontFamily: 'DM Sans,sans-serif', textTransform: 'uppercase', letterSpacing: '1px' }}>· Live Feed</span>
+              <span style={{ fontSize: 9, fontWeight: 500, color: 'rgba(255,255,255,.68)', fontFamily: 'DM Sans,sans-serif', textTransform: 'uppercase', letterSpacing: '1px' }}>· Market Feed</span>
             </div>
             <button className="nfab-panel__close" onClick={() => setOpen(false)} aria-label="Close news">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
