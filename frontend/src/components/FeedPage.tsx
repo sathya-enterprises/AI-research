@@ -22,7 +22,7 @@ const RELATED_FALLBACK: Article[] = [
 
 function SkeletonCard({ h = 110 }: { h?: number }) {
   return (
-    <div style={{
+    <div className="feed-skeleton-card" style={{
       background: '#ffffff', border: '1px solid #e6e2d8',
       borderRadius: '10px', height: `${h}px`, overflow: 'hidden', padding: '16px',
       boxShadow: '0 1px 4px rgba(15,23,42,0.04)',
@@ -255,7 +255,7 @@ export default function FeedPage({ category }: { category: Category }) {
 
           <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
             {meta && (
-              <div style={{
+              <div className="feed-meta-badge" style={{
                 display:'flex', alignItems:'center', gap:'5px',
                 background: meta.fromCache ? 'rgba(200,146,42,0.08)' : 'rgba(13,92,69,0.07)',
                 border:`1px solid ${meta.fromCache ? 'rgba(200,146,42,0.3)' : 'rgba(13,92,69,0.25)'}`,
@@ -266,7 +266,7 @@ export default function FeedPage({ category }: { category: Category }) {
                   background: meta.fromCache ? '#c8922a' : '#0d5c45',
                   display:'inline-block',
                 }}/>
-                <span style={{ fontSize:'9px', color: meta.fromCache ? '#92400e' : '#0d5c45', fontFamily:'JetBrains Mono,monospace', fontWeight:600 }}>
+                <span className={`feed-status-label ${meta.fromCache ? 'is-cached' : 'is-live'}`} style={{ fontSize:'9px', color: meta.fromCache ? '#92400e' : '#0d5c45', fontFamily:'JetBrains Mono,monospace', fontWeight:600 }}>
                   {meta.fromCache ? 'CACHED' : 'LIVE'} · {meta.total}
                 </span>
                 {fetchedLabel && (
@@ -276,6 +276,7 @@ export default function FeedPage({ category }: { category: Category }) {
                 )}
                 {meta.knowledgeBase?.status && meta.knowledgeBase.status !== 'not_synced_yet' && (
                   <span
+                    className={`feed-kb-status ${meta.knowledgeBase.status === 'stored' ? 'is-stored' : 'is-warning'}`}
                     title={meta.knowledgeBase.reason || `Supabase article KB: ${meta.knowledgeBase.storedSources ?? 0} source records, ${meta.knowledgeBase.storedVersions ?? 0} content versions, ${meta.knowledgeBase.storedChunks ?? 0} retrieval chunks`}
                     style={{ fontSize:'9px', color: meta.knowledgeBase.status === 'stored' ? '#0d5c45' : '#92400e', fontFamily:'JetBrains Mono,monospace', fontWeight:700 }}
                   >
@@ -285,6 +286,7 @@ export default function FeedPage({ category }: { category: Category }) {
               </div>
             )}
             <button
+              className="feed-refresh-btn"
               onClick={() => loadArticles(true)}
               disabled={refreshing}
               style={{
@@ -309,13 +311,14 @@ export default function FeedPage({ category }: { category: Category }) {
 
         {/* Error banner */}
         {error && (
-          <div style={{
+          <div className="feed-error-banner" style={{
             background:'#fef2f2', border:'1px solid rgba(239,68,68,0.25)',
             borderRadius:'8px', padding:'12px 16px', marginBottom:'12px',
             fontSize:'12px', color:'#991b1b', fontFamily:"'DM Sans',sans-serif",
           }}>
             ⚠ {error}
             <button
+              className="feed-retry-btn"
               onClick={() => loadArticles(false)}
               style={{ marginLeft:'12px', background:'none', border:'none', color:'#0d5c45', cursor:'pointer', fontSize:'11px', fontFamily:"'DM Sans',sans-serif", textDecoration:'underline', transition:'color .15s ease' }}
               onMouseEnter={e => { e.currentTarget.style.color='#0a4a37'; }}
@@ -330,7 +333,7 @@ export default function FeedPage({ category }: { category: Category }) {
         {loading && articles.length === 0 ? (
           <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
             {isScraping && (
-              <div style={{
+              <div className="feed-progress-banner" style={{
                 background:'linear-gradient(135deg,rgba(13,92,69,0.06),rgba(26,31,78,0.04))',
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'10px', padding:'16px 18px', marginBottom:'4px',
               }}>
@@ -362,7 +365,7 @@ export default function FeedPage({ category }: { category: Category }) {
         ) : (
           <>
             {(isScraping || refreshing) && articles.length > 0 && (
-              <div style={{
+              <div className="feed-progress-banner" style={{
                 display:'flex', alignItems:'center', gap:'8px',
                 background:'linear-gradient(135deg,rgba(13,92,69,0.06),rgba(26,31,78,0.04))',
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'8px',
@@ -389,7 +392,7 @@ export default function FeedPage({ category }: { category: Category }) {
               </div>
             )}
             {list.length > 0 && (
-              <div style={{
+              <div className="feed-more-stories" style={{
                 background:'#fff', borderRadius:'10px', border:'1px solid #e6e2d8',
                 boxShadow:'0 1px 6px rgba(15,23,42,0.04)',
                 padding:'4px 0', marginTop:'4px',

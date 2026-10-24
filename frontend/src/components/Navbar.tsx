@@ -74,7 +74,7 @@ export default function Navbar() {
         .mob-nav-item:active { background:rgba(13,92,69,0.08); transform:scale(.96); }
       `}</style>
 
-      <nav style={{
+      <nav className={pathname === '/' ? 'gg-global-navbar gg-global-navbar--chat' : 'gg-global-navbar'} style={{
         background: 'rgba(255, 255, 255, 0.98)',
         position: 'sticky',
         top: 0,

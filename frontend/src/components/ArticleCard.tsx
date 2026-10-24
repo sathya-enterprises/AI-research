@@ -66,7 +66,7 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
 
   // Shared tag pill
   const TagPill = () => (
-    <span style={{
+    <span className="gg-article-tag" style={{
       display:'inline-block', fontSize:'8px', fontWeight:700,
       color:tagText, background:tagBg,
       padding:'3px 8px', borderRadius:'3px', marginBottom:'9px',
