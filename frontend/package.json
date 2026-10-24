@@ -14,7 +14,8 @@
     "qa:test-report-mode-toggle": "node --test scripts/test-report-mode-toggle.cjs",
     "qa:test-chat-stream-animation": "node --test scripts/test-chat-stream-animation.cjs",
     "qa:test-report-stream-html-fallback": "node --test scripts/test-report-stream-html-fallback.cjs",
-    "qa:test-article-cleanup": "node --test scripts/test-article-cleanup.cjs"
+    "qa:test-article-cleanup": "node --test scripts/test-article-cleanup.cjs",
+    "qa:test-motion-system": "node --test scripts/test-motion-system.cjs"
   },
   "dependencies": {
     "next": "16.2.6",

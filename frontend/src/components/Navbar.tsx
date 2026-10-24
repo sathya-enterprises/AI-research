@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CATEGORIES } from '@/data';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -11,6 +11,8 @@ export default function Navbar() {
   const [time, setTime] = useState('');
   const { user, loading, signOut } = useAuth();
   const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const accountControlRef = useRef<HTMLDivElement | null>(null);
+  const accountTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }));
@@ -18,6 +20,27 @@ export default function Navbar() {
     const t = setInterval(tick, 60_000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!showAccountMenu) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && accountControlRef.current && !accountControlRef.current.contains(event.target)) {
+        setShowAccountMenu(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowAccountMenu(false);
+        accountTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showAccountMenu]);
 
   return (
     <>
@@ -97,11 +120,15 @@ export default function Navbar() {
 
             {/* Auth control — logged-out visitors see the full-page AuthGate
                 instead, so this only needs to render once authenticated */}
-            <div style={{ position: 'relative' }}>
+            <div className="gg-account-control" ref={accountControlRef} style={{ position: 'relative' }}>
 
               {!loading && user && (
                 <>
                   <button
+                    ref={accountTriggerRef}
+                    className="gg-account-trigger"
+                    aria-haspopup="menu"
+                    aria-expanded={showAccountMenu}
                     onClick={() => setShowAccountMenu(v => !v)}
                     style={{
                       display: 'flex', alignItems: 'center', gap: '6px',
@@ -132,6 +159,8 @@ export default function Navbar() {
 
                   {showAccountMenu && (
                     <div
+                      className="gg-account-menu"
+                      role="menu"
                       onMouseLeave={() => setShowAccountMenu(false)}
                       style={{
                         position: 'absolute', top: 'calc(100% + 6px)', right: 0,
@@ -141,6 +170,8 @@ export default function Navbar() {
                       }}
                     >
                       <button
+                        role="menuitem"
+                        className="gg-account-menu-item"
                         onClick={async () => { setShowAccountMenu(false); await signOut(); }}
                         style={{
                           display: 'block', width: '100%', textAlign: 'left',

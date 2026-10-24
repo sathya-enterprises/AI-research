@@ -25,7 +25,7 @@ function MetricChart({ metric, points }: { metric: string; points: DataPoint[] }
   const height = rows.length * (barH + gap) + gap;
 
   return (
-    <div style={{
+    <div className="data-metric-chart" style={{
       background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
       padding: '16px 18px', boxShadow: 'var(--shadow-sm)',
     }}>
@@ -56,7 +56,7 @@ function MetricChart({ metric, points }: { metric: string; points: DataPoint[] }
 
 function KpiCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <div style={{
+    <div className="data-kpi-card" style={{
       background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
       padding: '14px 16px', boxShadow: 'var(--shadow-xs)', flex: '1 1 140px', minWidth: '140px',
     }}>
@@ -125,7 +125,7 @@ export default function DataDashboard({ result }: { result: DataSearchResult }) 
 
   if (dataPoints.length === 0) {
     return (
-      <div style={{
+      <div className="data-dashboard-empty" style={{
         background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
         padding: '24px', textAlign: 'center', color: 'var(--muted)', fontFamily: "'DM Sans',sans-serif", fontSize: '13px',
       }}>
@@ -135,15 +135,16 @@ export default function DataDashboard({ result }: { result: DataSearchResult }) 
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'stretch' }}>
+    <div className="data-dashboard" style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+      <div className="data-kpi-row" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'stretch' }}>
         <KpiCard label="Sources Scanned" value={sourceCount} />
         <KpiCard label="Data Points" value={dataPoints.length} />
         <KpiCard label="Entities" value={uniqueEntities} />
         <KpiCard label="Metrics" value={grouped.length} />
         <KpiCard label="Live Market Figures" value={liveCount} />
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="data-export-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button
+            className="data-export-btn data-export-btn--primary"
             onClick={() => exportFile('xlsx')}
             disabled={exporting}
             style={{
@@ -153,6 +154,7 @@ export default function DataDashboard({ result }: { result: DataSearchResult }) 
             }}
           >⬇ Export Excel</button>
           <button
+            className="data-export-btn data-export-btn--secondary"
             onClick={() => exportFile('csv')}
             disabled={exporting}
             style={{
@@ -164,7 +166,7 @@ export default function DataDashboard({ result }: { result: DataSearchResult }) 
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px' }}>
+      <div className="data-metric-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '14px' }}>
         {grouped.map(([metric, points]) => <MetricChart key={metric} metric={metric} points={points} />)}
       </div>
 
@@ -172,7 +174,7 @@ export default function DataDashboard({ result }: { result: DataSearchResult }) 
         background: '#fff', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
         overflow: 'hidden', boxShadow: 'var(--shadow-sm)',
       }}>
-        <div style={{ overflowX: 'auto' }}>
+        <div className="data-table-scroll" style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', fontFamily: "'DM Sans',sans-serif" }}>
             <thead>
               <tr style={{ background: 'var(--surface2)', borderBottom: '1px solid var(--border)' }}>

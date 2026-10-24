@@ -94,7 +94,7 @@ function ArticleReader() {
   return (
     <>
       <MobileMarketBar />
-      <div className="page-grid">
+      <div className="page-grid article-page-grid">
 
       {/* LEFT: Stock Panel */}
       <div className="stock-panel-left">
@@ -102,7 +102,7 @@ function ArticleReader() {
       </div>
 
       {/* CENTER: Article */}
-      <div>
+      <div className="article-page-main">
         {/* Back button */}
         <button
           onClick={handleBackToFeed}
@@ -120,7 +120,7 @@ function ArticleReader() {
           ← Back to Feed
         </button>
 
-        <article style={{
+        <article className="article-reader-card" style={{
           background: '#ffffff',
           border: '1px solid #1a1e28',
           borderRadius: '4px',

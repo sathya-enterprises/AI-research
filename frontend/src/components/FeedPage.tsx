@@ -233,13 +233,13 @@ export default function FeedPage({ category }: { category: Category }) {
   return (
     <>
       <MobileMarketBar />
-      <div className="page-grid">
+      <div className="page-grid feed-page-grid">
 
       {/* ── LEFT ── */}
       <div className="stock-panel-left"><StockPanel stocks={STOCKS} stats={QUICK_STATS} /></div>
 
       {/* ── CENTER ── */}
-      <div>
+      <div className="feed-page-main">
         {/* Section header */}
         <div className="section-header" style={{ marginBottom:'14px' }}>
           <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
@@ -335,7 +335,7 @@ export default function FeedPage({ category }: { category: Category }) {
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'10px', padding:'16px 18px', marginBottom:'4px',
               }}>
                 <div style={{ display:'flex', alignItems:'center', gap:'10px', marginBottom:'8px' }}>
-                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'#0d5c45', animation:'pulse 1.2s infinite' }}/>
+                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'#0d5c45' }}/>
                   <span style={{ fontSize:'12px', fontFamily:"'DM Sans',sans-serif", color:'#0d5c45', fontWeight:700 }}>
                     Fetching from 54 sources…
                   </span>
@@ -368,7 +368,7 @@ export default function FeedPage({ category }: { category: Category }) {
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'8px',
                 padding:'8px 14px', marginBottom:'10px',
               }}>
-                <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:'#0d5c45', animation:'pulse 1.2s infinite' }}/>
+                <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:'#0d5c45' }}/>
                 <span style={{ fontSize:'11px', fontFamily:"'DM Sans',sans-serif", color:'#0d5c45', fontWeight:600 }}>
                   Updating feed… showing latest available while new articles load.
                 </span>
