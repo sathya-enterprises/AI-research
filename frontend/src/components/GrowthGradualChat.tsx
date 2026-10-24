@@ -9,6 +9,62 @@ import { loadPdfJs } from '@/lib/pdfjs-browser';
 import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+/**
+ * Keep appearance state isolated from GrowthGradualChat.
+ * Toggling the theme should only re-render this small control, not the
+ * full chat/report component (which contains a large amount of state and JSX).
+ */
+function AppearanceToggle() {
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+
+  useEffect(() => {
+    // Read the same persisted preference as the root ThemeInitializer so the
+    // control label stays correct even if effect ordering differs.
+    try {
+      const savedTheme = window.localStorage.getItem('gg-theme');
+      const activeTheme = document.documentElement.dataset.theme;
+      setTheme(savedTheme === 'dark' || (savedTheme !== 'light' && activeTheme === 'dark') ? 'dark' : 'light');
+    } catch {
+      setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    const currentTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+
+    // Apply immediately; no network request and no parent-component update.
+    document.documentElement.dataset.theme = nextTheme;
+    setTheme(nextTheme);
+
+    try {
+      window.localStorage.setItem('gg-theme', nextTheme);
+    } catch {
+      // The visual change still works when storage is unavailable.
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="sidebar-appearance-toggle"
+      onClick={toggleTheme}
+      aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+    >
+      <span className="sidebar-appearance-icon" aria-hidden="true">
+        {theme === 'dark' ? (
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></svg>
+        ) : (
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20.5 15.3A8.5 8.5 0 0 1 8.7 3.5 8.5 8.5 0 1 0 20.5 15.3Z"/></svg>
+        )}
+      </span>
+      <span className="sidebar-appearance-copy"><strong>Appearance</strong><small>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</small></span>
+      <span className={`sidebar-theme-switch${theme === 'dark' ? ' is-dark' : ''}`} aria-hidden="true"><span /></span>
+    </button>
+  );
+}
+
 interface Source { title: string; url: string; snippet: string; }
 interface ReportSource { id?: string; title: string; url?: string; publisher?: string; kind?: string; page_fetch_status?: string; evidence_origin?: string; claim_evidence_matched?: boolean; }
 interface ChartDataPoint { label: string; value: number; [key: string]: unknown; }
@@ -1908,7 +1964,6 @@ export default function GrowthGradualChat() {
   const [activeId, setActiveId]           = useState<string | null>(null);
   const [messages, setMessages]           = useState<Message[]>([]);
   const [sidebarOpen, setSidebarOpen]     = useState(true);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [sidebarUserMenuOpen, setSidebarUserMenuOpen] = useState(false);
   const sidebarUserControlRef = useRef<HTMLDivElement | null>(null);
   const { user, signOut } = useAuth();
@@ -1918,17 +1973,6 @@ export default function GrowthGradualChat() {
     if (isMobile) setSidebarOpen(false);
     else setSidebarOpen(true);
   }, [isMobile]);
-
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem('gg-theme');
-      const nextTheme = saved === 'dark' ? 'dark' : 'light';
-      setTheme(nextTheme);
-      document.documentElement.dataset.theme = nextTheme;
-    } catch {
-      document.documentElement.dataset.theme = 'light';
-    }
-  }, []);
 
   useEffect(() => {
     if (!sidebarUserMenuOpen) return;
@@ -1947,13 +1991,6 @@ export default function GrowthGradualChat() {
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [sidebarUserMenuOpen]);
-
-  const toggleAppTheme = () => {
-    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(nextTheme);
-    document.documentElement.dataset.theme = nextTheme;
-    try { window.localStorage.setItem('gg-theme', nextTheme); } catch { /* storage may be disabled */ }
-  };
 
   // Welcome mode: null = home, 'chat' = ask anything, 'attach' = file mode, 'news' = market news
 
@@ -6020,23 +6057,7 @@ export default function GrowthGradualChat() {
           </div>
 
           <div className="sidebar-footer">
-            <button
-              type="button"
-              className="sidebar-appearance-toggle"
-              onClick={toggleAppTheme}
-              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-            >
-              <span className="sidebar-appearance-icon" aria-hidden="true">
-                {theme === 'dark' ? (
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></svg>
-                ) : (
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20.5 15.3A8.5 8.5 0 0 1 8.7 3.5 8.5 8.5 0 1 0 20.5 15.3Z"/></svg>
-                )}
-              </span>
-              <span className="sidebar-appearance-copy"><strong>Appearance</strong><small>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</small></span>
-              <span className={`sidebar-theme-switch${theme === 'dark' ? ' is-dark' : ''}`} aria-hidden="true"><span /></span>
-            </button>
+            <AppearanceToggle />
 
             <div className="sidebar-account-wrap" ref={sidebarUserControlRef}>
               <button
