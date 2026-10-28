@@ -1,5 +1,6 @@
 """Paperly RAG Service v2 — FastAPI app."""
 
+import asyncio
 import os, logging, time
 from pathlib import Path
 import uvicorn
@@ -7,9 +8,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 
-load_dotenv(Path(__file__).resolve().with_name(".env"), override=False)
+_service_env = Path(__file__).resolve().with_name(".env")
+load_dotenv(_service_env, override=False)
+# Also load backend/.env for local setups where API and RAG settings are kept there.
+# Fill only unset/blank values so non-empty service-specific/process values win.
+_parent_env = Path(__file__).resolve().parents[1] / ".env"
+for _key, _value in dotenv_values(_parent_env).items():
+    if _value is not None and not os.environ.get(_key):
+        os.environ[_key] = _value
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [RAG] %(levelname)s %(message)s", datefmt="%H:%M:%S")
 # httpx/httpcore INFO logs include complete Storage object paths. Keep provider
@@ -23,6 +31,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 from rag_engine import RAGEngine
 import okf_store
+import pgvector_store
 engine = RAGEngine()
 
 
@@ -65,20 +74,24 @@ async def ping():
         "model": engine.model_name,
         "embedding_dimension": engine._dim,
         "reranker_loaded": engine._reranker is not None,
+        "vector_store": "supabase_pgvector",
     }
 
 @app.get("/health")
 @app.head("/health")
 async def health():
     sessions = engine.list_sessions()
+    vector_storage = pgvector_store.health_check()
+    ready = engine._model is not None and bool(vector_storage.get("ready"))
     return {
         "service": "rag-service",
-        "status": "ok" if engine._model is not None else "degraded",
-        "ready": engine._model is not None,
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
         "port": int(os.getenv("RAG_PORT", 7860)),
         "model": engine.model_name,
         "embedding_dimension": engine._dim,
-        "index_type": "FAISS IndexFlatIP (in-memory; restored from OKF on demand)",
+        "index_type": "Supabase Postgres pgvector (persistent; no local vector index)",
+        "vector_storage": vector_storage,
         "reranker": {
             "enabled": engine._reranker is not None,
             "model": os.getenv("HF_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2") if engine._reranker is not None else None,
@@ -120,7 +133,8 @@ async def query(req: QueryReq):
             top_k = min(30, engine.get_session_info(req.session_id).get("chunk_count", 30))
             min_score = 0.0
 
-        result = engine.retrieve(
+        result = await asyncio.to_thread(
+            engine.retrieve,
             session_id=req.session_id,
             question=req.question,
             top_k=top_k,
@@ -149,7 +163,8 @@ async def generate_report(req: ReportReq):
     t0 = time.time()
     try:
         restore_status = await engine.ensure_session_loaded(req.session_id)
-        result = engine.retrieve_for_report(
+        result = await asyncio.to_thread(
+            engine.retrieve_for_report,
             session_id=req.session_id,
             report_spec=req.report_spec,
             report_type=req.report_type,
@@ -174,7 +189,7 @@ async def generate_report(req: ReportReq):
 @app.delete("/session/{session_id}")
 async def delete_session(session_id: str):
     await engine.delete_session(session_id)
-    return {"success": True, "session_id": session_id}
+    return {"success": True, "session_id": session_id, "vector_store": "supabase_pgvector"}
 
 
 @app.get("/session/{session_id}/info")

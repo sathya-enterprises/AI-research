@@ -69,24 +69,35 @@ test('editorial restraint pass keeps short user messages compact and removes dec
 });
 
 
-test('chat route hides the duplicate global header while preserving sidebar account and theme controls', () => {
+test('chat route hides the duplicate global header, temporarily removes theme toggle, and preserves account controls', () => {
   const navbar = read('src/components/Navbar.tsx');
   const chat = read('src/components/GrowthGradualChat.tsx');
   const globals = read('src/app/globals.css');
   assert.match(navbar, /pathname === '\/' \? 'gg-global-navbar gg-global-navbar--chat'/);
   assert.match(globals, /\.gg-global-navbar--chat\s*\{\s*display:\s*none\s*!important;/);
-  assert.match(chat, /className="sidebar-appearance-toggle"/);
+  assert.doesNotMatch(chat, /<AppearanceToggle\s*\/\s*>/);
   assert.match(chat, /className="sidebar-user-button"/);
   assert.match(chat, /await signOut\(\)/);
 });
 
-test('light/dark preference persists and provides dark tokens for chat and shared pages', () => {
+test('theme initializer can restore a saved theme while the sidebar toggle is temporarily hidden', () => {
   const chat = read('src/components/GrowthGradualChat.tsx');
   const init = read('src/components/ThemeInitializer.tsx');
   const globals = read('src/app/globals.css');
-  assert.match(chat, /localStorage\.setItem\('gg-theme', nextTheme\)/);
-  assert.match(chat, /document\.documentElement\.dataset\.theme = nextTheme/);
+  assert.doesNotMatch(chat, /function AppearanceToggle\s*\(/);
+  assert.doesNotMatch(chat, /<AppearanceToggle\s*\/\s*>/);
   assert.match(init, /localStorage\.getItem\('gg-theme'\)/);
+  assert.match(init, /document\.documentElement\.dataset\.theme = theme/);
   assert.match(globals, /html\[data-theme="dark"\]\s*\{/);
   assert.match(chat, /html\[data-theme="dark"\] \.chat-shell\.gg-premium\.gg-full/);
+});
+
+test('chat provides a floating down-arrow to return to the latest message', () => {
+  const chat = read('src/components/GrowthGradualChat.tsx');
+  assert.match(chat, /const \[showScrollToBottom, setShowScrollToBottom\] = useState\(false\)/);
+  assert.match(chat, /const awayFromBottom = distanceFromBottom >= 140/);
+  assert.match(chat, /showScrollToBottomRef\.current !== awayFromBottom/);
+  assert.match(chat, /className="chat-scroll-bottom"/);
+  assert.match(chat, /aria-label="Go to the latest message"/);
+  assert.match(chat, /container\.scrollTo\(\{ top: container\.scrollHeight, behavior: 'smooth' \}\)/);
 });

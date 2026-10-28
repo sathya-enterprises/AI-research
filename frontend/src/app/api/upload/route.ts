@@ -4,7 +4,7 @@
  * Forwards multipart file uploads to the Paperly API gateway, which:
  *   1. Stores the file in Supabase via file-service (Render)
  *   2. Extracts text / OCRs pages via extraction-service (Render + Gemini Vision)
- *   3. Chunks + embeds into FAISS via rag-service (HuggingFace Space)
+ *   3. Chunks + embeds into Supabase pgvector via rag-service (HuggingFace Space)
  *
  * Client sends:   POST /api/upload  multipart: files[], sessionId
  * Gateway URL:    PAPERLY_GATEWAY_URL/api/files/upload/:sessionId

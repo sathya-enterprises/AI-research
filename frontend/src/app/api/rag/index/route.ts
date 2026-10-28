@@ -1,38 +1,40 @@
-import { getBackendBaseUrl } from '@/lib/backend-url';
 import { NextRequest, NextResponse } from 'next/server';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // 5 min — covers HF cold start (up to 90s) + indexing
+// Local SentenceTransformer startup and hosted RAG cold starts can be slow.
+export const maxDuration = 300;
 
-const BACKEND = getBackendBaseUrl();
-// Same default as the backend (utils/rag_client.py) so attachments are indexed into the
-// rag-service the backend reads from. Set RAG_SERVICE_URL to your deployed rag-service in production.
-const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'http://127.0.0.1:7860').replace(/\/$/, '');
+// Index directly into the same RAG service that the backend uses for retrieval.
+// This removes a redundant frontend -> backend -> RAG hop and avoids a misleading
+// generic 502 when BACKEND_URL points at a different local backend port.
+const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'http://127.0.0.1:7860').trim().replace(/\/$/, '');
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-
-    // Fire ping and index in PARALLEL — don't wait for ping before indexing.
-    // The ping wakes the HF Space; the index call will also wake it naturally.
-    // If the space is cold both will wait ~60-90s for the cold start together,
-    // rather than ping waiting 90s first THEN index waiting another 120s.
-    const pingPromise = fetch(`${RAG_URL}/ping`, {
-      signal: AbortSignal.timeout(120_000),
-    }).catch(() => null); // non-fatal — just for warming
-
-    const indexPromise = fetch(`${BACKEND}/api/rag/index`, {
+    const response = await fetch(`${RAG_URL}/index`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(270_000), // 4.5 min — generous for cold HF Space
+      signal: AbortSignal.timeout(270_000),
+      cache: 'no-store',
     });
 
-    // We only need the index result; let ping finish in background
-    const [res] = await Promise.all([indexPromise, pingPromise]);
-    const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
+    const payload = await response.json().catch(() => ({
+      error: `RAG service returned a non-JSON response (HTTP ${response.status}).`,
+      chunks_added: 0,
+    }));
+    return NextResponse.json(payload, { status: response.status });
   } catch (err) {
-    return NextResponse.json({ error: 'RAG index proxy failed', chunks_added: 0 }, { status: 502 });
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : 'Unknown network error';
+    // Server-side diagnostics retain the real exception; the browser receives
+    // an actionable message without environment values or credentials.
+    console.error('[api/rag/index] RAG service request failed:', detail);
+    return NextResponse.json({
+      error: 'Could not reach the RAG service. Check that backend/rag-service is running and that RAG_SERVICE_URL points to it.',
+      code: 'RAG_SERVICE_UNREACHABLE',
+      chunks_added: 0,
+    }, { status: 502 });
   }
 }

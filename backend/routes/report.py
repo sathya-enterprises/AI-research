@@ -64,6 +64,10 @@ from utils.report_integrity import (
 )
 from utils.evidence_dataset import build_evidence_dataset, extract_requested_entities, EntityResolver, entity_key as _evidence_entity_key
 from utils.chart_gallery import blend_gallery_into_report, build_chart_gallery, gallery_markdown, gallery_types_for
+from utils.uploaded_workbook_analytics import (
+    is_file_only_workbook_report, build_pms_workbook_analytics,
+    assign_workbook_source, workbook_charts_section,
+)
 import contextvars as _contextvars
 
 # Exact source lines behind every evidence-gallery chart point, keyed by S#.
@@ -2399,6 +2403,26 @@ def _strip_citation_markers(text: str) -> str:
     # text through.
     text = re.sub(r"(?<=\S)\s--\s(?=\S)", " — ", text)
     return text
+
+
+def _clean_inline_source_markers_for_display(text: str) -> str:
+    """Remove internal source tokens from prose while preserving the source appendix.
+
+    This is deliberately applied only at the public-output boundary, after the
+    evidence and publication audits have consumed the original source markers.
+    The canonical source manifest remains available to the renderer as a source list.
+    """
+    if not text:
+        return text
+    text = re.sub(r"(?i)\s*\[File:\s*[^\]]+\]", "", text)
+    text = re.sub(r"(?i)\s*\[(?:S|SRC)\d+\]", "", text)
+    text = re.sub(r"(?im)^\s*(?:workbook\s+source|source)\s*:\s*\.?\s*$", "", text)
+    text = re.sub(r"(?i)\b(?:workbook\s+source|source)\s*:\s*\.?", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+([,.;:])", r"\1", text)
+    text = re.sub(r"(?m)^\s*[•*-]?\s*$", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 _TITLE_PREAMBLE_RE = re.compile(
@@ -5850,8 +5874,8 @@ _REPORT_FALLBACK_SYSTEM = (
     "Write a complete source-grounded report using the supplied dynamic plan. Never invent facts, figures, "
     "citations or URLs. Use exact [S#] source IDs. Do not create a duplicate Sources/Data Sources list; "
     "the renderer owns the source appendix. Use useful analytical markdown and evidence-backed tables/charts. "
-    "The selected report tier controls research breadth, analytical depth, and a rendered page band measured by the final PDF renderer. "
-    "Treat the page band as an editorial objective, never as permission to pad, duplicate analysis, or invent facts. "
+    "The selected report tier controls research breadth and analytical depth. Do not target a page, word, character, section, statistic, table, or visualization count. "
+    "For workbook-only reports, evidence availability—not a fixed page band—determines appropriate length. Never pad, duplicate analysis, or invent facts to increase length. "
     "Choose section names, order, and optional components from the question and available evidence; do not impose "
     "a fixed outline. For deeper tiers, investigate additional relevant dimensions, comparisons, assumptions, "
     "counterarguments, risks, scenarios and evidence gaps only where the query and sources warrant them. "
@@ -9748,7 +9772,36 @@ def _action_requests_chart_addition(instruction: str, visual_alternative: bool |
     if visual_alternative is True or _action_requests_visual_alternative(instruction):
         return False
     clean_instruction = _strip_negated_visual_operations(instruction)
-    return bool(re.search(r"\b(?:add|insert|create|include|append)\b.{0,50}\b(?:chart|graph|plot|visualization)\b", clean_instruction, re.I))
+    return bool(re.search(r"\b(?:add|insert|create|include|append)\b.{0,70}\b(?:charts?|graphs?|plots?|visuali[sz]ations?)\b", clean_instruction, re.I))
+
+
+def _action_requested_chart_count(instruction: str, visual_alternative: bool | None = None) -> int:
+    """Return the number of new charts requested, capped to keep Actions bounded.
+
+    Singular wording produces one chart. A plural/vague request such as
+    "add some charts" produces two distinct charts by default, while explicit
+    numeric/word counts are respected up to four.
+    """
+    if not _action_requests_chart_addition(instruction, visual_alternative):
+        return 0
+    clean = re.sub(r"(?im)^\s*target\s+sections?\s*:.*(?:\n|$)", " ", str(instruction or ""))
+    count_words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "four": 4}
+    match = re.search(
+        r"\b(\d+|one|a|an|two|three|four)\s+(?:additional\s+)?(?:charts?|graphs?|plots?|visuali[sz]ations?)\b",
+        clean, re.I,
+    )
+    if match:
+        token = match.group(1).casefold()
+        try:
+            count = int(token)
+        except ValueError:
+            count = count_words.get(token, 1)
+        return max(1, min(4, count))
+    # Unspecified plural intent ("some charts", "add charts") should not be
+    # silently reduced to just one visual.
+    if re.search(r"\b(?:charts|graphs|plots|visuali[sz]ations)\b", clean, re.I):
+        return 2
+    return 1
 
 
 def _action_requests_chart_operation(instruction: str) -> bool:
@@ -10858,7 +10911,12 @@ def _action_edit_validation(original: str, edited: str, instruction: str, eviden
             if original_blocks and not edited_blocks:
                 problems.append("existing table was removed without a replacement")
 
-    if not _action_has_material_change(original, edited):
+    if not _action_has_material_change(original, edited) and not _action_is_chart_only_addition(instruction):
+        # A chart is added to the chart registry later in the Action pipeline,
+        # after this prose-preservation gate. For a chart-only request, an
+        # unchanged section body is valid: the new [CHART_n] marker is attached
+        # only after a supported chart specification has been created. All
+        # citation, URL, entity, numeric and placeholder checks above still run.
         problems.append("edit produced no material change")
 
     return (not problems, problems)
@@ -11295,6 +11353,44 @@ def _action_requests_table(instruction: str) -> bool:
 def _action_has_material_change(original: str, edited: str) -> bool:
     norm = lambda x: re.sub(r"[^a-z0-9%$₹€£]+", " ", (x or "").casefold()).strip()
     return norm(original) != norm(edited)
+
+
+def _action_is_chart_only_addition(instruction: str) -> bool:
+    """Whether a chart can be the sole material result of this Action.
+
+    New chart objects are created after section-text validation. Permit the
+    text to remain unchanged only when the user's requested operation is just
+    adding a chart (including its data points), not when the same request also
+    asks for prose, table, image, citation, or other edits.
+    """
+    raw = str(instruction or "")
+    if not _action_requests_chart_addition(raw):
+        return False
+
+    clean = re.sub(r"(?im)^\s*target\s+sections?\s*:.*(?:\n|$)", " ", raw)
+    clean = re.sub(r"(?im)^\s*instruction\s*:\s*", " ", clean)
+    # Remove the actual chart-add operation and its directly associated data
+    # points. Any separate edit request remains for the check below.
+    clean = re.sub(
+        r"\b(?:add|insert|create|include|append)\b[^.!?;\n]{0,100}"
+        r"\b(?:charts?|graphs?|plots?|visuali[sz]ations?)\b"
+        r"(?:[^.!?;\n]{0,45}\bdata\s+points?\b)?",
+        " ", clean, flags=re.I,
+    )
+    # Accept common chart-only wording variants without making 'data points'
+    # itself count as a second operation.
+    clean = re.sub(r"\b(?:and|with|using|based\s+on|from)\s+(?:some\s+)?(?:supported\s+|existing\s+)?data\s+points?\b", " ", clean, flags=re.I)
+    # Detect separate prose/structure operations that must still create a text
+    # change. Negative preservation language is not a positive operation.
+    clean = re.sub(r"(?im)^.*\b(?:do\s+not|don't|dont|leave|keep|preserve|retain)\b.*$", " ", clean)
+    other_operation = re.search(
+        r"\b(?:rewrite|rephrase|expand|shorten|condense|summari[sz]e|improve|revise|edit|"
+        r"correct|repair|refresh|replace|remove|delete|modify|change|reorganize|restructure|"
+        r"simplify|clarify|update|add|insert|include|append|create|generate|build|make|"
+        r"produce|draft|construct|convert|format|reformat|populate|tabulate)\b",
+        clean, re.I,
+    )
+    return other_operation is None
 
 
 def _best_matching_section(instruction: str, sections: list[dict]) -> tuple[int, float]:
@@ -18354,6 +18450,7 @@ async def _edit_report_section_single_body(body: dict):
         )[:30000]
 
     newly_added_chart_index: int | None = None
+    newly_added_chart_indices: list[int] = []
     chart_updated = False
     image_updated = False
     chart_removed = False
@@ -18924,11 +19021,20 @@ async def _edit_report_section_single_body(body: dict):
             "The point band is a target only when source resolution and chart semantics support it. If insufficient distinct evidence exists, "
             "return exactly {\"error\": \"insufficient data\"}; do not pad with fake values."
         )
-        new_chart_user_prompt = f"SECTION TEXT:\n{new_section_text}\n\nINSTRUCTION:\n{instruction}"
+        new_chart_user_prompt = (
+            f"SECTION TEXT:\n{new_section_text}\n\n"
+            f"INSTRUCTION:\n{instruction}\n\n"
+            "REPORT-WIDE SUPPORTED EVIDENCE CONTEXT (use only when directly relevant to this section):\n"
+            f"{action_context}\n\n"
+            "Build the chart for the selected section. You may use report-wide evidence above when it directly supports "
+            "the section's analysis, but do not import unrelated metrics, invent values, or infer missing observations. "
+            "Keep the chart title and takeaway aligned to the selected section."
+        )
         new_chart = await _call_llm_json(new_chart_system_prompt, new_chart_user_prompt)
         if new_chart and "error" not in new_chart and _validate_chart_spec(new_chart):
             charts.append(new_chart)
             newly_added_chart_index = len(charts)
+            newly_added_chart_indices.append(newly_added_chart_index)
             chart_updated = True
 
     # Explicitly asking to add a chart means add a new visual, even when this
@@ -18959,7 +19065,75 @@ async def _edit_report_section_single_body(body: dict):
         if additional_chart and "error" not in additional_chart and _validate_chart_spec(additional_chart):
             charts.append(additional_chart)
             newly_added_chart_index = len(charts)
+            newly_added_chart_indices.append(newly_added_chart_index)
             chart_updated = True
+
+    # Plural chart requests produce multiple distinct visuals where supported.
+    # The first chart is built above using the section and its evidence context;
+    # each extra pass is asked for a different analytic angle and cannot reuse
+    # an earlier chart's data object as a duplicate.
+    requested_new_chart_count = _action_requested_chart_count(instruction, visual_alternative_requested)
+    while len(newly_added_chart_indices) < requested_new_chart_count:
+        action_tier = str(body.get("reportTier") or body.get("depth") or body.get("reportDepth") or "detailed").strip().lower()
+        extra_chart_system_prompt = (
+            "Build ONE ADDITIONAL and DISTINCT evidence-grounded chart for the selected report section. "
+            "Do not duplicate the chart type, title, series, or analytic comparison of the charts already supplied. "
+            "Choose a complementary analytical angle and a suitable supported chart type from: pie, bar, line, area, "
+            "scatter, bubble, doughnut, histogram, boxplot, waterfall, funnel, radar, polar_area, treemap, heatmap, "
+            "stacked_bar, grouped_bar, horizontal_bar, stacked_area, step_line, spline, combo, candlestick, ohlc, "
+            "gauge, bullet, pictogram, pareto, dot_plot, lollipop, violin, density, ridgeline, gantt, timeline, "
+            "marimekko, sunburst, sankey, chord, network, tree, flowchart, venn, funnel_pyramid, population_pyramid, "
+            "progress, kpi, sparkline, error_bar, control_chart and arrow. Use only numbers and relationships directly "
+            "supported by the selected section or relevant evidence context; never invent, estimate, interpolate or pad. "
+            "For scalar-series charts return {\"type\": string, \"title\": string, \"unit\": string, \"xLabel\": string, \"yLabel\": string, "
+            "\"series\": [{\"name\": string, \"data\": [{\"label\": string, \"value\": number}, ...]}], "
+            "\"rationale\": string, \"takeaway\": string}. Use the native schema for special chart types. "
+            + chart_density_contract(action_tier) + "\n"
+            "If no distinct, well-supported chart remains, return exactly {\"error\": \"insufficient data\"}."
+        )
+        existing_new_chart_summaries = json.dumps(
+            [
+                {
+                    "type": charts[index - 1].get("type"),
+                    "title": charts[index - 1].get("title"),
+                    "series": charts[index - 1].get("series"),
+                }
+                for index in newly_added_chart_indices if 0 < index <= len(charts)
+            ],
+            ensure_ascii=False,
+        )
+        extra_chart_user_prompt = (
+            f"SELECTED SECTION TEXT:\n{new_section_text}\n\n"
+            f"INSTRUCTION:\n{instruction}\n\n"
+            f"ALREADY CREATED CHARTS (avoid duplicates):\n{existing_new_chart_summaries}\n\n"
+            "REPORT-WIDE SUPPORTED EVIDENCE CONTEXT (only use directly relevant evidence):\n"
+            f"{action_context}"
+        )
+        extra_chart = await _call_llm_json(extra_chart_system_prompt, extra_chart_user_prompt)
+        if not extra_chart or "error" in extra_chart or not _validate_chart_spec(extra_chart):
+            break
+        charts.append(extra_chart)
+        new_index = len(charts)
+        newly_added_chart_indices.append(new_index)
+        if newly_added_chart_index is None:
+            newly_added_chart_index = new_index
+        chart_updated = True
+
+    if requested_new_chart_count and len(newly_added_chart_indices) < requested_new_chart_count:
+        if requested_new_chart_count == 1:
+            error_message = (
+                "The chart could not be created safely because the section did not contain enough distinct, supported data points or the chart provider failed. The report was left unchanged."
+            )
+        else:
+            error_message = (
+                "The requested charts could not all be created safely because the available evidence did not support enough distinct data views or the chart provider failed. The report was left unchanged."
+            )
+        return JSONResponse({
+            "error": error_message,
+            "editedSection": target["heading"],
+            "preserved": True,
+            "details": [f"Created {len(newly_added_chart_indices)} of {requested_new_chart_count} requested chart(s) with valid specifications."],
+        }, status_code=422)
 
     # Chart operations are part of the Action contract, not best-effort side
     # effects. Never report a successful edit when a requested chart could not
@@ -18991,8 +19165,8 @@ async def _edit_report_section_single_body(body: dict):
     # If we just built a brand-new chart for a section that had none, make
     # sure its placeholder actually appears in the rewritten text — the
     # rewrite LLM call above never knew this chart would exist.
-    if newly_added_chart_index is not None:
-        placeholder = f"[CHART_{newly_added_chart_index}]"
+    for chart_index in newly_added_chart_indices:
+        placeholder = f"[CHART_{chart_index}]"
         if placeholder not in new_section_text:
             new_section_text = new_section_text.rstrip("\n") + f"\n\n{placeholder}\n\n"
 
@@ -19270,6 +19444,48 @@ async def generate_report(request: Request):
     embedded_file_images: list[dict] = body.get("embeddedFileImages", [])
     session_id: str     = body.get("sessionId", "").strip()
     has_rag: bool       = bool(body.get("hasRag", False))
+    # Parse structured PMS workbook tables deterministically. This is used only
+    # for uploaded-file reports; it never substitutes external financial data.
+    try:
+        workbook_analytics = build_pms_workbook_analytics(file_context) if "[Sheet:" in str(file_context or "") else {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
+    except Exception as _workbook_analytics_exc:
+        workbook_analytics = {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
+        log.warning("Workbook analytics preflight failed safely: %s", type(_workbook_analytics_exc).__name__)
+    file_only_report = is_file_only_workbook_report(
+        question, file_context, source_documents, has_rag=has_rag,
+    )
+    if file_only_report:
+        # A workbook-only instruction must not silently reuse prior web sources,
+        # market/news KB entries, or unrelated external image candidates.
+        if sources:
+            log.info("Workbook-only report: ignoring %d pre-attached external source(s)", len(sources))
+        sources = []
+        if workbook_analytics.get("kind") == "pms_strategy_performance":
+            by_name = {str(x.get("filename") or "").casefold(): x for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)}
+            evidence_by_file = workbook_analytics.get("evidenceByFile") or {}
+            for filename, file_info in by_name.items():
+                original_name = str(file_info.get("filename") or filename)
+                excerpt = str(evidence_by_file.get(filename) or evidence_by_file.get(original_name) or "")[:16000]
+                match = next((d for d in source_documents if str(d.get("name") or d.get("title") or "").casefold() == filename), None)
+                if match is None:
+                    match = {"name": original_name, "title": original_name, "kind": "Uploaded document", "sourceType": "Uploaded document"}
+                    source_documents.append(match)
+                if excerpt:
+                    match.update({
+                        "chartEvidenceExcerpt": excerpt,
+                        "evidenceOrigin": "uploaded_workbook",
+                        "evidence_origin": "uploaded_workbook",
+                        "pageFetchStatus": "not_applicable",
+                        "page_fetch_status": "not_applicable",
+                        "evidenceAvailable": True,
+                        "evidence_available": True,
+                        "sourceType": "Uploaded workbook",
+                    })
+            log.info("Workbook-only report mode enabled; PMS strategies=%d deterministic_charts=%d files=%d",
+                     len(workbook_analytics.get("strategies") or []), len(workbook_analytics.get("charts") or []),
+                     len(workbook_analytics.get("files") or []))
+        else:
+            log.info("Workbook-only report mode enabled; external research disabled")
     rag_status: dict = {"requested": has_rag, "status": "not_requested", "retrievedChunks": 0, "sourceCount": 0}
     rag_source_rows: list[dict] = []
     requested_depth = str(body.get("depth") or body.get("reportDepth") or "").strip().lower()
@@ -19532,7 +19748,11 @@ async def generate_report(request: Request):
     # ── Decide source strategy ─────────────────────────────────────────────────
     has_file_data = bool(file_context.strip()) or bool(extracted_image_context.strip()) or bool(rag_source_rows)
 
-    if has_file_data and not sources:
+    if file_only_report and has_file_data:
+        sources = []
+        image_candidates_raw.clear()
+        log.info("Report: workbook-only source strategy — external search and source reuse disabled")
+    elif has_file_data and not sources:
         from routes.chat import (
             exa_search_multi as _exa_search_multi,
             _looks_like_ai_overview, needs_web_search as _needs_web_search,
@@ -19611,9 +19831,9 @@ async def generate_report(request: Request):
         # Do not inject stored web research into a pure file-only report. When
         # outside/current context is requested, the file-first branch already
         # populated `sources`, so reuse remains allowed.
-        _allow_stored_library = (not has_file_data) or bool(sources)
+        _allow_stored_library = (not file_only_report) and ((not has_file_data) or bool(sources))
         if not _allow_stored_library:
-            raise RuntimeError("file-only request; stored web research not applicable")
+            raise RuntimeError("workbook-only request; stored web research not applicable")
         # Search-result persistence runs asynchronously. Looking up the same
         # library immediately after a broad fresh search can contend with those
         # writes and add many seconds while returning duplicate material. Skip
@@ -19658,7 +19878,10 @@ async def generate_report(request: Request):
                 if _stored_added:
                     log.info("Report: reused %d stored web source(s) for topic=%r", _stored_added, _stored_query[:80])
     except Exception as exc:
-        log.warning("Report: stored web research lookup unavailable: %s: %s", type(exc).__name__, str(exc)[:140])
+        if file_only_report:
+            log.info("Report: skipped stored web research for workbook-only request")
+        else:
+            log.warning("Report: stored web research lookup unavailable: %s: %s", type(exc).__name__, str(exc)[:140])
 
     # Scraped market-news knowledge base: full articles that readers opened in
     # the feed (ET, Business Standard, Mint, Moneycontrol, ...) are stored with
@@ -19791,10 +20014,10 @@ async def generate_report(request: Request):
     # EV question mentioning "market share" (or "India Electric Mobility
     # Index") received Nifty/Sensex quotes that took 2 of the 10 Brief
     # enrichment slots and confused the writer.
-    _is_index_question = bool(_INDEX_QUESTION_RE.search(question)) or bool(
+    _is_index_question = (not file_only_report) and (bool(_INDEX_QUESTION_RE.search(question)) or bool(
         "market_data" in intent.evidence_needed
         and re.search(r"\b(?:stock|equity|share)\s+(?:market|index|indices)\b", question, re.IGNORECASE)
-    )
+    ))
     if _is_index_question:
         try:
             quotes = await fetch_index_quotes()
@@ -19869,7 +20092,7 @@ async def generate_report(request: Request):
     # capitalized company-like phrase, regardless of keyword match. This is
     # safe — a candidate that isn't a real company simply fails to resolve
     # in screener_kb / Yahoo lookup and is silently dropped, same as today.
-    _early_company_candidates = _extract_company_candidates(question, intent=intent)
+    _early_company_candidates = [] if file_only_report else _extract_company_candidates(question, intent=intent)
     _gallery_ohlc_series: list[dict] = []
     # Named companies plus either stock language or a request for reported
     # financial metrics (profit, assets, NPAs, deposits…) — the Screener.in KB
@@ -19972,7 +20195,7 @@ async def generate_report(request: Request):
     # Prioritize sources that actually mention the named entities/topics in the
     # request. This does not delete provenance; it only determines which results
     # are enriched and shown first to the report writer.
-    _company_names_for_ranking = _extract_company_candidates(question, intent=intent)
+    _company_names_for_ranking = [] if file_only_report else _extract_company_candidates(question, intent=intent)
     if _company_names_for_ranking:
         q_tokens = {t for t in re.findall(r"[a-z0-9&]+", question.lower()) if len(t) >= 4}
         scored_sources = []
@@ -20173,24 +20396,27 @@ async def generate_report(request: Request):
         "sources": enriched,
     })
 
-    # Persist the richer, actually-fetched page text as well as the raw search
-    # result. This means a later report/action can reuse the same evidence
-    # without losing the deeper page content collected during this run.
-    try:
-        from utils.research_store import persist_web_search_results
-        _persist_rows = [x for x in enriched if isinstance(x, dict) and str(x.get("url") or "").strip()]
-        if _persist_rows:
-            async def _persist_enriched_web_research():
-                try:
-                    await asyncio.to_thread(
-                        persist_web_search_results, question, _persist_rows,
-                        provider="report-enrichment",
-                    )
-                except Exception as _persist_exc:
-                    log.warning("Report: enriched web research persistence skipped: %s", type(_persist_exc).__name__)
-            asyncio.create_task(_persist_enriched_web_research())
-    except Exception as _persist_import_exc:
-        log.debug("Report: web research persistence helper unavailable: %s", type(_persist_import_exc).__name__)
+    # Persist enriched publisher research only for reports that actually requested
+    # external evidence. A workbook-only report must not repopulate a legacy web
+    # source library after the user has deliberately cleared it for storage.
+    if file_only_report:
+        log.info("Workbook-only report: skipped external web-source persistence")
+    else:
+        try:
+            from utils.research_store import persist_web_search_results
+            _persist_rows = [x for x in enriched if isinstance(x, dict) and str(x.get("url") or "").strip()]
+            if _persist_rows:
+                async def _persist_enriched_web_research():
+                    try:
+                        await asyncio.to_thread(
+                            persist_web_search_results, question, _persist_rows,
+                            provider="report-enrichment",
+                        )
+                    except Exception as _persist_exc:
+                        log.warning("Report: enriched web research persistence skipped: %s", type(_persist_exc).__name__)
+                asyncio.create_task(_persist_enriched_web_research())
+        except Exception as _persist_import_exc:
+            log.debug("Report: web research persistence helper unavailable: %s", type(_persist_import_exc).__name__)
 
     # The calculated sector-quarter dataset is not a publisher web page. It is
     # constructed locally AFTER the external web-source enrichment/filtering
@@ -20230,6 +20456,20 @@ async def generate_report(request: Request):
     # source IDs. The same canonical manifest is then used by charts, audit,
     # Show Report and PDF export.
     source_manifest = build_source_registry(enriched, source_documents)
+    workbook_source_id = ""
+    if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance":
+        workbook_names = [str(x.get("filename") or "").strip() for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)]
+        _name_keys = {x.casefold() for x in workbook_names if x}
+        _workbook_source = next((item for item in source_manifest if isinstance(item, dict)
+                                 and str(item.get("title") or "").strip().casefold() in _name_keys), None)
+        if _workbook_source:
+            workbook_source_id = str(_workbook_source.get("id") or "").upper()
+            _workbook_excerpt = str(_workbook_source.get("chartEvidenceExcerpt") or "")
+            if workbook_source_id and _workbook_excerpt:
+                log.info("Workbook analytics source resolved: id=%s title=%r excerpt_chars=%d",
+                         workbook_source_id, _workbook_source.get("title"), len(_workbook_excerpt))
+        if not workbook_source_id:
+            log.warning("Workbook analytics has no canonical source ID; deterministic charts will not be published")
     if rag_source_rows:
         rag_identities = {source_identity_key(row) for row in rag_source_rows}
         rag_status["sourceIds"] = [
@@ -20454,10 +20694,10 @@ async def generate_report(request: Request):
     # with YAML frontmatter) were written to Supabase Storage under
     # paperly-okf/<session_id>/. Fetching them here gives the report LLM a
     # structured, typed view of each source document — much cleaner than the
-    # raw chunked text that comes back from FAISS retrieval, which improves
+    # raw chunked text that comes back from pgvector retrieval, which improves
     # title accuracy, section attribution, and factual grounding.
     okf_context = ""
-    if session_id and has_file_data:
+    if session_id and has_file_data and not file_only_report:
         try:
             # [File: name] markers in file_context come from files actually
             # attached THIS turn (see buildFilePayload on the frontend) — use
@@ -20549,7 +20789,7 @@ async def generate_report(request: Request):
         any(name in str(c.get("sourceUrl") or "").casefold() for name in _EDITORIAL_IMAGE_DOMAINS)
         for c in _existing_image_candidates
     )
-    if (not no_web_sources and not _has_editorial_image
+    if (not file_only_report and not no_web_sources and not _has_editorial_image
             and os.getenv("REPORT_IMAGE_SUPPLEMENT", "1").strip().casefold() not in {"0", "false", "off", "no"}):
         _image_query = _image_search_query(question, intent)
         if _image_query:
@@ -20654,15 +20894,27 @@ async def generate_report(request: Request):
             "research product rather than a padded summary."
         ),
     }.get(report_tier, "")
-    tier_execution = (
-        f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
-        f"RENDERED PAGE BAND: {tier_spec.page_target.minimum}–{tier_spec.page_target.maximum} pages; preferred target {tier_spec.page_target.target}. Aim for the preferred target using unique source-backed analysis and final-renderer pagination checks; never pad or invent evidence. If available evidence is insufficient, state the limitation.\n"
-        f"Research breadth: {tier_spec.research_breadth}; evidence intensity: {tier_spec.evidence_intensity}.\n"
-        + chart_density_contract(report_tier) + "\n"
-        f"Depth instruction: {_depth_instructions} "
-        "The exact section names, order, KPI use and visual mix remain driven by THIS request and THIS evidence. "
-        "If a requested dimension cannot be supported by the available sources, identify the evidence gap instead of fabricating it. "
-    )
+    if file_only_report:
+        tier_execution = (
+            f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
+            "WORKBOOK-ONLY MODE: use the uploaded workbook as the sole factual source. Do not search the web, reuse stored web sources, "
+            "guess company identities from the prompt, or add unrelated stock/news imagery. Calculate numerical comparisons from parsed workbook "
+            "values; preserve units, periods and missing markers. Cite the workbook and worksheet for material findings. Use evidence-driven length; "
+            "do not run repeated expansion passes or pad to a page target.\n"
+            + chart_density_contract(report_tier) + "\n"
+            f"Depth instruction: {_depth_instructions} "
+            "Select only analyses supported by the workbook; state data gaps explicitly."
+        )
+    else:
+        tier_execution = (
+            f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
+            f"RENDERED PAGE BAND: {tier_spec.page_target.minimum}–{tier_spec.page_target.maximum} pages; preferred target {tier_spec.page_target.target}. Aim for the preferred target using unique source-backed analysis and final-renderer pagination checks; never pad or invent evidence. If available evidence is insufficient, state the limitation.\n"
+            f"Research breadth: {tier_spec.research_breadth}; evidence intensity: {tier_spec.evidence_intensity}.\n"
+            + chart_density_contract(report_tier) + "\n"
+            f"Depth instruction: {_depth_instructions} "
+            "The exact section names, order, KPI use and visual mix remain driven by THIS request and THIS evidence. "
+            "If a requested dimension cannot be supported by the available sources, identify the evidence gap instead of fabricating it. "
+        )
 
     user_prompt = (
         f"Today's date is {today}. Resolve \"latest\", \"current\", \"this quarter/year\", "
@@ -20682,16 +20934,20 @@ async def generate_report(request: Request):
         + conversation_section
         + (img_placement_instruction if img_placement_instruction else "")
         + (
-            f"\n\nSupplementary web sources ({len(enriched)} results):\n\n{src_text}\n\n"
-            if not no_web_sources else
-            "\n\nNO WEB SOURCES: A web search for this topic returned nothing usable — this is "
-            "expected for a personal/advisory question rather than a news or market-data query. "
-            "Write the report entirely from your own financial/business knowledge and reasoning. "
-            "Do NOT invent citations, publication names, statistics, or URLs you were not actually "
-            "given — attribute nothing to a 'source' that doesn't exist here. Where a number is a "
-            "reasonable estimate or industry rule-of-thumb rather than a verified figure, say so "
-            "explicitly (e.g. 'typically', 'a common benchmark is', 'as a rough estimate'). Omit any "
-            "References/Sources/Methodology section entirely, since there are no sources to list.\n\n"
+            "\n\nWORKBOOK-ONLY EVIDENCE: The uploaded workbook is the sole factual source for this request. "
+            "Do not search the web, reuse stored web sources, cite external sources, or supplement with model-memory statistics. "
+            "Use the parsed workbook data and the deterministic workbook comparison charts supplied below; clearly distinguish calculations from raw observations.\n\n"
+            if file_only_report else
+            (f"\n\nSupplementary web sources ({len(enriched)} results):\n\n{src_text}\n\n"
+             if not no_web_sources else
+             "\n\nNO WEB SOURCES: A web search for this topic returned nothing usable — this is "
+             "expected for a personal/advisory question rather than a news or market-data query. "
+             "Write the report entirely from your own financial/business knowledge and reasoning. "
+             "Do NOT invent citations, publication names, statistics, or URLs you were not actually "
+             "given — attribute nothing to a 'source' that doesn't exist here. Where a number is a "
+             "reasonable estimate or industry rule-of-thumb rather than a verified figure, say so "
+             "explicitly (e.g. 'typically', 'a common benchmark is', 'as a rough estimate'). Omit any "
+             "References/Sources/Methodology section entirely, since there are no sources to list.\n\n")
         )
         + image_candidates_block
         + "INSTRUCTIONS:\n"
@@ -20715,26 +20971,37 @@ async def generate_report(request: Request):
         )
         + "9. Respond ONLY with the JSON object — no markdown fences, no text outside JSON."
     )
+    if file_only_report:
+        # Later, more-specific instruction resolves the generic template's web-source wording.
+        user_prompt += (
+            "\n\nFINAL WORKBOOK-ONLY OVERRIDE: Ignore any generic instruction above that mentions web sources, external research, "
+            "company-market APIs, publisher images, or fixed page targets. This request is grounded exclusively in the attached workbook. "
+            "Do not introduce external facts. Provide complete workbook-derived comparisons, include the supplied verified chart data, and stop "
+            "when the supported analysis is complete rather than repeating expansion passes."
+        )
 
     # Additive multi-model evidence analysis: independent tasks run concurrently,
     # but the original evidence blocks and final publication gates remain authoritative.
     _report_progress("parallel_analysis", "Running parallel evidence analysts…", 63)
-    _parallel_analysis_result = {"enabled": True, "findings": [], "gaps": [], "analysts": 0}
-    try:
-        _parallel_analysis_result = await run_parallel_evidence_analysis(
-            question=question, report_tier=report_tier, source_text=src_text,
-            research_engine_context=str(research_engine_block or ""), report_plan=report_plan,
-        )
-        _parallel_analysis_notes = _format_parallel_evidence_notes(_parallel_analysis_result)
-        if _parallel_analysis_notes:
-            _instructions_marker = "INSTRUCTIONS:\n1. The uploaded file content"
-            _marker_at = user_prompt.find(_instructions_marker)
-            if _marker_at >= 0:
-                user_prompt = user_prompt[:_marker_at] + _parallel_analysis_notes + "\n\n" + user_prompt[_marker_at:]
-            else:
-                user_prompt += "\n\n" + _parallel_analysis_notes
-    except Exception as _parallel_exc:
-        log.warning("Parallel evidence analysis failed safely; using the existing writer path: %s", type(_parallel_exc).__name__)
+    _parallel_analysis_result = {"enabled": not file_only_report, "findings": [], "gaps": [], "analysts": 0}
+    if file_only_report:
+        log.info("Workbook-only report: skipped parallel external-evidence analyst stage")
+    else:
+        try:
+            _parallel_analysis_result = await run_parallel_evidence_analysis(
+                question=question, report_tier=report_tier, source_text=src_text,
+                research_engine_context=str(research_engine_block or ""), report_plan=report_plan,
+            )
+            _parallel_analysis_notes = _format_parallel_evidence_notes(_parallel_analysis_result)
+            if _parallel_analysis_notes:
+                _instructions_marker = "INSTRUCTIONS:\n1. The uploaded file content"
+                _marker_at = user_prompt.find(_instructions_marker)
+                if _marker_at >= 0:
+                    user_prompt = user_prompt[:_marker_at] + _parallel_analysis_notes + "\n\n" + user_prompt[_marker_at:]
+                else:
+                    user_prompt += "\n\n" + _parallel_analysis_notes
+        except Exception as _parallel_exc:
+            log.warning("Parallel evidence analysis failed safely; using the existing writer path: %s", type(_parallel_exc).__name__)
     record_research_stage("parallel_evidence_analysis_summary", {
         "enabled": bool(_parallel_analysis_result.get("enabled", True)),
         "analysts": int(_parallel_analysis_result.get("analysts") or 0),
@@ -21978,7 +22245,104 @@ async def generate_report(request: Request):
         # into the now-shorter array (see _remap_chart_placeholders docstring).
         report_text = _remap_chart_placeholders(report_text, original_charts_list, valid_mask)
 
-        original_images_list = parsed.get("images") or []
+        # Add deterministic, workbook-derived PMS comparisons after LLM chart cleanup,
+        # so these exact data-backed charts enter the same final validation/rendering path.
+        if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+            try:
+                _raw_workbook_charts = workbook_analytics.get("charts") or []
+                _existing_chart_titles = {str(c.get("title") or "").casefold().strip() for c in charts if isinstance(c, dict)}
+                _workbook_charts_to_add = []
+                for _raw_workbook_chart in _raw_workbook_charts:
+                    # Normalize first: the generic chart normalizer intentionally
+                    # drops unknown model metadata, including workbook evidence.
+                    # Reattach deterministic workbook provenance afterwards so the
+                    # final evidence gate can validate each plotted value against
+                    # the exact raw worksheet row rather than treating it as an
+                    # ungrounded model-generated chart.
+                    _candidate_chart = _normalize_chart_spec(_raw_workbook_chart)
+                    _candidate_chart = dict(_candidate_chart or {})
+                    _candidate_chart["sourceOrigin"] = "uploaded_workbook"
+                    # This flag is set only on charts computed by the server-side
+                    # workbook analytics path. It lets the evidence gate validate
+                    # exact workbook row quotes without incorrectly requiring a
+                    # fetched public publisher webpage for a private uploaded file.
+                    _candidate_chart["_serverWorkbookEvidence"] = True
+                    _candidate_chart["sourceIds"] = [workbook_source_id] if workbook_source_id else []
+                    _candidate_chart["source"] = [workbook_source_id] if workbook_source_id else []
+                    _raw_series_by_name = {
+                        str(_series.get("name") or _series.get("label") or "").strip().casefold(): _series
+                        for _series in (_raw_workbook_chart.get("series") or []) if isinstance(_series, dict)
+                    }
+                    _normalized_series = []
+                    for _series in (_candidate_chart.get("series") or []):
+                        if not isinstance(_series, dict):
+                            continue
+                        _series = dict(_series)
+                        _series_key = str(_series.get("name") or _series.get("label") or "").strip().casefold()
+                        _raw_series = _raw_series_by_name.get(_series_key)
+                        _raw_points = (_raw_series or {}).get("data") or (_raw_series or {}).get("values") or []
+                        _raw_points_by_label = {
+                            str(_point.get("label") or _point.get("name") or "").strip().casefold(): _point
+                            for _point in _raw_points if isinstance(_point, dict)
+                        }
+                        _data_key = "data" if isinstance(_series.get("data"), list) else "values"
+                        _normalized_points = []
+                        for _point_index, _point in enumerate(_series.get(_data_key) or []):
+                            if not isinstance(_point, dict):
+                                _normalized_points.append(_point)
+                                continue
+                            _point = dict(_point)
+                            _point_key = str(_point.get("label") or _point.get("name") or _point.get("x") or "").strip().casefold()
+                            _raw_point = _raw_points_by_label.get(_point_key)
+                            # Chart normalization may clean or reformat labels (for example,
+                            # adding an AMC prefix or changing punctuation). Exact-label lookup
+                            # alone then loses the workbook row quote and causes the evidence
+                            # guard to prune a legitimate deterministic point. Since both lists
+                            # originate from the same server-side workbook chart and retain
+                            # their order, use the same-position raw point as a safe fallback.
+                            if _raw_point is None and _point_index < len(_raw_points):
+                                _positional_point = _raw_points[_point_index]
+                                if isinstance(_positional_point, dict) and (
+                                    _positional_point.get("evidenceQuote")
+                                    or _positional_point.get("sourceSheet")
+                                    or _positional_point.get("sourceRow") is not None
+                                ):
+                                    _raw_point = _positional_point
+                            if _raw_point:
+                                for _evidence_key in ("evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow"):
+                                    if _raw_point.get(_evidence_key) is not None:
+                                        _point[_evidence_key] = _raw_point[_evidence_key]
+                            if workbook_source_id:
+                                _point["evidenceSource"] = workbook_source_id
+                            _normalized_points.append(_point)
+                        _series[_data_key] = _normalized_points
+                        _normalized_series.append(_series)
+                    _candidate_chart["series"] = _normalized_series
+                    _candidate_title = str(_candidate_chart.get("title") or "").casefold().strip()
+                    if _candidate_title in _existing_chart_titles or not _is_plausible_chart(_candidate_chart):
+                        continue
+                    _workbook_charts_to_add.append(_candidate_chart)
+                    _existing_chart_titles.add(_candidate_title)
+                if _workbook_charts_to_add:
+                    _chart_start_index = len(charts) + 1
+                    charts.extend(_workbook_charts_to_add)
+                    _workbook_chart_intro = (
+                        "The following rankings are calculated from reported return values in the uploaded PMS workbook. "
+                        "Missing and undisclosed observations are excluded, not treated as zero."
+                    )
+                    report_text = (report_text or "").rstrip() + "\n\n" + _workbook_chart_intro + "\n\n" + workbook_charts_section(
+                        _workbook_charts_to_add, start_index=_chart_start_index,
+                    ) + "\n"
+                    log.info("Workbook analytics: added %d deterministic evidence-backed chart(s) to report body",
+                             len(_workbook_charts_to_add))
+                # For file-only PMS reports, publish deterministic KPIs rather than
+                # unsupported LLM-invented keyStats.
+                if workbook_analytics.get("keyStats"):
+                    parsed["keyStats"] = list(workbook_analytics["keyStats"])
+            except Exception as _workbook_chart_exc:
+                log.warning("Workbook chart insertion failed safely: %s", type(_workbook_chart_exc).__name__)
+
+        original_images_list = [] if file_only_report else (parsed.get("images") or [])
         try:
             images, images_valid_mask = await asyncio.wait_for(
                 _generate_ai_report_images(original_images_list, subject=question, candidates=image_candidates),
@@ -21995,7 +22359,7 @@ async def generate_report(request: Request):
         # but after many rounds of it punting to [] even with decent
         # candidates available, don't make "is there a photo in this report"
         # depend entirely on the model feeling confident enough to comply.
-        images, was_forced = _force_fallback_images(images, image_candidates, model_used)
+        images, was_forced = ([], False) if file_only_report else _force_fallback_images(images, image_candidates, model_used)
         if report_tier == "brief" and len(images) > 4:
             images = list(images[:4])
             images_valid_mask = list(images_valid_mask[:4])
@@ -22063,13 +22427,16 @@ async def generate_report(request: Request):
         pre_expand_chars = len(report_text)
         if report_tier == "in_depth":
             log.info("[IN_DEPTH] initial report chars: %d", pre_expand_chars)
-        report_text = await _expand_report_to_tier(
-            report_text=report_text,
-            question=question,
-            report_tier=report_tier,
-            report_plan=report_plan,
-            evidence_text=src_text if not no_web_sources else file_section,
-        )
+        if file_only_report:
+            log.info("Workbook-only report: skipped semantic/page-band expansion to prevent repetitive padding")
+        else:
+            report_text = await _expand_report_to_tier(
+                report_text=report_text,
+                question=question,
+                report_tier=report_tier,
+                report_plan=report_plan,
+                evidence_text=src_text if not no_web_sources else file_section,
+            )
         report_text = strip_generation_markers(report_text)
         if len(report_text) != pre_expand_chars:
             log.info(
@@ -22089,7 +22456,7 @@ async def generate_report(request: Request):
         # Finalise imagery before page preflight so the body and final export
         # receive the same visual placeholders. Byte fetching remains in the
         # PDF route; this pass only establishes deterministic document shape.
-        images, _ = _top_up_images(images, image_candidates, model_used)
+        images, _ = ([], False) if file_only_report else _top_up_images(images, image_candidates, model_used)
         report_text = _inject_fallback_image_placeholders(report_text, images)
 
         # The modular expansion writer may add fresh Markdown tables after the
@@ -22119,14 +22486,23 @@ async def generate_report(request: Request):
         # Ground page-range enforcement in the same A4 renderer used for the
         # final PDF. The character budget is an intermediate generation signal;
         # actual pagination is the acceptance criterion.
-        report_text, preflight_pages = await _ensure_report_page_budget(
-            report_text=report_text, question=report_topic, report_tier=report_tier,
-            report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-            title=str(parsed.get("title") or report_topic), summary=str(parsed.get("summary") or ""),
-            key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
-            presentation=report_presentation, web_images=images,
-            file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
-        )
+        if file_only_report:
+            preflight_pages = _rendered_page_count_preflight(
+                report_text, str(parsed.get("title") or report_topic), question,
+                str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
+                source_manifest, report_presentation, report_tier, web_images=images,
+                file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+            )
+            log.info("Workbook-only report: measured PDF preflight pages=%s without forcing page-band expansions", preflight_pages)
+        else:
+            report_text, preflight_pages = await _ensure_report_page_budget(
+                report_text=report_text, question=report_topic, report_tier=report_tier,
+                report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                title=str(parsed.get("title") or report_topic), summary=str(parsed.get("summary") or ""),
+                key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
+                presentation=report_presentation, web_images=images,
+                file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+            )
         report_text = strip_generation_markers(report_text)
         if preflight_pages is not None:
             log.info("Report: final pagination preflight = %d pages (advisory upper review threshold %d)",
@@ -22236,7 +22612,7 @@ async def generate_report(request: Request):
         # ── Top up: rules ask for 2-4 images, but the model has sometimes
         # selected just 1 even with more decent candidates left unused — don't
         # leave the report thinner on photos than what was actually available.
-        images, _ = _top_up_images(images, image_candidates, model_used)
+        images, _ = ([], False) if file_only_report else _top_up_images(images, image_candidates, model_used)
 
         # ── Fallback: inject a [WEB_IMG_n] marker for any image (model-picked,
         # forced, or topped-up) that doesn't already have one in the body, so
@@ -22711,6 +23087,7 @@ async def generate_report(request: Request):
         _final_pageband_ran = False
         if (
             str(report_tier).casefold() == "brief"
+            and not file_only_report
             and preflight_pages is not None
             and tier_spec.page_target.minimum is not None
             and preflight_pages < int(tier_spec.page_target.minimum)
@@ -22915,24 +23292,24 @@ async def generate_report(request: Request):
         }, status=("failed" if _capture_publication_status == "FAIL" else "completed"), token=_research_capture_token)
         if _capture_path:
             log.info("Research capture written to %s", _capture_path)
-        response_payload = _decode_leaked_unicode_escapes({
-            "reportId":   report_id,
-            "revision":   1,
-            "title":      clean_title,
-            "report":     report_text,
-            "charts":     charts,
-            "images":     images,  # validated {url, caption} pairs for PDF/UI embedding
-            "keyStats":   parsed.get("keyStats", []),
-            "summary":    parsed.get("summary", ""),
-            "fileImages": embedded_file_images,  # extracted charts/images only — never full pages
-            "recommendedFormat": final_format,
-            "reportStyle": report_style,
-            "kicker": str(parsed.get("kicker") or "")[:60],
-            "reportTier": report_tier,
-            "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
-            "estimatedPages": preflight_pages,
-            "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
-            "pageBudget": {
+        if file_only_report:
+            _workbook_page_target = {
+                "min": 1, "target": preflight_pages if preflight_pages is not None else 1,
+                "max": None, "mode": "evidence_driven",
+            }
+            _workbook_page_budget = {
+                "minimum": 1,
+                "target": preflight_pages if preflight_pages is not None else 1,
+                "maximum": None,
+                "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
+                "measured": preflight_pages is not None,
+                "minimumReached": preflight_pages is not None and preflight_pages >= 1,
+                "warning": "Pagination could not be measured by the export renderer." if preflight_pages is None else None,
+                "mode": "evidence_driven",
+            }
+        else:
+            _workbook_page_target = {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum}
+            _workbook_page_budget = {
                 "minimum": tier_spec.page_target.minimum,
                 "target": tier_spec.page_target.target,
                 "maximum": tier_spec.page_target.maximum,
@@ -22946,7 +23323,25 @@ async def generate_report(request: Request):
                     f"Rendered output has {preflight_pages} pages, above the {tier_spec.page_target.maximum}-page maximum; distinct supported content was preserved."
                     if preflight_pages > tier_spec.page_target.maximum else None
                 ),
-            },
+            }
+        response_payload = _decode_leaked_unicode_escapes({
+            "reportId":   report_id,
+            "revision":   1,
+            "title":      clean_title,
+            "report":     report_text,
+            "charts":     charts,
+            "images":     images,  # validated {url, caption} pairs for PDF/UI embedding
+            "keyStats":   parsed.get("keyStats", []),
+            "summary":    _clean_inline_source_markers_for_display(str(parsed.get("summary", "") or "")),
+            "fileImages": embedded_file_images,  # extracted charts/images only — never full pages
+            "recommendedFormat": final_format,
+            "reportStyle": report_style,
+            "kicker": str(parsed.get("kicker") or "")[:60],
+            "reportTier": report_tier,
+            "pageTarget": _workbook_page_target,
+            "estimatedPages": preflight_pages,
+            "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
+            "pageBudget": _workbook_page_budget,
             "theme":      clean_theme,
             "presentation": report_presentation,
             "sources":    source_manifest,
@@ -22962,8 +23357,8 @@ async def generate_report(request: Request):
         })
         # Final public-output boundary: the response decoder itself can reveal
         # escaped HTML. Always normalize after decoding, not before it.
-        response_payload["report"] = normalize_report_markdown(strip_generation_markers(
-            _decode_leaked_unicode_escapes(response_payload.get("report", ""))
+        response_payload["report"] = normalize_report_markdown(_clean_inline_source_markers_for_display(
+            strip_generation_markers(_decode_leaked_unicode_escapes(response_payload.get("report", "")))
         ))
         # The model audit runs before final cleanup. Remove only its stale
         # placeholder-formatting finding when the exact published text no longer
@@ -23035,13 +23430,16 @@ async def generate_report(request: Request):
             m = re.search(r'"report"\s*:\s*"((?:[^"\\]|\\.)*)', text)
             if m:
                 report_raw = m.group(1).replace("\\n", "\n").replace('\\"', '"')
-                # Only chop back to the last clean section boundary if the
-                # match actually ran off the end of the text without hitting
-                # a real closing quote (i.e. genuinely truncated output).
-                # Since "report" was already quote-repaired above, a match
-                # that stops well short of len(text) found a real closing
-                # delimiter — that's a complete field and shouldn't be cut.
-                genuinely_truncated = m.end(1) >= len(text) - 2
+                # A malformed outer JSON wrapper can contain an unescaped quote
+                # inside report prose. In that case this regex appears to find a
+                # closing quote before the end of the response, but the following
+                # character is ordinary prose rather than a JSON field delimiter.
+                # Only treat the field as complete when the quote is followed by
+                # a comma or closing brace after whitespace.
+                _quote_pos = m.end()
+                _after_quote = text[_quote_pos + 1:].lstrip() if _quote_pos < len(text) and text[_quote_pos] == '"' else ""
+                _has_json_delimiter = _after_quote.startswith((",", "}"))
+                genuinely_truncated = m.end(1) >= len(text) - 2 or not _has_json_delimiter
                 if genuinely_truncated:
                     for boundary in ["\n## ", "\n### ", "\n\n"]:
                         last = report_raw.rfind(boundary)
@@ -23141,27 +23539,49 @@ async def generate_report(request: Request):
                     return JSONResponse({"error": "The report provider returned no usable report content after recovery.", "report": "", "charts": [], "images": [], "keyStats": [], "summary": ""}, status_code=502)
 
                 salvage_before = len(salvaged_report)
-                salvaged_report = await _expand_report_to_tier(
-                    report_text=salvaged_report, question=question, report_tier=report_tier,
-                    report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-                )
-                log.info("Report: salvage tier expansion chars: %d -> %d (tier=%s)", salvage_before, len(salvaged_report), report_tier)
-                salvaged_report, salvaged_pages = await _ensure_report_page_budget(
-                    report_text=salvaged_report, question=report_topic, report_tier=report_tier,
-                    report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-                    title=str(salvaged.get("title") or report_topic), summary=str(salvaged.get("summary") or ""),
-                    key_stats=salvaged.get("keyStats", []) or [], charts=salvaged["charts"], sources=source_manifest,
-                    presentation=report_presentation, web_images=salvaged.get("images", []) or [],
-                    file_images=embedded_file_images, theme=_resolve_theme(salvaged.get("theme"), question),
-                )
-                log.info("Report: salvage pagination preflight=%s advisoryMaximum=%d tier=%s",
-                         salvaged_pages, tier_spec.page_target.maximum, report_tier)
+                if file_only_report:
+                    log.info("Workbook-only report salvage: skipped repeated tier/page expansion")
+                else:
+                    salvaged_report = await _expand_report_to_tier(
+                        report_text=salvaged_report, question=question, report_tier=report_tier,
+                        report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                    )
+                    log.info("Report: salvage tier expansion chars: %d -> %d (tier=%s)", salvage_before, len(salvaged_report), report_tier)
+                    salvaged_report, salvaged_pages = await _ensure_report_page_budget(
+                        report_text=salvaged_report, question=report_topic, report_tier=report_tier,
+                        report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                        title=str(salvaged.get("title") or report_topic), summary=str(salvaged.get("summary") or ""),
+                        key_stats=salvaged.get("keyStats", []) or [], charts=salvaged["charts"], sources=source_manifest,
+                        presentation=report_presentation, web_images=salvaged.get("images", []) or [],
+                        file_images=embedded_file_images, theme=_resolve_theme(salvaged.get("theme"), question),
+                    )
+                    log.info("Report: salvage pagination preflight=%s advisoryMaximum=%d tier=%s",
+                             salvaged_pages, tier_spec.page_target.maximum, report_tier)
 
             # Keep recovery responses aligned with the happy path: remove only a
             # late duplicate bibliography from the report body; the same canonical
             # source manifest is rendered separately by both artifact renderers.
             salvaged["report"] = normalize_report_markdown(salvaged.get("report", ""))
             salvaged_report = normalize_report_markdown(salvaged_report)
+            if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+                try:
+                    _salvage_titles = {str(c.get("title") or "").casefold().strip() for c in (salvaged.get("charts") or []) if isinstance(c, dict)}
+                    _salvage_additions = []
+                    for _raw_chart in assign_workbook_source(workbook_analytics.get("charts") or [], workbook_source_id):
+                        _chart = _normalize_chart_spec(_raw_chart)
+                        _title = str(_chart.get("title") or "").casefold().strip()
+                        if _title in _salvage_titles or not _is_plausible_chart(_chart):
+                            continue
+                        _salvage_additions.append(_chart); _salvage_titles.add(_title)
+                    if _salvage_additions:
+                        _start = len(salvaged.get("charts") or []) + 1
+                        salvaged["charts"] = list(salvaged.get("charts") or []) + _salvage_additions
+                        salvaged_report += "\n\n" + f"Workbook-derived comparisons use reported values from the uploaded workbook. Source: [{workbook_source_id}]." + "\n\n" + workbook_charts_section(_salvage_additions, start_index=_start)
+                    if workbook_analytics.get("keyStats"):
+                        salvaged["keyStats"] = list(workbook_analytics["keyStats"])
+                    log.info("Workbook analytics salvage: deterministic charts added=%d", len(_salvage_additions))
+                except Exception as _salvage_chart_exc:
+                    log.warning("Workbook chart salvage failed safely: %s", type(_salvage_chart_exc).__name__)
             try:
                 from routes.html_report import _strip_redundant_model_source_appendix
                 salvaged["report"] = _strip_redundant_model_source_appendix(salvaged["report"])
@@ -23178,6 +23598,10 @@ async def generate_report(request: Request):
                 images=salvaged.get("images", []), sources=source_manifest, timeout_seconds=18.0,
             )
             _salv_theme = _resolve_theme(salvaged.get("theme"), question)
+            if file_only_report:
+                _salvage_page_target = {"min": 1, "target": salvaged_pages if salvaged_pages is not None else 1, "max": None, "mode": "evidence_driven"}
+            else:
+                _salvage_page_target = {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum}
             return JSONResponse(_decode_leaked_unicode_escapes({
                 "reportId": report_id,
                 "revision": 1,
@@ -23198,7 +23622,7 @@ async def generate_report(request: Request):
                 "reportStyle": report_style,
                 "kicker": str(salvaged.get("kicker") or "")[:60],
                 "reportTier": report_tier,
-                "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
+                "pageTarget": _salvage_page_target,
                 "estimatedPages": salvaged_pages if report_tier in ("detailed", "in_depth") else None,
                 "renderedPages": salvaged_pages if report_tier in ("detailed", "in_depth") else None,
                 "geminiAudit": salvaged_audit,
@@ -23225,7 +23649,7 @@ async def generate_report(request: Request):
             except Exception as e:
                 log.debug("Report repair: image validation failed, continuing without images (%s)", e)
             repaired_imgs, _ = _force_fallback_images(repaired_imgs, image_candidates, model_used)
-            repaired_imgs, _ = _top_up_images(repaired_imgs, image_candidates, model_used)
+            repaired_imgs, _ = ([], False) if file_only_report else _top_up_images(repaired_imgs, image_candidates, model_used)
             _raw_charts = [
                 _normalize_chart_spec(_recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(_normalise_inline_chart_spec(c) or c)))
                 for c in (repaired_parsed.get("charts") or [])

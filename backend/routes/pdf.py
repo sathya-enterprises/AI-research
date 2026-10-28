@@ -5059,6 +5059,32 @@ def _normalized_numeric_observation_line(value: object) -> str:
     return re.sub(r"[^a-z0-9%₹$€£]+", " ", text.casefold()).strip()
 
 
+def _is_entity_label_without_numeric_observation(value: object) -> bool:
+    """Avoid treating the numeric prefix in the brand name '360 ONE' as data.
+
+    The PDF audit should still validate full lines that attach a measurable
+    observation (for example, a return percentage) to the company name.
+    """
+    text = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", str(value or ""), flags=re.I).strip()
+    text = re.sub(r"^\s*\d+(?:\.\d+)*[.)]\s+", "", text, count=1)
+    match = re.match(r"(?i)^360\s+ONE\s+Asset\s+Management\b(.*)$", text)
+    if not match:
+        return False
+    remainder = match.group(1).strip(" \t:,-–—")
+    # Company names may be repeated in titles, profiles and ranking labels. These
+    # are not numeric observations unless the trailing text states a metric/value.
+    metric_words = re.search(
+        r"(?i)\b(?:return(?:s)?|revenue|aum|assets under management|profit|growth|yield|"
+        r"margin|valuation|cagr|performance|investment|benchmark|value|amount|reported|was|at|of)\b",
+        remainder,
+    )
+    numeric_measure = re.search(r"(?:%|₹|[$€£]|\b(?:cr|crore|million|billion|bps|basis points?)\b)", remainder, re.I)
+    if metric_words or numeric_measure:
+        return False
+    # Allow a plain entity name and common descriptive parenthetical qualifiers.
+    return bool(not remainder or re.fullmatch(r"(?i)(?:\([^)]{0,100}\)?)?", remainder))
+
+
 def _remove_exact_duplicate_observation_lines(report: str, findings: list[dict]) -> tuple[str, int]:
     """Remove only exact duplicate numeric lines explicitly identified by the PDF audit.
 
@@ -5078,8 +5104,8 @@ def _remove_exact_duplicate_observation_lines(report: str, findings: list[dict])
     removed = 0
     metric_line = re.compile(
         r"(?i)\b(?:credit|deposits?|gross npa|net npa|gnpa|nnpa|non[- ]performing|liabilit(?:y|ies)|"
-        r"assets?|net profit|profitability|net interest margin|nim|repo rate|interest rate|upi|growth|ratio|capital adequacy|"
-        r"return on assets|return on equity|transactions?)\b"
+        r"total assets|net assets|assets under management|\baum\b|net profit|profitability|net interest margin|nim|repo rate|interest rate|upi|growth|ratio|capital adequacy|"
+        r"return on assets|return on equity|returns?|transactions?)\b"
     )
     for line in str(report or "").splitlines():
         norm = _normalized_numeric_observation_line(line)
@@ -5211,9 +5237,9 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
     # that name a metric and include numeric evidence.
     metric_line = re.compile(
         r"(?i)\b(?:credit|deposits?|gross npa|net npa|gnpa|nnpa|non[- ]performing|"
-        r"liabilit(?:y|ies)|assets?|net profit|profitability|net interest margin|nim|"
+        r"liabilit(?:y|ies)|total assets|net assets|assets under management|\baum\b|net profit|profitability|net interest margin|nim|"
         r"repo rate|interest rate|upi|growth|ratio|capital adequacy|return on assets|"
-        r"return on equity|transactions?)\b"
+        r"return on equity|returns?|transactions?)\b"
     )
     seen_numeric_lines: dict[str, int] = {}
     duplicate_numeric_lines: list[dict] = []
@@ -5228,6 +5254,8 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
         # the normalized comparison too, so genuinely duplicated observations
         # still match even if they appear as differently numbered list items.
         observation_text = re.sub(r"^\s*\d+(?:\.\d+)*[.)]\s+", "", line, count=1)
+        if _is_entity_label_without_numeric_observation(observation_text):
+            continue
         if len(line) < 24 or not metric_line.search(observation_text) or not re.search(r"\d", observation_text):
             continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)

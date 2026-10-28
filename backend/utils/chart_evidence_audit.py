@@ -279,6 +279,14 @@ def _search_chart_evidence_verified(source: dict) -> bool:
 def _chart_source_text(source: dict | None, require_publisher_verification: bool = False) -> str:
     if not isinstance(source, dict):
         return ""
+    origin = str(source.get("evidenceOrigin") or source.get("evidence_origin") or "").strip().casefold()
+    kind = str(source.get("kind") or source.get("source_type") or source.get("sourceType") or "").strip().casefold()
+    workbook_excerpt = str(source.get("chartEvidenceExcerpt") or "").strip()
+    # A user-uploaded workbook is primary evidence for a file-based report. It is
+    # not a web publisher page, but its exact row excerpt may still validate a
+    # chart point when evidenceSource/evidenceQuote/evidenceValue match that row.
+    if origin == "uploaded_workbook" and "uploaded" in kind and workbook_excerpt:
+        return workbook_excerpt
     if not require_publisher_verification:
         return "\n".join(str(source.get(key) or "") for key in _SOURCE_TEXT_KEYS).strip()
 
@@ -657,8 +665,18 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
             if not source:
                 continue
             source_text[sid] = _chart_source_text(source, require_publisher_verification)
+        # Uploaded workbooks are primary evidence, but they are not publisher
+        # webpages. For charts created by the deterministic server-side workbook
+        # analytics path, validate each exact row quote and numeric scaling
+        # directly. Requiring publisher-page verification here rejects valid
+        # workbook points even though the row-level quote came from the workbook.
+        server_workbook_chart = chart.get("_serverWorkbookEvidence") is True and str(
+            chart.get("sourceOrigin") or ""
+        ).strip().casefold() == "uploaded_workbook"
         for series_index, point_index, series, label, value, point in indexed_points:
             quote_sid = str(point.get("evidenceSource") or "").strip().upper()
+            if server_workbook_chart and quote_sid in ids and quote_sid in source_by_id and point.get("evidenceQuote"):
+                source_text[quote_sid] = str(point.get("evidenceQuote") or "")
             if quote_sid and point.get("evidenceQuote"):
                 if _quote_supports(value, point.get("evidenceValue"), point.get("evidenceQuote"), source_text.get(quote_sid, "")):
                     continue

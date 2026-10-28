@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies for sentence-transformers and faiss
+# Install system dependencies for sentence-transformers and pgvector-backed RAG
 RUN apt-get update && apt-get install -y \
     build-essential \
     libgfortran5 \

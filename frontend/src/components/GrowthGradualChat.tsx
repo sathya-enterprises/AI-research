@@ -9,62 +9,6 @@ import { loadPdfJs } from '@/lib/pdfjs-browser';
 import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-/**
- * Keep appearance state isolated from GrowthGradualChat.
- * Toggling the theme should only re-render this small control, not the
- * full chat/report component (which contains a large amount of state and JSX).
- */
-function AppearanceToggle() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-
-  useEffect(() => {
-    // Read the same persisted preference as the root ThemeInitializer so the
-    // control label stays correct even if effect ordering differs.
-    try {
-      const savedTheme = window.localStorage.getItem('gg-theme');
-      const activeTheme = document.documentElement.dataset.theme;
-      setTheme(savedTheme === 'dark' || (savedTheme !== 'light' && activeTheme === 'dark') ? 'dark' : 'light');
-    } catch {
-      setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
-    }
-  }, []);
-
-  const toggleTheme = () => {
-    const currentTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
-    const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
-
-    // Apply immediately; no network request and no parent-component update.
-    document.documentElement.dataset.theme = nextTheme;
-    setTheme(nextTheme);
-
-    try {
-      window.localStorage.setItem('gg-theme', nextTheme);
-    } catch {
-      // The visual change still works when storage is unavailable.
-    }
-  };
-
-  return (
-    <button
-      type="button"
-      className="sidebar-appearance-toggle"
-      onClick={toggleTheme}
-      aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-    >
-      <span className="sidebar-appearance-icon" aria-hidden="true">
-        {theme === 'dark' ? (
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></svg>
-        ) : (
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20.5 15.3A8.5 8.5 0 0 1 8.7 3.5 8.5 8.5 0 1 0 20.5 15.3Z"/></svg>
-        )}
-      </span>
-      <span className="sidebar-appearance-copy"><strong>Appearance</strong><small>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</small></span>
-      <span className={`sidebar-theme-switch${theme === 'dark' ? ' is-dark' : ''}`} aria-hidden="true"><span /></span>
-    </button>
-  );
-}
-
 interface Source { title: string; url: string; snippet: string; }
 interface ReportSource { id?: string; title: string; url?: string; publisher?: string; kind?: string; page_fetch_status?: string; evidence_origin?: string; claim_evidence_matched?: boolean; }
 interface ChartDataPoint { label: string; value: number; [key: string]: unknown; }
@@ -2046,6 +1990,8 @@ export default function GrowthGradualChat() {
   }, []);
 
   const bottomRef      = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const showScrollToBottomRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
   const reportTierMenuRef = useRef<HTMLDivElement>(null);
@@ -2235,6 +2181,9 @@ export default function GrowthGradualChat() {
 
     const sessionId = getOrCreateSessionId();
     setRagIndexing(true);
+    let indexedSuccessfully = false;
+    let indexingErrorMessage = '';
+    const filesToIndex = new Set<string>();
 
     // ── Index attachments directly into rag-service ──
     // Text is already extracted in the browser by processFile(); rag-service
@@ -2242,6 +2191,7 @@ export default function GrowthGradualChat() {
     // Paperly gateway was removed — those services are no longer deployed.)
     try {
       const toIndex = results.filter((f): f is AttachedFile => f !== null && !!f.extractedText);
+      toIndex.forEach(f => filesToIndex.add(f.id));
 
       if (toIndex.length > 0) {
         const docs = await Promise.all(toIndex.map(async f => ({
@@ -2252,58 +2202,72 @@ export default function GrowthGradualChat() {
           file_type: f.type,
         })));
 
-        // ── Index with one automatic retry (handles HF Space cold starts) ──────
-        // HF Spaces sleep after ~15 min idle. Cold start = 60-90s. If the first
-        // attempt returns 0 chunks (timeout or cold start), we wait 8s and retry
-        // once. This covers the most common reason files are silently ignored.
-        const tryIndex = async (): Promise<{ chunks_added?: number; total_chunks?: number; error?: string }> => {
+        // ── Index with one automatic retry for a transient service connection failure ──
+        // Database/schema/credential errors are not retried: they are deterministic
+        // and should be shown immediately instead of looking like a cold start.
+        const tryIndex = async (): Promise<{ chunks_added?: number; total_chunks?: number; error?: string; detail?: string; code?: string; status?: number }> => {
           const r = await fetch('/api/rag/index', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId, documents: docs }),
           });
-          return r.json().catch(() => ({}));
+          const payload = await r.json().catch(() => ({}));
+          const body = (payload && typeof payload === 'object') ? payload : {};
+          return {
+            ...body,
+            status: r.status,
+            error: body.error || (typeof body.detail === 'string' ? body.detail : undefined) || (!r.ok ? `RAG service returned HTTP ${r.status}.` : undefined),
+          };
         };
 
-        console.log('[RAG] Indexing', docs.length, 'doc(s) to HF Space...');
+        console.log('[RAG] Indexing', docs.length, 'doc(s) to pgvector-backed RAG service...');
         let d = await tryIndex();
 
-        if ((d.chunks_added ?? 0) === 0 && (d.total_chunks ?? 0) === 0) {
-          // First attempt got 0 chunks — HF Space may have been cold. Wait and retry.
-          console.warn('[RAG] 0 chunks on first attempt — HF Space cold start? Retrying in 8s...');
-          setStatusMsg('File server waking up, retrying…');
+        // Retry only a transient connection failure. A schema/credential/database
+        // error is deterministic and should be surfaced immediately, not hidden
+        // behind an unnecessary eight-second cold-start retry.
+        if (d.code === 'RAG_SERVICE_UNREACHABLE') {
+          console.warn('[RAG] RAG service unreachable on first attempt. Retrying in 8s...');
+          setStatusMsg('Reconnecting to file service…');
           await new Promise(res => setTimeout(res, 8_000));
           d = await tryIndex();
         }
 
         if ((d.chunks_added ?? 0) > 0 || (d.total_chunks ?? 0) > 0) {
+          indexedSuccessfully = true;
           setRagIndexed(true);
           console.log('[RAG] Indexed', d.chunks_added, 'chunks ✅');
         } else {
-          // Both attempts failed — tell the user clearly instead of silent failure
-          console.error('[RAG] Index failed after retry:', d);
-          setAttachedFiles(prev => prev.map(f => ({
+          // Surface the actual service/schema error instead of disguising it as a cold start.
+          indexingErrorMessage = d.error || 'File indexing failed — check that pgvector is configured and the RAG service is healthy.';
+          console.error('[RAG] Index failed:', d);
+          setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
             ...f,
             status: 'failed' as const,
-            error: 'File server unavailable — your file was attached but AI may not read it. Try re-uploading.',
-          })));
+            error: indexingErrorMessage,
+          }) : f));
         }
       } else {
         console.warn('[RAG] No extracted text available to index');
       }
 
     } catch (e) {
+      indexingErrorMessage = e instanceof Error ? e.message : 'File indexing failed unexpectedly.';
       console.warn('[RAG] Direct index failed:', e);
-      setAttachedFiles(prev => prev.map(f => ({
+      setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
         ...f,
-        status: f.status === 'attaching' ? 'failed' as const : f.status,
-        error: f.status === 'attaching' ? 'Upload failed — please try again.' : f.error,
-      })));
+        status: 'failed' as const,
+        error: indexingErrorMessage || 'Upload failed — please try again.',
+      }) : f));
     } finally {
       setRagIndexing(false);
       setStatusMsg('');
       if (results.some(r => r !== null && !!r.extractedText)) {
-        notifyFileReady('Ready to search', 'Your file finished indexing — ask away.');
+        if (indexedSuccessfully) {
+          notifyFileReady('Ready to search', 'Your file finished indexing — ask away.');
+        } else {
+          notifyFileReady('File indexing failed', 'The file is attached, but the AI could not index it. Check the RAG service and pgvector setup.');
+        }
       }
     }
   }, [attachedFiles.length]);
@@ -5937,7 +5901,35 @@ export default function GrowthGradualChat() {
           .sidebar-appearance-toggle, .sidebar-user-button, .sidebar-user-menu { transition: none !important; animation: none !important; }
         }
 
-      `}</style>
+      
+
+        /* Floating jump-to-latest control. Kept outside the scroll viewport so it stays in place. */
+        .chat-shell.gg-premium.gg-full .chat-main { position: relative; }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom {
+          position: absolute; z-index: 8; left: 50%; bottom: 104px;
+          display: grid; place-items: center; width: 38px; height: 38px;
+          padding: 0; border: 1px solid var(--ed-rule, #deded7); border-radius: 50%;
+          background: var(--ed-surface, #fff); color: var(--ed-ink-strong, #202820);
+          box-shadow: 0 3px 12px rgba(18, 30, 23, .14); cursor: pointer;
+          transform: translateX(-50%); animation: ggScrollToBottomIn 140ms ease-out both;
+        }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom:hover {
+          transform: translate(-50%, -2px); box-shadow: 0 5px 15px rgba(18, 30, 23, .18);
+        }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom:focus-visible {
+          outline: 2px solid #528269; outline-offset: 3px;
+        }
+        @keyframes ggScrollToBottomIn {
+          from { opacity: 0; transform: translate(-50%, 4px); }
+          to { opacity: 1; transform: translate(-50%, 0); }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full .chat-scroll-bottom { bottom: 112px; width: 36px; height: 36px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full .chat-scroll-bottom { animation: none; transition: none; }
+        }
+`}</style>
 
 
       {/* Hidden file input */}
@@ -6057,7 +6049,6 @@ export default function GrowthGradualChat() {
           </div>
 
           <div className="sidebar-footer">
-            <AppearanceToggle />
 
             <div className="sidebar-account-wrap" ref={sidebarUserControlRef}>
               <button
@@ -6115,7 +6106,14 @@ export default function GrowthGradualChat() {
           {/* Messages */}
           <div className="chat-msgs" onScroll={(event) => {
             const el = event.currentTarget;
-            shouldAutoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+            const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+            const awayFromBottom = distanceFromBottom >= 140;
+            shouldAutoScrollRef.current = !awayFromBottom;
+            // Only schedule a React update when the button actually needs to appear or disappear.
+            if (showScrollToBottomRef.current !== awayFromBottom) {
+              showScrollToBottomRef.current = awayFromBottom;
+              setShowScrollToBottom(awayFromBottom);
+            }
           }}>
             {isEmpty ? (
               <div className="chat-welcome">
@@ -6356,6 +6354,26 @@ export default function GrowthGradualChat() {
             )}
             <div ref={bottomRef}/>
           </div>
+
+          {showScrollToBottom && (
+            <button
+              type="button"
+              className="chat-scroll-bottom"
+              aria-label="Go to the latest message"
+              title="Go to the latest message"
+              onClick={() => {
+                const container = bottomRef.current?.parentElement;
+                if (!container) return;
+                shouldAutoScrollRef.current = true;
+                container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 4v15" />
+                <path d="m6 13 6 6 6-6" />
+              </svg>
+            </button>
+          )}
 
           {/* Input */}
           <div className="chat-input-area">

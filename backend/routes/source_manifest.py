@@ -242,6 +242,8 @@ def source_provenance_note(source: object) -> str:
 
     if str(source.get("source_status") or source.get("sourceStatus") or "").casefold() == "unresolved":
         return "Source record missing; this citation is not verified."
+    if origin == "uploaded_workbook" and available and str(source.get("chartEvidenceExcerpt") or "").strip():
+        return "Evidence is derived from the user-uploaded workbook and is traceable to worksheet rows; it is not independently publisher-verified."
     if origin == "okf_retrieval" and available:
         if matched is True and missing_count == 0:
             return "Retrieved from the saved OKF document; the cited claim aligns with the available excerpt."
@@ -325,10 +327,34 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
         entry = {
             "title": name, "kind": "Uploaded document", "publisher": "User-provided", "url": "",
         }
+        # Retain bounded evidence excerpts for uploaded workbooks. This is a
+        # user-supplied evidence source, not a publisher-page verification; the
+        # chart audit handles that provenance explicitly. Do not copy extracted
+        # file text wholesale into the public source registry.
+        for key in (
+            "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
+            "page_fetch_status", "pageFetchStatus", "evidence_available",
+            "evidenceAvailable", "source_type", "sourceType",
+        ):
+            if document.get(key) is not None:
+                entry[key] = document.get(key)
         identity = source_identity_key(entry)
         # A canonical manifest is immutable. Appended records may be deduped
-        # against it, but must never cause existing IDs to be renumbered.
+        # against it, but uploaded-workbook evidence metadata still needs to be
+        # attached when the same file already entered through RAG retrieval.
         if identity and identity in seen:
+            if str(entry.get("evidence_origin") or entry.get("evidenceOrigin") or "").casefold() == "uploaded_workbook":
+                evidence_keys = (
+                    "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
+                    "page_fetch_status", "pageFetchStatus", "evidence_available",
+                    "evidenceAvailable", "source_type", "sourceType",
+                )
+                for current in result:
+                    if source_identity_key(current) == identity:
+                        for key in evidence_keys:
+                            if entry.get(key) is not None:
+                                current[key] = entry.get(key)
+                        break
             continue
         if identity:
             seen.add(identity)

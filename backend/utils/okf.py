@@ -22,7 +22,7 @@ This module is used in two places:
                          OKF bundle (.zip) instead of a PDF.
   2. rag-service       — Paperly stores each indexed document (and a per-
                          session bundle manifest) as OKF concepts on disk,
-                         alongside the FAISS vector index, so the underlying
+                         alongside the pgvector store, so the underlying
                          file context is held in an open, inspectable format
                          rather than only living inside the vector store.
 """
