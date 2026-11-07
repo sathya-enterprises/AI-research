@@ -23,16 +23,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
 log = logging.getLogger("report_outline")
+from utils.page_policy import policy as _page_policy  # noqa: E402
 
 WORDS_PER_PAGE = 380
 TIER_RULES = {
-    "detailed": {"sections": "6-8", "subsections": False, "leaf_cap": 1150, "leaf_floor": 380, "total_cap": 8200,
+    "detailed": {"sections": "6-8", "subsections": False, "leaf_cap": 1150, "leaf_floor": 380,
+                 "total_cap": _page_policy("detailed").words_cap,
                  "k_leaf": 12, "exec_words": 450},
-    "in_depth": {"sections": "12-26", "subsections": True, "leaf_cap": 950, "leaf_floor": 330, "total_cap": 42000,
+    "in_depth": {"sections": "12-26", "subsections": True, "leaf_cap": 950, "leaf_floor": 330,
+                 "total_cap": _page_policy("in_depth").words_cap,
                  "k_leaf": 14, "exec_words": 900},
 }
 MIN_ANALYSIS_SECTIONS = {"detailed": 5, "in_depth": 12}
@@ -143,8 +147,10 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "2. List the DIMENSIONS the entities are compared on (e.g. quarterly returns, FPI/DII flows, valuation, earnings, drivers).\n"
             f"3. Plan {rules['sections']} analysis sections (at least {MIN_ANALYSIS_SECTIONS['in_depth']}):\n"
             "   a. ONE section per DEEP-DIVE entity listed below (role \"deep_dive\", \"entity\" set, title starting with the "
-            "entity name) with 3-4 subsections: performance and momentum; flows and ownership; valuation and earnings; "
-            "drivers, risks and outlook.\n"
+            "entity name) with 2-4 subsections chosen from what THAT sector's evidence covers (for example credit growth and "
+            "asset quality for banks, commodity prices and global demand for metals, orders and execution for capital "
+            "goods). Name and order them for the sector; do NOT give every sector the same subsection set. A sector with "
+            "thin evidence gets fewer subsections.\n"
             "   b. 1-3 COMPACT comparison sections (role \"compact\") that together name EVERY compact entity in \"entities\".\n"
             "   c. At least 4 cross-cutting sections (role \"cross_cutting\"): the market regime, flows, valuation/earnings, "
             "macro drivers, risks/scenarios and outlook. Every cross-cutting section has 2-5 subsections."
@@ -483,6 +489,12 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     for row in coverage:
         if row["status"] != "covered":
             decisions.append(f"Entity '{row['entity']}' has insufficient evidence ({row['passages']} passages) - no dedicated coverage.")
+    if tier == "in_depth" and os.getenv("GG_V2_SUBSECTION_PLANNER", "1") != "0":
+        # Deep-dives must not all share one subsection template: choose each sector's
+        # subsections from the facets its own evidence covers. (Offline replays switch this
+        # off: replayed writer text was written for the recorded subsections.)
+        from utils.subsection_planner import diversify_deep_dives
+        diversify_deep_dives(store, sections, decisions)
     assign_passages(store, sections, rules["k_leaf"])
     seed_entity_evidence(store, sections, tiers)
     resolve_thin_evidence(store, sections, decisions)
@@ -499,8 +511,8 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
                                        word_budget=rules["exec_words"]))
     outline.sections.append(Section(section_id="method", title="Methodology and Evidence Base", kind="methodology"))
     if tier == "in_depth":
-        outline.sections.append(Section(section_id="appx-sources", title="Appendix A — Source Reliability", kind="appendix_sources"))
-        outline.sections.append(Section(section_id="appx-data", title="Appendix B — Data Tables", kind="appendix_data"))
+        # Sources (with their reliability) are listed once, by the renderer, as "Appendix B — Data Sources".
+        outline.sections.append(Section(section_id="appx-data", title="Appendix A — Data Tables", kind="appendix_data"))
     log.info("V2 outline: sections=%d kept=%d entities=%d covered=%d decisions=%d planned_words=%d",
              len(sections), len(outline.analysis_sections()), len(coverage),
              sum(1 for r in coverage if r["status"] == "covered"), len(decisions), meta["plannedAnalysisWords"])
