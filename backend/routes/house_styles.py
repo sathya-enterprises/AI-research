@@ -553,7 +553,7 @@ body.gg-house--market_currents .gg-house-cover__period { font-size: 16pt !import
 body.gg-house--market_currents .gg-house-cover__dek { font-size: 9pt !important; }
 body.gg-house--market_currents .gg-house-cover__stat-value { font-size: 14pt !important; }
 body.gg-house--market_currents .gg-house-cover__stat-label { font-size: 6.5pt !important; }
-body.gg-house--market_currents .gg-report-sections > .gg-section { break-before: auto !important; page-break-before: auto !important; margin-bottom: 24px !important; }
+body.gg-house--market_currents .gg-report-sections > .gg-section { break-before: page !important; page-break-before: always !important; margin-bottom: 24px !important; }
 body.gg-house--market_currents .gg-report-sections > .gg-section:first-child { break-before: auto !important; page-break-before: auto !important; }
 body.gg-house--market_currents .gg-section-heading { break-after: avoid !important; page-break-after: avoid !important; break-inside: avoid !important; }
 body.gg-house--market_currents .gg-chart-wrap,

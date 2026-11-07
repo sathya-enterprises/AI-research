@@ -424,6 +424,8 @@ html:has(body.gg-editorial) {{ background: #FFFFFF !important; }}
   break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-stats-grid, {p} .gg-metrics {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-keep-with-next {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
+/* every major section starts on a new page (layout rule only: no new visual tokens) */
+{p} .gg-section ~ .gg-section {{ break-before: page !important; page-break-before: always !important; }}
 {p} .gg-keep-with-next .gg-table-wrap, {p} .gg-keep-with-next .gg-table-scroll {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-section-heading, {p} .gg-section-h3, {p} .gg-subsection-h4, {p} .gg-chart-title {{ break-after: avoid-page !important; page-break-after: avoid !important; }}
 {p} .gg-table tr {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}

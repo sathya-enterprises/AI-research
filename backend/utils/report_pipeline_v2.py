@@ -118,6 +118,78 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
+def _apply_section_layout(edited, *, store, outline, analysis, good, today: str) -> dict:
+    """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
+    from utils.number_policy import apply_number_policy
+    from utils.section_charts import _is_qtd, qtd_start_month
+    from utils.section_layout import (entity_columns, entity_table, how_to_read, move_watch_items,
+                                      place_inline_tables, stat_strip, tables_in, takeaways)
+    from utils.subsection_planner import _set_key
+
+    start = qtd_start_month(today)
+    qtd = (lambda text: _is_qtd(text, start)) if start else None
+    tables = tables_in(store)
+    by_id = {t.passage_id: t for t in tables}
+    summaries = {d.section_id: d.summary for d in good}
+    sections = {s.section_id: s for s in analysis}
+    stats = {"statStrips": 0, "takeaways": 0, "watch": 0, "inlineTables": 0, "comparisons": 0,
+             "placedTables": set(), "scorecard": "", "scorecardRows": 0, "headingsRemoved": 0}
+    for e in edited:
+        sec = sections.get(e.section_id)
+        cited = {t.strip().upper() for g in CITE_RE.findall(e.body) for t in re.split(r"\s*[,;]\s*", g)}
+        top, body, watch = [], e.body, ""
+        if e.role == "deep_dive" and e.entity:
+            strip = stat_strip(tables, e.entity, cited, qtd=qtd)
+            if strip:
+                top.append(strip)
+                stats["statStrips"] += 1
+            summary = summaries.get(e.section_id, "")
+            ids = {t.strip().upper() for g in CITE_RE.findall(summary) for t in re.split(r"\s*[,;]\s*", g)}
+            texts = {pid: store.get(pid).text for pid in ids if store.get(pid)}
+            checked = apply_number_policy(summary, passage_texts=texts, allowed_numbers=_number_set(texts.values()),
+                                          section_id=e.section_id).body if texts else ""
+            line = takeaways(checked)
+            if line:
+                top.append(line)
+                stats["takeaways"] += 1
+            body, watch = move_watch_items(body)
+        elif e.role == "compact" and sec is not None and len(sec.entities) >= 3:
+            columns = entity_columns(tables, list(sec.entities), qtd=qtd)
+            table = entity_table(columns, list(sec.entities), caption=f"{e.title}: key metrics by sector")
+            if table:
+                top.append(table)
+                stats["comparisons"] += 1
+                stats["placedTables"].update(c.table.passage_id for c in columns[:4])
+        elif re.search(r"(?i)outlook|risks?|scenarios?", e.title):
+            body, watch = move_watch_items(body)
+        before = set(stats["placedTables"])
+        # Long sections may carry a third small evidence table; short ones at most two.
+        long_section = len(re.findall(r"[A-Za-z]+", body)) > 1500
+        body = place_inline_tables(body, by_id, stats["placedTables"], max_tables=3 if long_section else 2)
+        stats["inlineTables"] += len(stats["placedTables"] - before)
+        if watch:
+            stats["watch"] += 1
+        e.body = "\n\n".join(x for x in [*top, body, watch] if x).strip()
+    # Sector scorecard + how to read, right after the executive summary.
+    names = (outline.meta or {}).get("entityTiers") or {}
+    sectors = list(names.get("deep_dive") or []) + list(names.get("compact") or [])
+    if not sectors:
+        from utils.entity_tiers import SYNONYMS, discover_entities
+        sectors = [e.name for e in discover_entities(store) if e.name in SYNONYMS][:20]
+    columns = entity_columns(tables, sectors, qtd=qtd)
+    scorecard = entity_table(columns, sectors, caption="Sector scorecard: verified metrics by sector", min_values=2)
+    if scorecard:
+        stats["scorecardRows"] = scorecard.count("\n| ") - 1
+        note = how_to_read(deep_dives=sum(1 for e in edited if e.role == "deep_dive"),
+                           compact=sum(1 for e in edited if e.role == "compact"),
+                           has_qtd="QTD, partial" in scorecard or any("QTD" in e.body for e in edited),
+                           has_calculated=any("(calculated:" in e.body for e in edited))
+        # The table opens the section page (it is one unbreakable block); the reading note follows it.
+        stats["scorecard"] = f"## Sector Scorecard\n\n{scorecard}\n\n{note}"
+    stats["distinctDeepDiveSubsectionSets"] = len({_set_key(s) for s in analysis if getattr(s, "role", "") == "deep_dive"})
+    return stats
+
+
 def _figure_paragraph(body: str, number: int) -> str:
     """The paragraph that interprets figure ``number`` (the one with "Figure N", else the one after its marker)."""
     paragraphs = re.split(r"\n\s*\n", str(body or ""))
@@ -181,6 +253,11 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
         lines += ["", "**Scope decisions and limitations.**"]
         lines += [f"- {d}" for d in outline.decisions[:20]]
         lines += [f"- Section '{f}' could not be generated and is omitted." for f in failed]
+    from utils.page_policy import shortfall_note
+    note = shortfall_note(getattr(outline, "tier", "") or (outline.meta or {}).get("tier", ""),
+                          int((outline.meta or {}).get("evidenceSupportedWords") or 0))
+    if note:
+        lines += ["", f"**Length.** {note}"]
     dropped = [c for c in charts if c.status == "dropped"]
     if dropped:
         lines += ["", f"{len(dropped)} candidate charts were not used: their data could not be verified or the text did not interpret them."]
@@ -226,11 +303,35 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         if len(rows) < 2:
             continue
         width = len(rows[0].split("|"))
+        body_rows = [r for r in rows[1:] if len(r.split("|")) == width]
+        if not body_rows:
+            continue  # rows that do not fit the header would render an empty table under a bare caption
         shown += 1
         ids = ", ".join(getattr(p, "merged_ids", None) or [p.passage_id])
-        out += ["", f"### {heading} [{ids}]", "", "| " + rows[0].strip().strip("|") + " |",
-                "| " + " | ".join(["---"] * width) + " |"]
-        out += ["| " + r.strip().strip("|") + " |" for r in rows[1:] if len(r.split("|")) == width]
+        # A clear caption: the source's table title without its "TABLE n —" numbering; a
+        # too-short title is described from the table's own columns.
+        caption = re.sub(r"^TABLE\s+\d+\s*[—-]\s*", "", heading).replace("(continued)", "").strip(" :")
+        cols = [c.strip() for c in rows[0].strip().strip("|").split("|") if c.strip()]
+        row_labels = [r.strip().strip("|").split("|")[0].strip() for r in body_rows]
+        from utils.chart_titles import data_title, foreign_entities
+        if len(caption) < 12 or foreign_entities(caption, row_labels):
+            # A page heading that names other entities than the table holds (the C2 title problem)
+            # is replaced by a caption built from the table's own columns and rows.
+            caption = data_title(metric=cols[1] if len(cols) > 1 else "Values", labels=row_labels[:15])
+        # A table wider than the page makes Chromium shrink the WHOLE PDF to fit it: show at
+        # most 8 columns and say so (the full table is in the cited source).
+        max_cols = 8
+
+        def cells(line: str) -> list[str]:
+            return [c.strip() for c in line.strip().strip("|").split("|")][:max_cols]
+
+        head = cells(rows[0])
+        out += ["", f"### {caption} [{ids}]", "", "| " + " | ".join(head) + " |",
+                "| " + " | ".join(["---"] * len(head)) + " |"]
+        out += ["| " + " | ".join(cells(r)) + " |" for r in body_rows]
+        total_cols = len(rows[0].strip().strip("|").split("|"))
+        if total_cols > max_cols:
+            out += ["", f"Note: the first {max_cols} of {total_cols} columns are shown; the full table is in the cited source."]
     return "\n".join(out)
 
 
@@ -260,7 +361,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         min_year = window_start(question, _date.fromisoformat(today[:10])).year
     except Exception:
         min_year = None
-    candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year)
+    candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
+                                                     today=today)
     # Run the same chart verification the export gates use BEFORE writing, so the
     # writer only interprets charts that will survive to the PDF.
     if chart_verifier and candidates:
@@ -378,16 +480,22 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if progress:
         progress("Editing the full report…")
     edited, editorial = await editorial_pass(edited, gateway=gateway)
+    layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today)
+    if layout["scorecard"]:
+        parts.append(layout["scorecard"])
     parts += [f"## {e.title}\n\n{e.body}" for e in edited]
     method = methodology_markdown(store=store, manifest=manifest, outline=outline, charts=candidates, drafts=good,
                                   gateway_stats=gateway.stats.to_dict(), question=question, window_note=window_note, failed=failed)
     parts.append(f"## Methodology and Evidence Base\n\n{method}")
     if tier == "in_depth":
-        parts.append(f"## Appendix A — Source Reliability\n\n{appendix_sources_markdown(manifest, cited_sources)}")
-        data_md = appendix_data_markdown(store, data_passages)
+        # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
+        # Tables placed in the text that discusses them are not repeated in the appendix.
+        data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"])
         if data_md:
-            parts.append(f"## Appendix B — Data Tables\n\n{data_md}")
+            parts.append(f"## Appendix A — Data Tables\n\n{data_md}")
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
+    from utils.section_layout import fix_heading_runs
+    report_md, layout["headingsRemoved"] = fix_heading_runs(report_md)
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)
     report_md = _source_level(report_md)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
@@ -442,6 +550,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             "unresolvedTableValues": [t for d in good for t in d.unsupported_numbers] + exec_unsupported,
         },
         "editorial": editorial.to_dict(),
+        "layout": {k: (sorted(v) if isinstance(v, set) else v) for k, v in layout.items() if k != "scorecard"},
         "chartTextMismatches": chart_text_mismatches,
         "failedSections": failed, "words": words, "estimatedPages": est_pages,
         "entitySearch": entity_search_stats or {},

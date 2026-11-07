@@ -179,7 +179,8 @@ def test_end_to_end_assembly_with_fake_llm(tier):
     coverage = {r["entity"]: r for r in meta["outline"]["entityCoverage"]}
     assert coverage["NIFTY BANK"]["status"] == "covered" and coverage["NIFTY OIL"]["status"] == "insufficient_evidence"
     if tier == "in_depth":
-        assert "## Appendix A — Source Reliability" in report and "## Appendix B — Data Tables" in report
+        # Sources are listed once, by the renderer (Appendix B — Data Sources); the pipeline adds only the data tables.
+        assert "## Appendix A — Data Tables" in report and "Source Reliability" not in report
     else:
         assert "Appendix A" not in report
 

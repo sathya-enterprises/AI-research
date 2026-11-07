@@ -2624,6 +2624,21 @@ def _markdown_to_html(
         # and must reach the editable table renderer instead of being flattened
         # into a diagram or discarded.
         if is_table_start(i):
+            # "**Table: caption**" on the line before a table becomes the table's own title,
+            # rendered inside the table block so the caption cannot be separated from it.
+            _table_caption = None
+            if para_buf:
+                _cap = re.fullmatch(r"\*\*Table:\s*(.+?)\*\*", para_buf[-1].strip())
+                if _cap:
+                    _table_caption = _cap.group(1).strip()
+                    para_buf.pop()
+            elif out:
+                # The normaliser puts a blank line before tables, so the caption was already
+                # emitted as its own paragraph: take it back and use it as the table title.
+                _cap = re.fullmatch(r'<p class="gg-reveal[^"]*"[^>]*><strong>Table:\s*(.+?)</strong></p>', out[-1].strip())
+                if _cap:
+                    _table_caption = html.unescape(re.sub(r"<[^>]+>", "", _cap.group(1))).strip()
+                    out.pop()
             flush_para(); close_list()
             rows = []
             # Header + separator + following pipe rows.
@@ -2645,7 +2660,7 @@ def _markdown_to_html(
             source_value = table_source or (table_ids if table_ids else None)
             rendered_table = _render_table_markup(
                 heads, values, source_registry, source_value,
-                table_ids or last_source_ids, force_source_notes, method=method_text,
+                table_ids or last_source_ids, force_source_notes, title=_table_caption, method=method_text,
             )
             if rendered_table:
                 out.append(rendered_table)
@@ -2683,7 +2698,13 @@ def _markdown_to_html(
         if stripped.startswith("> "):
             flush_para(); close_list()
             _status_label = _status_banner_label(stripped[2:])
-            if _status_label:
+            from utils.layout_blocks import render_admonition
+            _layout_block = render_admonition(stripped, source_registry)
+            if _layout_block is not None:
+                # "> [!STATS] ...", "> [!TAKEAWAYS] ..." etc.: an existing block placed in the text.
+                if _layout_block:
+                    out.append(_layout_block)
+            elif _status_label:
                 # Draft / warning notices are publication-status messages, not
                 # pull quotes: render them as a labelled banner (text unchanged).
                 out.append(f'<div class="gg-status-banner gg-status-banner--{_status_label[0]}" role="note" data-status-label="{html.escape(_status_label[1], quote=True)}">{_inline_md(stripped[2:], source_registry)}</div>')
@@ -2707,7 +2728,8 @@ def _markdown_to_html(
         close_list(); para_buf.append(stripped); i += 1
 
     flush_para(); close_list()
-    return "\n".join(out)
+    from utils.layout_blocks import keep_headings_with_next
+    return "\n".join(keep_headings_with_next(out))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -4518,6 +4540,7 @@ def _render_sources_appendix(
     source_registry: list[dict] | None = None,
     report_tier: str = "detailed",
     cited_source_ids: set[str] | None = None,
+    heading_override: str | None = None,
 ) -> str:
     """Render canonical sources as a compact, numbered, one-line list.
 
@@ -4529,7 +4552,19 @@ def _render_sources_appendix(
     manifest = source_registry if source_registry is not None else build_source_registry(sources)
     if not manifest or placement == "none":
         return ""
+    from utils.source_list import clean_title, metadata_parts as _source_metadata, source_number
+
     display_manifest = list(manifest)
+    # One merged source list: the cited sources (every [S#] in the text resolves to a
+    # row), each with its reliability assessment. Sources screened but not cited are
+    # counted, not listed.
+    cited = {str(s).strip().upper() for s in (cited_source_ids or set())}
+    screened_not_cited = 0
+    if cited and any(str(s.get("id") or "").strip().upper() in cited for s in display_manifest):
+        kept = [s for s in display_manifest if str(s.get("id") or "").strip().upper() in cited]
+        screened_not_cited = len(display_manifest) - len(kept)
+        display_manifest = kept
+    display_manifest.sort(key=lambda s: source_number(str(s.get("id") or "")) or 10 ** 6)
     if not display_manifest:
         return ""
 
@@ -4540,7 +4575,8 @@ def _render_sources_appendix(
         # requested URL in the manifest for audit traceability.
         url = _safe_plain_url(source.get("publisher_page_url") or source.get("url"))
         source_id = str(source.get("id") or f"S{index}").strip().upper()
-        title = str(source.get("title") or source.get("publisher") or url or "Untitled source").strip()
+        # The [S#] id is printed with the title (list markers are hidden in some house styles).
+        title = f"[{str(source.get('id') or '').strip().upper()}] " + (clean_title(source) or url or "Untitled source")
         safe_id = html.escape(source_id, quote=True)
         safe_title = html.escape(title, quote=True)
         publication_date = str(source.get("publication_date") or "").strip()
@@ -4568,10 +4604,16 @@ def _render_sources_appendix(
         # Keep client-facing source lists compact. Per-source retrieval failures
         # are retained in backend diagnostics and publication-audit metadata, not
         # repeated verbatim beside every citation in the exported report.
-        metadata_parts = [part for part in (date_markup,) if part]
-        metadata_markup = f'<span class="gg-source-metadata">{" · ".join(metadata_parts)}</span>' if metadata_parts else ""
+        # Publisher, date, authority tier, reliability score and a one-line reason
+        # (formerly a separate "Source Reliability" appendix).
+        meta_text = [html.escape(part, quote=True) for part in _source_metadata(source)]
+        metadata_markup = (f'<span class="gg-source-metadata">{" · ".join(meta_text)}</span>' if meta_text
+                           else (f'<span class="gg-source-metadata">{date_markup}</span>' if date_markup else ""))
+        # The list number is the source id, so "[S12]" in the text is entry 12 here.
+        number = source_number(source_id)
+        value_attr = f' value="{number}"' if number else ""
         lines.append(
-            f'<li id="source-{safe_id}" class="gg-source-line">'
+            f'<li id="source-{safe_id}" class="gg-source-line"{value_attr}>'
             f'<span class="gg-source-id">[{safe_id}]</span> '
             f'<span class="gg-source-title-text">{safe_title}</span> '
             f'{link_markup}'
@@ -4579,12 +4621,14 @@ def _render_sources_appendix(
             f'</li>'
         )
     count = len(display_manifest)
-    heading = "Appendix — Data Sources" if placement == "appendix" or include_appendix else "Data Sources"
+    heading = heading_override or ("Appendix — Data Sources" if placement == "appendix" or include_appendix else "Data Sources")
     print_break = ""
     return (
         f'{print_break}<section id="data-sources" class="gg-sources gg-reveal" data-reveal data-source-placement="{html.escape(placement, quote=True)}" data-source-count="{count}">'
         f'<h2>{heading}</h2>'
-        f'<p class="gg-sources-count">Total sources: {count}</p>'
+        f'<p class="gg-sources-count">Total sources: {count}'
+        + (f' cited ({screened_not_cited} further sources were screened but not cited)' if screened_not_cited else '')
+        + '</p>'
         f'<ol class="gg-source-list">{"".join(lines)}</ol></section>'
     )
 
@@ -5347,9 +5391,11 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     placement = str(source_spec.get("placement") or "end_of_report")
     if placement == "none" and source_registry:
         placement = "end_of_report"
+    # Appendix lettering: when the body ends with "Appendix A — ...", the source list is Appendix B.
+    sources_heading = "Appendix B — Data Sources" if re.search(r"(?im)^#{2}\s+Appendix A\b", report) else None
     sources_html = _render_sources_appendix(
         sources, placement, bool(source_spec.get("include_appendix")), source_registry,
-        report_tier=report_tier, cited_source_ids=cited_source_ids,
+        report_tier=report_tier, cited_source_ids=cited_source_ids, heading_override=sources_heading,
     )
     inline_sources_html = ""
     if placement == "none":
@@ -5418,7 +5464,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     navigation_entries.extend(section_entries)
     has_source_appendix = bool(sources_html)
     if has_source_appendix:
-        navigation_entries.append(("data-sources", "Data Sources"))
+        navigation_entries.append(("data-sources", sources_heading or "Data Sources"))
     navigation_html = _render_report_navigation(navigation_entries, report_tier)
     index_entries = [*navigation_entries]
     # A contents panel is useful for substantial Deep Research reports, but
