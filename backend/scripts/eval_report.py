@@ -343,8 +343,90 @@ def refetch_replay(capture: dict) -> dict:
     }
 
 
+_LLM_LOG_RE = re.compile(r"HTTP Request: POST https://(?:generativelanguage\.googleapis\.com|api\.groq\.com|openrouter\.ai)\S*")
+
+
+def llm_metrics(capture: dict, log_text: str) -> dict:
+    """LLM calls and tokens. V2 records every call in the capture; for the old path
+    the server log's provider HTTP requests are counted (tokens unavailable)."""
+    calls = [c for c in (capture.get("llmCalls") or []) if isinstance(c, dict)]
+    log_calls = len(_LLM_LOG_RE.findall(log_text or "")) or None
+    if calls:
+        return {"llm_calls": len(calls), "llm_calls_all_providers": log_calls,
+                "llm_tokens_in": sum(int(c.get("tokensIn") or 0) for c in calls),
+                "llm_tokens_out": sum(int(c.get("tokensOut") or 0) for c in calls),
+                "llm_failed_calls": sum(1 for c in calls if not c.get("ok"))}
+    return {"llm_calls": None, "llm_calls_all_providers": log_calls, "llm_tokens_in": None, "llm_tokens_out": None}
+
+
+def v2_metrics(capture: dict) -> dict:
+    stage = ((capture.get("stages") or {}).get("pipeline_v2") or {}).get("data") or {}
+    if not stage:
+        return {"pipeline": "v1"}
+    if stage.get("fallback"):
+        return {"pipeline": "v1 (v2 failed: " + str(stage.get("error") or "")[:60] + ")"}
+    cit = stage.get("citations") or {}
+    outline = stage.get("outline") or {}
+    coverage = outline.get("entityCoverage") or []
+    return {
+        "pipeline": "v2",
+        "v2_sections_ok": f"{sum(1 for s in stage.get('sections') or [] if s.get('ok'))}/{len(stage.get('sections') or [])}",
+        "v2_passages_provided": cit.get("passagesProvided"),
+        "v2_passages_cited": cit.get("passagesCited"),
+        "v2_pct_passages_cited": round(100 * (cit.get("passagesCited") or 0) / cit["passagesProvided"], 1) if cit.get("passagesProvided") else None,
+        "v2_unsupported_numbers": stage.get("unsupportedNumbers"),
+        "v2_invalid_citations": sum(int(s.get("invalidCitations") or 0) for s in stage.get("sections") or []),
+        "v2_entities_covered": f"{sum(1 for r in coverage if r.get('status') == 'covered')}/{len(coverage)}" if coverage else None,
+        "v2_scope_decisions": len(outline.get("decisions") or []),
+        "v2_estimated_pages": stage.get("estimatedPages"),
+        "v2_evidence_supported_pages": stage.get("evidenceSupportedPages"),
+    }
+
+
+def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
+    """Re-run V2 assembly offline from the captured passages and LLM responses."""
+    stages = capture.get("stages") or {}
+    passages = (((stages.get("evidence_store") or {}).get("data") or {}).get("passages")) or {}
+    if not capture.get("llmCalls") or not passages:
+        return {"v2replay": "n/a (capture has no V2 llmCalls / passages)"}
+    from utils.evidence_store import store_from_passages
+    from utils.llm_replay import ReplayGateway
+    from utils.report_pipeline_v2 import run_pipeline_v2
+
+    store = store_from_passages(passages)
+    manifest = (((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources")) or []
+    gateway = ReplayGateway(capture)
+    result = asyncio.run(run_pipeline_v2(runtime=None, question=str(capture.get("question") or ""),
+                                         tier=str(capture.get("reportTier") or "detailed"), store=store,
+                                         manifest=[m for m in manifest if isinstance(m, dict)],
+                                         today=str(capture.get("startedAt") or "")[:10], gateway=gateway))
+    out = json.loads(result["raw"])
+    (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
+    report = out.get("report") or ""
+    headings = [(len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(report)]
+    explained, referenced = charts_explained(report, out.get("charts") or [])
+    charts = out.get("charts") or []
+    metrics = {
+        "v2replay_calls_replayed": gateway.stats.calls, "v2replay_missing_calls": len(gateway.missing),
+        "v2replay_prompts_changed": len(gateway.prompt_changed),
+        "v2replay_words": len(WORD_RE.findall(CITE_RE.sub(" ", MARKER_RE.sub(" ", report)))),
+        "v2replay_charts": len(charts),
+        "v2replay_pct_charts_explained": round(100 * explained / len(charts), 1) if charts else None,
+        "v2replay_unsupported_numbers": result["meta"].get("unsupportedNumbers"),
+        "v2replay_husk_callouts": len(husk_blocks(report)),
+        "v2replay_duplicate_headings": len(duplicate_headings(headings)),
+    }
+    if rerender:
+        pdf_bytes, error = asyncio.run(_rerender(out, str(capture.get("question") or ""), str(capture.get("reportTier") or "detailed")))
+        if pdf_bytes:
+            (run_dir / "v2_replay.pdf").write_bytes(pdf_bytes)
+        metrics["v2replay_pages"] = pdf_metrics(pdf_bytes).get("pages") if pdf_bytes else f"render error: {error}"
+    return metrics
+
+
 # ── per-run evaluation ────────────────────────────────────────────────────────
-def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False, refetch: bool = False) -> dict:
+def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False, refetch: bool = False,
+                 replay: bool = False) -> dict:
     capture = _load(run_dir / "capture.json") or {}
     status = _load(run_dir / "status_final.json") or {}
     result = status.get("result") or {}
@@ -408,21 +490,30 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False,
     metrics["pdf_words"] = pm.get("pdf_words")
     metrics["render_errors"] = (1 if render_error else 0) + len(pm.get("raw_markers_in_pdf") or [])
     metrics["_detail"]["render"] = {"error": render_error, "raw_markers": pm.get("raw_markers_in_pdf"), "sparse_pages": pm.get("sparse_pages")}
+    metrics.update(llm_metrics(capture, log_text))
+    metrics.update(v2_metrics(capture))
+    elapsed = status.get("elapsedMs") or 0
+    metrics["time_s"] = round(elapsed / 1000, 1) if elapsed else None
     if retrieval and capture:
         metrics.update(retrieval_replay(capture))
     if refetch and capture:
         metrics.update(refetch_replay(capture))
+    if replay and capture:
+        metrics.update(replay_v2(capture, run_dir, rerender))
     return metrics
 
 
 ORDER = ["tier", "pages", "pdf_words", "report_words", "h2_sections", "subsections", "sources_fetched",
          "sources_in_appendix", "sources_cited", "pct_evidence_cited", "charts", "pct_charts_explained",
          "pct_charts_figure_ref", "numbers_removed", "husk_callouts", "sentence_fragments", "empty_headings",
-         "duplicate_headings", "misplaced_sections", "dangling_refs", "render_errors"]
+         "duplicate_headings", "misplaced_sections", "dangling_refs", "render_errors",
+         "pipeline", "llm_calls", "llm_calls_all_providers", "llm_tokens_in", "llm_tokens_out", "llm_failed_calls", "time_s",
+         "v2_sections_ok", "v2_passages_provided", "v2_passages_cited", "v2_pct_passages_cited", "v2_unsupported_numbers",
+         "v2_invalid_citations", "v2_entities_covered", "v2_scope_decisions", "v2_estimated_pages", "v2_evidence_supported_pages"]
 
 
 def print_table(rows: list[dict], baseline: dict | None = None) -> None:
-    keys = ORDER + sorted({k for r in rows for k in r if k.startswith(("replay_", "refetch_"))})
+    keys = [k for k in ORDER if any(k in r for r in rows)] + sorted({k for r in rows for k in r if k.startswith(("replay_", "refetch_", "v2replay"))})
     names = [r["run"] for r in rows]
     width = max(24, *(len(k) for k in keys))
     colw = max(18, *(len(n) for n in names)) if names else 18
@@ -450,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rerender", action="store_true", help="rebuild PDFs from saved results with the current renderer")
     parser.add_argument("--retrieval", action="store_true", help="replay current retrieval scoring on captured search results")
     parser.add_argument("--refetch", action="store_true", help="re-fetch queued pages with the current fetcher (network only, no API credits)")
+    parser.add_argument("--replay-v2", action="store_true", help="re-run V2 assembly offline from captured passages and LLM responses")
     parser.add_argument("--baseline", help="JSON baseline to show before → after")
     parser.add_argument("--save-baseline", help="write metrics to this JSON file")
     parser.add_argument("--details", action="store_true", help="print the offending headings/husks/fragments")
@@ -459,7 +551,8 @@ def main(argv: list[str] | None = None) -> int:
     if not run_dirs:
         print(f"No runs found under {DEFAULT_RUNS}", file=sys.stderr)
         return 2
-    rows = [evaluate_run(d, rerender=args.rerender, retrieval=args.retrieval, refetch=args.refetch) for d in run_dirs]
+    rows = [evaluate_run(d, rerender=args.rerender, retrieval=args.retrieval, refetch=args.refetch, replay=args.replay_v2)
+            for d in run_dirs]
     baseline = None
     if args.baseline:
         raw = json.loads(Path(args.baseline).read_text(encoding="utf-8"))

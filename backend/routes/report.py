@@ -21550,7 +21550,10 @@ async def generate_report(request: Request):
         log.info("Report: evidence store passages=%d sources=%d mean_reliability=%.3f",
                  len(evidence_store.passages), len(evidence_store.source_ids()), evidence_store.mean_reliability())
         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
-                                                 "sourceSummary": evidence_store.source_summary()})
+                                                 "sourceSummary": evidence_store.source_summary(),
+                                                 # Keyed dict (not a list) so the capture keeps every
+                                                 # passage; needed to replay V2 offline.
+                                                 "passages": {p.passage_id: p.to_dict() for p in evidence_store.passages}})
     except Exception as _store_exc:
         log.warning("Report: evidence store unavailable: %s", type(_store_exc).__name__)
 

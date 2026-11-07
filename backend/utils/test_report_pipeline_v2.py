@@ -187,3 +187,29 @@ def test_invalid_outline_raises_so_report_py_falls_back():
     with pytest.raises(PipelineV2Error):
         asyncio.run(run_pipeline_v2(runtime=None, question="q", tier="detailed", store=store, manifest=manifest,
                                     today="2026-11-07", gateway=Broken(OUTLINE)))
+
+
+def test_offline_replay_reproduces_the_run_from_captured_calls():
+    from utils.evidence_store import store_from_passages
+    from utils.llm_replay import ReplayGateway
+
+    store, manifest = _store()
+    calls = []
+
+    class Recording(FakeGateway):
+        async def generate(self, *, purpose, prompt, system="", section_id="", **kwargs):
+            result = await super().generate(purpose=purpose, prompt=prompt, system=system, section_id=section_id)
+            calls.append({"purpose": purpose, "sectionId": section_id, "ok": result.ok, "model": "fake",
+                          "llmPrompt": prompt, "llmResponse": result.text})
+            return result
+
+    live = asyncio.run(run_pipeline_v2(runtime=None, question="Sector rotation", tier="in_depth", store=store,
+                                       manifest=manifest, today="2026-11-07", gateway=Recording(OUTLINE)))
+    capture = {"llmCalls": calls}
+    rebuilt = store_from_passages({p.passage_id: p.to_dict() for p in store.passages})
+    replay_gateway = ReplayGateway(capture)
+    replayed = asyncio.run(run_pipeline_v2(runtime=None, question="Sector rotation", tier="in_depth", store=rebuilt,
+                                           manifest=manifest, today="2026-11-07", gateway=replay_gateway))
+    assert replayed["raw"] == live["raw"]
+    assert replay_gateway.missing == [] and replay_gateway.prompt_changed == []
+    assert replay_gateway.recorded_calls == len(calls)

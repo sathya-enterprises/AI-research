@@ -280,6 +280,26 @@ class EvidenceStore:
         }
 
 
+def store_from_passages(passages: dict | list) -> EvidenceStore:
+    """Rebuild a store from captured passage dicts (Passage.to_dict), e.g. for offline replay."""
+    store = EvidenceStore()
+    items = passages.values() if isinstance(passages, dict) else passages
+    for item in items:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        passage = Passage(
+            passage_id=str(item["id"]), source_id=str(item.get("sourceId") or str(item["id"]).split(".")[0]),
+            text=str(item.get("text") or ""), kind=str(item.get("kind") or "narrative"), url=str(item.get("url") or ""),
+            title=str(item.get("title") or ""), publisher=str(item.get("publisher") or ""),
+            published=str(item.get("published") or ""), authority_tier=str(item.get("authorityTier") or "unknown"),
+            reliability=float(item.get("reliability") or 0.45), numbers=_NUMBER_RE.findall(str(item.get("text") or ""))[:60],
+        )
+        store.passages.append(passage)
+        store._by_id[passage.passage_id] = passage
+    store.passages.sort(key=lambda p: (int(re.sub(r"\D", "", p.source_id) or 0), int(p.passage_id.split(".")[-1] or 0)))
+    return store.finalize()
+
+
 def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list[dict] | None = None) -> EvidenceStore:
     """Build a store from enriched source rows.
 
