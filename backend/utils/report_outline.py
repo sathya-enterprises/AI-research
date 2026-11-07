@@ -32,7 +32,7 @@ WORDS_PER_PAGE = 380
 TIER_RULES = {
     "detailed": {"sections": "6-8", "subsections": False, "leaf_cap": 1150, "leaf_floor": 380, "total_cap": 8200,
                  "k_leaf": 12, "exec_words": 450},
-    "in_depth": {"sections": "12-20", "subsections": True, "leaf_cap": 950, "leaf_floor": 330, "total_cap": 34000,
+    "in_depth": {"sections": "12-26", "subsections": True, "leaf_cap": 950, "leaf_floor": 330, "total_cap": 42000,
                  "k_leaf": 14, "exec_words": 900},
 }
 MIN_ANALYSIS_SECTIONS = {"detailed": 5, "in_depth": 12}
@@ -347,7 +347,11 @@ def entity_coverage(store, entities: list[dict], dimensions: list[str]) -> list[
         hits = store.search(query, k=20, max_per_source=4)
         if hits:
             top = hits[0][1]
-            hits = [(p, s) for p, s in hits if s >= 0.3 * top and _terms(name) & _terms(p.text + " " + p.title)]
+            if _terms(name):
+                hits = [(p, s) for p, s in hits if s >= 0.3 * top and _terms(name) & _terms(p.text + " " + p.title)]
+            else:  # two-letter names ("IT") are below the term length; match them case-sensitively
+                hits = [(p, s) for p, s in hits if s >= 0.3 * top
+                        and re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", p.text + " " + p.title)]
         dim_hits = store.search(f"{query} {dim_terms}", k=10, max_per_source=3) if dim_terms else []
         # A data table carrying the entity's own row is per-entity evidence on its own.
         in_table = any(p.kind in {"table", "calculated"} and re.search(rf"(?im)^\s*{re.escape(name)}\s*\|", p.text)

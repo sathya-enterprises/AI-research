@@ -29,7 +29,17 @@ _GENERIC_LABELS = {
     "nifty", "momentum", "quality", "value", "growth", "low volatility", "alpha", "beta", "breadth", "benchmark",
     "recovery", "relative strength", "earnings revisions", "earnings upgrades", "earnings downgrades", "volatility",
     "leaders", "laggards", "leading", "lagging", "improving", "weakening", "average", "median", "fii", "dii", "fpi",
+    # comparison words and financial line items
+    "better", "worse", "higher", "lower", "same", "neutral", "positive", "negative", "up", "down", "inline",
+    "turnover", "inventories", "inventory", "revenue", "revenues", "sales", "net profit", "profit", "ebitda", "pat",
+    "eps", "debt", "assets", "liabilities", "equity", "cash", "margin", "margins", "capex", "receivables",
+    "payables", "dividend", "book value", "income", "expenses", "interest", "borrowings", "reserves",
+    "cost of inputs", "employees", "full-time employees", "headcount", "raw materials", "power and fuel",
 }
+_PERIOD_LABEL_RE = re.compile(
+    r"^(?:\d+\s*(?:years?|yrs?|y|months?|mths?|m|weeks?|w|days?|d)|ytd|mtd|qtd|since inception|inception"
+    r"|[qh][1-4]\s*[:\-/ ]?\s*(?:fy|cy)?\s*'?\d{2,4}(?:\s*[-/]\s*\d{2,4})?|fy\s*'?\d{2,4}(?:\s*[-/]\s*\d{2,4})?)$", re.I)
+_COMPANY_HEADER_RE = re.compile(r"(?i)^(?:company|companies|stock|stocks|scrip|symbol|name of (?:the )?company|constituent|issuer)$")
 # Common Indian sector synonyms; keys are canonical display names.
 SYNONYMS = {
     "IT": ["information technology", "it services", "technology", "it & telecom"],
@@ -45,7 +55,7 @@ SYNONYMS = {
     "Realty": ["real estate", "realty index"],
     "Energy": ["power", "energy index"],
     "Oil & Gas": ["oil and gas", "oil, gas & consumable fuels", "oil gas"],
-    "Media": ["media & entertainment", "media and entertainment"],
+    "Media": ["media & entertainment", "media and entertainment", "media, entertainment & publication"],
     "Consumer Durables": ["consumer durable"],
     "Infrastructure": ["infra"],
     "Capital Goods": ["capital good", "industrials"],
@@ -63,6 +73,7 @@ class EntityEvidence:
     aliases: set[str] = field(default_factory=set)
     table_passages: set[str] = field(default_factory=set)
     table_sources: set[str] = field(default_factory=set)
+    company_rows: int = 0
     text_passages: set[str] = field(default_factory=set)
     good_text_sources: set[str] = field(default_factory=set)
     tier: str = "coverage_note"
@@ -79,7 +90,7 @@ def canonical(label: str) -> str | None:
         return None
     stripped = re.sub(r"^(?:nifty|s&p bse|bse)\s+", "", text, flags=re.I).strip()
     key = stripped.casefold()
-    if not key or key in _GENERIC_LABELS or _BENCHMARK_RE.match(text) or _BENCHMARK_RE.match(stripped):
+    if not key or key in _GENERIC_LABELS or _BENCHMARK_RE.match(text) or _BENCHMARK_RE.match(stripped) or _PERIOD_LABEL_RE.match(key):
         return None
     if key in _ALIAS_TO_CANON:
         return _ALIAS_TO_CANON[key]
@@ -100,7 +111,10 @@ def discover_entities(store, *, max_entities: int = 40) -> list[EntityEvidence]:
     for passage in store.passages:
         if passage.kind not in {"table", "calculated"}:
             continue
-        rows = [ln for ln in passage.text.splitlines() if " | " in ln][1:]  # skip the header row
+        table_lines = [ln for ln in passage.text.splitlines() if " | " in ln]
+        first_header = table_lines[0].strip().strip("|").split("|")[0].strip() if table_lines else ""
+        company_table = bool(_COMPANY_HEADER_RE.match(first_header))
+        rows = table_lines[1:]  # skip the header row
         for row in rows:
             label = row.strip().strip("|").split("|")[0].strip()
             canon = canonical(label)
@@ -110,9 +124,16 @@ def discover_entities(store, *, max_entities: int = 40) -> list[EntityEvidence]:
             entity.aliases.add(label.strip())
             entity.table_passages.add(passage.passage_id)
             entity.table_sources.add(passage.source_id)
+            if company_table:
+                entity.company_rows += 1
     # A label is an entity if it is a known sector name, or it labels table rows
     # in at least two different sources (one table's row labels may be metrics).
     found = {k: e for k, e in found.items() if k in SYNONYMS or len(e.table_sources) >= 2}
+    # When the entities are mostly sectors, single companies (TCS, GAIL, ONGC) are
+    # constituents, not peer entities: drop company-table rows and ticker-like labels.
+    if sum(1 for k in found if k in SYNONYMS) >= 6:
+        found = {k: e for k, e in found.items() if k in SYNONYMS or (
+            e.company_rows < len(e.table_passages) and not re.fullmatch(r"[A-Z&]{2,6}", k))}
     for entity in found.values():
         pattern = _pattern(entity)
         for passage in store.passages:
@@ -123,6 +144,10 @@ def discover_entities(store, *, max_entities: int = 40) -> list[EntityEvidence]:
                 entity.text_passages.add(passage.passage_id)
                 if mentions >= 2 and passage.reliability >= GOOD_RELIABILITY:
                     entity.good_text_sources.add(passage.source_id)
+    # In a sector-dominated set, a label that is not a known sector must also be
+    # discussed in text (survey parameters and constituents appear only in tables).
+    if sum(1 for k in found if k in SYNONYMS) >= 6:
+        found = {k: e for k, e in found.items() if k in SYNONYMS or e.good_text_sources}
     ranked = sorted(found.values(), key=lambda e: (-len(e.good_text_sources), -len(e.table_passages), e.name))
     return ranked[:max_entities]
 
@@ -151,7 +176,13 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
 
 
 def entity_tiers(store, *, tier: str = "in_depth") -> dict[str, list[EntityEvidence]]:
-    max_deep = 10 if tier == "in_depth" else 3
+    # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
+    # ceiling (ranked by evidence) that keeps the report within the LLM call budget.
+    import os
+    try:
+        max_deep = int(os.getenv("GG_V2_MAX_DEEP_DIVES", "16")) if tier == "in_depth" else 3
+    except ValueError:
+        max_deep = 16 if tier == "in_depth" else 3
     return assign_tiers(discover_entities(store), max_deep_dives=max_deep)
 
 

@@ -117,3 +117,9 @@ def test_entity_search_runs_the_stage_a_path_and_reports_per_entity():
     assert stats["queries"] == 3 and stats["results"] == 3 and stats["new_urls"] == 2 and stats["kept"] == 1
     assert stats["perEntity"]["IT"] == {"queries": 2, "results": 1, "kept": 1}
     assert kept[0]["entitySearch"] == "IT"
+
+
+def test_period_labels_line_items_and_quarter_labels_are_not_entities():
+    for label in ("5 Years", "1 Year", "YTD", "Q2:25-26", "Q4 FY26", "Better", "Turnover", "Inventories", "Cost Of Inputs"):
+        assert canonical(label) is None, label
+    assert canonical("Media, Entertainment & Publication") == "Media"
