@@ -35,7 +35,7 @@ function parseArgs(argv) {
     else if (arg === '--help' || arg === '-h') args.help = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
-  if (!['pdf', 'docx', 'html'].includes(args.format)) throw new Error('--format must be pdf, docx, or html');
+  if (args.format !== 'pdf') throw new Error('--format must be pdf (PDF is the only report export)');
   if (!Number.isInteger(args.reportIndex) || args.reportIndex < 0) throw new Error('--report-index must be a non-negative integer');
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 5_000 || args.timeoutMs > 240_000) throw new Error('--timeout-ms must be between 5000 and 240000');
   return args;
@@ -50,17 +50,12 @@ function safeFilename(name, format) {
 function validateBytes(format, bytes) {
   if (!bytes || bytes.length < 8) throw new Error('Export produced an empty or implausibly small file.');
   if (format === 'pdf' && bytes.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('The generated artifact is not a PDF (missing %PDF signature).');
-  if (format === 'docx' && !(bytes[0] === 0x50 && bytes[1] === 0x4b)) throw new Error('The generated artifact is not a DOCX/OOXML ZIP (missing PK signature).');
-  if (format === 'html') {
-    const start = bytes.subarray(0, 500).toString('utf8').toLowerCase();
-    if (!start.includes('<html') && !start.includes('<!doctype html')) throw new Error('The generated artifact does not appear to be an HTML document.');
-  }
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    process.stdout.write('Usage: node scripts/capture-report-export.cjs --cdp <URL> --format <pdf|docx|html> [--report-index N] [--out .test-exports] [--timeout-ms 180000]\n');
+    process.stdout.write('Usage: node scripts/capture-report-export.cjs --cdp <URL> --format pdf [--report-index N] [--out .test-exports] [--timeout-ms 180000]\n');
     return;
   }
 
@@ -125,7 +120,7 @@ async function main() {
         const format = ${JSON.stringify(extension)};
         const reportIndex = ${options.reportIndex};
         const timeoutMs = ${options.timeoutMs};
-        const labels = { pdf: 'Download PDF', docx: 'Download Editable Word', html: 'Download HTML' };
+        const labels = { pdf: 'Download PDF' };
         const reports = Array.from(document.querySelectorAll('.report-wrap'));
         if (!reports.length) throw new Error('No rendered report card found in the current conversation.');
         if (reportIndex >= reports.length) throw new Error('Report index is out of range (' + reports.length + ' reports visible).');
@@ -155,7 +150,7 @@ async function main() {
             await new Promise(resolve => setTimeout(resolve, 200));
           }
           if (!captured) {
-            const visibleError = report.innerText.match(/(?:PDF|Word document|HTML) generation failed[^\\n]*|Could not download[^\\n]*|generated (?:PDF|Word document|HTML) was empty[^\\n]*/i);
+            const visibleError = report.innerText.match(/PDF generation failed[^\\n]*|Could not download[^\\n]*|generated PDF was empty[^\\n]*/i);
             throw new Error(visibleError ? visibleError[0] : 'No export Blob appeared before the bounded timeout. Inspect the UI error and Network response; no second click was made.');
           }
           const response = await fetch(captured.href);

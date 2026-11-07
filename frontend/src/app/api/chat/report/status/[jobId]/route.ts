@@ -1,7 +1,7 @@
 import { getBackendBaseUrl } from '@/lib/backend-url';
 /**
  * Durable report-job status. The browser polls this when the SSE progress
- * stream is interrupted (proxy timeout, network change) so a long Brief,
+ * stream is interrupted (proxy timeout, network change) so a long
  * In-Detail or Deep Research job is never lost.
  *
  * Reconstructed 2026-10-21: this dynamic route folder was missing from the

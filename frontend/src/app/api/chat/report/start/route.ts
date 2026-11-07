@@ -1,6 +1,6 @@
 import { getBackendBaseUrl } from '@/lib/backend-url';
 /**
- * Start a report job for Brief, In-Detail or Deep Research. The backend returns
+ * Start a report job for In-Detail or Deep Research. The backend returns
  * immediately with a job ID; the browser reads progress and preview chunks from
  * the SSE stream, with status polling available as a fallback.
  */

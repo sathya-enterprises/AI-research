@@ -43,7 +43,6 @@ export async function GET() {
       'POST /api/chat/report/start',
       'GET /api/chat/report/stream/[jobId]',
       'GET /api/chat/report/status/[jobId]',
-      'POST /api/chat/report/docx',
     ],
   });
 }

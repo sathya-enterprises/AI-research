@@ -26,11 +26,10 @@ interface WebImage { url: string; caption?: string; sourceUrl?: string; sourceUR
 // ever set when the user's request explicitly asked for a visual style
 // (see report.py SYSTEM_PROMPT's THEME section). fontFamily/customCss are not
 // fully represented in the flat PDF export, which is the only report export exposed.
-type ReportTier = 'brief' | 'detailed' | 'in_depth';
+type ReportTier = 'detailed' | 'in_depth';
 
 const REPORT_TIER_OPTIONS: { value: ReportTier; label: string; scope: string; description: string }[] = [
-  { value: 'brief', label: 'Brief', scope: '6–10 pages', description: 'Core findings with the key charts — a fast, focused read.' },
-  { value: 'detailed', label: 'In-Detail', scope: '25–30 pages', description: 'Brief coverage plus deeper comparisons, history and risks, with more charts.' },
+  { value: 'detailed', label: 'In-Detail', scope: '25–30 pages', description: 'Core findings plus deeper comparisons, history and risks, with charts.' },
   { value: 'in_depth', label: 'Deep Research', scope: '70–100 pages', description: 'Widest source base and granular, chart-heavy analysis; length follows the evidence.' },
 ];
 
@@ -49,7 +48,7 @@ interface ReportQualityReview { publicationAudit?: ReportPublicationAudit; chart
 interface ReportPageBudget { minimum?: number | null; target?: number | null; maximum?: number | null; renderedPages?: number | null; measured?: boolean; minimumReached?: boolean | null; warning?: string | null; }
 interface ReportRagStatus { requested?: boolean; status?: string; retrievedChunks?: number; sourceCount?: number; sourceIds?: string[]; restoreStatus?: string; rerankerRan?: boolean; message?: string; }
 interface ReportRevision { revision: number; savedAt: number; note: string; report: string; title?: string; charts: ChartSpec[]; images?: WebImage[]; sources?: ReportSource[]; presentation?: Record<string, unknown>; keyStats?: {label:string;value:string;change?:string}[]; summary?: string; theme?: ReportTheme; qualityReview?: ReportQualityReview; publicationStatus?: string; sessionId?: string; ragStatus?: ReportRagStatus; }
-interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; reportStyle?: ReportStyle; kicker?: string; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf' | 'html'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
+interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; reportStyle?: ReportStyle; kicker?: string; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
 interface ReportFailureItem { stage?: string; issue?: string; claim?: string; sources?: string[]; values?: string[]; }
 
 // Human-readable names for the backend's failedStage values.
@@ -1201,7 +1200,7 @@ function ReportPromptModal({
     ? 'Run a new research prompt and create a separate report.'
     : 'Change one part of the current report without regenerating the rest.';
   const placeholder = isExperiment
-    ? 'Example: Compare EV adoption in India, China and Europe in a Brief report.'
+    ? 'Example: Compare EV adoption in India, China and Europe in an In-Detail report.'
     : 'Example: Make the Regional Landscape section shorter and add a comparison chart using only its existing evidence.';
 
   return (
@@ -1931,7 +1930,7 @@ export default function GrowthGradualChat() {
   // restarting its timer on every provider chunk.
   const [streamDisplayedText, setStreamDisplayedText] = useState('');
   const [streamVisualMessageId, setStreamVisualMessageId] = useState<string | null>(null);
-  const [selectedReportTier, setSelectedReportTier] = useState<ReportTier>('brief');
+  const [selectedReportTier, setSelectedReportTier] = useState<ReportTier>('detailed');
   const [selectedReportStyle, setSelectedReportStyle] = useState<ReportStyle>('market_currents');
   // generateReport reads the style through a ref so its many call sites stay unchanged.
   const selectedReportStyleRef = useRef<ReportStyle>('market_currents');
@@ -2058,8 +2057,12 @@ export default function GrowthGradualChat() {
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem('gg-report-tier-v2');
-      if (saved === 'brief' || saved === 'detailed' || saved === 'in_depth') {
+      if (saved === 'detailed' || saved === 'in_depth') {
         setSelectedReportTier(saved);
+      } else if (saved === 'brief') {
+        // The Brief tier was removed; migrate the saved picker to In-Detail.
+        setSelectedReportTier('detailed');
+        window.localStorage.setItem('gg-report-tier-v2', 'detailed');
       }
       const savedStyle = window.localStorage.getItem('gg-report-style-v1');
       if (savedStyle === 'market_currents' || savedStyle === 'feature_article') {
@@ -2448,7 +2451,7 @@ export default function GrowthGradualChat() {
     setReportModeEnabled(false);
     setReportTierMenuOpen(false);
     shouldAutoScrollRef.current = true;
-    setSelectedReportTier('brief');
+    setSelectedReportTier('detailed');
     setAttachedFiles([]);
     setPastedTexts([]);
     setRagIndexed(false);
@@ -2766,7 +2769,7 @@ export default function GrowthGradualChat() {
       // chat-answer path.
       // The report-depth picker is authoritative. The wording of the prompt
       // must never silently change the user's selected tier (e.g. selecting
-      // Brief and typing a prompt containing the word "detailed").
+      // In-Detail and typing a prompt containing the words "deep dive").
       const requestTier = selectedReportTier;
       generateReport(
         botMsg.id,
@@ -3058,11 +3061,12 @@ export default function GrowthGradualChat() {
   /** Builds a report for a Report-mode query. `conversationContext` contains
    *  prior Q&A from the current thread when available. */
   const generateReport = useCallback((botMsgId: string, question: string, files: AttachedFile[], conversationContext?: string, appendToHistory: boolean = false, priorSources: Source[] = [], reportTier: ReportTier = 'detailed') => {
-    // Normalize persisted/legacy tier values such as `Brief` to the backend enum.
+    // Normalize persisted/legacy tier values to the backend enum; the removed
+    // `brief` tier (e.g. from older saved conversations) falls back to detailed.
     // All report tiers must use the durable start + SSE route; the synchronous
     // route can take minutes and prevents progress from reaching the browser.
     const normalizedTier = String(reportTier || 'detailed').trim().toLowerCase();
-    const effectiveReportTier: ReportTier = ['brief', 'detailed', 'in_depth'].includes(normalizedTier)
+    const effectiveReportTier: ReportTier = ['detailed', 'in_depth'].includes(normalizedTier)
       ? normalizedTier as ReportTier
       : 'detailed';
     console.info('[report] using background streaming pipeline', { reportTier: effectiveReportTier });
@@ -3251,10 +3255,9 @@ export default function GrowthGradualChat() {
       .map(f => ({ name: f.name, text: f.extractedText || '', file_type: f.type }));
 
     buildFilePayload().then(async ({ fileImages, embeddedFileImages, fileTextContext }) => {
-      // Every report tier uses the durable background-job + SSE progress path.
-      // Brief still uses its smaller source/page budget, but the browser no
-      // longer waits on one long blocking POST or appears frozen during work.
-      const useBackgroundReportJob = ['brief', 'detailed', 'in_depth'].includes(effectiveReportTier);
+      // Every report tier uses the durable background-job + SSE progress path,
+      // so the browser never waits on one long blocking POST or appears frozen.
+      const useBackgroundReportJob = ['detailed', 'in_depth'].includes(effectiveReportTier);
       if (useBackgroundReportJob) {
         console.info('[report] POST /api/chat/report/start', { reportTier: effectiveReportTier });
         const startPayload = {
@@ -3291,12 +3294,10 @@ export default function GrowthGradualChat() {
             : `Could not start the report job (HTTP ${started.status}). Check the report API routes and backend logs.`;
           return { ok: false, status: started.status || 502, data: { error: safeError } };
         }
-        const maxWaitMs = effectiveReportTier === 'in_depth' ? 60 * 60_000 : effectiveReportTier === 'brief' ? 20 * 60_000 : 30 * 60_000;
+        const maxWaitMs = effectiveReportTier === 'in_depth' ? 60 * 60_000 : 30 * 60_000;
         setStatusMsg(effectiveReportTier === 'in_depth'
           ? 'Deep Research is running — collecting evidence and building the comprehensive report…'
-          : effectiveReportTier === 'brief'
-            ? 'Brief report is running — finding evidence and assembling the focused report…'
-            : 'In-Detail research is running — expanding evidence and building the detailed report…');
+          : 'In-Detail research is running — expanding evidence and building the detailed report…');
         try {
           const streamRes = await fetch(`/api/chat/report/stream/${encodeURIComponent(startData.jobId)}`, {
             cache: 'no-store', signal: AbortSignal.timeout(maxWaitMs),
@@ -3535,14 +3536,9 @@ export default function GrowthGradualChat() {
             fileImages: data.fileImages ?? [],
             sourceDocuments,
             sources: data.sources ?? [],
-            // "html" when the question itself asked for something a static
-            // PDF can't do (animation/interactive/motion/etc.), OR when the
-            // model's own theme decision (see data.theme.richStyleNeeded)
-            // says the requested visual style needs treatment a flat PDF
-            // re-theme can't deliver — computed server-side either way, so
-            // an absent field here still falls back to "pdf".
-            recommendedFormat: data.recommendedFormat ?? 'pdf',
-            // Carried through unchanged to /report/pdf and /report/html on
+            // PDF is the only report output format.
+            recommendedFormat: 'pdf',
+            // Carried through unchanged to /report/pdf on
             // every later download, and preserved across section edits —
             // this is what actually makes fontFamily/customCss apply.
             theme: data.theme ?? undefined,
@@ -4671,7 +4667,7 @@ export default function GrowthGradualChat() {
         .chat-shell.gg-premium .input-hint { color: var(--ed-muted) !important; }
         .chat-shell.gg-premium .file-chip { background: var(--ed-tint) !important; border: 0 !important; border-radius: 3px !important; color: var(--ed-ink) !important; }
 
-        /* depth selector (Brief / In-Detail / Deep Research) */
+        /* depth selector (In-Detail / Deep Research) */
         .chat-shell.gg-premium .report-tier-trigger { background: var(--ed-surface) !important; border: 1px solid var(--ed-rule) !important; border-radius: 3px !important; box-shadow: none !important; color: var(--ed-ink) !important; }
         .chat-shell.gg-premium .report-tier-trigger.is-open, .chat-shell.gg-premium .report-tier-trigger:hover { border-color: var(--ed-forest) !important; }
         .chat-shell.gg-premium .report-tier-trigger-dot { background: var(--ed-forest) !important; box-shadow: none !important; border-radius: 0 !important; width: 2px !important; height: 18px !important; }

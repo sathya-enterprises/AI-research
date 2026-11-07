@@ -56,9 +56,9 @@ await check('Frontend /api/scrape route', `${frontend}/api/scrape`, 'OPTIONS', (
   message: status === 404 ? 'Scrape route is not registered in the active Next.js app.' : `Scrape route responded with HTTP ${status} (expected a non-404 route response).`
 }));
 
-await check('Frontend DOCX export route registration (GET should be 405)', `${frontend}/api/chat/report/docx`, 'GET', (status) => ({
+await check('Frontend PDF export route registration (GET should be 405)', `${frontend}/api/chat/report/pdf`, 'GET', (status) => ({
   pass: status === 405,
-  message: status === 405 ? 'Editable Word export proxy is registered and accepts POST.' : status === 404 ? 'DOCX export route is not registered in the active frontend.' : `Unexpected DOCX route status ${status}.`
+  message: status === 405 ? 'PDF export proxy is registered and accepts POST.' : status === 404 ? 'PDF export route is not registered in the active frontend.' : `Unexpected PDF route status ${status}.`
 }));
 
 await check('Frontend report route registration (GET should be 405)', `${frontend}/api/chat/report`, 'GET', (status, payload) => ({
