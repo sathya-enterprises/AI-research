@@ -20757,6 +20757,18 @@ async def generate_report(request: Request):
     audit_discovered_sources = [dict(x) for x in sources if isinstance(x, dict)]
     sources = _filter_relevant_sources(sources, question, intent, report_tier=report_tier)
     sources = _dedupe_enriched_sources(sources)
+    # Look-alike / denylisted domains never take a publisher-fetch slot.
+    try:
+        from utils.source_quality import authority as _source_authority
+        _denied = [s for s in sources if isinstance(s, dict) and str(s.get("url") or "").startswith("http")
+                   and _source_authority(str(s.get("url")))[0] == "denylisted"]
+        if _denied:
+            for _row in _denied:
+                log.warning("Report: source denylisted before fetch: %s — %s",
+                            urlparse(str(_row.get("url"))).hostname, _source_authority(str(_row.get("url")))[1])
+            sources = [s for s in sources if s not in _denied]
+    except Exception as _deny_exc:
+        log.warning("Report: source denylist check skipped: %s", type(_deny_exc).__name__)
     sources = _drop_boilerplate_and_entityless_sources(sources, question)
     if report_tier == "in_depth" and _is_fpi_flow_research(question, intent) and not has_file_data and len(sources) < 35:
         # Top up thin source pools by missing evidence dimensions, rather than
@@ -21347,6 +21359,21 @@ async def generate_report(request: Request):
     except Exception as crawl_exc:
         log.warning("Report: bounded site crawl unavailable (%s); keeping verified search/page evidence", type(crawl_exc).__name__)
         record_research_stage("sources_after_site_crawl", {"crawlStats": {"enabled": False, "error": type(crawl_exc).__name__}, "sourceCount": len(enriched), "sources": []})
+
+    # Source quality: authority tier, recency vs the requested window, evidence
+    # strength -> reliability score + reason on every source; drop look-alike /
+    # denylisted domains and near-duplicate copies; strip cross-page boilerplate.
+    try:
+        from utils.source_quality import assess_sources
+        _quality_input = len(enriched)
+        enriched, _source_quality = assess_sources(enriched, question=question, report_tier=report_tier)
+        log.info("Report: source quality kept=%d/%d denylisted=%d near_duplicates=%d boilerplate_lines=%d mean_reliability=%s tiers=%s",
+                 len(enriched), _quality_input, _source_quality.get("denylisted", 0), _source_quality.get("near_duplicates", 0),
+                 _source_quality.get("boilerplate_lines_removed", 0), _source_quality.get("mean_reliability"),
+                 {k[5:]: v for k, v in _source_quality.items() if k.startswith("tier_")})
+        record_research_stage("source_quality", _source_quality)
+    except Exception as _quality_exc:
+        log.warning("Report: source quality assessment skipped: %s", type(_quality_exc).__name__)
 
     _report_progress("evidence_ready", "Building the evidence set and checking source relevance…", 52)
     _pages_fetched = sum(1 for row in enriched if row.get("pageFetchStatus") == "ok")

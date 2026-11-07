@@ -91,7 +91,10 @@ def _display_entry(entry: dict, source_id: str) -> dict:
     domain = _domain_for(url, entry.get("domain") or entry.get("host") or "")
     publication_date = _clean_text(
         entry.get("publication_date") or entry.get("publicationDate") or
-        entry.get("published_at") or entry.get("publishedAt") or entry.get("date"), 80,
+        entry.get("published_at") or entry.get("publishedAt") or entry.get("date") or
+        # Exa/search providers return the date as "published"; without this the
+        # manifest dropped it (only 7 of 47 sources dated in the live runs).
+        entry.get("published"), 80,
     )
     publisher_page_title = _clean_text(entry.get("publisher_page_title") or entry.get("publisherPageTitle") or "", 300)
     publisher_page_url = _safe_http_url(
@@ -128,6 +131,15 @@ def _display_entry(entry: dict, source_id: str) -> dict:
         "unmatched_numeric_claims_count": int(entry.get("unmatched_numeric_claims_count", len(entry.get("unmatchedNumericClaims") or [])) or 0),
         _REGISTRY_MARKER: _REGISTRY_VERSION,
     }
+    # Source-quality assessment (utils/source_quality.py) travels with the
+    # canonical record so the appendix can show reliability per source.
+    for key in ("authority_tier", "reliability_score", "recency_score", "reliability_note"):
+        value = entry.get(key)
+        if value is None:
+            value = entry.get({"authority_tier": "authorityTier", "reliability_score": "reliabilityScore",
+                               "recency_score": "recencyScore", "reliability_note": "reliabilityNote"}[key])
+        if value not in (None, ""):
+            result[key] = round(float(value), 3) if key.endswith("_score") else _clean_text(value, 240)
     # Exact quoted source lines behind evidence-gallery chart points; kept so
     # export-time chart audits can re-verify the same lines.
     chart_lines = str(entry.get("chartEvidenceExcerpt") or "").strip()
