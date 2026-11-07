@@ -62,23 +62,45 @@ def _tokens(text: str) -> list[str]:
 
 
 def _split_tables_and_text(page: str) -> tuple[list[tuple[str, list[str]]], str]:
-    """Separate extractor table blocks ("TABLE n — heading" + pipe rows) from narrative text."""
+    """Separate pipe tables from narrative text.
+
+    Recognises extractor blocks ("TABLE n — heading" + pipe rows) and unlabelled
+    runs of >= 3 pipe-delimited rows (e.g. the calculated sector-return matrix),
+    whose heading is the nearest preceding non-table line.
+    """
     tables: list[tuple[str, list[str]]] = []
     narrative: list[str] = []
     current: tuple[str, list[str]] | None = None
-    for line in str(page or "").splitlines():
-        stripped = line.strip()
+    lines = str(page or "").splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
         if re.match(r"^TABLE \d+\b", stripped):
             current = (stripped, [])
             tables.append(current)
+            i += 1
             continue
         if current is not None and " | " in stripped:
             current[1].append(stripped)
+            i += 1
             continue
         current = None
+        if " | " in stripped:
+            run = []
+            j = i
+            while j < len(lines) and " | " in lines[j]:
+                run.append(lines[j].strip())
+                j += 1
+            if len(run) >= 3:
+                heading = next((ln.strip() for ln in reversed(narrative) if ln.strip()), "Table")[:200]
+                tables.append((heading, run))
+                i = j
+                continue
         if stripped.startswith("[") and stripped.endswith("]") and "PUBLISHER" in stripped:
+            i += 1
             continue  # extractor section labels
-        narrative.append(line)
+        narrative.append(lines[i])
+        i += 1
     return tables, "\n".join(narrative)
 
 
@@ -151,7 +173,14 @@ class EvidenceStore:
         if not chunks:
             excerpt = str(row.get("fullContent") or row.get("snippet") or "")
             if internal:
-                chunks = [("calculated", c) for c in (_narrative_passages(excerpt) or ([excerpt.strip()] if excerpt.strip() else []))]
+                # Calculated datasets keep their matrix as table passages so charts
+                # and section writers can use the exact rows.
+                tables, narrative = _split_tables_and_text(excerpt)
+                for heading, rows in tables:
+                    chunks += [("calculated", c) for c in _table_passages(heading, rows)]
+                chunks += [("calculated", c) for c in _narrative_passages(narrative)]
+                if not chunks and excerpt.strip():
+                    chunks = [("calculated", excerpt.strip())]
             else:
                 chunks = [("search_excerpt", c) for c in _narrative_passages(excerpt)]
                 meta["reliability"] = round(meta["reliability"] * 0.85, 3)

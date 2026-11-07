@@ -70,3 +70,20 @@ def test_positional_ids_without_manifest_and_summaries():
     assert summary["passages"] == len(store.passages) and summary["sources"] == 3
     per_source = {row["sourceId"]: row for row in store.source_summary()}
     assert per_source["S1"]["authorityTier"] == "primary_official" and per_source["S1"]["kinds"]["table"] >= 2
+
+
+def test_calculated_matrix_without_table_label_becomes_calculated_table_passages():
+    matrix = "\n".join([
+        "COMPLETED CALENDAR-QUARTER NSE SECTOR INDEX RETURNS (calculated from observed month-end index closes)",
+        "Quarter coverage: Q3 FY26, Q4 FY26, Q1 FY27, Q2 FY27",
+        "Sector | Q3 FY26 | Q4 FY26 | Q1 FY27 | Q2 FY27",
+        "NIFTY IT | -4.10% | +2.20% | -1.30% | +6.50%",
+        "NIFTY BANK | +3.40% | +1.10% | +5.20% | -0.80%",
+        "NIFTY PHARMA | +1.00% | +0.40% | +2.70% | +3.30%",
+    ])
+    rows = [{"url": "internal://verified-sector-quarterly-returns", "title": "CALCULATED NSE SECTOR RETURNS — 4 COMPLETED CALENDAR QUARTERS",
+             "fullContent": matrix, "pageFetchStatus": "not_applicable", "authorityTier": "primary_official", "reliabilityScore": 1.0}]
+    store = build_evidence_store(rows)
+    tables = [p for p in store.passages if p.kind == "calculated" and "Sector | Q3 FY26" in p.text]
+    assert len(tables) == 1
+    assert "NIFTY BANK | +3.40%" in tables[0].text and "Quarter coverage" in tables[0].text.splitlines()[0]

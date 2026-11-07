@@ -871,7 +871,7 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
     # remain auditable after source-manifest normalization.
     evidence_text = "\n".join(lines)
     return {
-        "title": "CALCULATED NSE SECTOR RETURNS — EIGHT COMPLETED CALENDAR QUARTERS",
+        "title": f"CALCULATED NSE SECTOR RETURNS — {len(quarters)} COMPLETED CALENDAR QUARTERS",
         "url": "internal://verified-sector-quarterly-returns",
         "kind": "Verified data",
         "publisher": "Calculated from daily market data",
