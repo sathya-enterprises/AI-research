@@ -156,7 +156,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         raise PipelineV2Error(f"only {len(analysis)} analysis sections have enough evidence")
 
     # Charts: build from stored data, assign to sections, number in section order.
-    candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2)
+    try:
+        from datetime import date as _date
+        from utils.source_quality import window_start
+        min_year = window_start(question, _date.fromisoformat(today[:10])).year
+    except Exception:
+        min_year = None
+    candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year)
     assign_charts(candidates, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
     planned = [c for c in candidates if c.section_id]
     figure_no = 0

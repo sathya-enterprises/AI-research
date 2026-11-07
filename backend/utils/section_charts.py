@@ -82,21 +82,45 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
     rows = [r for r in rows if len(r) == len(header) and r[0]]
     if len(rows) < 2 or len(header) < 2:
         return []
-    numeric_cols, units = [], set()
+    numeric_cols, col_units = [], {}
     for col in range(1, len(header)):
         parsed = [_parse_number(r[col]) for r in rows]
         good = [p for p in parsed if p]
         if len(good) >= max(2, int(0.7 * len(rows))):
             numeric_cols.append(col)
-            units.update(u for _, u in good)
+            units = {u for _, u in good} - {""}
+            if "%" in header[col] or re.search(r"(?i)\breturns?\b.*\(%\)", header[col]):
+                units.add("%")
+            col_units[col] = units
     if not numeric_cols:
         return []
-    units.discard("")
-    if len(units) > 1:
-        return []  # mixed units in one view are not a defensible chart
-    unit = "%" if units == {"%"} else (next(iter(units)) if units else "")
+
+    def unit_of(cols: list[int]) -> str | None:
+        """Unit shared by the plotted columns; None when they disagree (not one chart)."""
+        merged = set().union(*(col_units[c] for c in cols)) if cols else set()
+        if len(merged) > 1:
+            return None
+        return next(iter(merged)) if merged else ""
+
     period_cols = [c for c in numeric_cols if _PERIOD_RE.match(header[c])]
-    title = heading if len(heading) >= 6 else (passage.title or "Source table")
+    if len(period_cols) >= 2 and unit_of(period_cols) is None:
+        period_cols = []
+    if len(period_cols) >= 2:
+        unit = unit_of(period_cols) or ""
+    else:
+        single = next((c for c in numeric_cols if unit_of([c]) is not None), None)
+        if single is None:
+            return []
+        numeric_cols = [single] + [c for c in numeric_cols if c != single]
+        unit = unit_of([single]) or ""
+    # FAQ-style or very long headings make poor chart titles.
+    if len(heading) >= 6 and not heading.rstrip().endswith("?") and len(heading) <= 90:
+        title = heading
+    else:
+        first = period_cols[0] if len(period_cols) >= 2 else numeric_cols[0]
+        title = f"{'Values' if len(period_cols) >= 2 else header[first]} by {header[0] or 'item'}"
+        if passage.publisher:
+            title += f" ({passage.publisher})"
     evidence_rows = {r[0]: " | ".join(r) for r in rows}
 
     def point(label: str, col_label: str, value: float, raw: str, row_label: str) -> dict:
@@ -136,7 +160,7 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
             if parsed:
                 data.append(point(r[0], r[0], parsed[0], r[col], r[0]))
                 points.append((header[col], r[0], parsed[0]))
-        spec = {"type": "bar", "title": f"{title} — {header[col]}" if header[col] else title, "xLabel": header[0] or "Item",
+        spec = {"type": "bar", "title": f"{title} — {header[col]}" if header[col] and header[col] not in title else title, "xLabel": header[0] or "Item",
                 "yLabel": header[col] or unit or "Value", "unit": unit, "series": [{"name": header[col] or "Value", "data": data}]}
     spec.update({"source": [passage.source_id], "sourceIds": [passage.source_id], "evidenceBasis":
                  "calculated" if passage.kind == "calculated" else "reported",
@@ -166,8 +190,24 @@ def verify_chart(chart: PlannedChart, passage_text: str) -> str:
     return ""
 
 
-def build_chart_candidates(store, *, max_charts: int = 40) -> tuple[list[PlannedChart], list[dict]]:
-    """Charts from every table/calculated passage; returns (verified charts, dropped log)."""
+def _outside_window(chart: PlannedChart, min_year: int | None) -> str:
+    if not min_year:
+        return ""
+    labels = " ".join([str(chart.spec.get("title") or ""), *[str(a) for a, _, _ in chart.points], *[str(b) for _, b, _ in chart.points]])
+    years = {int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", labels)}
+    years |= {2000 + int(y) for y in re.findall(r"\bFY\s*'?(\d{2})\b", labels, flags=re.I)}
+    if years and max(years) < min_year:
+        return f"outside the requested window (latest period {max(years)}, window starts {min_year})"
+    return ""
+
+
+def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None = None,
+                           min_reliability: float = 0.5) -> tuple[list[PlannedChart], list[dict]]:
+    """Charts from every table/calculated passage; returns (verified charts, dropped log).
+
+    Dropped before writing: unverifiable data, periods entirely before the
+    requested window, and data from sources below ``min_reliability``.
+    """
     charts, dropped, seen = [], [], set()
     for passage in store.passages:
         if passage.kind not in {"table", "calculated"}:
@@ -177,7 +217,9 @@ def build_chart_candidates(store, *, max_charts: int = 40) -> tuple[list[Planned
             if signature in seen:
                 continue
             seen.add(signature)
-            reason = verify_chart(chart, passage.text)
+            reason = verify_chart(chart, passage.text) or _outside_window(chart, min_year)
+            if not reason and passage.kind != "calculated" and passage.reliability < min_reliability:
+                reason = f"source reliability {passage.reliability:.2f} below {min_reliability:.2f}"
             if reason:
                 chart.status, chart.drop_reason = "dropped", reason
                 dropped.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": passage.passage_id, "reason": reason})

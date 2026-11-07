@@ -213,3 +213,23 @@ def test_offline_replay_reproduces_the_run_from_captured_calls():
     assert replayed["raw"] == live["raw"]
     assert replay_gateway.missing == [] and replay_gateway.prompt_changed == []
     assert replay_gateway.recorded_calls == len(calls)
+
+
+def test_chart_unit_comes_from_the_plotted_column_and_old_periods_are_dropped():
+    from utils.evidence_store import Passage
+    from utils.section_charts import build_chart_candidates as build
+    table = ("TABLE 1 — Sector Performance Scorecard\nSector | Index Level | 1 Week\n"
+             "NIFTY IT | 35,210.5 | +1.2%\nNIFTY BANK | 58,900.0 | -0.4%\nNIFTY PHARMA | 22,410.9 | +2.1%\n")
+    old = ("TABLE 2 — Sectoral Indices performance in April, 2024\nIndex | 1-month Returns (%)\n"
+           "NIFTY IT | 3.1\nNIFTY BANK | -1.2\nNIFTY AUTO | 4.4\n")
+
+    class S:
+        passages = [Passage("S1.1", "S1", table, "table", reliability=0.8),
+                    Passage("S2.1", "S2", old, "table", reliability=0.8),
+                    Passage("S3.1", "S3", table.replace("Scorecard", "Board"), "table", reliability=0.3)]
+
+    charts, dropped = build(S(), min_year=2025)
+    assert len(charts) == 1
+    assert charts[0].spec["unit"] == "" and "Index Level" in charts[0].spec["title"]  # not '%' from the other column
+    reasons = " | ".join(d["reason"] for d in dropped)
+    assert "outside the requested window" in reasons and "reliability 0.30 below 0.50" in reasons
