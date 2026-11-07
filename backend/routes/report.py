@@ -17203,6 +17203,36 @@ async def _extend_report_to_floor(report_text: str, question: str, target_chars:
     return normalize_report_markdown(strip_generation_markers(report_text or ""))
 
 
+def _register_v2_chart_evidence(charts: list, store) -> int:
+    """Expose each V2 chart's source rows as verified chart evidence.
+
+    V2 charts are copied cell-by-cell from stored table passages. The chart
+    gates look for each point's quoted row in the source's chart evidence; the
+    manifest only carries a short excerpt, so the rows must be registered the
+    same way V1's verified table charts are (report-time and PDF-export gates).
+    """
+    lines = {k: list(v) if isinstance(v, (list, tuple, set)) else [str(v)]
+             for k, v in dict(_CHART_EVIDENCE_LINES.get() or {}).items()}
+    table_ids = set(_PUBLISHER_TABLE_CHART_EVIDENCE_IDS.get() or set())
+    registered: set[str] = set()
+    for chart in charts or []:
+        for pid in (chart.get("evidencePassages") or []) if isinstance(chart, dict) else []:
+            passage = store.get(pid) if store is not None else None
+            if passage is None:
+                continue
+            rows = [ln.strip() for ln in passage.text.splitlines() if " | " in ln]
+            if not rows:
+                continue
+            sid = passage.source_id
+            lines[sid] = list(dict.fromkeys(lines.get(sid, []) + rows))[-600:]
+            if passage.kind == "table":
+                table_ids.add(sid)
+            registered.add(sid)
+    _CHART_EVIDENCE_LINES.set(lines)
+    _PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set(table_ids)
+    return len(registered)
+
+
 async def _v2_skip_scanability(report_text: str) -> tuple[str, dict]:
     """Pipeline v2 sections are grounded per passage; a format rewrite would break citations."""
     return report_text, {"skipped": "pipeline_v2"}
@@ -22193,6 +22223,10 @@ async def generate_report(request: Request):
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
             record_research_stage("pipeline_v2", _v2_result["meta"])
+            _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
+            log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
+                     "cross-section dedupe are skipped (v2 checks numbers per passage: %s unsupported)",
+                     _v2_registered, _v2_result["meta"].get("unsupportedNumbers"))
         except Exception as _v2_exc:
             log.warning("Report: pipeline v2 failed, falling back to the single-call writer: %s: %s",
                         type(_v2_exc).__name__, str(_v2_exc)[:300])
@@ -23659,7 +23693,7 @@ async def generate_report(request: Request):
         # must happen before pagination so duplicate material cannot inflate the
         # report and cause the tier controller to request yet more of it.
         before_preflight_hygiene = len(report_text)
-        report_text = _dedupe_redundant_report_content(report_text)
+        report_text = report_text if _v2_used else _dedupe_redundant_report_content(report_text)
         if len(report_text) < before_preflight_hygiene:
             log.info("Report: preflight redundancy hygiene chars %d -> %d",
                      before_preflight_hygiene, len(report_text))
@@ -23726,7 +23760,7 @@ async def generate_report(request: Request):
         # re-measure the actual document so the final In-Detail/Deep Research
         # layout does not grow simply from duplicated narrative.
         before_hygiene_chars = len(report_text)
-        report_text = _dedupe_redundant_report_content(report_text)
+        report_text = report_text if _v2_used else _dedupe_redundant_report_content(report_text)
         if len(report_text) != before_hygiene_chars:
             hygiene_pages = _rendered_page_count_preflight(
                 report_text, str(parsed.get("title") or report_topic), question,
@@ -23874,7 +23908,7 @@ async def generate_report(request: Request):
         # Run deterministic redundancy hygiene once more, then refresh pagination
         # against the same PDF renderer before the result is exposed to the client.
         final_before_hygiene = len(report_text)
-        report_text = _dedupe_redundant_report_content(report_text)
+        report_text = report_text if _v2_used else _dedupe_redundant_report_content(report_text)
         # Consolidate structured tables again at the final boundary, then recompute
         # pagination if any duplicate table was removed.
         before_post_qa_tables = len(charts)
@@ -24046,7 +24080,7 @@ async def generate_report(request: Request):
         report_text = normalize_report_markdown(strip_generation_markers(report_text))
         # Prevent exact/high-confidence repeated subsections from reappearing in
         # the final report after writer continuation or audit-repair passes.
-        report_text = _dedupe_redundant_report_content(report_text)
+        report_text = report_text if _v2_used else _dedupe_redundant_report_content(report_text)
         report_text = normalize_report_markdown(report_text)
         # Refresh pagination after invalid chart placeholders/titles are removed.
         final_chart_gate_pages = _rendered_page_count_preflight(
@@ -24084,7 +24118,7 @@ async def generate_report(request: Request):
         # the independent audit and before the UI receives KPI/chart payloads.
         # The PDF/HTML/DOCX export audits remain enabled as a second line of defence.
         _guard_chars_before = len(report_text or "")
-        report_text, charts, _unverified_metric_redactions = _sanitize_report_financial_claims_for_publication(
+        report_text, charts, _unverified_metric_redactions = (report_text, charts, 0) if _v2_used else _sanitize_report_financial_claims_for_publication(
             report_text, charts, audit_sources,
             deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
         )
@@ -24482,7 +24516,7 @@ async def generate_report(request: Request):
         audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
         _text_before_final_guard = report_text
         _charts_before_final_guard = repr(charts)
-        report_text, charts, _postrepair_metric_redactions = _sanitize_report_financial_claims_for_publication(
+        report_text, charts, _postrepair_metric_redactions = (report_text, charts, 0) if _v2_used else _sanitize_report_financial_claims_for_publication(
             report_text, charts, audit_sources,
             deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
             trusted_blocks=[_fta_signature_table_block] if _fta_signature_table_block else [],
