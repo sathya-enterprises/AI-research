@@ -40,6 +40,7 @@ NON-NEGOTIABLE RULES
 6. Write analytical prose (mechanisms, comparisons, implications), using the H3 subheadings given. Bullets only for
    genuine lists. No executive summary, no conclusion for the whole report, no source list.
 7. If the evidence for a subsection is thin, write less rather than pad.
+8. Never use code blocks (```). Present structured data as a Markdown table or as prose.
 
 OUTPUT FORMAT
 Markdown for the section body (start with the first H3 or an opening paragraph; do NOT write the H2 title).
@@ -181,6 +182,31 @@ def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[s
     return "".join(pieces), repaired
 
 
+_FENCE_RE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\n?(.*?)```", re.S)
+
+
+def unfence(body: str) -> str:
+    """Render code blocks as a Markdown table (pipe rows), a bullet list (several lines) or plain text."""
+    def repl(match: re.Match) -> str:
+        lines = [ln.rstrip() for ln in match.group(1).strip().splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        piped = [ln for ln in lines if "|" in ln]
+        if len(piped) >= 2 and len(piped) >= 0.6 * len(lines):
+            rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in piped]
+            width = max(len(r) for r in rows)
+            rows = [r + [""] * (width - len(r)) for r in rows]
+            table = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+            table += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+            return "\n\n" + "\n".join(table) + "\n\n"
+        if len(lines) > 1:
+            items = [re.sub(r"^\s*(?:[-*•]\s*)?", "- ", ln) for ln in lines]
+            return "\n\n" + "\n".join(items) + "\n\n"
+        return "\n\n" + lines[0].strip() + "\n\n"
+    body = _FENCE_RE.sub(repl, body)
+    return re.sub(r"(?m)^\s*```[A-Za-z0-9_+-]*\s*$", "", body)  # unmatched fence lines
+
+
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
                 figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None) -> SectionDraft:
     text = str(raw or "").strip()
@@ -189,6 +215,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     else:
         body, summary = text, ""
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
+    body = unfence(body)
     allowed_sources = {pid.split(".")[0] for pid in allowed_passages}
     invalid = 0
 

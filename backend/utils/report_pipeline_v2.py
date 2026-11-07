@@ -51,10 +51,37 @@ def _covered_line(draft) -> str:
     return f"{draft.title}: {draft.summary}" if draft.summary else draft.title
 
 
+_VERB = r"(?:shows?|illustrates?|highlights?|depicts?|plots?|compares?|captures?|demonstrates?|indicates?|confirms?|reveals?|tracks?)"
+
+
+def rewrite_removed_figure_refs(text: str, removed: set[int]) -> str:
+    """Remove the figure framing around a reference to a figure that is not in the report.
+
+    "Figure 6 shows that FPIs sold ..." -> "FPIs sold ..."; "As Figure 6 shows, X" -> "X";
+    "(see Figure 6)" / "(Figure 6)" disappear. The sentence keeps its claim (and citation);
+    it no longer points at a chart that does not exist. No filler phrase is inserted.
+    """
+    if not removed:
+        return text
+    alt = "|".join(str(n) for n in sorted(removed))
+    fig = rf"(?:Figure|Fig\.)\s+(?:{alt})\b"
+    text = re.sub(rf"\s*\((?:see|as shown in|cf\.)?\s*{fig}\)", "", text, flags=re.I)
+    text = re.sub(rf"\b[Aa]s\s+{fig}\s+{_VERB},?\s*", "", text)
+    text = re.sub(rf"\b(?:[Aa]s\s+)?(?:shown|illustrated|seen|depicted)\s+in\s+{fig},?\s*", "", text)
+    text = re.sub(rf"\b{fig}\s+{_VERB}\s+(?:that\s+|how\s+)?", "", text)
+    text = re.sub(rf"\b(?:in|from|per)\s+{fig}\b", "", text)
+    text = re.sub(rf"\b{fig}\b", "the data", text)
+    # Re-capitalise sentence starts the removal exposed.
+    text = re.sub(r"(^|[.!?]\s+|\n)([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
+    return re.sub(r"[ \t]{2,}", " ", text)
+
+
 def _renumber_figures(body: str, mapping: dict[int, int]) -> str:
-    """Renumber figure markers/references; references to unused figures become neutral wording."""
+    """Renumber figure markers/references; references to figures not in the report lose their figure framing."""
+    referenced = {int(n) for n in FIGURE_REF_RE.findall(body)}
+    body = rewrite_removed_figure_refs(body, referenced - set(mapping))
     body = FIGURE_MARKER_RE.sub(lambda m: f"[[FIGURE §{mapping[int(m.group(1))]}]]" if int(m.group(1)) in mapping else "", body)
-    body = FIGURE_REF_RE.sub(lambda m: f"Figure §{mapping[int(m.group(1))]}" if int(m.group(1)) in mapping else "the underlying data", body)
+    body = FIGURE_REF_RE.sub(lambda m: f"Figure §{mapping[int(m.group(1))]}" if int(m.group(1)) in mapping else m.group(0), body)
     return body.replace("§", "")
 
 
@@ -135,6 +162,15 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
         "repetition. Charts were built directly from data tables in the evidence; each chart is cited to the passage it was "
         "copied from and is interpreted in the text beside it.",
     ]
+    tier_counts = (outline.meta or {}).get("tierCounts")
+    if tier_counts:
+        names = (outline.meta or {}).get("entityTiers") or {}
+        lines += ["", f"**Entity coverage by evidence.** {tier_counts.get('deep_dive', 0)} entities had substantive text from "
+                      f"three or more reliable sources and receive a full section; {tier_counts.get('compact', 0)} had data "
+                      f"tables but thin commentary and are covered in compact comparisons; "
+                      f"{tier_counts.get('coverage_note', 0)} had neither."]
+        if names.get("coverage_note"):
+            lines += [f"Not analysed for lack of evidence: {', '.join(names['coverage_note'])}."]
     if outline.entity_coverage:
         covered = [r for r in outline.entity_coverage if r["status"] == "covered"]
         lines += ["", f"**Coverage.** {len(covered)} of {len(outline.entity_coverage)} identified entities had enough evidence "
@@ -184,13 +220,18 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
 
 
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
-                          window_note: str = "", progress=None, gateway=None) -> dict:
+                          window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
+                          chart_verifier=None, entity_search_stats: dict | None = None) -> dict:
     started = time.perf_counter()
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
     gateway = gateway or LLMGateway(runtime, tier)
+    if tiers is None and tier == "in_depth":
+        from utils.entity_tiers import entity_tiers
+        tiers = entity_tiers(store, tier=tier)
     try:
-        outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note)
+        outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note,
+                                      tiers=tiers)
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
     analysis = outline.analysis_sections()
@@ -205,6 +246,23 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except Exception:
         min_year = None
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year)
+    # Run the same chart verification the export gates use BEFORE writing, so the
+    # writer only interprets charts that will survive to the PDF.
+    if chart_verifier and candidates:
+        try:
+            reasons = chart_verifier([dict(c.spec, evidencePassages=c.passage_ids) for c in candidates])
+        except Exception as exc:  # verification problems must not abort the report
+            log.warning("V2 chart pre-verification failed: %s", type(exc).__name__)
+            reasons = [""] * len(candidates)
+        kept = []
+        for chart, reason in zip(candidates, reasons):
+            if reason:
+                chart.status, chart.drop_reason = "dropped", f"failed chart verification before writing: {reason}"
+                chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"),
+                                    "passage": ",".join(chart.passage_ids), "reason": chart.drop_reason})
+            else:
+                kept.append(chart)
+        candidates = kept
     assign_charts(candidates, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
     planned = [c for c in candidates if c.section_id]
     figure_no = 0
@@ -309,6 +367,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                       "passagesCited": len(cited_passages), "sourcesCited": len(cited_sources), "citedPassageIds": cited_passages},
         "unsupportedNumbers": sum(len(d.unsupported_numbers) for d in good) + len(exec_unsupported),
         "failedSections": failed, "words": words, "estimatedPages": est_pages,
+        "entitySearch": entity_search_stats or {},
         "evidenceSupportedPages": round(outline.meta.get("evidenceSupportedWords", 0) / WORDS_PER_PAGE, 1),
     }
     log.info("V2 pipeline: sections=%d/%d words=%d charts=%d calls=%d tokens_in=%d tokens_out=%d est_pages=%.1f in %.1fs",

@@ -297,6 +297,25 @@ def test_finalize_figures_renumbers_survivors_and_neutralises_removed_refs():
     out, charts_out, stats = finalize_figures(text, charts)
     assert [c["title"] for c in charts_out] == ["Figure 1: Ranking", "Figure 2: OI build-up"]
     assert "Figure 1 shows the ranking" in out and "Figure 2 shows OI build-up" in out
-    assert "Figure 6" not in out and "the underlying data shows flows" in out
+    assert "Figure 6" not in out and "underlying data" not in out
+    assert "Flows (removed later) [S2]." in out  # claim kept, figure framing removed
     assert charts_out[1]["takeaway"] == "Figure 2 shows OI build-up."
     assert stats == {"figures": 2, "danglingRefsNeutralized": 1, "mapping": {"3": 1, "9": 2}}
+
+
+def test_removed_figure_references_lose_their_framing_without_filler():
+    from utils.report_pipeline_v2 import rewrite_removed_figure_refs
+    text = ("Figure 6 shows that FPIs sold 883 crore [S2]. As Figure 6 shows, banks led [S3]. "
+            "Banks led again (see Figure 6). Figure 2 shows IT [S4].")
+    out = rewrite_removed_figure_refs(text, {6})
+    assert out == "FPIs sold 883 crore [S2]. Banks led [S3]. Banks led again. Figure 2 shows IT [S4]."
+    assert "underlying data" not in out
+
+
+def test_code_fences_become_tables_lists_or_text():
+    from utils.section_writer import unfence
+    assert "| A | B |\n| --- | --- |\n| 1 | 2 |" in unfence("```\nA | B\n1 | 2\n3 | 4\n```")
+    listed = unfence("Intro.\n```text\nMARKET HEALTH INDEX\nMicro - GDP\n```\nAfter.")
+    assert "```" not in listed and "- MARKET HEALTH INDEX" in listed and "- Micro - GDP" in listed
+    assert unfence("```\nsingle line\n```").strip() == "single line"
+    assert "```" not in unfence("text\n```\nunclosed")
