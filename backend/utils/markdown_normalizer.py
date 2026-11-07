@@ -304,8 +304,10 @@ def normalize_report_markdown(value: object) -> str:
     # without whitespace (for example, "... [S31].3. **The next section...").
     # Restore the structural line break before table/layout cleanup so the list
     # renders correctly and its ordinal cannot be mistaken for a factual value.
+    # Never split inside a decimal: "(from 38.69 to 40.90) during" is one number,
+    # not a sentence ending in "40." followed by a list item "90)".
     text = re.sub(
-        r"(?<=[.!?])(?=(?:\(?\d{1,3}[.)]|\(\d{1,3}\))[ \t]+(?:[*_#>]+[ \t]*)?\S)",
+        r"(?<=[.!?])(?<!\d\.)(?=(?:\(?\d{1,3}[.)]|\(\d{1,3}\))[ \t]+(?:[*_#>]+[ \t]*)?\S)",
         "\n\n",
         text,
     )
