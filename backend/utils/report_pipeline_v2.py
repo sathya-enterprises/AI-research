@@ -160,8 +160,20 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str)
                 top.append(table)
                 stats["comparisons"] += 1
                 stats["placedTables"].update(c.table.passage_id for c in columns[:4])
-        elif re.search(r"(?i)outlook|risks?|scenarios?", e.title):
-            body, watch = move_watch_items(body)
+        else:
+            if re.search(r"(?i)outlook|risks?|scenarios?", e.title):
+                body, watch = move_watch_items(body)
+            # A cross-cutting section that discusses three or more sectors with data gets a comparison
+            # of those sectors, from the tables it cites first (evidence-store cells only).
+            from utils.section_layout import entities_mentioned, insert_after_first_paragraph
+            discussed = entities_mentioned(body)
+            if len(discussed) >= 3:
+                columns = entity_columns(tables, discussed, qtd=qtd, preferred=cited)
+                comparison = entity_table(columns, discussed, caption=f"{e.title}: the sectors discussed, compared",
+                                          max_cols=3)
+                if comparison:
+                    body = insert_after_first_paragraph(body, comparison)
+                    stats["comparisons"] += 1
         before = set(stats["placedTables"])
         # Long sections may carry a third small evidence table; short ones at most two.
         long_section = len(re.findall(r"[A-Za-z]+", body)) > 1500
@@ -337,7 +349,8 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
 
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
                           window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
-                          chart_verifier=None, entity_search_stats: dict | None = None) -> dict:
+                          chart_verifier=None, entity_search_stats: dict | None = None,
+                          evidence_auditor=None) -> dict:
     started = time.perf_counter()
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
@@ -436,8 +449,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     summary_passages = {t.strip().upper() for d in good for g in CITE_RE.findall(d.summary) for t in re.split(r"\s*[,;]\s*", g)}
     exec_body = CITE_RE.sub(lambda m: "[" + ", ".join(t for t in re.split(r"\s*[,;]\s*", m.group(1)) if t.strip().upper() in summary_passages) + "]", exec_body)
     exec_body = exec_body.replace("[]", "")
+    exec_texts = {pid: store.get(pid).text for pid in summary_passages if store.get(pid)}
+    # Point each number at the summary passage that actually holds it before the (strict) policy runs.
+    from utils.section_writer import repair_citations
+    exec_body, _ = repair_citations(exec_body, {pid: _number_set([text]) for pid, text in exec_texts.items()})
     exec_policy = apply_number_policy(
-        exec_body, passage_texts={pid: store.get(pid).text for pid in summary_passages if store.get(pid)},
+        exec_body, passage_texts=exec_texts,
         allowed_numbers=_number_set(d.summary for d in good), section_id="exec")
     exec_body = exec_policy.body
     exec_unsupported = unsupported_numbers(exec_body, _number_set(d.summary for d in good))
@@ -523,6 +540,14 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             report_md, charts_out, _ = finalize_figures(report_md, charts_out)
             report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
 
+    # Number check = report.py's source-evidence check (value, unit and metric): claims it
+    # flags are dropped here, with a log line, before report.py's own check runs. Whatever is
+    # still flagged stays flagged (the report is then a draft); nothing is hidden.
+    evidence_removed, evidence_flagged = [], []
+    if evidence_auditor is not None:
+        from utils.evidence_check import fix_flagged_claims
+        report_md, evidence_removed, evidence_flagged = fix_flagged_claims(report_md, evidence_auditor)
+        report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", report_md)))
     est_pages = estimate_pages(sum(d.words for d in good), len(exec_body.split()), len(charts_out),
                                len(cited_sources) if tier == "in_depth" else 0,
@@ -550,6 +575,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             "unresolvedTableValues": [t for d in good for t in d.unsupported_numbers] + exec_unsupported,
         },
         "editorial": editorial.to_dict(),
+        "evidenceCheck": {"removedClaims": evidence_removed,
+                          "stillFlagged": [{"claim": str(g.get("claim") or "")[:200],
+                                            "values": list(g.get("unmatchedNumericClaims") or [])[:6]}
+                                           for g in evidence_flagged]},
         "layout": {k: (sorted(v) if isinstance(v, set) else v) for k, v in layout.items() if k != "scorecard"},
         "chartTextMismatches": chart_text_mismatches,
         "failedSections": failed, "words": words, "estimatedPages": est_pages,

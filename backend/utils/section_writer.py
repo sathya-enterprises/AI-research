@@ -38,7 +38,8 @@ NON-NEGOTIABLE RULES
 2. Cite every factual sentence with the passage ids it relies on, in square brackets, e.g. [S12.3] or [S4.1, S9.2].
    Only cite ids that appear in EVIDENCE PASSAGES.
 3. Numbers: state only numbers that appear in your passages or in the FIGURE data. Copy them exactly (same units).
-   Do not convert units or round. If you compute a number (a sum, difference, share or change), write
+   Quote each number with exactly the unit and scale the passage uses (crore stays crore, lakh crore stays lakh
+   crore, trillion stays trillion, %, bps); never convert units, change the scale or round. If you compute a number (a sum, difference, share or change), write
    "(calculated: <inputs>)" right after it, using only numbers from the cited passages. If a number you would need is
    not in the evidence, say the evidence does not show it. Sentences with numbers the evidence does not contain are removed.
 4. Figures: for each figure listed, put its marker [[FIGURE N]] on its own line where it belongs, and in the adjacent

@@ -10654,6 +10654,10 @@ _SUBJECT_ALIASES = {
     "profitability": ("profi", "retur", "earni"), "earnings": ("earni", "profi"),
     "re": ("renew",), "res": ("renew",), "psp": ("pumpe", "stora"), "ev": ("elect", "vehic"), "evs": ("elect", "vehic"),
     "gw": (), "mw": (), "kw": (), "twh": (), "inr": (), "usd": (), "crore": (), "lakh": (),
+    # Fund flows: "outflows of -47,955 crore" and "net investment | -47,955.00" are the same metric.
+    "outflow": ("flow", "inves"), "outflows": ("flow", "inves"), "inflow": ("flow", "inves"),
+    "inflows": ("flow", "inves"), "flows": ("flow", "inves"), "investment": ("flow", "inves"),
+    "investments": ("flow", "inves"), "invested": ("flow", "inves"), "divestment": ("flow", "inves"),
 }
 
 
@@ -10676,8 +10680,17 @@ def _claim_subject_stems(value: object) -> set[str]:
         if alias:
             stems.update(alias)
             continue
+        # Upper-case acronyms (DII, FPI, GST, NPA, RBI, CPI) name the metric or actor; dropping
+        # them for being short made "DII buying" and "DII inflows" look like different subjects.
+        if (raw.isupper() and 2 <= len(raw) <= 5 and raw.isalpha()
+                and word not in {"usd", "inr", "rs", "cr", "bn", "mn", "yoy", "qoq", "fy", "cy", "us", "eu", "uk"}):
+            stems.add(word)
+            continue
         if len(word) < 4 or word in _SUBJECT_STOP_WORDS or not word.isalpha():
             continue
+        # A plural is the same subject ("Autos" in a claim, "Auto" in the table row).
+        if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
         stems.add(word[:5])
     return stems
 
@@ -14647,6 +14660,13 @@ def _attach_audit_source_evidence(
         so FY27 does not become a false numeric claim of 27.
         """
         text = _strip_nonclaim_numeric_labels(value)
+        # PDF extractors sometimes leave glyph names ("/uni20B92.3 trillion" for "₹2.3 trillion");
+        # restore the character so the currency is read.
+        text = re.sub(r"/uni([0-9A-Fa-f]{4})", lambda m: chr(int(m.group(1), 16)), text)
+        # The typographic minus and a minus written before the currency ("−₹2,56,151 crore",
+        # "-INR 131,109 crore") are the same negative number as "-2,56,151".
+        text = text.replace("\u2212", "-").replace("\u2013", "-")
+        text = re.sub(r"(?<![\w.])-\s*(₹|INR|Rs\.?|US\$|USD|\$)\s*(?=\d)", r"\1 -", text)
         # Fiscal-year suffixes are often abbreviated (FY 2025–26 or FY26).
         # `20?\d{2}` does NOT match two-digit FY suffixes; use (?:20)?\d{2}.
         text = re.sub(r"\bFY\s*(?:20)?\d{2}(?:\s*[-/–]\s*(?:20)?\d{2})?\b", " ", text, flags=re.I)
@@ -14659,8 +14679,8 @@ def _attach_audit_source_evidence(
         token_re = re.compile(
             r"(?<![A-Za-z0-9])(?P<currency>US\$|USD|INR|₹|Rs\.?|rupees?)?\s*"
             r"(?P<number>-?\d[\d,]*(?:\.\d+)?)\s*"
-            r"(?P<unit>lakh\s+crores?|billion\s+units|trillion|billion|million|thousand|"
-            r"TWh|GWh|MWh|kWh|GW|MW|KW|TW|BU|crores|crore|lakhs|lakh|per\s?cent|%|bn|[TBMK])?"
+            r"(?P<unit>lakh\s+crores?|lakh\s+crs?\.?|billion\s+units|trillion|billion|million|thousand|"
+            r"TWh|GWh|MWh|kWh|GW|MW|KW|TW|BU|crores|crore|crs?\.?|lakhs|lakh|per\s?cent|%|bn|[TBMK])?"
             r"(?![A-Za-z0-9])",
             re.I,
         )
@@ -14677,7 +14697,10 @@ def _attach_audit_source_evidence(
                 continue
             currency = (match.group("currency") or "").casefold().replace(".", "")
             unit = re.sub(r"\s+", " ", (match.group("unit") or "").casefold()).strip()
-            unit = {"lakhs": "lakh", "crores": "crore", "lakh crores": "lakh crore"}.get(unit, unit)
+            unit = unit.rstrip(".")
+            # "cr" / "crs" is the standard Indian abbreviation of crore ("Rs 1.95 lakh cr").
+            unit = {"lakhs": "lakh", "crores": "crore", "lakh crores": "lakh crore", "cr": "crore", "crs": "crore",
+                    "lakh cr": "lakh crore", "lakh crs": "lakh crore"}.get(unit, unit)
             family = "scalar"
             scale = 1.0
             # RBI/Government of India publications write "2.7 per cent"; the
@@ -14749,6 +14772,18 @@ def _attach_audit_source_evidence(
         # prefix is structure, not a claimed count. The whitespace and
         # formatting-marker lookahead keeps decimal values such as 3.56 intact.
         text = re.sub(r"(?<![A-Za-z0-9])\d{1,2}[.)](?=\s+[*_`]*[A-Za-z])", " ", text)
+        # A number labelled "(calculated: inputs)" was verified by the V2 number policy (each input
+        # in a cited passage, the arithmetic reproduced); the label and the number it qualifies are
+        # not source quotes, so they are not looked up as such.
+        text = re.sub(r"[-+−]?\s*(?:₹|INR|Rs\.?|US\$|USD|\$)?\s*\d[\d,]*(?:\.\d+)?[^\d()\n]{0,30}\(calculated[^)]*\)", " ", text, flags=re.I)
+        # Durations and counts of items are not statistics ("3-month window", "13 weeks", "13 out of 15").
+        text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s*[- ]?\s*(?:weeks?|wks?|months?|years?|yrs?|days?|quarters?|fortnights?|sessions?)\b", " ", text)
+        text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s+(?:out\s+)?of\s+(?:the\s+)?\d{1,3}\b", " ", text)
+        text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s+(?:[a-z]+\s+)?(?:sectors?|stocks?|companies|constituents?|indices|industries|sub-sectors?)\b",
+                      " ", text)
+        # A date without its year ("between September 15 and October 15, 2026") is not a statistic.
+        text = re.sub(r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b(?![.,]\d)", " ", text)
+        text = re.sub(r"(?i)(?<![\d.,])\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b", " ", text)
         return numbers(text)
 
     stop_words = {"the", "and", "for", "with", "from", "that", "this", "were", "was", "are", "into", "over", "under", "during", "according", "reported", "expected", "projected", "india", "banking", "sector"}
@@ -14780,7 +14815,8 @@ def _attach_audit_source_evidence(
         last_prose_line = ""
         table_header_text = ""
         row_context: dict[str, str] = {}
-        unit_re = re.compile(r"(\b(?:GW|MW|KW|TW|TWh|GWh|MWh|kWh|BU|billion units|crore|lakh|million|billion|trillion|per\s?cent)\b|%)", re.I)
+        # "(CR)" / "(Rs cr)" column headers carry crore to their cells, like "(crore)".
+        unit_re = re.compile(r"(\b(?:GW|MW|KW|TW|TWh|GWh|MWh|kWh|BU|billion units|crore|cr|lakh|million|billion|trillion|per\s?cent)\b|%)", re.I)
         def flush_paragraph() -> None:
             if paragraph:
                 joined = re.sub(r"\s+", " ", " ".join(paragraph)).strip()
@@ -14818,6 +14854,7 @@ def _attach_audit_source_evidence(
                 # A header row establishes units per column. Do not mistake an
                 # ordinary data row for a header merely because one cell has units.
                 row_has_numeric = any(re.search(r"\d", cell) for cell in cells)
+                first_row_of_table = not table_header_text
                 if not table_header_text:
                     # First row of a table block: its header (or caption-like
                     # first row) names what the rows below measure.
@@ -14841,7 +14878,9 @@ def _attach_audit_source_evidence(
                     # bare values into GW.
                     context_rows_remaining = 0
                     context_unit = None
-                if not row_has_numeric and row_has_header_terms:
+                # The first, number-free row of a table is its header even without the listed header
+                # words ("FORTNIGHT ENDING | NET INVESTMENT (CR) | ASSETS UNDER CUSTODY (CR)").
+                if not row_has_numeric and (row_has_header_terms or first_row_of_table):
                     column_units = []
                     for cell in cells:
                         match = unit_re.search(cell)
@@ -14855,7 +14894,7 @@ def _attach_audit_source_evidence(
                 # The unit is declared in the row label, not the column header.
                 row_label_unit: str | None = None
                 for i, cell in enumerate(cells):
-                    if not re.fullmatch(r"\s*(?:[-—–]|-?\d[\d,]*(?:\.\d+)?%?)(?:\s*\[[Ss]\d+(?:\s*[,;]\s*[Ss]\d+)*\])?\s*", cell or ""):
+                    if not re.fullmatch(r"\s*(?:[-—–]|[+\-−–]?\d[\d,]*(?:\.\d+)?%?)(?:\s*\[[Ss]\d+(?:\s*[,;]\s*[Ss]\d+)*\])?\s*", cell or ""):
                         if re.search(r"[A-Za-z]{3,}", cell or ""):
                             row_label_unit = "%" if re.search(r"(?i)\bper\s?cent\b|\bpercent(?:age)?\b|%", cell) else None
                     unit = column_units[i] if i < len(column_units) else None
@@ -14869,7 +14908,7 @@ def _attach_audit_source_evidence(
                         # In report tables the citation marker often shares the
                         # numeric cell (`5.60 [S2]`). Preserve the marker while
                         # inheriting the declared column unit.
-                        numeric_cell = re.fullmatch(r"\s*((?:[-—–]|-?\d[\d,]*(?:\.\d+)?%?))(\s*\[[Ss]\d+(?:\s*[,;]\s*[Ss]\d+)*\])?\s*", cell)
+                        numeric_cell = re.fullmatch(r"\s*((?:[-—–]|[+\-−–]?\d[\d,]*(?:\.\d+)?%?))(\s*\[[Ss]\d+(?:\s*[,;]\s*[Ss]\d+)*\])?\s*", cell)
                         if numeric_cell and re.search(r"\d", numeric_cell.group(1)):
                             cell = f"{numeric_cell.group(1)} {unit}{numeric_cell.group(2) or ''}"
                     expanded_cells.append(cell)
@@ -22278,16 +22317,21 @@ async def generate_report(request: Request):
                         reasons[index] = str(failure.get("reason") or "failed chart verification")[:200]
                 return reasons
 
+            from utils.evidence_check import manifest_auditor as _v2_manifest_auditor
             _v2_result = await run_pipeline_v2(
                 runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
                 manifest=source_manifest, today=_v2_today.isoformat(),
                 window_note=_past_n_quarters_anchor(question, _v2_today).strip(),
                 progress=lambda message: _report_progress("writing", message, 70),
                 tiers=_v2_tiers, chart_verifier=_v2_chart_preverify, entity_search_stats=_v2_entity_stats,
+                # V2 runs this same source-evidence check on its own text and drops what it flags.
+                evidence_auditor=_v2_manifest_auditor(source_manifest, enriched),
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
             _v2_unsupported_after_policy = list((_v2_result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or [])
+            _v2_unsupported_after_policy += [", ".join(map(str, g.get("values") or [])) or "flagged claim"
+                                             for g in (_v2_result["meta"].get("evidenceCheck") or {}).get("stillFlagged") or []]
             record_research_stage("pipeline_v2", _v2_result["meta"])
             _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
             log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
@@ -24325,10 +24369,16 @@ async def generate_report(request: Request):
             )
         _chart_pipeline.record("table_handoff", charts, removed=_removed_chart_reasons(
             _charts_before_table_handoff, charts, None, "table chart rows could not be matched to a fetched publisher row"))
-        report_text, _table_integrity_findings = _sanitize_report_tables_for_publication(
-            report_text, enriched,
-            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
-        )
+        if _v2_used:
+            # V2 tables are copied cell by cell from evidence-store passages (fetched pages, entity-search
+            # pages and calculated datasets this sanitizer does not see); their numbers stay under the
+            # source-evidence check. Stage D lost 48 such tables here (flattened into prose).
+            _table_integrity_findings = []
+        else:
+            report_text, _table_integrity_findings = _sanitize_report_tables_for_publication(
+                report_text, enriched,
+                deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
+            )
         report_text, _ratio_integrity = repair_banking_growth_and_ratio_labels(
             report_text, enriched, source_manifest,
         )
@@ -24624,11 +24674,14 @@ async def generate_report(request: Request):
             report_text, charts, _final_table_handoff = remove_unverified_table_chart_specs(
                 report_text, charts, enriched,
             )
-        report_text, _final_table_findings = _sanitize_report_tables_for_publication(
-            report_text, enriched,
-            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
-            trusted_blocks=[_fta_signature_table_block] if _fta_signature_table_block else [],
-        )
+        if _v2_used:
+            _final_table_findings = []  # V2 tables: evidence-store cells, checked by the source-evidence audit
+        else:
+            report_text, _final_table_findings = _sanitize_report_tables_for_publication(
+                report_text, enriched,
+                deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
+                trusted_blocks=[_fta_signature_table_block] if _fta_signature_table_block else [],
+            )
         report_text, _final_ratio_repair = repair_banking_growth_and_ratio_labels(
             report_text, enriched, source_manifest,
         )

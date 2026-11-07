@@ -141,6 +141,25 @@ class PoolNumber:
     position: int
     line: int = 0
     pct: bool = False
+    unit: str = ""
+
+
+_UNIT_WORD_RE = re.compile(r"\s*(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\b|crores?|crs?\b|trillion|tn\b|billion|bn\b|million|mn\b)", re.I)
+
+
+def unit_family(after: str) -> str:
+    """The unit written right after a number: '%', 'lakh crore', 'crore', 'trillion', 'billion', 'million' or ''."""
+    match = _UNIT_WORD_RE.match(after or "")
+    if not match:
+        return ""
+    word = re.sub(r"\s+", " ", match.group(1).casefold())
+    if word in {"%", "percent", "per cent"}:
+        return "%"
+    if word.startswith("lakh"):
+        return "lakh crore"
+    if word.startswith("cr"):
+        return "crore"
+    return {"tn": "trillion", "bn": "billion", "mn": "million"}.get(word, word)
 
 
 def number_pool(passages: dict[str, str]) -> list[PoolNumber]:
@@ -152,7 +171,8 @@ def number_pool(passages: dict[str, str]) -> list[PoolNumber]:
             if value is None or re.fullmatch(r"(?:19|20)\d{2}", match.group(0)):
                 continue
             pct = bool(re.match(r"\s*%", text[match.end():match.end() + 3]))
-            pool.append(PoolNumber(value, match.group(0).lstrip("+"), pid, match.start(), text.count("\n", 0, match.start()), pct))
+            pool.append(PoolNumber(value, match.group(0).lstrip("+"), pid, match.start(), text.count("\n", 0, match.start()),
+                                   pct, unit_family(text[match.end():match.end() + 16])))
     return pool
 
 
@@ -231,6 +251,51 @@ def find_derivation(token: str, pool: list[PoolNumber], *, qualifier: str = "", 
     return ""
 
 
+_CALC_LABEL_RE = re.compile(r"\(calculated(?: from| using)?\s*:?\s*([^)]*)\)", re.I)
+
+
+def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
+    """'' when every "(calculated: ...)" label in the sentence is verified, else the reason.
+
+    Each input must appear in a cited passage, and the stated operation on those
+    inputs must reproduce the number the label follows. A label whose inputs are only
+    in the writer's own sentence, or whose arithmetic does not hold, fails.
+    """
+    pool_values = {normalize(n.raw).lstrip("-") for n in pool}
+    for match in _CALC_LABEL_RE.finditer(sentence):
+        body = match.group(1)
+        before = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", CITE_RE.sub(" ", sentence[:match.start()]))
+        if not before:
+            return "calculated label without a number"
+        target = before[-1]
+        conversion = re.match(r"\s*converted from\s+([-+−]?\d[\d,]*(?:\.\d+)?)\s*(.*)$", body, re.I)
+        if conversion:
+            if normalize(conversion.group(1)).lstrip("-") not in pool_values:
+                return f"conversion input {conversion.group(1)} is not in the cited passages"
+            continue
+        inputs = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", body)
+        if len(inputs) < 2:
+            return "calculated label without its inputs"
+        missing = [x for x in inputs if normalize(x).lstrip("-") not in pool_values]
+        if missing:
+            return f"calculation input(s) {', '.join(missing)} not in the cited passages"
+        values = [abs(_float(x) or 0.0) for x in inputs]
+        if "÷" in body or "/" in body:
+            derived = 100 * values[0] / values[1] if values[1] else float("nan")
+        elif "change from" in body.casefold():
+            derived = 100 * (values[1] - values[0]) / values[0] if values[0] else float("nan")
+        elif "−" in body or " - " in body:
+            derived = values[0] - values[1]
+        elif "+" in body:
+            derived = sum(values)
+        else:
+            return "calculated label without a recognisable operation"
+        qualifier = qualifier_before(sentence[:sentence.find(target)]) if target in sentence else ""
+        if not _close(derived, target, qualifier):
+            return f"calculation does not reproduce {target}"
+    return ""
+
+
 @dataclass
 class PolicyResult:
     body: str
@@ -282,10 +347,29 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
             # An uncited sentence may still state a labelled unit conversion of a number the
             # section was given (2,645 crore -> "₹26,450 million"); only conversions are searched.
             conversion_pool = pool or number_pool(passage_texts)
-            tokens = statistic_tokens(sentence)
+            tokens = statistic_tokens(re.sub(r"\(calculated[^)]*\)", " ", sentence))
+            cited_values = {normalize(n.raw).lstrip("-") for n in pool}
+            # Inputs the writer states in its own sentence count only if a cited passage holds them too.
             sentence_pool = [n for n in number_pool({"sentence": CITE_RE.sub(" ", sentence)})
-                             if normalize(n.raw).lstrip("-") in {normalize(t).lstrip("-") for t in tokens}]
-            unsupported = [t for t in tokens if normalize(t) not in allowed_numbers and normalize(t).lstrip("-") not in allowed_numbers]
+                             if normalize(n.raw).lstrip("-") in {normalize(t).lstrip("-") for t in tokens}
+                             and (not pool or normalize(n.raw).lstrip("-") in cited_values)]
+
+            def supported(token: str) -> bool:
+                plain = normalize(token).lstrip("-")
+                if not pool:   # no usable citation: the section's evidence set (citation repair ran first)
+                    return normalize(token) in allowed_numbers or plain in allowed_numbers
+                start = sentence.find(token)
+                claim_unit = unit_family(sentence[start + len(token):start + len(token) + 16]) if start >= 0 else ""
+                for item in pool:
+                    if normalize(item.raw).lstrip("-") != plain:
+                        continue
+                    # Same value AND same unit as written in the passage (a table cell may carry
+                    # its unit in the column header, so a bare passage number is accepted).
+                    if not claim_unit or not item.unit or claim_unit == item.unit:
+                        return True
+                return False
+
+            unsupported = [t for t in tokens if not supported(t)]
             drop = False
             for token in unsupported:
                 start = sentence.find(token)
@@ -309,9 +393,14 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                     drop = True
                     result.removed.append({"section": section_id, "number": token,
                                            "sentence": re.sub(r"\s+", " ", CITE_RE.sub("", piece)).strip()[:240]})
+            label_problem = "" if drop else verify_calculation_labels(sentence, pool)
+            if label_problem:
+                drop = True
+                result.removed.append({"section": section_id, "number": "calculated label", "reason": label_problem,
+                                       "sentence": re.sub(r"\s+", " ", CITE_RE.sub("", piece)).strip()[:240]})
             if drop:
-                log.info("V2 number policy removed a sentence in %s: number(s) %s not found in the cited evidence",
-                         section_id or "?", ", ".join(t for t in unsupported)[:120])
+                log.info("V2 number policy removed a sentence in %s: %s", section_id or "?",
+                         label_problem or f"number(s) {', '.join(t for t in unsupported)[:120]} not in the cited evidence (value or unit)")
                 continue
             kept.append(sentence)
         new_line = "".join(kept).strip()
