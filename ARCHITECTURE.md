@@ -118,11 +118,8 @@ sequenceDiagram
 | `GET /api/chat/report/stream/{job_id}` | `backend/routes/report.py` | Progress, provisional preview and final result via SSE |
 | `GET /api/chat/report/status/{job_id}` | `backend/routes/report.py` | Poll job state/result if stream is lost |
 | `POST /api/chat/report` | `backend/routes/report.py` | Synchronous/direct report generation entry point |
-| `POST /api/chat/report/pdf` | `backend/routes/pdf.py` | PDF export |
-| `POST /api/chat/report/html` | `backend/routes/html_report.py` | HTML export |
-| `POST /api/chat/report/docx` | `backend/routes/docx_report.py` | Editable Word export |
+| `POST /api/chat/report/pdf` | `backend/routes/pdf.py` | PDF export (the only report output format) |
 | `POST /api/chat/report/email` | `backend/routes/email.py` | Email report delivery when configured |
-| `POST /api/chat/report/okf` | `backend/routes/okf.py` | OKF representation/export helper |
 | `/api/rag/*` | `backend/routes/rag.py` | Backend-facing RAG index/query/delete/health proxy |
 | `/api/stocks/*` | `backend/routes/stocks.py` | Screener fundamentals lookup |
 | `/api/datasearch` | `backend/routes/datasearch.py` | Structured data-search API |
@@ -246,7 +243,7 @@ Report generation is a separate long-running workflow from ordinary chat. It sta
 
 ### 7.1 Report input
 
-The frontend submits a report payload containing the question, selected tier/style, conversation context, current session id, any available extracted file text/source metadata, `hasRag`, and optional image/embedded-image data. The report worker normalizes the tier (`brief`, `detailed`, `in_depth`) and resolves any explicit page target.
+The frontend submits a report payload containing the question, selected tier/style, conversation context, current session id, any available extracted file text/source metadata, `hasRag`, and optional image/embedded-image data. The report worker validates the tier (`detailed` or `in_depth`; the removed `brief` tier returns HTTP 400) and resolves any explicit page target (10 pages or fewer maps to `detailed`).
 
 If `hasRag` is true, `routes/report.py` calls `utils.rag_client.rag_report()` and the separate RAG service's `/report` endpoint to retrieve relevant uploaded-document evidence. That evidence is merged with the web research/source context. Images go through a separate Gemini Vision extraction path.
 
@@ -306,11 +303,9 @@ flowchart TD
 
 ## 8. Export and delivery
 
-The report result can be rendered through separate backend routers:
+PDF is the only report output format.
 
-- **HTML:** `backend/routes/html_report.py` builds the report HTML and source-linked presentation.
-- **PDF:** `backend/routes/pdf.py` prepares print-safe HTML/charts and renders using Chromium/Playwright where available, with configured fallback behavior. It includes output audits for report/PDF issues.
-- **DOCX:** `backend/routes/docx_report.py` builds editable Word content, tables, citations and supported native charts/data.
+- **PDF:** `backend/routes/pdf.py` prepares print-safe HTML/charts and renders using Chromium/Playwright where available, with configured fallback behavior. It includes output audits for report/PDF issues. The HTML it prints is composed internally by `build_html_report()` in `backend/routes/html_report.py`, which has no endpoint of its own.
 - **Email:** `backend/routes/email.py` formats and sends a report when the mail provider/configuration is set.
 
 These exports consume the structured report output; they are not the research/RAG engine. The frontend has corresponding Next.js routes under `frontend/src/app/api/chat/report/`.
@@ -383,7 +378,7 @@ Use the same `X-Request-ID`/trace id across Next.js, FastAPI and RAG requests wh
 | OKF Storage archive | `backend/rag-service/okf_store.py` |
 | Report jobs, research pipeline and quality gates | `backend/routes/report.py`, `backend/utils/research_engine.py` |
 | Source identity/manifest | `backend/routes/source_manifest.py` |
-| HTML/PDF/DOCX renderers | `backend/routes/html_report.py`, `backend/routes/pdf.py`, `backend/routes/docx_report.py` |
+| PDF renderer (with internal HTML composition) | `backend/routes/pdf.py`, `backend/routes/html_report.py` |
 | Browser file parsing and chat UX | `frontend/src/components/GrowthGradualChat.tsx` |
 | Next.js chat stream adapter | `frontend/src/app/api/chat/ai-sdk/route.ts` |
 | Next.js RAG indexing adapter | `frontend/src/app/api/rag/index/route.ts` |

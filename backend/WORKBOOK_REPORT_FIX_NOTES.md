@@ -4,7 +4,7 @@
 
 - Deterministic PMS chart points now carry an explicit, source-derived evidence quote containing worksheet, row, metric, raw workbook cell value, and original row context. This addresses cases where the serialized CSV row omitted a normalized period cell or represented a return as a percentage string, causing chart evidence validation to reject valid values.
 - Numeric validation accepts raw percentage strings such as `24.8%` while still requiring the value to appear in the quoted workbook evidence and the plotted/raw scale to be consistent.
-- If the report planner fails or returns malformed JSON, workbook-only PMS reports preserve the selected depth: Brief uses a concise outline, Detailed uses eight analysis sections, and In-depth adds further evidence-driven sections. The writer must still omit analyses unsupported by available data.
+- If the report planner fails or returns malformed JSON, workbook-only PMS reports preserve the selected depth: Detailed uses eight analysis sections, and In-depth adds further evidence-driven sections. The writer must still omit analyses unsupported by available data.
 - Added regression coverage for workbook chart publication and raw percentage strings.
 
 ## Validation performed

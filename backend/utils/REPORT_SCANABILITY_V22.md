@@ -6,4 +6,4 @@ V22 adds a post-generation, section-local formatting pass. It selects prose-heav
 
 V22 also removes leaked continuation-control marker lines such as `[[SECTION]]` and `[[END SECTION]]` before pagination and final rendering. This prevents generation protocol artifacts from appearing as reader-facing headings.
 
-The changes are dynamic and tier-aware: the pass selects fewer candidates for Brief, more for In-Detail, and a capped set for Deep Research. It does not force charts or tables when source data does not support them and does not impose a fixed report template.
+The changes are dynamic and tier-aware: the pass selects a moderate set of candidates for In-Detail and a larger capped set for Deep Research (the Brief tier has since been removed). It does not force charts or tables when source data does not support them and does not impose a fixed report template.

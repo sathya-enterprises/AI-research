@@ -1,5 +1,7 @@
 # FinBot Premium - Updates v2 (September 1, 2026)
 
+> **Historical note:** `routes/pdf_enhanced.py` was never wired into an endpoint and has since been removed; `routes/pdf.py` is the only PDF renderer.
+
 ## Summary of Changes
 
 This update adds **enhanced PDF generation** with professional layouts, better charts, and automatic page flow management.

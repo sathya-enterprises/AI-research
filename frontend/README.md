@@ -25,7 +25,6 @@ npm run dev
 | `POST /api/chat` | Streaming chat — Tavily top-25 + Groq/Gemini |
 | `POST /api/chat/report` | Full report with charts from top-25 pages |
 | `POST /api/chat/report/pdf` | Download report as branded PDF |
-| `POST /api/chat/report/docx` | Download editable Word report with native text/tables, clickable citations, embedded figures and native charts with editable Excel data where supported |
 | `GET /api/market` | NSE/BSE market data |
 | `GET /api/scrape` | News feed (proxies to Python backend) |
 | `GET /api/article` | Article scraper |

@@ -11,7 +11,6 @@ Main Python/FastAPI business and orchestration API. The Next.js frontend still o
 | POST | `/api/chat` | SSE streaming chat (Groq → Gemini fallback + Exa web search) |
 | POST | `/api/chat/report` | Research report generation (JSON) |
 | POST | `/api/chat/report/pdf` | PDF export via the branded HTML/print renderer |
-| POST | `/api/chat/report/docx` | Editable Word export: native text, headings, tables, source hyperlinks, and supported charts with embedded Excel data |
 | GET | `/api/stocks/search` | Search the Screener.in fundamentals knowledge base by ticker/name |
 | GET | `/api/stocks/{company_id}` | Full fundamentals snapshot for a company |
 | POST | `/api/datasearch` | Free-text query → structured data points for the frontend Data Search Engine (`/search`) |
@@ -33,7 +32,7 @@ Main Python/FastAPI business and orchestration API. The Next.js frontend still o
 | `LOGO_B64` | (Optional) Base64-encoded logo image for PDF cover |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Also powers the Screener.in fundamentals knowledge base (see `screener_kb/README.md`) unless overridden below |
 | `ARTICLE_KB_INGEST_TOKEN` | Optional shared server-to-server secret for authenticated website-crawl ingestion. Set the same random value on the frontend server and backend; never prefix with `NEXT_PUBLIC_`. |
-| `REPORT_TIER_SEARCH_LIMITS` / `REPORT_TIER_ENRICH_LIMITS` / `REPORT_TIER_CRAWL_PAGES` / `REPORT_TIER_NUMERIC_OBSERVATIONS` / `REPORT_TIER_EVIDENCE_CONTEXT_CHARS` | (Optional) Per-tier scraping and evidence capacity as `brief,detailed,in_depth` integers. Defaults: `20,60,100` search results per query, `20,50,80` fetched pages, `6,24,48` crawled pages, `120,250,400` numeric observations and `40000,85000,140000` evidence characters passed to the writer. Higher values mean more chart data points, more search spend and longer report jobs. |
+| `REPORT_TIER_SEARCH_LIMITS` / `REPORT_TIER_ENRICH_LIMITS` / `REPORT_TIER_CRAWL_PAGES` / `REPORT_TIER_NUMERIC_OBSERVATIONS` / `REPORT_TIER_EVIDENCE_CONTEXT_CHARS` | (Optional) Per-tier scraping and evidence capacity as `detailed,in_depth` integers (the legacy three-value `brief,detailed,in_depth` form is still accepted and its first value ignored). Defaults: `60,100` search results per query, `50,80` fetched pages, `24,48` crawled pages, `250,400` numeric observations and `85000,140000` evidence characters passed to the writer. Higher values mean more chart data points, more search spend and longer report jobs. |
 | `REPORT_BRAND_ARN` | (Optional) Registration line printed in the Market Currents footer; defaults to `ARN-351151, Validity Jan'29`. |
 | `SCREENER_SUPABASE_URL` / `SCREENER_SUPABASE_ANON_KEY` | (Optional) Point the fundamentals knowledge base at a separate Supabase project instead of reusing `SUPABASE_URL`/`SUPABASE_ANON_KEY` |
 
@@ -83,8 +82,3 @@ To include your logo, either:
 - Place `logo.jpg` / `logo.png` in the working directory, **or**
 - Set `LOGO_B64` env var to the base64-encoded image bytes.
 
-## Editable Word Reports
-
-The `POST /api/chat/report/docx` endpoint creates a native Office Open XML document. Text, headings, lists, citations, source appendix, key-stat cells, report tables and chart-data tables are editable. Supported chart types are real Word chart objects linked to embedded Excel workbooks; unsupported chart types keep their supplied data in editable Word tables rather than being converted to a screenshot. Supplied hydrated images are ordinary replaceable Word images.
-
-Install `backend/requirements.txt` after updating the project so `python-docx` and `openpyxl` are present. In the frontend, use **Download Editable Word** from the report panel.

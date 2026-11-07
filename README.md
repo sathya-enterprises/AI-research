@@ -1,6 +1,6 @@
 # Growth Gradual
 
-AI research workspace. Users can ask a question, attach documents, receive source-linked answers, and create Brief, Detailed or In-Depth research reports with evidence-backed charts, tables, citations and export formats.
+AI research workspace. Users can ask a question, attach documents, receive source-linked answers, and create In-Detail or Deep Research (in-depth) reports with evidence-backed charts, tables and citations, delivered as PDF.
 
 ## Runtime architecture at a glance
 
@@ -84,7 +84,7 @@ The owner confirmed that the one-time Supabase migrations for session metadata, 
 
 ## Report lifecycle
 
-The report UI starts a backend job via `/api/chat/report/start`, receives progress and draft previews through `/stream/{jobId}`, and can recover through `/status/{jobId}` polling. The backend performs research, evidence gathering, report drafting and quality gates before returning the structured report payload. Separate export endpoints render HTML, PDF and DOCX; email delivery is also exposed when configured. See `ARCHITECTURE.md` for the full pipeline and current process boundaries.
+The report UI starts a backend job via `/api/chat/report/start`, receives progress and draft previews through `/stream/{jobId}`, and can recover through `/status/{jobId}` polling. The backend performs research, evidence gathering, report drafting and quality gates before returning the structured report payload. The PDF endpoint renders the report (PDF is the only output format); email delivery is also exposed when configured. See `ARCHITECTURE.md` for the full pipeline and current process boundaries.
 
 ## Tests and checks
 
