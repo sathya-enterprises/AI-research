@@ -22214,11 +22214,67 @@ async def generate_report(request: Request):
             from datetime import date as _v2_date
             from utils.report_pipeline_v2 import run_pipeline_v2
             _v2_today = _v2_date.today()
+            from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
+            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier) if report_tier == "in_depth" else None
+            _v2_entity_stats: dict = {}
+            if _v2_tiers:
+                record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
+                # Targeted searches for entities below the deep-dive threshold, through the
+                # same relevance / fetch / quality path as the main search.
+                from utils.entity_research import plan_entity_queries, run_entity_search, search_cap
+                from utils.source_quality import assess_sources as _assess_sources
+                from routes.chat import exa_search_multi as _entity_exa_search
+                _window_label = f"last {requested_quarter_count(question)} quarters"
+                _entity_plan = plan_entity_queries(_v2_tiers, cap=search_cap(report_tier), window=_window_label)
+                if _entity_plan:
+                    _report_progress("writing", f"Researching {len({e for e, _ in _entity_plan})} under-covered entities…", 68)
+
+                    async def _entity_search(queries):
+                        return await _entity_exa_search(queries, max_results=8, min_results=3, max_keys_per_query=1)
+
+                    def _entity_filter(rows, require_context=False):
+                        return _filter_relevant_sources(rows, question, intent, require_context=require_context, report_tier=report_tier)
+
+                    async def _entity_enrich(rows):
+                        return list(await asyncio.gather(*[enrich(row, i) for i, row in enumerate(rows)]))
+
+                    _entity_rows, _v2_entity_stats = await run_entity_search(
+                        _entity_plan, search_fn=_entity_search, filter_fn=_entity_filter, enrich_fn=_entity_enrich,
+                        quality_fn=lambda rows: _assess_sources(rows, question=question, report_tier=report_tier),
+                        existing_urls={str(r.get("url") or "") for r in enriched},
+                    )
+                    if _entity_rows:
+                        enriched = _dedupe_enriched_sources(enriched + _entity_rows)
+                        source_manifest = build_source_registry(enriched, source_documents)
+                        from utils.evidence_store import build_evidence_store as _rebuild_store
+                        evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier)
+                        record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
+                        record_research_stage("evidence_store", {**evidence_store.capture_summary(),
+                                                                 "sourceSummary": evidence_store.source_summary(),
+                                                                 "passages": {p.passage_id: p.to_dict() for p in evidence_store.passages}})
+                    record_research_stage("entity_search", _v2_entity_stats)
+                record_research_stage("entity_tiers", _tier_summary(_v2_tiers))
+
+            def _v2_chart_preverify(specs: list[dict]) -> list[str]:
+                """Same evidence check the report-time/PDF chart gates apply, run before writing."""
+                _register_v2_chart_evidence(specs, evidence_store)
+                _audited = _attach_audit_source_evidence(source_manifest, enriched, "")
+                _public = _merge_source_evidence_statuses(source_manifest, _audited)
+                _result = audit_chart_evidence_consistency("", specs, _public, question=question)
+                reasons = [""] * len(specs)
+                for failure in list(_result.get("chartEvidenceFailures") or []) + list(_result.get("chartTableVerificationConflicts") or []):
+                    index = int(failure.get("chartIndex") or 0) - 1
+                    if 0 <= index < len(specs) and not reasons[index]:
+                        reasons[index] = str(failure.get("reason") or "failed chart verification")[:200]
+                return reasons
+
             _v2_result = await run_pipeline_v2(
                 runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
                 manifest=source_manifest, today=_v2_today.isoformat(),
                 window_note=_past_n_quarters_anchor(question, _v2_today).strip(),
                 progress=lambda message: _report_progress("writing", message, 70),
+                tiers=_v2_tiers, chart_verifier=_v2_chart_preverify, entity_search_stats=_v2_entity_stats,
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
