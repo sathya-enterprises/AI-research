@@ -92,7 +92,11 @@ def _split_tables_and_text(page: str) -> tuple[list[tuple[str, list[str]]], str]
                 run.append(lines[j].strip())
                 j += 1
             if len(run) >= 3:
-                heading = next((ln.strip() for ln in reversed(narrative) if ln.strip()), "Table")[:200]
+                heading = "Table"
+                while narrative and not narrative[-1].strip():
+                    narrative.pop()
+                if narrative:
+                    heading = narrative.pop().strip()[:200]  # the heading belongs to the table, not the prose
                 tables.append((heading, run))
                 i = j
                 continue

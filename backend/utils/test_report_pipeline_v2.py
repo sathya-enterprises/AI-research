@@ -1,0 +1,189 @@
+"""REPORT_PIPELINE_V2: charts, section post-processing, outline sizing and the end-to-end assembly (fake LLM)."""
+import asyncio
+import json
+import re
+
+import pytest
+
+from utils.evidence_store import build_evidence_store
+from utils.llm_gateway import GatewayStats, LLMResult
+from utils.report_outline import Section, resolve_thin_evidence, size_budgets
+from utils.report_pipeline_v2 import PipelineV2Error, run_pipeline_v2
+from utils.section_charts import build_chart_candidates, charts_from_passage, verify_chart
+from utils.section_writer import SectionDraft, postprocess, unsupported_numbers
+
+QUARTERS = ["Q3 FY26", "Q4 FY26", "Q1 FY27", "Q2 FY27"]
+SECTORS = ["NIFTY IT", "NIFTY BANK", "NIFTY PHARMA", "NIFTY AUTO", "NIFTY FMCG", "NIFTY METAL", "NIFTY REALTY",
+           "NIFTY ENERGY", "NIFTY MEDIA", "NIFTY PSU BANK"]
+
+
+def _matrix(rows=SECTORS):
+    lines = ["COMPLETED CALENDAR-QUARTER NSE SECTOR INDEX RETURNS (calculated)", "Sector | " + " | ".join(QUARTERS)]
+    for i, name in enumerate(rows):
+        lines.append(name + " | " + " | ".join(f"{(i + 1) * (1 if q % 2 else -1) * 1.1 + q:+.2f}%" for q in range(4)))
+    return "\n".join(lines)
+
+
+def _sources():
+    narrative = ("Foreign portfolio investors sold financial services shares worth 11,704 crore in September while "
+                 "domestic institutions bought heavily through SIP flows. ") * 6
+    fpi_table = ("TABLE 1 — FPI net investment by sector (Rs crore)\nSector | Net investment\n"
+                 "Financial Services | -11,704\nInformation Technology | -6,210\nCapital Goods | 3,480\nHealthcare | 1,950\n")
+    rows = [{"url": "internal://verified-sector-quarterly-returns", "title": "CALCULATED NSE SECTOR RETURNS", "fullContent": _matrix(),
+             "authorityTier": "primary_official", "reliabilityScore": 1.0}]
+    for i in range(2, 13):
+        rows.append({"url": f"https://www.nseindia.com/report-{i}", "title": f"NSE sector flows report {i}", "publisher": "NSE",
+                     "publication_date": "2026-10-01", "pageFetchStatus": "ok",
+                     "pageContent": (fpi_table if i == 2 else "") + narrative + f" Banks rallied {i}.5% in the quarter.",
+                     "authorityTier": "primary_official", "reliabilityScore": 0.9})
+    return rows
+
+
+def _store():
+    rows = _sources()
+    manifest = [{"id": f"S{i}", "url": r["url"] if not r["url"].startswith("internal") else "", "title": r["title"],
+                 "authority_tier": r["authorityTier"], "reliability_score": r["reliabilityScore"], "publication_date": r.get("publication_date", ""),
+                 "publisher": r.get("publisher", "Calculated")} for i, r in enumerate(rows, 1)]
+    return build_evidence_store(rows, manifest=manifest), manifest
+
+
+# ── charts ────────────────────────────────────────────────────────────────────
+def test_charts_are_built_from_stored_tables_with_exact_cell_evidence():
+    store, _ = _store()
+    charts, dropped = build_chart_candidates(store)
+    types = {c.spec["type"] for c in charts}
+    assert "heatmap" in types and "bar" in types  # 10 sectors x 4 quarters -> heatmap; FPI table -> bar
+    bar = next(c for c in charts if c.spec["type"] == "bar")
+    point = bar.spec["series"][0]["data"][0]
+    assert point["evidenceValue"] == "-11,704" and point["value"] == -11704.0 and "Financial Services" in point["evidenceQuote"]
+    heat = next(c for c in charts if c.spec["type"] == "heatmap")
+    assert heat.spec["columns"] == QUARTERS and len(heat.spec["rows"]) == 10 and heat.spec["unit"] == "%"
+
+
+def test_unverifiable_chart_is_dropped_before_writing():
+    store, _ = _store()
+    chart = next(c for c in build_chart_candidates(store)[0] if c.spec["type"] == "bar")
+    assert verify_chart(chart, "a different passage without those cells") .startswith("value")
+    chart.points = chart.points[:2]
+    assert verify_chart(chart, "") == "fewer than 3 data points"
+
+
+# ── section post-processing ───────────────────────────────────────────────────
+class _Fig:
+    def __init__(self, n):
+        self.figure_number, self.status, self.claim, self.drop_reason, self.passage_ids, self.points = n, "planned", "", "", [], []
+
+
+def test_postprocess_validates_citations_figures_and_numbers():
+    raw = ("### Flows\nFPIs sold 11,704 crore of financials [S2.1]. A claim with a bad id [S99.1] and mixed [S2.1, S7.4].\n\n"
+           "Figure 1 shows the sector spread, with banks up 42.42% [S2.1].\n\n<<<SUMMARY>>>\nFPIs sold 11,704 crore [S2.1].")
+    figs = [_Fig(1), _Fig(2)]
+    draft = postprocess(SectionDraft("sec-1", "Flows"), raw, allowed_passages={"S2.1"}, allowed_numbers={"11704"}, figures=figs, min_words=10)
+    assert draft.ok and draft.invalid_citations == 2
+    assert "[S99.1]" not in draft.body and "[S2.1]" in draft.body
+    assert "[[FIGURE 1]]" in draft.body and figs[0].status == "referenced" and "Figure 1 shows" in figs[0].claim
+    assert figs[1].status == "dropped" and 2 in draft.figures_dropped and "[[FIGURE 2]]" not in draft.body
+    assert draft.unsupported_numbers == ["42.42"]
+    assert draft.cited_passages == ["S2.1"] and draft.summary.startswith("FPIs sold")
+
+
+def test_unsupported_numbers_ignore_years_quarters_citations_and_figure_numbers():
+    body = "In Q2 FY27 and 2026, Figure 3 shows 4.5% growth [S1.2] versus 7.1%."
+    assert unsupported_numbers(body, {"4.5"}) == ["7.1"]
+
+
+# ── outline sizing ────────────────────────────────────────────────────────────
+def test_thin_sections_are_merged_or_dropped_and_budgets_come_from_evidence():
+    store, _ = _store()
+    ids = [p.passage_id for p in store.passages]
+    strong = Section("sec-1", "Sector returns by quarter", queries=["sector returns quarter"], passage_ids=ids[:6])
+    prose_only = [p.passage_id for p in store.passages if p.kind == "narrative"][:1]
+    thin_related = Section("sec-2", "Sector returns outliers", queries=["sector returns outliers"], passage_ids=prose_only)
+    thin_unrelated = Section("sec-3", "Weather patterns", queries=["monsoon rainfall"], passage_ids=[])
+    decisions = []
+    resolve_thin_evidence(store, [strong, thin_related, thin_unrelated], decisions)
+    assert thin_related.status == "merged" and thin_unrelated.status == "dropped"
+    assert any("Merged section 'Sector returns outliers'" in d for d in decisions)
+    assert any("Dropped section 'Weather patterns'" in d for d in decisions)
+    meta = {}
+    size_budgets(store, [strong, thin_related, thin_unrelated], "detailed", meta)
+    assert 380 <= strong.word_budget <= 1150 and meta["plannedAnalysisWords"] == strong.word_budget
+
+
+# ── end to end with a fake LLM ────────────────────────────────────────────────
+class FakeGateway:
+    def __init__(self, outline):
+        self.outline = outline
+        self.stats = GatewayStats()
+
+    async def generate(self, *, purpose, prompt, system="", section_id="", **kwargs):
+        self.stats.calls += 1
+        self.stats.by_purpose[purpose] += 1
+        self.stats.models["fake"] += 1
+        if purpose == "outline":
+            return LLMResult(ok=True, text=json.dumps(self.outline), model="fake")
+        if purpose == "executive_summary":
+            cites = re.findall(r"\[(S\d+\.\d+)\]", prompt)
+            return LLMResult(ok=True, text=f"The rotation favoured banks over IT, and FPIs sold 11,704 crore of financials [{cites[0]}].", model="fake")
+        ids = re.findall(r"(?m)^\[(S\d+\.\d+)\]", prompt)
+        figs = [int(n) for n in re.findall(r"(?m)^Figure (\d+):", prompt)]
+        body = f"### Evidence\nFPIs sold 11,704 crore of financial services shares in September [{ids[0]}]. " + (
+            "Domestic institutions absorbed the selling through steady SIP inflows, which kept index drawdowns shallow "
+            f"and shifted leadership towards domestically owned sectors [{ids[-1]}]. ") * 4
+        for n in figs:
+            body += f"\n\nFigure {n} shows how the sectors compare across the window [{ids[0]}].\n\n[[FIGURE {n}]]"
+        return LLMResult(ok=True, text=body + f"\n<<<SUMMARY>>>\nFPIs sold 11,704 crore [{ids[0]}].", model="fake")
+
+
+OUTLINE = {
+    "title": "Indian Sector Rotation Over Four Quarters",
+    "thesis": "Leadership rotated from IT to financials as foreign selling met domestic buying.",
+    "entities": [{"name": "NIFTY BANK", "aliases": ["banks"]}, {"name": "NIFTY OIL", "aliases": []}],
+    "dimensions": ["quarterly returns", "FPI flows"],
+    "sections": [
+        {"title": "Sector returns by quarter", "goal": "Show the return matrix", "queries": ["sector index returns quarter NIFTY"],
+         "subsections": [{"title": "Leaders and laggards", "goal": "rank", "queries": ["NIFTY returns Q2 FY27"]}]},
+        {"title": "Foreign and domestic flows", "goal": "Explain flows", "queries": ["FPI net investment sector crore", "domestic institutions SIP"]},
+        {"title": "Banks versus IT", "goal": "Compare", "queries": ["banks rallied quarter", "information technology"]},
+        {"title": "Weather patterns", "goal": "irrelevant", "queries": ["monsoon rainfall forecast"]},
+    ],
+}
+
+
+@pytest.mark.parametrize("tier", ["detailed", "in_depth"])
+def test_end_to_end_assembly_with_fake_llm(tier):
+    store, manifest = _store()
+    gateway = FakeGateway(OUTLINE)
+    result = asyncio.run(run_pipeline_v2(runtime=None, question="Sector rotation in India over the last 4 quarters", tier=tier,
+                                         store=store, manifest=manifest, today="2026-11-07", gateway=gateway))
+    out = json.loads(result["raw"])
+    assert set(out) >= {"title", "report", "charts", "keyStats", "summary", "images"}
+    report = out["report"]
+    assert report.startswith("## Executive Summary")
+    assert "## Methodology and Evidence Base" in report and "Weather patterns" not in report.split("## Methodology")[0]
+    assert not re.search(r"\[S\d+\.\d+\]", report)  # passage ids converted to source-level for the renderer
+    assert re.search(r"\[S\d+\]", report)
+    assert out["charts"] and all(c["title"].startswith(f"Figure {i}:") for i, c in enumerate(out["charts"], 1))
+    for i in range(1, len(out["charts"]) + 1):
+        assert f"[CHART_{i}]" in report and f"Figure {i} shows" in report
+    meta = result["meta"]
+    assert meta["llm"]["calls"] == gateway.stats.calls
+    assert any("Weather patterns" in d for d in meta["outline"]["decisions"])
+    coverage = {r["entity"]: r for r in meta["outline"]["entityCoverage"]}
+    assert coverage["NIFTY BANK"]["status"] == "covered" and coverage["NIFTY OIL"]["status"] == "insufficient_evidence"
+    if tier == "in_depth":
+        assert "## Appendix A — Source Reliability" in report and "## Appendix B — Data Tables" in report
+    else:
+        assert "Appendix A" not in report
+
+
+def test_invalid_outline_raises_so_report_py_falls_back():
+    store, manifest = _store()
+
+    class Broken(FakeGateway):
+        async def generate(self, **kwargs):
+            return LLMResult(ok=False, error="http_503")
+
+    with pytest.raises(PipelineV2Error):
+        asyncio.run(run_pipeline_v2(runtime=None, question="q", tier="detailed", store=store, manifest=manifest,
+                                    today="2026-11-07", gateway=Broken(OUTLINE)))
