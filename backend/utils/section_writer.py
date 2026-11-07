@@ -16,8 +16,14 @@ Rules enforced in the prompt and checked afterwards:
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+from utils.figure_refs import rewrite_removed_figure_refs
+from utils.number_policy import apply_number_policy, statistic_tokens
+
+log = logging.getLogger("section_writer")
 
 SUMMARY_MARKER = "<<<SUMMARY>>>"
 CITE_RE = re.compile(r"\[(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\]")
@@ -32,7 +38,9 @@ NON-NEGOTIABLE RULES
 2. Cite every factual sentence with the passage ids it relies on, in square brackets, e.g. [S12.3] or [S4.1, S9.2].
    Only cite ids that appear in EVIDENCE PASSAGES.
 3. Numbers: state only numbers that appear in your passages or in the FIGURE data. Copy them exactly (same units).
-   Do not calculate new numbers. If a number you would need is not in the evidence, say the evidence does not show it.
+   Do not convert units or round. If you compute a number (a sum, difference, share or change), write
+   "(calculated: <inputs>)" right after it, using only numbers from the cited passages. If a number you would need is
+   not in the evidence, say the evidence does not show it. Sentences with numbers the evidence does not contain are removed.
 4. Figures: for each figure listed, put its marker [[FIGURE N]] on its own line where it belongs, and in the adjacent
    paragraph write "Figure N shows ..." and interpret it: what it compares, the key pattern, and why it matters for the
    section's goal. Use the figure's own values.
@@ -60,6 +68,8 @@ class SectionDraft:
     invalid_citations: int = 0
     repaired_citations: int = 0
     unsupported_numbers: list[str] = field(default_factory=list)
+    calculated_numbers: list[dict] = field(default_factory=list)
+    removed_sentences: list[dict] = field(default_factory=list)
     figures_referenced: list[int] = field(default_factory=list)
     figures_dropped: list[int] = field(default_factory=list)
     calls: int = 0
@@ -85,16 +95,14 @@ def _number_set(texts) -> set[str]:
 
 
 def unsupported_numbers(body: str, allowed: set[str]) -> list[str]:
-    text = CITE_RE.sub(" ", body)
-    text = FIGURE_MARKER_RE.sub(" ", text)
-    text = FIGURE_REF_RE.sub(" ", text)
-    text = re.sub(r"\b(?:Q[1-4]|H[12])\s*(?:FY|CY)?\s*'?\d{2,4}\b|\bFY\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\b", " ", text, flags=re.I)
+    """Statistics in the text that are not in the evidence (labelled calculations are checked by the policy)."""
+    # A labelled calculation ("₹83,816 crore (calculated: 47,955 + ...)") was verified by the
+    # number policy against its inputs: neither the number nor its inputs are "unsupported".
+    text = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated:[^)]*\)", " ", body)
     out = []
-    for token in _NUM_RE.findall(text):
+    for token in statistic_tokens(text):
         norm = _normalize_number(token)
         plain = norm.lstrip("-")
-        if re.fullmatch(r"(?:19|20)\d{2}", plain) or plain in {"1", "2", "3", "4", "5", "0"}:
-            continue  # years and small ordinals
         if norm not in allowed and plain not in allowed:
             out.append(token)
     return out
@@ -134,17 +142,8 @@ EVIDENCE PASSAGES (cite by id):
 
 
 def _sentence_numbers(sentence: str) -> list[str]:
-    """Factual numbers in a sentence (no citations, figure refs, years, quarter labels, small ordinals)."""
-    text = CITE_RE.sub(" ", sentence)
-    text = FIGURE_MARKER_RE.sub(" ", FIGURE_REF_RE.sub(" ", text))
-    text = re.sub(r"\b(?:Q[1-4]|H[12])\s*(?:FY|CY)?\s*'?\d{2,4}\b|\bFY\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\b", " ", text, flags=re.I)
-    out = []
-    for token in _NUM_RE.findall(text):
-        plain = _normalize_number(token).lstrip("-")
-        if re.fullmatch(r"(?:19|20)\d{2}", plain) or plain in {"0", "1", "2", "3", "4", "5"}:
-            continue
-        out.append(plain)
-    return out
+    """Factual numbers in a sentence (no citations, figure refs, periods, durations, counts, small ordinals)."""
+    return [_normalize_number(t).lstrip("-") for t in statistic_tokens(re.sub(r"\(calculated:[^)]*\)", " ", sentence))]
 
 
 def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[str, int]:
@@ -163,6 +162,15 @@ def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[s
     for i, sentence in enumerate(pieces):
         matches = list(CITE_RE.finditer(sentence))
         if not matches:
+            # An uncited sentence whose numbers all sit in one given passage gets that citation.
+            numbers = _sentence_numbers(sentence)
+            if numbers and not sentence.lstrip().startswith("|"):
+                holder = next((pid for pid, nums in passage_numbers.items() if all(n in nums for n in numbers)), None)
+                if holder:
+                    stripped = sentence.rstrip()
+                    end = len(stripped) - 1 if stripped and stripped[-1] in ".!?" else len(stripped)
+                    pieces[i] = stripped[:end] + f" [{holder}]" + stripped[end:] + sentence[len(stripped):]
+                    repaired += 1
             continue
         cited = [t.strip().upper() for m in matches for t in re.split(r"\s*[,;]\s*", m.group(1))]
         have = set().union(*(passage_numbers.get(c, set()) for c in cited))
@@ -208,7 +216,8 @@ def unfence(body: str) -> str:
 
 
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
-                figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None) -> SectionDraft:
+                figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None,
+                passage_texts: dict[str, str] | None = None, own_figures: set[int] | None = None) -> SectionDraft:
     text = str(raw or "").strip()
     if SUMMARY_MARKER in text:
         body, summary = text.split(SUMMARY_MARKER, 1)
@@ -216,6 +225,10 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         body, summary = text, ""
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
+    # The writer sometimes copies the prompt's subsection spec into the heading:
+    # "### Title — goal: Review ... (~475 words)" -> "### Title".
+    body = re.sub(r"(?m)^(#{3,6}\s+.+?)\s*[—–-]+\s*goal:.*$", r"\1", body)
+    body = re.sub(r"(?m)^(#{3,6}\s+.+?)\s*\(~?\d+\s+words\)\s*$", r"\1", body)
     allowed_sources = {pid.split(".")[0] for pid in allowed_passages}
     invalid = 0
 
@@ -232,9 +245,22 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
 
     body = CITE_RE.sub(fix, body)
     body, draft.repaired_citations = repair_citations(body, passage_numbers or {})
+    if passage_texts:
+        # Number policy: label calculations with their inputs; remove sentences whose
+        # numbers are not in the evidence (logged and recorded, never hidden).
+        policy = apply_number_policy(body, passage_texts=passage_texts, allowed_numbers=allowed_numbers,
+                                     section_id=draft.section_id)
+        body = policy.body
+        draft.calculated_numbers += policy.calculated
+        draft.removed_sentences += policy.removed
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}
+    # "Figure N" for a number this section was not given (another section's figure, or a
+    # label the writer put on its own table) would be renumbered onto the wrong chart.
+    foreign = {int(n) for n in FIGURE_REF_RE.findall(body)} - numbers - set(own_figures or ())
+    if foreign:
+        body = rewrite_removed_figure_refs(body, foreign)
     referenced = {int(n) for n in FIGURE_REF_RE.findall(body)} & numbers
     for fig in figures:
         n = fig.figure_number
@@ -295,10 +321,20 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     if not passages:
         draft.error = "no evidence passages assigned"
         return draft
-    allowed_passages = {p.passage_id for p in passages}
-    passage_numbers = {p.passage_id: _number_set([p.text]) for p in passages}
-    allowed_numbers = _number_set(p.text for p in passages) | _number_set(
+    # Passages the writer may legitimately cite beyond its own: those behind its figures,
+    # and those cited in the ALREADY COVERED summaries it is told to build on (repeating
+    # "FMCG fell 8.8% [S19.5]" from an earlier section is reported, not unsupported).
+    extra_ids = {pid for f in figures for pid in f.passage_ids}
+    extra_ids |= {t.strip().upper() for line in already_covered for g in CITE_RE.findall(line)
+                  for t in re.split(r"\s*[,;]\s*", g) if "." in t}
+    extra = [p for p in (store.get(pid) for pid in sorted(extra_ids)) if p and p not in passages]
+    citable = passages + extra
+    allowed_passages = {p.passage_id for p in citable}
+    passage_numbers = {p.passage_id: _number_set([p.text]) for p in citable}
+    passage_texts = {p.passage_id: p.text for p in citable}
+    allowed_numbers = _number_set(p.text for p in citable) | _number_set(
         f"{v:g}" for f in figures for _, _, v in f.points)
+    own_figures = {f.figure_number for f in figures}
     subs = [s for s in section.subsections if s.status == "keep"]
     groups = _chunks(subs) if subs else [[]]
     bodies, summaries = [], []
@@ -323,7 +359,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             continue
         part = SectionDraft(section_id=draft.section_id, title=draft.title)
         postprocess(part, result.text, allowed_passages=allowed_passages, allowed_numbers=allowed_numbers,
-                    figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers)
+                    figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers,
+                    passage_texts=passage_texts, own_figures=own_figures)
         if not part.ok:
             draft.error = (f"{draft.error}; " if draft.error else "") + f"part {gi + 1}: {part.error}"
         if part.ok:
@@ -332,6 +369,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             draft.invalid_citations += part.invalid_citations
             draft.repaired_citations += part.repaired_citations
             draft.unsupported_numbers += part.unsupported_numbers
+            draft.calculated_numbers += part.calculated_numbers
+            draft.removed_sentences += part.removed_sentences
             draft.figures_referenced += part.figures_referenced
     # Evidence-driven extension: a short section that left several of its own
     # passages uncited gets ONE more call with only those unused passages. More
@@ -361,7 +400,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         if result.ok and not re.match(r"^\s*<<<SUMMARY>>>\s*NONE", result.text.strip()):
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)
             postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
-                        allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers)
+                        allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers,
+                        passage_texts=passage_texts, own_figures=own_figures)
             if extra.ok:
                 bodies.append(extra.body)
                 if extra.summary:
@@ -369,6 +409,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                 draft.invalid_citations += extra.invalid_citations
                 draft.repaired_citations += extra.repaired_citations
                 draft.unsupported_numbers += extra.unsupported_numbers
+                draft.calculated_numbers += extra.calculated_numbers
+                draft.removed_sentences += extra.removed_sentences
     # Figures never referenced in any part are dropped.
     for fig in figures:
         if fig.status != "referenced":
