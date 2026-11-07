@@ -130,8 +130,14 @@ def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
         return result
     if isinstance(value, (list, tuple, set)):
         items = list(value)
-        out = [_safe(item, field_name, depth + 1) for item in items[:60]]
-        if len(items) > 60:
+        # Stage lists must be complete enough for offline replays
+        # (scripts/eval_report.py); an in-depth run has 100+ candidate sources.
+        try:
+            max_items = max(10, int(os.getenv("GG_RESEARCH_CAPTURE_MAX_ITEMS", "250")))
+        except ValueError:
+            max_items = 250
+        out = [_safe(item, field_name, depth + 1) for item in items[:max_items]]
+        if len(items) > max_items:
             out.append(f"[LIST TRUNCATED; original items={len(items)}]")
         return out
     return str(value)[:1000]
