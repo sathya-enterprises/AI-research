@@ -48,3 +48,16 @@ def test_crawl_ceiling_is_configurable(monkeypatch):
     monkeypatch.setenv("GG_CRAWL_MAX_PAGES", "30")
     _rows, stats = asyncio.run(crawl_relevant_internal_pages([], "sector rotation India", report_tier="in_depth", max_pages=48, max_depth=3))
     assert stats["page_limit"] == 30
+
+
+def test_sector_rotation_relevance_cap_scales_with_tier():
+    question = "Sector rotation in the Indian stock markets over the last 4 quarters"
+    rows = [{
+        "url": f"https://www.nseindia.com/report-{i}", "title": f"NSE sectoral indices quarterly returns {i}",
+        "pageContent": "Nifty IT sector returns and FII flows by sector " + " ".join(str(n) for n in range(80)),
+        "snippet": "sectoral indices sector returns", "pageFetchStatus": "ok",
+    } for i in range(100)]
+    detailed = R._filter_relevant_sources([dict(r) for r in rows], question, None, require_context=True, report_tier="detailed")
+    deep = R._filter_relevant_sources([dict(r) for r in rows], question, None, require_context=True, report_tier="in_depth")
+    assert len(detailed) == 40
+    assert len(deep) == 70

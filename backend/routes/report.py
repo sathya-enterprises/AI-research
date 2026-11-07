@@ -8038,7 +8038,10 @@ def _filter_relevant_sources(
             rank = score + len(groups) * 10 + (14 if official else 0) + min(digits // 200, 6) * 2
             ranked_rotation.append((rank, len(groups), idx, src))
         ranked_rotation.sort(key=lambda item: (-item[0], -item[1], item[2]))
-        rotation_limit = 40 if require_context else 50
+        # Deep Research must not inherit In-Detail's evidence ceiling: the same
+        # 40/50 cap previously applied to both tiers (in-depth: 53 fetched -> 40).
+        _deep = str(report_tier or "").casefold() == "in_depth"
+        rotation_limit = (70 if _deep else 40) if require_context else (90 if _deep else 50)
         chosen_rotation = [item[3] for item in ranked_rotation[:rotation_limit]]
         if chosen_rotation:
             log.info("Sector-rotation relevance gate retained %d/%d sources (require_context=%s; official data hosts preserved)",
