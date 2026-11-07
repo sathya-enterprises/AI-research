@@ -303,12 +303,33 @@ def repeated_chart_titles(charts: list) -> list[str]:
     return [t for t, n in Counter(titles).items() if t and n > 1]
 
 
+def malformed_after_strip(report: str) -> list[str]:
+    """Sentences / cells left empty or malformed when inline citations are stripped (renderer rule)."""
+    from utils.citation_display import MARKER_RE, only_citations, strip_citation_markers
+
+    bad = []
+    for block in re.split(r"\n\s*\n|\n(?=\s*[-*|>])", report or ""):
+        if not MARKER_RE.search(block) or only_citations(block):
+            continue  # untouched, or a citation-only line the renderer drops
+        out = strip_citation_markers(block)
+        if re.search(r"\(\s*\)|\s[.,;:](?:\s|$)|[,;]\s*[.]|\.\s*\.|^\s*[-*]\s*$|\|\s*\|", out):
+            bad.append(out.strip()[:160])
+    return bad
+
+
+def takeaway_figure_refs(report: str) -> list[str]:
+    return [ln[:160] for ln in re.findall(r"(?m)^>\s*\[!TAKEAWAYS\].*$", report or "")
+            if re.search(r"\b(?:Figure|Fig\.)\s*\d+", ln)]
+
+
 def layout_metrics(pdf_bytes: bytes | None, report: str, prefix: str = "") -> tuple[dict, dict]:
     """Stage D layout checks from the PDF geometry (PyMuPDF) and the report text."""
     from utils.pdf_layout_metrics import distinct_deep_dive_sets, pdf_layout_metrics
 
     distinct, deep_dives = distinct_deep_dive_sets(report)
-    metrics = {f"{prefix}distinct_subsection_sets": f"{distinct}/{deep_dives}" if deep_dives else None}
+    metrics = {f"{prefix}distinct_subsection_sets": f"{distinct}/{deep_dives}" if deep_dives else None,
+               f"{prefix}malformed_after_citation_strip": len(malformed_after_strip(report)),
+               f"{prefix}takeaway_figure_refs": len(takeaway_figure_refs(report))}
     if not pdf_bytes:
         return metrics, {}
     m = pdf_layout_metrics(pdf_bytes)
@@ -325,9 +346,14 @@ def layout_metrics(pdf_bytes: bytes | None, report: str, prefix: str = "") -> tu
         f"{prefix}code_fences_in_pdf": len(m["code_fences"]),
         # Below ~9pt means Chromium shrank the whole document to fit something too wide.
         f"{prefix}body_font_pt": m["body_font_size"],
+        f"{prefix}citation_markers_in_pdf": m["citation_markers"],
+        f"{prefix}malformed_lines_in_pdf": len(m["malformed_pdf_lines"]),
+        f"{prefix}sections_without_sources_line": max(0, m["sections"] - m["sections_with_sources_line"]),
     })
     details = {k: m[k] for k in ("source_list_headings", "stranded_headings", "heading_then_heading", "near_empty_pages",
-                                 "table_overflow", "prompt_leak_headings", "code_fences")}
+                                 "table_overflow", "prompt_leak_headings", "code_fences", "citation_marker_pages", "malformed_pdf_lines")}
+    details["malformed_after_citation_strip"] = malformed_after_strip(report)[:10]
+    details["takeaway_figure_refs"] = takeaway_figure_refs(report)
     return metrics, details
 
 
@@ -522,6 +548,13 @@ def _removed_not_in_live_prompt(capture: dict, removed: list[dict]) -> int:
                if normalize(str(r.get("number") or "")).lstrip("-") not in prompts.get(str(r.get("section") or ""), set()))
 
 
+def _replay_auditor(store, manifest_rows: list, enriched_rows: list):
+    """report.py's source-evidence check against the captured fetched pages + passages (stricter than live:
+    the live check also sees pages fetched after the capture point)."""
+    from utils.evidence_check import store_auditor
+    return store_auditor(store, manifest_rows, enriched_rows)
+
+
 def _captured_tiers(stages: dict, store):
     """The entity tiers the live run used (replaying recomputed tiers would change the outline prompt)."""
     summary = ((stages.get("entity_tiers") or {}).get("data")) or {}
@@ -568,7 +601,8 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
                                          tier=str(capture.get("reportTier") or "detailed"), store=store,
                                          manifest=manifest_rows,
                                          today=str(capture.get("startedAt") or "")[:10], gateway=gateway,
-                                         chart_verifier=chart_verifier, tiers=_captured_tiers(stages, store)))
+                                         chart_verifier=chart_verifier, tiers=_captured_tiers(stages, store),
+                                         evidence_auditor=_replay_auditor(store, manifest_rows, enriched_rows)))
     out = json.loads(result["raw"])
     # The PDF route resolves [S#] citations against the source manifest.
     # The PDF route resolves [S#] citations and re-checks charts against the manifest;
@@ -618,6 +652,8 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
         "v2replay_sentences_removed_not_in_live_prompt": _removed_not_in_live_prompt(
             capture, (result["meta"].get("numberPolicy") or {}).get("sentencesRemoved") or []),
         "v2replay_unresolved_numbers": len((result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or []),
+        "v2replay_evidence_check_removed": len((result["meta"].get("evidenceCheck") or {}).get("removedClaims") or []),
+        "v2replay_evidence_check_still_flagged": len((result["meta"].get("evidenceCheck") or {}).get("stillFlagged") or []),
         "v2replay_repeated_sentences_removed": (result["meta"].get("editorial") or {}).get("repeatedSentencesRemoved"),
         "v2replay_sections_merged": len((result["meta"].get("editorial") or {}).get("mergedSections") or []),
         "v2replay_contradictions_flagged": len((result["meta"].get("editorial") or {}).get("contradictions") or []),
@@ -732,7 +768,9 @@ ORDER = ["tier", "pages", "pdf_words", "report_words", "h2_sections", "subsectio
          "duplicate_headings", "misplaced_sections", "chart_title_mismatch", "figure_numbering_issues",
          "repeated_chart_titles", "source_lists", "prose_only_streak", "pct_body_pages_non_prose",
          "distinct_subsection_sets", "stranded_headings", "heading_then_heading", "appendix_pages", "near_empty_pages",
-         "table_overflow_lines", "prompt_text_in_headings", "code_fences_in_pdf", "dangling_refs", "render_errors",
+         "table_overflow_lines", "prompt_text_in_headings", "code_fences_in_pdf", "citation_markers_in_pdf",
+         "sections_without_sources_line", "malformed_after_citation_strip", "takeaway_figure_refs",
+         "dangling_refs", "render_errors",
          "pipeline", "llm_calls", "llm_calls_all_providers", "llm_tokens_in", "llm_tokens_out", "llm_failed_calls", "time_s",
          "v2_sections_ok", "v2_passages_provided", "v2_passages_cited", "v2_pct_passages_cited", "v2_unsupported_numbers",
          "v2_invalid_citations", "v2_entities_covered", "v2_scope_decisions", "v2_estimated_pages", "v2_evidence_supported_pages"]

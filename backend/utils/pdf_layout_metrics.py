@@ -128,6 +128,23 @@ def pdf_layout_metrics(pdf_bytes: bytes) -> dict:
             (non_prose if has_block else prose_only).append(index + 1)
         if 0 < index < len(doc) - 1 and words < 60:
             near_empty.append(index + 1)
+    # Inline citation markers left in the reader-facing PDF (the Data Sources list may show ids).
+    sources_page = min((page for page, title in source_lists if "data sources" in title.casefold()), default=len(doc) + 1)
+    marker_pages, malformed_pdf = [], []
+    for index, lines in enumerate(pages):
+        if index + 1 >= sources_page:
+            break
+        hits = sum(len(re.findall(r"\[\s*S\d+", ln["text"])) for ln in lines)
+        if hits:
+            marker_pages.append((index + 1, hits))
+        for ln in lines:   # leftovers of citation stripping in the rendered text (letter-spaced captions excluded)
+            if re.search(r"(?:\w\s){4,}", ln["text"]):
+                continue
+            if re.search(r"[,;]\s*\.(?:\s|$)|\(\s*\)|\s,(?=\s)", ln["text"]):
+                malformed_pdf.append((index + 1, ln["text"][:90]))
+    sections = sum(1 for lines in pages[:appendix_start] for ln in lines
+                   if re.fullmatch(r"S\s*E\s*C\s*T\s*I\s*O\s*N\s*\d.*", ln["text"].strip(), re.I))
+    sources_lines = sum(1 for lines in pages[:appendix_start] for ln in lines if ln["text"].strip().startswith("Sources:"))
     body_pages = sorted(non_prose + prose_only)
     streak = best = 0
     for page_no in body_pages:
@@ -141,6 +158,9 @@ def pdf_layout_metrics(pdf_bytes: bytes) -> dict:
         "appendix_pages": len(doc) - appendix_start if appendix_start < len(doc) else 0,
         "stranded_headings": stranded, "heading_then_heading": heading_runs,
         "near_empty_pages": near_empty, "table_overflow": overflow[:10], "prompt_leak_headings": leaks, "code_fences": fences,
+        "citation_markers": sum(h for _p, h in marker_pages), "citation_marker_pages": marker_pages[:10],
+        "malformed_pdf_lines": malformed_pdf[:20],
+        "sections": sections, "sections_with_sources_line": min(sources_lines, sections),
     }
 
 
