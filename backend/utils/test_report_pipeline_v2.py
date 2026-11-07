@@ -226,7 +226,8 @@ def test_chart_unit_comes_from_the_plotted_column_and_old_periods_are_dropped():
     class S:
         passages = [Passage("S1.1", "S1", table, "table", reliability=0.8),
                     Passage("S2.1", "S2", old, "table", reliability=0.8),
-                    Passage("S3.1", "S3", table.replace("Scorecard", "Board"), "table", reliability=0.3)]
+                    # Different data (identical data would be deduplicated before the reliability check).
+                    Passage("S3.1", "S3", table.replace("35,210.5", "36,001.0"), "table", reliability=0.3)]
 
     charts, dropped = build(S(), min_year=2025)
     assert len(charts) == 1
