@@ -214,6 +214,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     mapping = {c.figure_number: i for i, c in enumerate(used, 1)}
     charts_out = []
     for c in used:
+        c.claim = _renumber_figures(c.claim, mapping)  # the claim must use the final figure number
         c.figure_number = mapping[c.figure_number]
         spec = dict(c.spec)
         spec["title"] = f"Figure {c.figure_number}: {spec.get('title')}"

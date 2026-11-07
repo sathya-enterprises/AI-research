@@ -266,3 +266,12 @@ def test_short_section_is_extended_only_from_its_unused_passages():
     seen.clear()
     asyncio.run(write_section(Gw(OUTLINE), store, full, [], question="q", thesis="t", already_covered=[], other_sections=[]))
     assert "section_extend" not in seen  # met its budget: no extension call
+
+
+def test_chart_claim_has_no_marker_and_uses_the_final_figure_number():
+    from utils.report_pipeline_v2 import _renumber_figures
+    figs = [_Fig(3)]
+    raw = "### Leaders\n[[FIGURE 3]]\nFigure 3 shows telecom leading at 14.08% [S2.1].\n<<<SUMMARY>>>\nok"
+    postprocess(SectionDraft("s", "t"), raw, allowed_passages={"S2.1"}, allowed_numbers={"14.08"}, figures=figs, min_words=5)
+    assert figs[0].claim == "Figure 3 shows telecom leading at 14.08%."
+    assert _renumber_figures(figs[0].claim, {3: 1}).startswith("Figure 1 shows")

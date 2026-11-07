@@ -171,8 +171,11 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
             idx = next((i for i, p in enumerate(paragraphs) if re.search(rf"\bFigure\s+{n}\b", p)), len(paragraphs) - 1)
             paragraphs.insert(idx + 1, marker)
             body = "\n\n".join(paragraphs)
-        sentence = next((s for s in re.split(r"(?<=[.!?])\s+", body) if re.search(rf"\bFigure\s+{n}\b", s)), "")
-        fig.claim = CITE_RE.sub("", sentence).strip()[:400]
+        # Claim = the sentence that interprets the figure, without markers/headings
+        # (a marker on the line above used to end up inside the chart takeaway).
+        prose = FIGURE_MARKER_RE.sub(" ", re.sub(r"(?m)^\s*#{1,6}\s.*$", " ", body))
+        sentence = next((s for s in re.split(r"(?<=[.!?])\s+|\n\s*\n", prose) if re.search(rf"\bFigure\s+{n}\b", s)), "")
+        fig.claim = re.sub(r"\s+([.,;:])", r"\1", re.sub(r"\s+", " ", CITE_RE.sub("", sentence))).strip()[:400]
         fig.status = "referenced"
         draft.figures_referenced.append(n)
     # Stray markers for figures this section was not given.
