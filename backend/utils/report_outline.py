@@ -146,7 +146,8 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "sector index, each company, each region). Use the names as they appear in the sources; give aliases.\n"
             "2. List the DIMENSIONS the entities are compared on (e.g. quarterly returns, FPI/DII flows, valuation, earnings, drivers).\n"
             f"3. Plan {rules['sections']} analysis sections (at least {MIN_ANALYSIS_SECTIONS['in_depth']}):\n"
-            "   a. ONE section per DEEP-DIVE entity listed below (role \"deep_dive\", \"entity\" set, title starting with the "
+            "   a. ONE section per DEEP-DIVE entity listed below - never combine two DEEP-DIVE entities in one section "
+            "(role \"deep_dive\", \"entity\" set, title starting with the "
             "entity name) with 2-4 subsections chosen from what THAT sector's evidence covers (for example credit growth and "
             "asset quality for banks, commodity prices and global demand for metals, orders and execution for capital "
             "goods). Name and order them for the sector; do NOT give every sector the same subsection set. A sector with "
@@ -377,6 +378,48 @@ def _mentions(section: Section, entity) -> bool:
     return any(re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", hay) for n in names if len(n) >= 2)
 
 
+def _headline_entities(section: Section, entities: list) -> list:
+    """Qualifying entities a section is ABOUT (its title and entity field), most specific match wins:
+    "PSU Bank: ..." is about PSU Bank, not also about Bank."""
+    hay = f"{section.title} {section.entity}".casefold()
+    spans = {}
+    for entity in entities:
+        names = {entity.name.casefold(), *[a.casefold() for a in getattr(entity, "aliases", [])]}
+        found = [m.span() for n in names if len(n) >= 2
+                 for m in re.finditer(rf"(?<![a-z]){re.escape(n)}(?![a-z])", hay)]
+        if found:
+            spans[entity.name] = (entity, found)
+    out = []
+    for name, (entity, found) in spans.items():
+        inside_other = all(any(o_name != name and o[0] <= f[0] and f[1] <= o[1] and (o[1] - o[0]) > (f[1] - f[0])
+                               for o_name, (_e, o_found) in spans.items() for o in o_found) for f in found)
+        if not inside_other:
+            out.append(entity)
+    return out
+
+
+def merged_deep_dives(sections: list[Section], tiers: dict | None) -> list[tuple[Section, list]]:
+    """Deep-dive sections that cover two or more qualifying (deep-dive tier) sectors."""
+    qualifying = list((tiers or {}).get("deep_dive", []))
+    out = []
+    for sec in sections:
+        if sec.role == "deep_dive":
+            covered = _headline_entities(sec, qualifying)
+            if len(covered) >= 2:
+                out.append((sec, covered))
+    return out
+
+
+def _has_own_deep_dive(sections: list[Section], entity, qualifying: list) -> bool:
+    for sec in sections:
+        if sec.role != "deep_dive":
+            continue
+        covered = _headline_entities(sec, qualifying)
+        if [e.name for e in covered] == [entity.name] or (sec.entity == entity.name and len(covered) <= 1):
+            return True
+    return False
+
+
 def validate_outline(sections: list[Section], tier: str, tiers: dict | None) -> list[str]:
     """Structural rules the outline must meet (rejected outlines get one retry)."""
     errors = []
@@ -384,8 +427,12 @@ def validate_outline(sections: list[Section], tier: str, tiers: dict | None) -> 
     if len(sections) < minimum:
         errors.append(f"only {len(sections)} analysis sections; at least {minimum} are required")
     if tiers and tier == "in_depth":
-        for entity in tiers.get("deep_dive", []):
-            if not any(s.role == "deep_dive" and _mentions(s, entity) for s in sections):
+        qualifying = list(tiers.get("deep_dive", []))
+        for sec, covered in merged_deep_dives(sections, tiers):
+            errors.append(f"deep-dive section '{sec.title}' merges qualifying sectors "
+                          f"{', '.join(e.name for e in covered)}; each needs its own deep-dive")
+        for entity in qualifying:
+            if not _has_own_deep_dive(sections, entity, qualifying):
                 errors.append(f"deep-dive entity '{entity.name}' has no section of its own")
         missing = [e.name for e in tiers.get("compact", []) if not any(_mentions(s, e) for s in sections)]
         if missing:
@@ -398,8 +445,16 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
     if not tiers or tier != "in_depth":
         return sections
     next_id = len(sections) + 1
-    for entity in tiers.get("deep_dive", []):
-        if any(s.role == "deep_dive" and _mentions(s, entity) for s in sections):
+    qualifying = list(tiers.get("deep_dive", []))
+    # Split merged deep-dives: the section keeps one sector, the others get their own sections below.
+    for sec, covered in merged_deep_dives(sections, tiers):
+        keep = next((e for e in covered if e.name == sec.entity), covered[0])
+        rest = sec.title.split(":", 1)[1].strip() if ":" in sec.title else "Sector Deep-Dive"
+        decisions.append(f"Split merged deep-dive '{sec.title}' ({', '.join(e.name for e in covered)}): "
+                         f"each qualifying sector gets its own section.")
+        sec.title, sec.entity, sec.entities = f"{keep.name}: {rest}", keep.name, [keep.name]
+    for entity in qualifying:
+        if _has_own_deep_dive(sections, entity, qualifying):
             continue
         sec = Section(section_id=f"sec-{next_id}", title=f"{entity.name}: Sector Deep-Dive", role="deep_dive",
                       entity=entity.name, entities=[entity.name], goal=f"Full analysis of {entity.name} over the window",
@@ -502,6 +557,19 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     if tiers:
         meta["entityTiers"] = {k: [e.name for e in v] for k, v in tiers.items()}
         meta["tierCounts"] = {k: len(v) for k, v in tiers.items()}
+        # Per-sector plan: tier, evidence counts and the section that covers it (own / shared).
+        qualifying = list(tiers.get("deep_dive", []))
+        plan = []
+        for tier_name, entities in tiers.items():
+            for entity in entities:
+                own = next((s.title for s in sections if s.role == "deep_dive" and s.status == "keep"
+                            and [e.name for e in _headline_entities(s, qualifying)] == [entity.name]), "")
+                shared = next((s.title for s in sections if s.status == "keep" and _mentions(s, entity)), "")
+                plan.append({"sector": entity.name, "tier": tier_name, "goodTextSources": len(entity.good_text_sources),
+                             "tableSources": len(entity.table_sources),
+                             "section": own or shared, "coverage": "own deep-dive" if own else ("shared section" if shared else "none")})
+        meta["sectorPlan"] = plan
+        meta["mergedDeepDivesSplit"] = sum(1 for d in decisions if d.startswith("Split merged deep-dive"))
     size_budgets(store, sections, tier, meta)
     outline = Outline(title=str(data.get("title") or "")[:160], thesis=str(data.get("thesis") or "")[:600],
                       sections=sections, entities=entities, dimensions=dimensions, entity_coverage=coverage,
