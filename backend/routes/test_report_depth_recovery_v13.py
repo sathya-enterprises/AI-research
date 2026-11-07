@@ -26,10 +26,11 @@ def test_parenthesized_source_citations_are_clickable():
     assert 'href="#source-S1"' in rendered
 
 
-def test_long_tier_fallback_keeps_salvaged_body_without_a_page_quota():
+def test_long_tier_fallback_keeps_salvaged_body_and_reports_page_target():
     text = Path(ROOT / "routes" / "report.py").read_text(encoding="utf-8")
     assert 'salvaged_report if report_tier in ("detailed", "in_depth")' in text
     assert 'if report_tier in ("detailed", "in_depth"):' in text
     assert '"report":     salvaged_report' in text
-    assert '"minimum": None' in text
+    assert '"pageTarget": _salvage_page_target' in text
+    assert '"min": _salvage_minimum' in text
     assert 'salvage final pages' not in text

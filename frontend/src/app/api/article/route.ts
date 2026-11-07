@@ -1,18 +1,3 @@
-
-// Added reliability patch
-const ALPHA_VANTAGE_KEYS = (process.env.ALPHA_VANTAGE_API_KEYS || "")
- .split(",")
- .map(v => v.trim())
- .filter(Boolean);
-
-let avKeyIndex = 0;
-function getAlphaVantageKey() {
-  if (!ALPHA_VANTAGE_KEYS.length) return "";
-  const key = ALPHA_VANTAGE_KEYS[avKeyIndex];
-  avKeyIndex = (avKeyIndex + 1) % ALPHA_VANTAGE_KEYS.length;
-  return key;
-}
-
 import { NextRequest, NextResponse } from 'next/server';
 import { parse, HTMLElement } from 'node-html-parser';
 import { createLogger } from '@/lib/logger';

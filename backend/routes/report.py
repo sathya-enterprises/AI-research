@@ -15,10 +15,10 @@ import io
 import logging
 import math
 import re
+import sys as _sys
 import time
 import uuid
-from pathlib import Path
-from urllib.parse import urlparse, parse_qsl, urlencode, unquote, quote
+from urllib.parse import urlparse, parse_qsl, unquote, quote
 
 import httpx
 from fastapi import APIRouter
@@ -49,21 +49,56 @@ from utils.screener_kb import (
 )
 from utils.intent import resolve_request_intent, RequestIntent, is_search_audit_request, _extract_research_topic
 from routes.house_styles import DEFAULT_REPORT_STYLE, normalize_report_style, writer_style_contract
-from utils.report_tiers import get_report_tier_spec, report_tier_contract
+from routes import report_llm
+from utils.report_tiers import get_report_tier_spec, report_tier_contract, requested_report_page_count
+from utils.deep_research_coverage import (
+    audit_research_coverage, audit_requested_report_scope,
+    indian_fy_quarter as _indian_fy_quarter,
+    requested_indian_fy_quarters, _requested_rolling_year_window,
+    _CALENDAR_DATE_RE, _parse_calendar_date,
+    extract_verified_fta_signatures,
+)
+from utils.promoter_disclosures import (
+    extract_verified_promoter_events,
+    render_promoter_extraction_failure_report,
+    render_promoter_evidence_report,
+)
 from utils.chart_catalog import (
     CHART_TYPES, AXIS_CHART_TYPES, normalize_chart_type, chart_density_contract,
     chart_density_assessment, count_chart_points, chart_point_band,
 )
-from utils.markdown_normalizer import normalize_report_markdown, strip_excluded_report_sections
+from utils.markdown_normalizer import normalize_report_markdown, sanitize_inline_citations, strip_excluded_report_sections
 from routes.source_manifest import normalise_source_manifest, build_source_registry, ensure_cited_source_records, extract_source_citation_ids
 from utils.source_identity import canonical_http_url, source_identity_key
-from utils.chart_evidence_audit import audit_chart_evidence_consistency, prune_unsupported_chart_points, sanitize_charts_for_publication
+from utils.chart_evidence_audit import (
+    audit_chart_evidence_consistency, prune_unsupported_chart_points,
+    drop_charts_outside_requested_window, remove_stale_chart_narration,
+    sanitize_charts_for_publication,
+)
+from utils.evidence_provenance import is_trusted_calculated_sector_source
 from utils.report_integrity import (
     remove_unverified_table_chart_specs, sanitize_unverified_markdown_tables,
     repair_banking_growth_and_ratio_labels,
 )
 from utils.evidence_dataset import build_evidence_dataset, extract_requested_entities, EntityResolver, entity_key as _evidence_entity_key
-from utils.chart_gallery import blend_gallery_into_report, build_chart_gallery, gallery_markdown, gallery_types_for
+from utils.chart_gallery import (
+    blend_gallery_into_report, build_chart_gallery, cohere_chart_placements,
+    gallery_markdown, gallery_types_for,
+)
+from utils.chart_planner import (
+    assess_chart_coverage as _assess_chart_coverage, gap_queries as _chart_gap_queries,
+    plan_chart_needs as _plan_chart_needs, planned_chart_types as _planned_chart_types,
+    plan_meta as _chart_plan_meta_dict, writer_plan_block as _chart_writer_plan_block,
+    bind_charts_to_plan as _bind_charts_to_plan,
+)
+from utils.source_ids import (
+    next_source_number as _next_source_number,
+    reconcile_chart_source_ids as _reconcile_chart_source_ids,
+)
+from utils.uploaded_workbook_analytics import (
+    is_file_only_workbook_report, build_pms_workbook_analytics,
+    assign_workbook_source, workbook_charts_section,
+)
 import contextvars as _contextvars
 
 # Exact source lines behind every evidence-gallery chart point, keyed by S#.
@@ -84,9 +119,9 @@ def _search_extract_evidence_allowed() -> bool:
     Exa/Tavily extracts are the provider's own indexed copy of the cited page.
     Matching remains strict (same sentence/row, value, unit and subject terms);
     only the publisher-fetch prerequisite is relaxed. Set
-    REPORT_ACCEPT_SEARCH_EXTRACT_EVIDENCE=0 to restore publisher-page-only checks.
+    Set REPORT_ACCEPT_SEARCH_EXTRACT_EVIDENCE=1 to explicitly allow strict, quoted search excerpts.
     """
-    return os.getenv("REPORT_ACCEPT_SEARCH_EXTRACT_EVIDENCE", "1").strip().casefold() not in {"0", "false", "no", "off"}
+    return os.getenv("REPORT_ACCEPT_SEARCH_EXTRACT_EVIDENCE", "0").strip().casefold() not in {"0", "false", "no", "off"}
 
 
 def _chart_evidence_lines_for_kind(source_id: object, kind: str) -> str:
@@ -140,9 +175,11 @@ from utils.research_capture import (
     current_capture_active, current_research_capture_path,
 )
 from utils.report_quality import (
-    audit_report_structure, audit_report_publication, build_secondary_review_prompt,
+    audit_report_structure, audit_report_publication,
     reconcile_orphaned_chart_references, ensure_requested_chart_disclosure,
+    reconcile_orphaned_chart_narration,
     find_incomplete_numeric_fragments, repair_incomplete_numeric_fragments,
+    repair_report_numeric_consistency,
 )
 from utils.report_scanability import (
     strip_generation_markers, audit_scanability, select_scanability_targets,
@@ -341,6 +378,11 @@ def _action_audit_blockers(deterministic_audits: dict) -> set[str]:
             }, sort_keys=True, ensure_ascii=True))
     if bool(evidence.get("blocking")) and not groups and not evidence.get("mismatchedSources"):
         blockers.add("numeric_evidence:unspecified")
+    scope = deterministic_audits.get("scopeCoverageAudit") or {}
+    for flag in scope.get("flags") or []:
+        blockers.add("scope:" + re.sub(r"\s+", " ", str(flag)).strip()[:500])
+    if bool(scope.get("blocking")) and not scope.get("flags"):
+        blockers.add("scope:unspecified")
     return blockers
 
 
@@ -390,7 +432,6 @@ async def _audit_action_candidate(
             if detail.get(field) is not None:
                 item[field] = detail[field]
     cited_ids = {value.upper() for value in extract_source_citation_ids(union_report)}
-    cited_sources = [item for item in manifest if str(item.get("id") or "").upper() in cited_ids]
     question = (str(title or "") + " " + candidate_report[:1800]).strip()[:2200]
     semaphore = asyncio.Semaphore(6)
     fetchable = [
@@ -422,9 +463,12 @@ async def _audit_action_candidate(
         return {
             "chartDensity": _chart_density_audit(chart_rows, report_tier),
             # Use the full audit working evidence, not the content-free display manifest.
-            "publicationAudit": audit_report_publication(report_text, chart_rows, image_rows, evidence_sources),
+            "publicationAudit": audit_report_publication(
+                report_text, chart_rows, image_rows, evidence_sources, question=question,
+            ),
             "sourceEvidenceAudit": _source_evidence_quality_audit(evidence_sources),
             "structure": audit_report_structure(report_text),
+            "scopeCoverageAudit": audit_requested_report_scope(question, report_text, evidence_sources),
         }
 
     baseline = run_audits(original_report, original_sources, original_charts, original_images)
@@ -662,39 +706,6 @@ _OKF_LEGACY_BUCKET = _os.environ.get("OKF_SUPABASE_BUCKET", "paperly-uploads").s
 _OKF_PREFIX = "paperly-okf"
 
 
-def _indian_fy_quarter(d):
-    """Return (label, quarter_start, quarter_end) for date `d` under the
-    Indian fiscal year (April-March), e.g. July 2026 -> ('Q2 FY27', 2026-07-01, 2026-09-30).
-
-    This exists because leaving fiscal-quarter arithmetic to the LLM produces
-    inconsistent/wrong labels (seen: "Q2 FY27" used for two different
-    quarters in the same report, and for a period that should have been
-    Q1 FY27). Computing it here and handing the model the exact label removes
-    that arithmetic from its job entirely.
-    """
-    from datetime import date
-    import calendar
-    if d.month >= 4:
-        fy_end_year = d.year + 1
-        month_in_fy = d.month - 3  # Apr=1 .. Dec=9
-    else:
-        fy_end_year = d.year
-        month_in_fy = d.month + 9  # Jan=10 .. Mar=12
-    q_num = (month_in_fy - 1) // 3 + 1  # 1..4
-    fy_label = f"FY{str(fy_end_year)[-2:]}"
-    q_start_month_in_fy = (q_num - 1) * 3 + 1
-    q_start_month = q_start_month_in_fy + 3 if q_start_month_in_fy <= 9 else q_start_month_in_fy - 9
-    q_start_year = fy_end_year - 1 if q_start_month >= 4 else fy_end_year
-    q_start = date(q_start_year, q_start_month, 1)
-    q_end_month = q_start_month + 2
-    q_end_year = q_start_year
-    if q_end_month > 12:
-        q_end_month -= 12
-        q_end_year += 1
-    q_end = date(q_end_year, q_end_month, calendar.monthrange(q_end_year, q_end_month)[1])
-    return f"Q{q_num} {fy_label}", q_start, q_end
-
-
 def _past_n_quarters_anchor(question: str, today) -> str:
     """
     If the question references "past/last N quarters" (or "8 quarters" etc.),
@@ -705,42 +716,194 @@ def _past_n_quarters_anchor(question: str, today) -> str:
     "Q2 FY27" reused for two different periods) have come from.
     Returns "" if the question has no such reference.
     """
-    m = re.search(r"\b(?:past|last)\s+(\d{1,2})\s+quarters?\b", question.lower())
-    if not m:
+    periods = requested_indian_fy_quarters(question, today)
+    if not periods:
         return ""
-    n = int(m.group(1))
-
-    from datetime import timedelta
-    cur_label, cur_start, cur_end = _indian_fy_quarter(today)
-    # The current quarter is still in progress unless today is its last day;
-    # "past N quarters" of completed data should end at the last FULLY
-    # completed quarter, not the one still running.
-    if today < cur_end:
-        last_complete_end = cur_start - timedelta(days=1)
-    else:
-        last_complete_end = cur_end
-
-    labels = []
-    probe = last_complete_end
-    for _ in range(n):
-        label, q_start, q_end = _indian_fy_quarter(probe)
-        labels.append((label, q_start, q_end))
-        probe = q_start - timedelta(days=1)
-    labels.reverse()
-
     lines = "\n".join(
         f"  - {label}: {q_start.strftime('%b %d, %Y')} - {q_end.strftime('%b %d, %Y')}"
-        for label, q_start, q_end in labels
+        for label, q_start, q_end in periods
+    )
+    cur_label, cur_start, cur_end = _indian_fy_quarter(today)
+    current_quarter_note = (
+        f"The current quarter ({cur_label}, {cur_start.strftime('%b %d, %Y')} - "
+        f"{cur_end.strftime('%b %d, %Y')}) is complete as of {today.strftime('%B %d, %Y')} "
+        "and is included only if it is the last row shown.\n"
+        if today >= cur_end else
+        f"The current quarter ({cur_label}, {cur_start.strftime('%b %d, %Y')} - "
+        f"{cur_end.strftime('%b %d, %Y')}) is still in progress as of {today.strftime('%B %d, %Y')} "
+        "and is excluded from this completed-quarter window.\n"
     )
     return (
         f"\n\nQUARTER WINDOW (pre-computed -- use these exact labels and dates, do NOT "
         f"recompute fiscal quarters yourself, and do not use any other quarter label "
         f"anywhere in the report):\n{lines}\n"
-        f"The current quarter ({cur_label}, {cur_start.strftime('%b %d, %Y')} - "
-        f"{cur_end.strftime('%b %d, %Y')}) is still in progress as of {today.strftime('%B %d, %Y')} "
-        f"and is NOT part of the {n}-quarter window above unless it is already the last "
-        f"row shown.\n"
+        + current_quarter_note
     )
+
+
+def _requested_scope_contract(question: str, today) -> str:
+    """Give the writer an explicit contract for time-bounded event lists."""
+    text = str(question or "")
+    lower = text.casefold()
+    promoter_task = bool(re.search(r"\bpromoter", lower) and re.search(
+        r"\b(?:stake\s+sales?|exits?|sell(?:ing)?|shareholding|bulk\s+deals?|block\s+deals?)\b", lower
+    ))
+    quarters = requested_indian_fy_quarters(text, today) if promoter_task else []
+    if quarters:
+        labels = ", ".join(label for label, _, _ in quarters)
+        return (
+            "\n\nPROMOTER EXIT PERIOD-COVERAGE CONTRACT:\n"
+            f"The requested completed quarters are exactly: {labels}. Include a period-coverage table with one row for every quarter, "
+            "even when the retrieved evidence does not establish activity. For an uncovered quarter write exactly that no verified event was located "
+            "in the retrieved evidence and that activity is unknown; do not say there were zero sales. Distinguish completed promoter sales/exits "
+            "from proposed OFS notices, pledge or encumbrance changes, dilution, shareholding snapshots, and ordinary block/bulk trades. "
+            "Every event row must cite the direct exchange filing that names the seller and event; do not list a company-specific event outside that table. "
+            "Compute counts and proportions only from rows in that cited table and state numerator, denominator, unit, and period. "
+            "Call a list exhaustive only when disclosure coverage is established across NSE and BSE; otherwise call it partial and state the limitation. "
+            "Never fill missing events, reasons, dates, or figures from memory.\n"
+        )
+
+    fta_task = bool(re.search(r"\b(?:ftas?|free[- ]trade agreements?)\b", lower) and re.search(r"\bsign(?:ed|ing)?\b", lower))
+    fta_window = _requested_rolling_year_window(text, today) if fta_task else None
+    if fta_window:
+        start, end = fta_window
+        start_text = start.strftime("%B %d, %Y")
+        end_text = end.strftime("%B %d, %Y")
+        return (
+            "\n\nFTA SIGNATURE-WINDOW CONTRACT:\n"
+            f"Treat the requested rolling window as inclusive from {start_text} through {end_text} (as of {end_text}). "
+            "List an agreement in the in-window table only when an official source verifies its signing date inside that window. "
+            "Give the partner, agreement, exact date signed, cited official signing source, and legal status as of the end date. Keep signing, "
+            "negotiation concluded, ratification, entry into force, and implementation as separate events. An agreement becoming operational "
+            "during the window is not evidence that it was signed during the window. Put older agreements in a clearly separate comparison section "
+            "with their own signature/effectiveness dates. If no signing can be verified in the window, say so explicitly and cite the official search evidence.\n"
+        )
+    return ""
+
+
+def _publisher_sources_with_manifest_ids(source_manifest: list, enriched_sources: list) -> list[dict]:
+    """Join fetched publisher bodies to the citation IDs used by the report."""
+    manifest_by_url: dict[str, str] = {}
+    for manifest_row in source_manifest or []:
+        if not isinstance(manifest_row, dict):
+            continue
+        source_id = str(manifest_row.get("id") or "").strip().upper()
+        url = manifest_row.get("url") or manifest_row.get("publisher_page_url") or manifest_row.get("publisherPageUrl")
+        canonical = canonical_http_url(url)
+        if source_id and canonical:
+            manifest_by_url[canonical] = source_id
+
+    joined: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for source in enriched_sources or []:
+        if not isinstance(source, dict):
+            continue
+        source_id = ""
+        for key in ("url", "pageFetchUrl", "publisherPageUrl", "publisher_page_url"):
+            canonical = canonical_http_url(source.get(key))
+            if canonical and canonical in manifest_by_url:
+                source_id = manifest_by_url[canonical]
+                break
+        if not source_id:
+            continue
+        signature = (source_id, canonical_http_url(source.get("url")))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        item = dict(source)
+        item["id"] = source_id
+        item["pageFetchStatus"] = str(item.get("pageFetchStatus") or item.get("page_fetch_status") or "unknown")
+        item["evidenceOrigin"] = str(item.get("evidenceOrigin") or item.get("evidence_origin") or "")
+        joined.append(item)
+    return joined
+
+
+def _build_verified_fta_signing_table_block(
+    question: str, events: list[dict], *, as_of_date=None,
+) -> str:
+    """Render the canonical dated-signature table from verified official events."""
+    if not events:
+        return ""
+    from datetime import date as _date
+
+    window = _requested_rolling_year_window(question, as_of_date or _date.today())
+    if not window:
+        return ""
+    window_start, window_end = window
+    def date_label(value) -> str:
+        return f"{value.strftime('%B')} {value.day}, {value.year}"
+
+    rows = [
+        "### Officially verified signatures in the requested window",
+        f"Requested rolling signing window: {date_label(window_start)} through {date_label(window_end)}.",
+        "The records below are dated official signing announcements found in the fetched source set. A signing record does not by itself establish entry into force or implementation.",
+        "",
+        "| Agreement | Partner | Signature date | Status established by this source | Official source |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    seen: set[tuple[str, str, str]] = set()
+    for event in events:
+        source_id = str(event.get("source_id") or "").strip().upper()
+        signature_date = event.get("signature_date")
+        partner = re.sub(r"\s+", " ", str(event.get("partner") or "")).strip()
+        agreement = re.sub(r"\s+", " ", str(event.get("agreement") or "")).strip()
+        if not source_id or not signature_date or not partner or not agreement:
+            continue
+        key = (source_id, signature_date.isoformat(), partner.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            f"| {agreement} | {partner} | {date_label(signature_date)} | Signing verified; this source does not establish commencement of legal effect | [{source_id}] |"
+        )
+    if not seen:
+        return ""
+    return normalize_report_markdown("\n".join(rows))
+
+
+def _verified_fta_signing_block_for_report(
+    report_text: str, question: str, events: list[dict], *, as_of_date=None,
+) -> str:
+    """Return the exact block that will be inserted under this report's heading."""
+    block = _build_verified_fta_signing_table_block(question, events, as_of_date=as_of_date)
+    if not block:
+        return ""
+    heading = re.search(r"(?im)^#{1,6}\s+[^\n]*(?:in[- ]window|signature review|signing review)[^\n]*$", str(report_text or ""))
+    block_heading = re.match(r"(?m)^#{1,6}\s+[^\n]*$", block)
+    if heading and block_heading:
+        normalize_heading = lambda value: re.sub(r"\s+", " ", re.sub(r"^#{1,6}\s+", "", str(value or ""))).strip().casefold()
+        if normalize_heading(heading.group(0)) == normalize_heading(block_heading.group(0)):
+            return block[block_heading.end():].lstrip("\r\n")
+    return block
+
+
+def _insert_verified_fta_signing_table(
+    report_text: str, question: str, events: list[dict], *, as_of_date=None,
+) -> str:
+    """Surface fetched official signature records the writer omitted from its table."""
+    full_block = _build_verified_fta_signing_table_block(question, events, as_of_date=as_of_date)
+    if not full_block:
+        return report_text
+    heading = re.search(r"(?im)^#{1,6}\s+[^\n]*(?:in[- ]window|signature review|signing review)[^\n]*$", str(report_text or ""))
+    if heading:
+        block_heading = re.match(r"(?m)^#{1,6}\s+[^\n]*$", full_block)
+        block = full_block
+        if block_heading:
+            normalize_heading = lambda value: re.sub(r"\s+", " ", re.sub(r"^#{1,6}\s+", "", str(value or ""))).strip().casefold()
+            if normalize_heading(heading.group(0)) == normalize_heading(block_heading.group(0)):
+                block = full_block[block_heading.end():].lstrip("\r\n")
+        if block and block in str(report_text or ""):
+            return report_text
+        insertion = heading.end()
+        return str(report_text[:insertion]).rstrip() + "\n\n" + block + str(report_text[insertion:])
+    block = full_block
+    if block in str(report_text or ""):
+        return report_text
+    risks_heading = re.search(r"(?im)^#{1,3}\s+[^\n]*(?:risks|evidence gaps|limitations)[^\n]*$", str(report_text or ""))
+    if risks_heading:
+        insertion = risks_heading.start()
+        return str(report_text[:insertion]).rstrip() + "\n\n" + block + "\n\n" + str(report_text[insertion:]).lstrip()
+    return str(report_text or "").rstrip() + "\n\n" + block + "\n"
 
 
 def _normalize_filename(s: str) -> str:
@@ -848,14 +1011,14 @@ async def _fetch_okf_context(session_id: str, max_chars: int = 12000,
                             continue
                     if not body:
                         continue
-                    dedupe_key = hashlib.sha256(( _normalize_filename(doc_title) + "\n" + body).encode("utf-8", "ignore")).hexdigest()
+                    dedupe_key = hashlib.sha256((_normalize_filename(doc_title) + "\n" + body).encode("utf-8", "ignore")).hexdigest()
                     if dedupe_key in seen_docs:
                         continue
                     seen_docs.add(dedupe_key)
                     chunk = f"### Source: {doc_title}\n\n{body}"
                     remaining = max_chars - total
                     if len(chunk) > remaining:
-                        chunk = chunk[:remaining] + "\n\n[…truncated]"
+                        chunk = chunk[:remaining] + "\n\n[...truncated]"
                     concept_texts.append(chunk)
                     total += len(chunk)
     except Exception as exc:
@@ -875,7 +1038,7 @@ You MUST respond with valid JSON only — no markdown fences, no preamble, no te
 Respond with EXACTLY this shape:
 {
   "title": "<concise NOUN-PHRASE report title, max 12 words. Examples: 'Top Banking Stocks India 2026', 'Indian Mutual Fund SIP Returns Analysis', 'HDFC vs ICICI Bank Comparison', 'Nifty 50 Market Outlook — June 2026'. STRICT RULES: NEVER start with 'So', 'You', 'I', 'Let's', 'Here', 'Based', 'Looking', 'Understanding', 'A look at', 'An analysis of', or any verb/pronoun. NEVER start with 'The' followed by a verb — e.g. BAD: 'The Nifty outlook today is mixed, with some analysts predicting...' (full sentence starting with The) → GOOD: 'Nifty 50 Outlook — Mixed Signals Amid Volatility'. NEVER write a full sentence — this includes sentences that don't start with one of those words too, e.g. BAD: 'The Minimum Investment Amounts For These Top-Performing SIPs Are As Follows' → GOOD: 'Top-Performing SIP Funds — Minimum Investment Requirements'. Never end a title with a colon, 'as follows', or '...' — those signal an incomplete sentence, not a heading. ALWAYS write a noun phrase — topic first, qualifiers after.>",
-  "report": "<full markdown report whose scope and structure fit this request and its usable evidence. The selected report tier supplied in the user prompt guides research breadth, analytical depth and the final-renderer page band. Brief targets 6–10 pages; In-Detail targets 25–30 pages and must preserve the core answer while adding material analysis; Deep Research targets 70–100 pages where the source base can support that depth and must use broader relevant sources and triangulation. The page band is a delivery objective, not permission to pad. Do not stop before material questions are answered, but also stop and disclose a shortfall when the evidence runs out. Add useful depth through source-grounded mechanisms, comparisons, history, counterpoints, sensitivities and implications; never repetition, invented numbers or empty sections.>",
+  "report": "<full markdown report whose scope and structure fit this request and its usable evidence. The selected report tier controls research breadth and analytical depth, not a fixed page, word, or character count. Keep Brief concise; make In-Detail and Deep Research more comprehensive through distinct evidence, source-grounded comparisons, history, counterpoints, sensitivities and implications. Stop when material questions are answered or the evidence runs out; never pad, repeat, or invent numbers.",
   "charts": [...],
   "images": [{ "prompt": "<AI image-generation prompt — see AI IMAGE RULES>", "caption": "<short caption>" }, ...] (0-2 items — see AI IMAGE RULES; optional, include only where a genuine visual opportunity exists),
   "keyStats": [{ "label": "<short label>", "value": "<value string>", "change": "<+/- % or empty string>" }],
@@ -1007,328 +1170,28 @@ the report body. Any step-by-step sequence (a funnel, a process, a pipeline) mus
 either: (a) a numbered markdown list with a short bolded stage name and 1-2 sentences per step (this
 is the default — use it for most sequences), or (b) an arrow chart if the sequence is really a
 before-vs-after metric change for named items, or (c) a simple table with columns like Stage | What
-Happens | Output. Whichever you pick, it still counts as a genuine chartable/tabular element per STEP 4 above.
+Happens | Output. Choose the form that best answers the prompt; this is not a visual-count requirement.
 
-STEP 1 — AGGRESSIVELY SCAN sources for ANY chartable numbers:
-  • Returns/performance of multiple funds, stocks, sectors → bar chart
-  • Rankings with numbers (top 5 SIPs by return, top gainers) → bar chart
-  • Time-series: quarterly results, monthly data, weekly prices → line chart
-  • Allocation/composition (sector weights, portfolio mix) → pie chart
-  • Comparisons: 1yr vs 3yr vs 5yr returns of same fund → bar chart
-  • A metric that CHANGED FROM ONE VALUE TO ANOTHER for the same named items —
-    guidance revised from X% to Y%, price target raised from ₹A to ₹B, a rating
-    upgraded/downgraded, before-vs-after any number — → ARROW CHART, not a bar
-    chart. This is one of the most common shapes in an earnings/guidance story
-    ("cut FY26 guidance from +1-3% to flat-to-down 1%") and reads far better as
-    an arrow from the old value to the new one than as two separate bars.
-    → {"type":"arrow","series":[{"name":"Previous","data":[{"label":"Fiserv","value":2}]},
-                                  {"name":"Revised","data":[{"label":"Fiserv","value":-1}]}]}
-    → Needs ≥2 named items with a real before/after pair each; for a single item,
-      state the before/after in text instead (an arrow chart needs ≥2 items same as bar/pie).
-  • Two INDEPENDENT numeric metrics given for the same set of named entities where
-    the RELATIONSHIP between them is the actual point (e.g. valuation score vs.
-    1-year return, P/E vs. revenue growth, market cap vs. daily % move) → SCATTER
-    chart, not two separate bar charts. Use this whenever the report's own prose
-    is making a "despite X being high, Y is low" / "X correlates with Y" argument —
-    that argument IS the scatter plot.
-    → {"type":"scatter","series":[{"name":"1-Yr Return %","data":[{"label":"Astera Labs","value":86.3}]},
-                                    {"name":"Valuation Score /6","data":[{"label":"Astera Labs","value":0}]}]}
-    → Needs ≥4 named entities with BOTH metrics present — fewer than that, a scatter
-      plot is just a few dots with nothing to show a pattern; use a table instead.
-  • A running total that moves through sequential positive/negative components
-    to arrive somewhere new — an AUM bridge (opening balance → inflows →
-    redemptions → mark-to-market → closing balance), a profit bridge (revenue →
-    COGS → opex → tax → net profit), any "how did we get from X to Y" breakdown
-    where the sources give the individual moves, not just the two endpoints —
-    → WATERFALL chart, not a bar chart. A bar chart of the same numbers loses the
-    "running total" story; a waterfall shows each component's contribution AND
-    the cumulative path in one image.
-    → {"type":"waterfall","unit":"₹ Cr","series":[{"name":"AUM","data":[
-        {"label":"Opening AUM","value":12500,"isTotal":true},
-        {"label":"Net Inflows","value":840},
-        {"label":"MTM Gains","value":210},
-        {"label":"Redemptions","value":-390},
-        {"label":"Closing AUM","value":13160,"isTotal":true}]}]}
-    → "isTotal":true marks an ANCHOR point (opening/closing balance) that resets
-      the running total to its own value; omit it (or set false) on every
-      component IN BETWEEN — those are deltas added to the running total, not
-      standalone totals. Needs ≥3 stages total (an anchor + at least one move +
-      the ending point, or ≥3 sequential deltas) — a 2-stage before/after belongs
-      in a bar or arrow chart instead, not a waterfall.
-  • The sources give a single stock/index's OPEN/HIGH/LOW/CLOSE for multiple
-    trading sessions (not just the closing level) → CANDLESTICK chart, not a
-    line chart — a line chart of just the closes throws away the day's range,
-    which is the whole point when the sources bothered to report OHLC data.
-    → {"type":"candlestick","unit":"₹","series":[{"name":"Nifty 50","data":[
-        {"label":"Jun 1","open":23510,"high":23680,"low":23470,"close":23654},
-        {"label":"Jun 2","open":23654,"high":23710,"low":23590,"close":23601}]}]}
-    → Needs ≥2 sessions, each with all four of open/high/low/close present. If
-      the sources only give closing levels (the common case), use a line chart
-      instead — do NOT invent open/high/low values to force a candlestick.
-  • A metric's recent trend matters as a quick visual cue but doesn't need its
-    own full labeled-axis chart — e.g. a 30-session price trend mentioned
-    alongside a stat you're already calling out in a KPI card or short note —
-    → SPARKLINE: a minimal axis-less line, same label/value shape as a line
-      chart, just without gridlines/tick labels. Needs ≥4 points to show an
-      actual shape; use a regular line chart instead once the trend deserves a
-      full chart of its own (axis labels, multiple series, etc.) rather than a
-      quick inline cue.
-    → {"type":"sparkline","unit":"","series":[{"name":"Nifty 50","data":[
-        {"label":"Jun 1","value":23654},{"label":"Jun 8","value":23480},
-        {"label":"Jun 15","value":23820},{"label":"Jun 22","value":23980}]}]}
-  • FII/DII flows by date → line chart if 3+ dates given. For a single-day FII vs
-    DII comparison (one net-buy figure, one net-sell figure — opposite signs),
-    use a 2-bar chart, NOT a pie: a pie slice can't represent a negative outflow,
-    so plotting FII (e.g. -735 Cr) against DII (e.g. +705 Cr) as pie shares
-    produces a meaningless percentage. Only use pie for genuinely non-negative
-    share-of-whole splits (e.g. green vs red IPO listings, both counts ≥0).
-  • Category-wise RETURNS (large cap vs mid cap vs small cap performance) → bar chart
-  • Category-wise AUM/asset totals (how much money sits in each PMS/fund category,
-    sector, or AMC out of the whole) → this is composition, not ranking — use a
-    PIE chart, even though the report already has bar charts of top performers by
-    return. Sum AUM per category first (skip UNDISC./blank entries), then chart
-    only categories with a real total. Don't skip this just because bar charts
-    were already used elsewhere in the report — composition data gets a pie
-    chart on its own merits, for chart-type variety.
-  • A single KPI measured against a target/threshold/benchmark (AUM vs. target AUM,
-    actual sales vs. plan, a fund's return vs. its benchmark, an SLA vs. its
-    threshold) → BULLET chart, not a 2-bar comparison — a bullet is purpose-built
-    for "how far is the actual number from the goal" and reads clearer than two
-    same-color bars sitting side by side. Works for one KPI or several stacked
-    together (e.g. several funds each vs. their own benchmark).
-    → {"type":"bullet","unit":"₹ Cr","series":[{"name":"AUM","data":[
-        {"label":"Q4 AUM","value":8200,"target":10000}]}]}
-    → Needs ≥1 KPI, each with both "value" and "target" present. For 2+ KPIs in
-      one chart, add more points to the same series (one bullet bar per label).
-  • The sources give enough individual data points on ONE metric to show its
-    SPREAD/DISTRIBUTION (e.g. daily returns for a month, P/E ratios across 15+
-    stocks in a sector, SIP amounts across investors) rather than a ranked list
-    of named items → HISTOGRAM, not a bar chart of named items. Bucket the raw
-    values into ~5-8 ranges yourself (e.g. "-2% to -1%", "-1% to 0%", "0% to 1%")
-    and chart the COUNT in each bucket — the buckets are the labels, the value is
-    how many observations fall in that bucket.
-    → {"type":"histogram","xLabel":"Daily Return","yLabel":"No. of Sessions","series":[{"name":"Return Distribution","data":[
-        {"label":"-2% to -1%","value":3},{"label":"-1% to 0%","value":9},
-        {"label":"0% to 1%","value":11},{"label":"1% to 2%","value":4}]}]}
-    → Needs ≥4 buckets covering the full observed range, in ascending order, and
-      only makes sense with enough raw observations behind it (≥10) to bucket
-      meaningfully — with fewer, individual data points as a bar/line chart
-      (or a table) is more honest than fabricating a distribution shape.
-  • The sources give (or let you derive) a five-number spread — min, 25th
-    percentile, median, 75th percentile, max — for a metric across one or more
-    named entities/periods (e.g. return ranges by fund category over 5 years,
-    valuation-multiple ranges across a sector's constituent stocks) → BOX PLOT,
-    not a bar chart of a single average figure — a bar chart of just the median
-    or mean throws away the spread, which is the actual story a "range" figure
-    is telling.
-    → {"type":"boxplot","unit":"%","series":[{"name":"5-Yr Return Range","data":[
-        {"label":"Large Cap","min":8.2,"q1":11.5,"median":13.8,"q3":16.2,"max":21.4},
-        {"label":"Small Cap","min":-4.5,"q1":9.0,"median":18.6,"q3":27.3,"max":41.0}]}]}
-    → Needs ≥1 entity, each with all five values present and in non-decreasing
-      order (min ≤ q1 ≤ median ≤ q3 ≤ max). Don't invent a spread the sources
-      don't support — if only a single average/return figure exists per entity,
-      that's a bar chart, not a box plot.
-  • Portfolio/sector/category composition where there are MANY constituents (6+)
-    and their RELATIVE SIZE (not just share of 100%) is the point — e.g. a
-    portfolio's full holding-by-holding weightage, a sector's market-cap makeup
-    across many stocks → TREEMAP, not a pie — a pie with 6+ slices gets
-    unreadable (too many thin slivers), while a treemap's proportional
-    rectangles stay legible at any slice count and can also show one level of
-    grouping (e.g. holdings nested under sector). Optional "group" field per
-    point clusters items under a shared parent for exactly this nesting; omit
-    it for a flat treemap.
-    → {"type":"treemap","unit":"%","series":[{"name":"Portfolio Weight","data":[
-        {"label":"HDFC Bank","value":9.2,"group":"BFSI"},
-        {"label":"ICICI Bank","value":7.8,"group":"BFSI"},
-        {"label":"Infosys","value":8.1,"group":"IT"},
-        {"label":"TCS","value":6.4,"group":"IT"},
-        {"label":"Reliance","value":10.5,"group":"Energy"}]}]}
-    → Needs ≥3 items, all non-negative. Fewer than 6 items and a pie/bar usually
-      reads just as well — reach for treemap once slice count would clutter a pie.
-  • A grid of one metric measured across two dimensions at once — e.g. sector
-    returns across several time periods, correlation between several stocks/
-    indices, monthly performance across several years → HEATMAP, not a table or
-    a multi-series bar chart — a table of the same numbers makes the reader hunt
-    for the pattern; a heatmap's color intensity makes the best/worst cells jump
-    out immediately.
-    → {"type":"heatmap","unit":"%","rows":["IT","BFSI","Energy","Pharma"],
-        "columns":["Q1FY26","Q2FY26","Q3FY26","Q4FY26"],
-        "values":[[4.2,-1.1,6.8,2.0],[3.5,5.2,-0.4,4.1],[-2.1,8.0,3.3,1.5],[1.0,2.2,0.9,3.8]]}
-    → Needs ≥2 rows and ≥2 columns, and "values" must be a complete rows×columns
-      numeric matrix (every row the same length as "columns"). Don't use this for
-      a single row or column of numbers — that's a bar chart instead.
-  • THREE independent numeric metrics given for the same set of named entities,
-    where all three matter together (e.g. market cap vs. revenue growth vs. P/E,
-    sized by trading volume) → BUBBLE chart, not a scatter — a bubble adds the
-    third metric as marker size instead of dropping it, which is the whole
-    reason to reach for this over a plain 2-metric scatter.
-    → {"type":"bubble","series":[
-        {"name":"Market Cap (₹ Cr)","data":[{"label":"Astera Labs","value":45000}]},
-        {"name":"Revenue Growth %","data":[{"label":"Astera Labs","value":86.3}]},
-        {"name":"Trading Volume (size)","data":[{"label":"Astera Labs","value":1.2}]}]}
-    → Series order is fixed: series[0]=x-metric, series[1]=y-metric, series[2]=
-      size-metric — all three sharing the same labels. Needs ≥4 named entities
-      with all three metrics present, same minimum as a scatter plot.
-  • Several qualitative/financial metrics (P/E, ROE, D/E, margins, growth rate)
-    compared across a SMALL set of companies/funds at once, where the shape of
-    strengths/weaknesses across metrics is the point (not any single metric's
-    ranking) → RADAR chart, not a grouped bar — a radar makes each entity's
-    overall profile-shape comparable at a glance, which a grouped bar with 4+
-    metrics per entity doesn't do nearly as clearly.
-    → {"type":"radar","series":[
-        {"name":"Company A","data":[{"label":"P/E","value":18.2},{"label":"ROE %","value":22.5},
-                                     {"label":"D/E","value":0.4},{"label":"Op. Margin %","value":19.0}]},
-        {"name":"Company B","data":[{"label":"P/E","value":24.1},{"label":"ROE %","value":15.0},
-                                     {"label":"D/E","value":0.9},{"label":"Op. Margin %","value":12.5}]}]}
-    → Needs ≥3 metrics (labels), each series sharing the SAME metric labels in
-      the same order — 1-2 companies works fine (radar reads well solo too), but
-      cap it at ~4-5 companies before the overlapping shapes get unreadable —
-      beyond that, a table is clearer.
+STEP 1 - Read the user prompt and the report plan, when present. Identify the questions, entities, metrics, time window, audience, and requested format. Use source numbers only when they answer one of those questions; data being chartable is not by itself a reason to include it.
+  For each candidate visual, identify the question it answers, the metric, entities, period, unit, and evidence source. Omit it when these do not match the requested analysis or the observations are not comparable.
+  Do not use topic-to-chart defaults or treat examples in this prompt as a checklist.
 
-  SINGLE-ASSET TREND OVER TIME — DON'T SKIP THIS ONE:
-  Whenever the sources give the level of ONE index/stock/rate at several dates or
-  sessions (e.g. "Nifty 50 closed at X on Jun 1, Y on Jun 11, Z on Jun 19..."),
-  that is a single-series LINE chart — this is one of the most valuable charts in
-  a markets report and is frequently under-used. Use the actual session/event dates
-  as labels (not just start/end) so the line shows real path, not just two points.
-  → Example: "Nifty 50 — June 2026 Session Levels" → line, series=[{"name":"Nifty 50",
-     "data":[{"label":"Jun 1","value":23654},{"label":"Jun 11","value":23167},
-             {"label":"Jun 19","value":24013},{"label":"Jun 30","value":23866}]}]
-  → Do this for ANY index/benchmark/rate the sources track across multiple dated
-    points, not only when the question explicitly asks for a "trend" or "chart".
-  → NEVER build a line chart from just 2 known values (e.g. "Q4 2025: 880.18" and
-    "Q1 2026: 880.52") even if you're tempted to space them across a date axis —
-    a straight line across many gridlines between 2 points implies daily/weekly
-    data that doesn't exist. With only 2 real values, use a bar chart instead (or
-    state the before/after figures in text), not a line.
-  → NEVER plot different TYPES of % change (previous session %, past-month %,
-    past-year %, etc.) as if they were sequential points on a timeline — they
-    describe different, non-chronological periods, and a line through them draws
-    a fake trend. Use a bar chart with each period as its own labeled bar instead
-    (e.g. "Sensex — % Change By Period": bars for "1 Day", "1 Month", "1 Year").
+STEP 2 - Build charts only from supported, user-relevant comparisons:
+  - Keep supported observations that fit the question, period, and comparison.
+  - Two distinct categories or two dated observations can be useful when they answer the question; do not pad a series.
+  - Use the required structure for the selected data shape (for example, paired x/y values for scatter, stages for waterfall, or a period-by-entity matrix for heatmap).
+  - Preserve equal values and missing-data gaps. Never invent, interpolate, or use zero for unavailable values.
+  - Do not turn one observation into a comparison. When a small dataset is clearer in prose or a table, use that form.
+  - Choose the clearest visual form for this question and dataset. Do not change chart forms to create variety.
 
-  COMPARISON TOPICS (X vs Y, A vs B) — MANDATORY MULTI-SERIES CHART:
-  When the question compares TWO OR MORE assets (e.g. "Gold vs Silver",
-  "Nifty vs Sensex", "HDFC vs ICICI", "equity vs debt"):
-  → Create ONE line chart with BOTH items as SEPARATE SERIES sharing the SAME date labels
-  → Example: series: [{"name":"Gold","data":[{"label":"Jun 1","value":1820},{"label":"Jun 5","value":1810}]},
-                       {"name":"Silver","data":[{"label":"Jun 1","value":86},{"label":"Jun 5","value":81}]}]
-  → NEVER make two separate single-series charts for each item — always combine into one
-  → If price scales differ wildly (e.g. gold Rs.1,25,000 vs silver Rs.72,000 when % change is small),
-     use % change from start for ALL series so both fit on the same Y axis:
-     → {"label":"Jun 1","value":0.0} for both, then show % change from that base
-  → NEVER mix price values and percentage changes in the same chart series or bar group.
-     BAD: series=[{name:"Gold",data:[{label:"Current Price",value:125957},{label:"Change",value:-3}]}, ...]
-     GOOD: Make ONE chart for price trend (line, % change), ONE separate bar chart for key stats like 1-month return %
-  ? Add a companion bar chart for key stats only when at least two distinct comparable observations are supported.
+STEP 3 - Place each [CHART_n] beside the explanation for exactly the data it displays.
+  - The nearby prose must name the chart's metric, entities, and period and state a source-supported pattern for the reader to notice. The chart's takeaway must describe that same evidence.
+  - Place the marker inside the prompt-driven section that discusses those entities and that measure, after the relevant explanation or table. Broad topic overlap is not enough.
+  - Do not create a section solely to house a chart. If no planned section or nearby source-backed explanation matches, omit the chart and its marker.
+  - Use each placeholder once and keep its number aligned with the corresponding chart in the charts array.
+  - For each non-table chart, provide a concise rationale for the visual form and a one-sentence, evidence-based takeaway. Do not add a new claim in the takeaway.
 
-  COMPOSITION / BREAKDOWN TOPICS — USE A STACKED BAR WHEN IT FITS:
-  When a label (e.g. a quarter, a fund, a sector) breaks down into 2+ parts of
-  a whole — portfolio allocation by asset class per fund, revenue split by
-  segment per quarter, expense breakdown by category — use a multi-series bar
-  chart with each part as its own series sharing the same labels, AND set
-  "stacked": true on the chart spec. This renders as a true stacked column
-  chart (segments stacked bottom-to-top, one column per label) — leaving
-  "stacked" unset/false on a multi-series bar instead renders side-by-side
-  GROUPED bars, which is the right shape for entity-vs-entity comparisons but
-  wrong for a composition/breakdown.
-  → Example: "Portfolio Allocation by Fund" → bar, stacked=true,
-     series: [{"name":"Equity","data":[{"label":"Fund A","value":65},{"label":"Fund B","value":40}]},
-              {"name":"Debt","data":[{"label":"Fund A","value":25},{"label":"Fund B","value":45}]},
-              {"name":"Cash","data":[{"label":"Fund A","value":10},{"label":"Fund B","value":15}]}]
-  → Only do this when the parts genuinely sum to the whole for each label (e.g. ~100% allocation,
-     or segments of one total revenue figure) — don't force unrelated metrics into a stacked shape.
-  → A single pie chart still works fine for ONE label's breakdown; reach for the stacked-bar
-     shape above once you're comparing that breakdown ACROSS multiple labels (funds/quarters/sectors).
-
-
-  • SIP topic → bar chart of top 5 funds by 3-yr return %
-  • Stock topic → bar chart of key financial metrics (revenue, profit growth %)
-  • Banking topic → bar chart of NIM/NPA/ROE across banks
-  • Market topic → bar chart of sector performance %
-  • Mutual fund topic → pie chart of category allocation OR bar of returns by category
-
-STEP 2 ? Create a chart only when the supplied evidence and the user's question support it:
-  ? Keep every valid, sourced observation that the chart can display clearly.
-  ? Two distinct categories are enough for a bar comparison; two dated observations are enough for a line comparison.
-  ? Use more points only when they exist in the evidence and improve the comparison.
-  ? Use type-specific structures where the chart requires them (for example, OHLC fields for candlesticks,
-    stages for waterfalls, paired values for scatter charts, or rows and columns for a heatmap).
-  ? Preserve equal values when equality is meaningful; never invent, interpolate, or pad values.
-  ? Never turn a single observation into a comparison or duplicate a label to fill a series.
-  ? Never use unsupported or invented future/projected values.
-  ? If the evidence supports exactly two entities or periods and the comparison is useful, retain the two-point chart.
-    Do not search for additional entities solely to increase point count. If one observation is supported, use prose or a table.
-  ? For partial comparisons, include only entities with supported values; state gaps instead of inserting 0 or estimates.
-  ? Vary chart form only when the source data supports it. Aggregate-only figures remain an aggregate table/value,
-    not duplicated per-entity bars. If individual values are unavailable, keep the evidence in an editable table.
-
-STEP 3 — Place [CHART_n] inline in the report markdown right after the paragraph AND bullet list whose data it shows.
-  charts[0] = [CHART_1], charts[1] = [CHART_2], etc.
-  IMPORTANT: Never place [CHART_n] immediately after just 1-2 sentences — always ensure at least one full
-  paragraph (3+ sentences) or a paragraph + bullet list precedes the chart. This prevents blank whitespace
-  gaps in the PDF.
-
-STEP 4 — Generate charts/tables wherever the source material and the user's request genuinely support
-  them. Visuals remain evidence-driven and have no fixed chart-count quota. The report itself follows
-  the selected tier's rendered page band; expand with distinct supporting analysis, not duplicated visuals
-  or filler, and stop when relevant evidence is exhausted.
-  If the user explicitly asks for more data points/charts, honor that request by adding distinct,
-  source-supported analytical angles — never by duplicating the same data in different chart shapes.
-  Before finalizing, scan the sources/file data and STEP 1's per-scenario list for chartable angles
-  you may have missed (a ratio, a trend, a breakdown, a comparison across a different pairing of the
-  same entities) so you aren't leaving genuinely chartable data unused — but never invent, pad, or
-  force a chart/table where the data doesn't genuinely support one just to reach a count. When the
-  report ends up with several charts, vary the shapes (bar, stacked bar, line, pie, arrow, scatter,
-  waterfall, candlestick, sparkline) rather than repeating the same shape for every chart; use the
-  stacked-bar shape above whenever a breakdown is compared across multiple labels. Where the sources
-  support enough distinct chartable angles for it, reach for a few different chart shapes (not, say,
-  eight bar charts in a row) — reread STEP 1's per-scenario list and actively look for angles that
-  produce a pie, a waterfall, a scatter, an arrow, or a candlestick before settling for "just chart
-  everything as a bar," which is a common way a chart-heavy report ends up looking flat and repetitive.
-
-  DO NOT SETTLE INTO THE SAME REPORT SKELETON EVERY TIME — including across separate report runs on
-  the SAME company/topic (e.g. this quarter's results vs. last quarter's, or simply the same question
-  asked again later): a reader who compares two reports on the same subject should see a genuinely
-  independent set of analytical choices, not the same chart-for-chart, section-for-section template
-  with only the numbers swapped. Concretely:
-    • Whenever a data shape genuinely supports more than one valid chart type (a 2-slice split can be
-      a donut OR a 2-bar comparison; a single long trend can be a line, an area, or — if it's more of
-      a supporting cue than a focal point — a sparkline; a ranked list can be a bar chart or, if it's
-      really a before/after move per item, an arrow chart), make an independent choice each time
-      based on which reads best for THIS report's specific numbers — don't default to whichever shape
-      you or a prior version of this report happened to use for that same metric before.
-    • Vary which angles from STEP 1's list you actually chart. Real source material always supports
-      more chartable angles than any one report has room for (no fixed visual quota) — which subset you pick,
-      and in what order they appear across the sections, should reflect what's most notable in THIS
-      run's numbers, not a fixed "always chart net profit first, then market cap, then P/E" checklist.
-    • Vary section framing too, per the REPORT STRUCTURE rules below — the body section names, which
-      metrics get their own subsection vs. a shared table, and where the stat-card strips and
-      pull-quotes land should all flow from what's actually notable in this specific run's numbers,
-      not repeat the last report's outline with the figures swapped in.
-
-  SPARSE CHARTS ARE VALID WHEN THE EVIDENCE IS SPARSE: keep a two-category comparison or a two-period series
-when it answers the question and both observations are supported. Do not reject it, add observations, or split it
-into extra charts just to increase visual density. Use a table or prose when the small dataset does not make a useful
-visual; use a chart when its comparison is clear and labels remain readable.
-
-  TABLES MAY CARRY A COMPANION CHART WHEN THE DATA FORMS A USEFUL, EVIDENCE-BACKED VISUAL:
-  Keep the full comparison in an editable table and add a chart only when it improves understanding.
-  Do not target a chart count or add a chart for visual density.
-
-  CHART-TYPE VARIETY IS MANDATORY WHEN SUPPORTED BY THE DATA: bar charts are the easiest shape to reach for,
-  which is exactly why reports drift into making EVERY chart a bar chart even when the underlying
-  data fits a different shape much better. Before finalizing the "images"/"charts" list, check the
-  full set you've built: if the report has 4+ charts and 3 or more of them are plain (non-stacked,
-  non-grouped) bar charts, go back through STEP 1's per-scenario rules above and actively look for
-  data you may have force-fit into a bar chart that actually belongs as an arrow chart (any before/
-  after or revised-guidance number), a scatter chart (any two-metrics-per-entity relationship), a
-  line/area chart (any single trend across 4+ points), a pie/donut (any composition-of-a-whole), a
-  bullet chart (any KPI-vs-target number), a box plot (any min/max/median spread across entities),
-  a treemap (any 6+-way composition), a heatmap (any metric-by-two-dimensions grid), a bubble chart
-  (any three-metrics-per-entity relationship), or a radar chart (any multi-metric entity profile).
-  A report is not required to use every type, but repeating the exact same bar-chart shape for most
-  of the report's visuals is a sign the data was matched to the easiest chart, not the right one.
+STEP 4 - Let the user's prompt, the report plan, and the evidence determine whether to include charts or tables, which subjects and periods to show, and how many visuals to use. There is no required chart count, type diversity, or chart-per-section target. Include a visual only when it was requested or materially clarifies an answer to the prompt; otherwise use the clearest prose or table. Do not duplicate one comparison in a chart and table unless each view answers a distinct part of the request. Keep every chart within the requested time window and use only comparable, source-supported observations.
 
 ANALYTICAL JUSTIFICATION — MANDATORY:
 - Every major analytical section must move beyond description. For important claims, connect the finding to the evidence/citation, explain the mechanism or causal channel, state the economic/strategic implication, and note the relevant counterpoint or condition when evidence is mixed.
@@ -1338,16 +1201,20 @@ ANALYTICAL JUSTIFICATION — MANDATORY:
 CHART JUSTIFICATION AND LABELING — MANDATORY:
 - Every non-table chart MUST answer a specific analytical question from the report. The chart is not decoration.
 - When a chart is grounded in supplied sources, include the relevant source IDs in the chart's "source" field so the rendered figure can carry provenance alongside the rationale and takeaway. Its placement must follow a paragraph that explains what relationship, change, comparison, distribution, or threshold the chart is testing.
+- That nearby paragraph must discuss the same entities, measure, and period represented by the chart; a shared broad topic is not enough. State what the values show and why that result matters to this request. Never leave a chart marker after unrelated prose.
 - Every non-table chart object MUST include a short "rationale" explaining why this chart type is the right visual for the underlying evidence, and a short "takeaway" stating the key visible implication without repeating the whole paragraph.
+- Give each table or chart one clear place in the prompt-driven section outline. If a visual has no relevant planned section or no source-grounded explanation, leave it out instead of appending it to a miscellaneous section.
 - Titles MUST identify the metric, entities and period where relevant. Never use generic titles such as "Market Overview", "Trend", "Comparison", "Chart 1", or "Data".
 - Axis labels are not decorative. They must name the quantity and unit in plain language. Use titles like "Capacity (GW)", "Utilization (%)", "Cost per MW (₹ crore)", or "EBITDA Margin (%)" rather than vague labels like "Value" or "Metric".
 - Use direct data labels when they materially improve reading and the number of marks is manageable; otherwise use a clean legend plus correctly labeled axes. Never leave a chart dependent on color alone to distinguish categories.
 - Avoid repeating the same visual treatment for successive sections. The chart form, annotation density, layout and supporting prose should reflect the evidence shape, not a fixed report skeleton.
 
-CHART COUNT — NO ARTIFICIAL LIMIT:
-- Do NOT cap or ration charts. Every section that contains two or more comparable sourced values MUST carry at least one chart; the report should contain as many distinct, evidence-backed charts as the sources support.
-- Create a chart for every distinct sourced series, comparison, ranking or breakdown. If the evidence supports 14 charts, use 14. Never manufacture charts from invented, padded or non-comparable values, and never discard a valid chart because a budget was reached.
-- Prefer a chart over describing numbers in prose; keep prose to a short cited interpretation of what each chart shows.
+CHART AND TABLE SCOPE — FOLLOW THE REQUEST:
+- Let the user's question, the evidence, and the report plan decide the sections, analysis, chart count, table count, and visual types. Do not use a fixed section template, a chart quota, or one visual per section.
+- Include a chart or table when the user requests it or when it materially explains evidence that answers the question. Do not show both when they repeat the same comparison without adding a different reading.
+- Keep each visual beside the section and paragraph that interpret its data. If no section clearly matches a chart's entities and measure, omit that chart instead of scattering it into another section.
+- Use all distinct, comparable, source-supported observations needed for the requested analysis. Do not truncate a relevant series just to make a chart fit; use a readable chart and, when necessary, a companion table.
+- Never manufacture charts or tables from invented, padded, or non-comparable values. Explain the key implication and any limitation in nearby prose.
 - The full supported visualization catalog includes: pie, bar, line, area, scatter, bubble, doughnut, histogram,
   boxplot, waterfall, funnel, radar, polar_area, treemap, heatmap, stacked_bar, grouped_bar, horizontal_bar,
   stacked_area, step_line, spline, combo, candlestick, ohlc, gauge, bullet, pictogram, pareto, dot_plot, arrow,
@@ -1418,7 +1285,7 @@ above. "candlestick" uses ONE series of {"label", "open", "high", "low", "close"
 of {"label", "value"} — see the CANDLESTICK example above. "sparkline" uses the same {"label",
 "value"} shape as "line" but renders without axes/gridlines.
 
-Shapes for the 7 newer chart types (see the STEP 1 list above for when to pick each one):
+Data shapes for the newer chart types; use them only when their structure and the user's question fit:
   • "bullet" — ONE series of {"label", "value", "target"} points, one point per KPI.
   • "histogram" — ONE series of {"label", "value"} points, same shape as "bar", where each
     "label" is a bucket RANGE (e.g. "0% to 1%") in ascending order and "value" is the count of
@@ -1484,6 +1351,9 @@ to give the report a visual anchor — a conceptual/editorial illustration, neve
 ✓ OPTIONAL: include an image only where it genuinely improves this specific report — prefer a relevant
   source-backed image candidate for named/factual subjects; use synthetic imagery only for clearly illustrative scenes. "images": [] is correct whenever no such genuine opportunity exists, not just for abstract topics —
   do not add an image merely because a report is being generated.
+  Do not use a generic person portrait or executive photo when the report is about a market, dataset,
+  industry, or policy. Use a person only when people themselves are central to the requested analysis;
+  otherwise omit the image or choose a directly relevant place, process, or object.
 ✓ Prefer source-backed candidate images for factual/named subjects. Use AI-generated imagery only for clearly illustrative scenes. Maximum 2 images per report. Never one per subsection, never "for visual variety."
 ✓ For a source-backed image, use {"candidateIndex": <number from CANDIDATE IMAGES>, "caption": "<1 short sentence>"}.
 ✓ For an AI-generated illustrative image, use {"prompt": "<scene description for an image generator>", "caption": "<1 short sentence>"}. Do not invent URLs.
@@ -1736,7 +1606,7 @@ GLOBAL RULES:
   request calls for a data-driven presentation — use as many markdown tables as the sources and the
   requested style genuinely support; a narrower question, or a prose-heavy requested style, correctly
   uses fewer or none.
-- Images: prefer relevant source-backed images selected by candidateIndex when search results provide a clearly topical image. Use an AI-generated illustrative image only when a specific, grounded scene is genuinely useful and no appropriate source image exists. Zero images is a valid outcome; never force an image for decoration.
+- Images: include photographs or illustrations only when the user explicitly requests them. Otherwise return empty "images" and "aiImages" arrays; do not add a stock image for decoration. When requested, select only a source-backed image that depicts the requested subject, or a specific grounded generated scene when no suitable source image exists. Never substitute an image for evidence.
 - keyStats: choose only the decision-relevant, source-grounded metrics that materially help this report. There is no target count; a report may have fewer metrics or none when evidence is thin. Never pad the strip with adjacent-topic or repeated numbers.
   Pull the strongest metric from major planned sections when one genuinely exists. Each keyStat needs:
   label (short), value, source ID(s) where supported, and change (signed) where applicable.
@@ -1935,6 +1805,39 @@ _IMAGE_MARKET_CHART_HINTS = (
     "trading volume", "quote chart", "technical chart", "technical analysis",
 )
 
+# Lead images of editorial pages are very often a photo of a named executive, which is
+# not an illustration of an industry/market topic. The +15 editorial-domain boost made
+# these win; reject by description unless the report is itself about that person/role.
+_PORTRAIT_IMAGE_HINTS = (
+    "headshot", "portrait", "profile photo", "profile picture", "file photo",
+    " ceo", "ceo ", " cio", "cio ", " cfo", "cfo ", " cto", "cto ", "chairman", "chairperson",
+    "managing director", "founder", "co-founder", "spokesperson", "analyst speaks",
+    "speaking at", "addresses", "interview with", "minister", "governor",
+    "blazer", "businessman", "business man", "businesswoman", "business woman",
+    "person in a suit", "man in a suit", "woman in a suit", "wearing a suit",
+)
+
+
+def _image_candidate_is_portrait(subject: str, description: str) -> bool:
+    hay = f" {(description or '').lower()} "
+    raw_description = str(description or "")
+    person_story = bool(
+        re.search(
+            r"\b(?:interview|profile of|portrait of|headshot|in conversation with|speaks? (?:to|with)|talks? (?:to|about))\b",
+            raw_description, re.IGNORECASE,
+        )
+        or re.search(r"\bsays\s+[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)?\b", raw_description)
+    )
+    if not person_story and not any(h in hay for h in _PORTRAIT_IMAGE_HINTS):
+        return False
+    topic = (subject or "").lower()
+    # Keep it when the request is explicitly about people/leadership.
+    return not any(t in topic for t in (
+        "ceo", "leadership", "management team", "founder", "executive", "profile of",
+        "analyst", "interview", "people", "person", "speaker",
+    ))
+
+
 def _image_candidate_is_irrelevant_market_chart(subject: str, description: str) -> bool:
     topic = (subject or "").lower()
     haystack = (description or "").lower()
@@ -2017,12 +1920,17 @@ def _filter_image_candidates(raw_images: list[dict], limit: int = 10, subject: s
         if any(hint in low for hint in _JUNK_IMAGE_HINTS):
             continue
         desc = (img.get("description") or "").strip()
-        desc_low = desc.lower()
+        source_title = str(img.get("sourceTitle") or img.get("source_title") or img.get("pageTitle") or img.get("page_title") or "").strip()
+        alt_text = str(img.get("alt") or img.get("altText") or img.get("caption") or "").strip()
+        image_context = " ".join(part for part in (desc, source_title, alt_text) if part)
+        desc_low = image_context.lower()
         if any(hint in desc_low for hint in _OFFTOPIC_IMAGE_HINTS):
             continue
-        if _image_candidate_is_topic_confused(subject, desc, url):
+        if _image_candidate_is_topic_confused(subject, image_context, url):
             continue
-        if _image_candidate_is_irrelevant_market_chart(subject, desc):
+        if _image_candidate_is_portrait(subject, image_context):
+            continue
+        if _image_candidate_is_irrelevant_market_chart(subject, image_context):
             continue
         # External visuals must retain the actual publisher/article page. An
         # image CDN URL or a guessed domain is not a source citation. Rather
@@ -2041,23 +1949,20 @@ def _filter_image_candidates(raw_images: list[dict], limit: int = 10, subject: s
             domain = _urlparse.urlparse(url).netloc.replace("www.", "")
         except Exception:
             domain = ""
-        tokens = topic_terms(f"{desc} {domain}")
+        tokens = topic_terms(f"{image_context} {domain}")
         hits = len(subject_tokens & tokens) if subject_tokens else 1
         if subject_tokens and hits == 0:
             continue
-        if re.search(r"(?i)\b(?:platform|intelligence layer|sign up|subscribe|webinar|download our|brochure|careers|about us|official website)\b", desc):
+        if re.search(r"(?i)\b(?:platform|intelligence layer|sign up|subscribe|webinar|download our|brochure|careers|about us|official website)\b", image_context):
             continue
         score = hits * 10 + min(len(desc), 160) / 1000.0
         try:
             page_host = (_urlparse.urlparse(source_page).hostname or "").casefold()
         except Exception:
             page_host = ""
-        if any(name in page_host for name in _EDITORIAL_IMAGE_DOMAINS):
-            score += 15
         row = {"url": url, "description": desc[:200], "domain": domain, "_score": score}
         # Keep the publisher page separate from the image asset URL.
         row["sourceUrl"] = source_page
-        source_title = str(img.get("sourceTitle") or img.get("source_title") or img.get("pageTitle") or img.get("page_title") or "").strip()
         if source_title:
             row["sourceTitle"] = source_title[:240]
         publisher = str(img.get("publisher") or img.get("siteName") or img.get("site_name") or "").strip()
@@ -2075,14 +1980,51 @@ def _filter_image_candidates(raw_images: list[dict], limit: int = 10, subject: s
     return rows[:limit]
 
 
-def _build_image_candidates_block(candidates: list[dict]) -> str:
-    """Render the numbered candidate-image list inserted into the user prompt.
-    Domain is real info derived straight from each image's own URL (not a
-    guess) — it's the only honest substitute for "what page this came from"
-    since Tavily's image list isn't tied back to a specific source result."""
+def _requires_quantitative_coverage(question: str) -> bool:
+    """Whether the request explicitly needs numeric, comparable evidence."""
+    text = str(question or "").casefold()
+    return bool(re.search(
+        r"\b(?:compare|comparison|trend|over the past|over the last|quarter|year|growth|rate|\d+\s+(?:quarters?|years?|months?)|how many|how much|transaction|stake|shares sold|financial|revenue|profit|returns?|data|statistics|table|chart|quantitative|numerical|percentage|percent|basis points)\b|\b\d+(?:\.\d+)?%",
+        text,
+    ))
+
+
+def _prompt_requests_report_images(question: str) -> bool:
+    """Only add editorial or generated photos when the user asks for them."""
+    text = str(question or "").casefold()
+    image_term = r"(?:images?|photos?|photographs?|pictures?|illustrations?|infographics?)"
+    if re.search(
+        rf"\b(?:no|without|avoid|skip|exclude|don't|do\s+not)\b.{{0,32}}\b{image_term}\b",
+        text,
+    ):
+        return False
+    return bool(re.search(rf"\b{image_term}\b", text))
+
+
+def _is_narrative_news_request(question: str) -> bool:
+    text = str(question or "").casefold()
+    return bool(re.search(r"\b(?:latest )?news\b|\bwhat happened\b|\bsummarize .*announcements?\b", text)) and not _requires_quantitative_coverage(question)
+
+
+def _should_fetch_index_data(question: str, evidence_needed: list[str] | None = None) -> bool:
+    """Fetch market-index series only for market/sector return questions."""
+    text = str(question or "").casefold()
+    if re.search(r"\b(?:promoter|pledge|stake sale|stake sales|bulk deal|block deal|shareholding)\b", text):
+        return False
+    wants_history = any(str(item).casefold() in {"historical", "market_data", "market data"} for item in (evidence_needed or []))
+    return wants_history and bool(re.search(r"\b(?:sector rotation|sector indices|market returns?|index returns?|nifty|sensex)\b", text))
+
+
+def _build_image_candidates_block(candidates: list[dict], question: str = "") -> str:
+    """Render publisher-linked image candidates without implying they replace evidence."""
+    quantitative = _requires_quantitative_coverage(question)
+    image_policy = (
+        'Images are optional supporting context; there is no numeric data-point quota. return "images": [].'
+        if not quantitative else 'Images are optional and never substitute for sourced numeric data. return "images": [] when unused.'
+    )
     if not candidates:
-        return "\n\nCANDIDATE IMAGES: none available for this query — return \"images\": [].\n"
-    lines = ["\n\nCANDIDATE IMAGES (reference ONLY by index — never invent or alter a URL):"]
+        return f'\n\nCANDIDATE IMAGES: none available for this query. {image_policy} Return "images": [].\n'
+    lines = ["\n\nCANDIDATE IMAGES (reference ONLY by index):", image_policy]
     for i, img in enumerate(candidates, start=1):
         desc = img["description"] or "(no description)"
         domain = img.get("domain") or "unknown source"
@@ -2090,6 +2032,7 @@ def _build_image_candidates_block(candidates: list[dict]) -> str:
     block = "\n".join(lines) + "\n"
     log.info("Report: image candidate block sent to LLM:\n%s", block)
     return block
+
 
 
 def _validate_image_selections(parsed_images: list, candidates: list[dict]) -> tuple[list[dict], list[bool]]:
@@ -2130,30 +2073,67 @@ _WEB_IMG_PLACEHOLDER_RE = re.compile(r"\[WEB_IMG_(\d+)\]")
 
 
 def _inject_fallback_image_placeholders(report_text: str, images: list[dict]) -> str:
-    """Spread [WEB_IMG_n] placeholders across the report body for any image
-    that doesn't already have one — covers both the model placing none at all,
-    and the partial case where _top_up_images added image(s) beyond what the
-    model itself placed a marker for. Only fills gaps; never touches markers
-    that already exist. Used by the main parse path and both JSON-salvage paths."""
+    """Place fallback image tokens only in a section with a topical match."""
     if not images:
         return report_text
-    existing = {int(n) for n in _WEB_IMG_PLACEHOLDER_RE.findall(report_text)}
+    text = str(report_text or "")
+    existing = {int(n) for n in _WEB_IMG_PLACEHOLDER_RE.findall(text)}
     missing = [i for i in range(1, len(images) + 1) if i not in existing]
     if not missing:
-        return report_text
-    paragraphs = report_text.split("\n\n")
-    n_para = len(paragraphs)
-    if len(missing) == 1:
-        insertion_points = [max(1, n_para // 4)]
-    else:
-        step = max(1, n_para // (len(missing) + 1))
-        insertion_points = [step * (k + 1) for k in range(len(missing))]
-    for k, para_idx in reversed(list(enumerate(insertion_points))):
-        img_idx = missing[k]
-        placeholder = f"\n\n[WEB_IMG_{img_idx}]\n"
-        insert_at = min(para_idx, n_para - 1)
-        paragraphs.insert(insert_at, placeholder)
-    return "\n\n".join(paragraphs)
+        return text
+
+    stop = {
+        "image", "photo", "picture", "man", "woman", "person", "people", "businessman", "businesswoman",
+        "blazer", "suit", "wearing", "office", "corporate", "professional", "executive", "portrait",
+        "the", "this", "that", "and", "for", "with", "from", "into", "about", "report", "analysis",
+        "market", "markets", "sector", "sectors", "india", "indian", "data", "business", "news",
+    }
+
+    def tokens(value: object) -> set[str]:
+        return {word for word in re.findall(r"[a-z0-9]{4,}", str(value or "").casefold()) if word not in stop}
+
+    paragraphs = text.split("\n\n")
+    headings: list[str] = []
+    current_heading = ""
+    for paragraph in paragraphs:
+        for line in paragraph.splitlines():
+            heading = re.match(r"^\s*#{1,4}\s+(.+)$", line)
+            if heading:
+                current_heading = heading.group(1)
+        headings.append(current_heading)
+
+    insertions: dict[int, list[int]] = {}
+    for image_index in missing:
+        if image_index > len(images) or not isinstance(images[image_index - 1], dict):
+            continue
+        image = images[image_index - 1]
+        image_text = " ".join(str(image.get(key) or "") for key in (
+            "caption", "alt", "description", "sourceTitle", "source_title", "publisher",
+        ))
+        source_url = str(image.get("sourceUrl") or image.get("sourceURL") or image.get("source_url") or "")
+        image_text += " " + re.sub(r"[-_/]+", " ", urlparse(source_url).path)
+        image_tokens = tokens(image_text)
+        if not image_tokens:
+            continue
+        ranked: list[tuple[int, int]] = []
+        for paragraph_index, paragraph in enumerate(paragraphs):
+            stripped = paragraph.strip()
+            if not stripped or stripped.startswith(("#", "|", "[CHART_", "[WEB_IMG_", "[FILE_IMG_", "[PAGE_IMG_", "- ", "* ", ">")):
+                continue
+            overlap = len(image_tokens & tokens(headings[paragraph_index] + " " + stripped))
+            if overlap:
+                ranked.append((overlap, paragraph_index))
+        if ranked:
+            _score, paragraph_index = max(ranked, key=lambda item: (item[0], -item[1]))
+            insertions.setdefault(paragraph_index + 1, []).append(image_index)
+
+    if not insertions:
+        return text
+    result = []
+    for index, paragraph in enumerate(paragraphs):
+        result.append(paragraph)
+        result.extend(f"[WEB_IMG_{image_index}]" for image_index in insertions.get(index + 1, []))
+    return "\n\n".join(result)
 
 
 def _image_search_query(question: str, intent=None) -> str:
@@ -2170,84 +2150,15 @@ def _image_search_query(question: str, intent=None) -> str:
 def _force_fallback_images(
     images: list[dict], image_candidates: list[dict], model_used: str = "?"
 ) -> tuple[list[dict], bool]:
-    """Select relevant source-backed images when the model returned none.
-
-    The candidates were already filtered against the user's subject.  Using
-    them here is therefore a recovery path for an incomplete model response,
-    not a fabricated visual quota.  Keep the cap small so images remain
-    evidence/illustration rather than decoration.
-    """
-    if images or not image_candidates:
-        return images, False
-    selected: list[dict] = []
-    seen: set[str] = set()
-    for candidate in image_candidates:
-        if not isinstance(candidate, dict):
-            continue
-        url = str(candidate.get("url") or "").strip()
-        if not url or url in seen:
-            continue
-        selected_image = {
-            "url": url,
-            "caption": str(candidate.get("description") or "").strip()[:160],
-        }
-        for key in ("sourceUrl", "sourceURL", "sourceTitle", "publisher", "sourceType", "publicationDate", "publication_date", "domain", "method", "methodology"):
-            if candidate.get(key):
-                selected_image[key] = candidate[key]
-        if str(candidate.get("sourceType") or "") == "Publisher page image":
-            # A news/publisher lead image illustrates the topic; it is credited
-            # to its page and must not be read as a source for any figure.
-            title = selected_image["caption"]
-            selected_image["caption"] = (f"Illustrative image — {title}" if title else "Illustrative image")[:180]
-            selected_image.setdefault("method", "Lead image of the linked publisher page; illustrative only, not a data source")
-        selected.append(selected_image)
-        seen.add(url)
-        if len(selected) >= 2:
-            break
-    if not selected:
-        return images, False
-    log.info(
-        "Report: selected %d source-backed fallback image(s) from relevant candidates (model=%s returned none)",
-        len(selected), model_used,
-    )
-    return selected, True
+    """Preserve the writer's image choice; an empty selection means no image."""
+    return list(images or []), False
 
 
 def _top_up_images(
     images: list[dict], image_candidates: list[dict], model_used: str = "?", target: int = 2
 ) -> tuple[list[dict], bool]:
-    """Add only unused, already-filtered source candidates up to a small cap."""
-    cap = max(1, min(int(target or 2), 3))
-    result = list(images or [])
-    if len(result) >= cap:
-        return result, False
-    seen = {
-        str(item.get("url") or "").strip()
-        for item in result
-        if isinstance(item, dict) and item.get("url")
-    }
-    added = 0
-    for candidate in image_candidates or []:
-        if not isinstance(candidate, dict):
-            continue
-        url = str(candidate.get("url") or "").strip()
-        if not url or url in seen:
-            continue
-        selected_image = {
-            "url": url,
-            "caption": str(candidate.get("description") or "").strip()[:160],
-        }
-        for key in ("sourceUrl", "sourceURL", "sourceTitle", "publisher", "sourceType", "publicationDate", "publication_date", "domain", "method", "methodology"):
-            if candidate.get(key):
-                selected_image[key] = candidate[key]
-        result.append(selected_image)
-        seen.add(url)
-        added += 1
-        if len(result) >= cap:
-            break
-    if added:
-        log.info("Report: topped up %d source-backed image(s) from relevant candidates (model=%s)", added, model_used)
-    return result, bool(added)
+    """Do not add search-ranked images the writer did not select for the report."""
+    return list(images or []), False
 
 def _remap_web_image_placeholders(report_text: str, valid_mask: list[bool]) -> str:
     """Twin of _remap_chart_placeholders for [WEB_IMG_n] — renumbers against
@@ -2273,6 +2184,38 @@ def _remap_web_image_placeholders(report_text: str, valid_mask: list[bool]) -> s
             continue
         out_lines.append(replaced)
     return "\n".join(out_lines)
+
+
+def _remove_images_from_valuation_sections(report_text: str, images: list[dict]) -> tuple[str, list[dict]]:
+    """Keep stock/news photos out of quantitative valuation subsections."""
+    if not images:
+        return str(report_text or ""), []
+    heading_stack: list[tuple[int, str]] = []
+    valid_mask = [True] * len(images)
+    removed = 0
+    for line in str(report_text or "").splitlines():
+        heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            heading_stack = [(prior_level, title) for prior_level, title in heading_stack if prior_level < level]
+            heading_stack.append((level, re.sub(r"[*_`]", "", heading.group(2)).strip()))
+            continue
+        if not re.search(r"\[WEB_IMG_\d+\]", line, re.I):
+            continue
+        section = " ".join(title for _level, title in heading_stack)
+        if not re.search(r"(?i)\b(?:valuation|percentiles?|quantitative\s+evaluation)\b", section):
+            continue
+        for raw_index in _WEB_IMG_PLACEHOLDER_RE.findall(line):
+            index = int(raw_index)
+            if 1 <= index <= len(valid_mask) and valid_mask[index - 1]:
+                valid_mask[index - 1] = False
+                removed += 1
+    if not removed:
+        return str(report_text or ""), images
+    remapped = _remap_web_image_placeholders(str(report_text or ""), valid_mask)
+    filtered = [image for image, keep in zip(images, valid_mask) if keep]
+    log.info("Report: removed %d illustrative image(s) from valuation sections", removed)
+    return remapped, filtered
 
 
 # ── Leaked system-prompt detector ──────────────────────────────────────────
@@ -2399,6 +2342,26 @@ def _strip_citation_markers(text: str) -> str:
     # text through.
     text = re.sub(r"(?<=\S)\s--\s(?=\S)", " — ", text)
     return text
+
+
+def _clean_inline_source_markers_for_display(text: str) -> str:
+    """Remove internal source tokens from prose while preserving the source appendix.
+
+    This is deliberately applied only at the public-output boundary, after the
+    evidence and publication audits have consumed the original source markers.
+    The canonical source manifest remains available to the renderer as a source list.
+    """
+    if not text:
+        return text
+    text = re.sub(r"(?i)\s*\[File:\s*[^\]]+\]", "", text)
+    text = re.sub(r"(?i)\s*\[(?:S|SRC)\d+\]", "", text)
+    text = re.sub(r"(?im)^\s*(?:workbook\s+source|source)\s*:\s*\.?\s*$", "", text)
+    text = re.sub(r"(?i)\b(?:workbook\s+source|source)\s*:\s*\.?", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+([,.;:])", r"\1", text)
+    text = re.sub(r"(?m)^\s*[•*-]?\s*$", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 _TITLE_PREAMBLE_RE = re.compile(
@@ -2580,6 +2543,49 @@ def _sanitize_title(title: str, question: str) -> str:
     if len(title) > 120:
         title = title[:120].rsplit(" ", 1)[0].rstrip(",;:-—") + "…"
     return title
+
+
+_COVER_CURRENCY_AMOUNT_RE = re.compile(
+    r"(?i)(?:₹|INR\b|Rs\.?)\s*\d[\d,]*(?:\.\d+)?"
+    r"(?:\s*(?:lakh|crore|million|billion|trillion|thousand|mn|bn)){0,3}"
+)
+
+
+def _sanitize_cover_summary_amounts(summary: object, report_body: object) -> str:
+    """Remove cover sentences with monetary claims absent from the report body."""
+    summary_text = str(summary or "").strip()
+    body = str(report_body or "")
+    if not summary_text:
+        return ""
+
+    def amount_signature(value: str) -> str:
+        tokens = re.findall(r"\d[\d,]*(?:\.\d+)?|[a-z]+", str(value or "").casefold())
+        if not tokens:
+            return ""
+        tokens[0] = tokens[0].replace(",", "")
+        return " ".join(tokens)
+
+    body_signatures = {amount_signature(match.group(0)) for match in _COVER_CURRENCY_AMOUNT_RE.finditer(body)}
+    body_low = body.casefold()
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", summary_text)
+    kept = []
+    for piece in pieces:
+        if not piece.strip():
+            continue
+        claim_amounts = [amount_signature(match.group(0)) for match in _COVER_CURRENCY_AMOUNT_RE.finditer(piece)]
+        if not claim_amounts:
+            kept.append(piece.strip())
+            continue
+        supported = all(amount and amount in body_signatures for amount in claim_amounts)
+        if re.search(r"(?i)\b(?:fpi|fii|foreign\s+(?:portfolio|institutional))\b", piece):
+            supported = supported and bool(re.search(r"(?i)\b(?:fpi|fii|foreign\s+(?:portfolio|institutional))\b", body_low))
+            if re.search(r"(?i)\b(?:divest\w*|outflows?|net\s+sell\w*|sell\w*)\b", piece):
+                supported = supported and bool(re.search(r"(?i)\b(?:divest\w*|outflows?|net\s+sell\w*|sell\w*)\b", body_low))
+        if re.search(r"(?i)\b(?:record|all[- ]time\s+high|highest[- ]ever)\b", piece):
+            supported = supported and bool(re.search(r"(?i)\b(?:record|all[- ]time\s+high|highest[- ]ever)\b", body_low))
+        if supported:
+            kept.append(piece.strip())
+    return re.sub(r"\s+", " ", " ".join(kept)).strip()
 
 
 def _align_title_horizon(title: str, question: str) -> str:
@@ -3448,6 +3454,50 @@ def _gallery_source_texts(source_manifest: list, enriched_sources: list) -> list
     return out
 
 
+def _source_texts_by_id(source_manifest: list, enriched_sources: list) -> dict[str, str]:
+    """Full evidence text per canonical source ID (publisher page + search extract)."""
+    texts: dict[str, str] = {}
+    for row in _gallery_source_texts(source_manifest, enriched_sources):
+        sid = str(row.get("id") or "").strip().upper()
+        if sid:
+            texts[sid] = (texts.get(sid, "") + "\n" + str(row.get("text") or "")).strip()
+    return texts
+
+
+def _reconcile_charts_to_manifest(charts: list, source_manifest: list, enriched_sources: list, *, stage: str = "") -> tuple[list, dict]:
+    """Make every chart's source IDs agree with the canonical manifest (see utils.source_ids)."""
+    try:
+        reconciled, meta = _reconcile_chart_source_ids(
+            charts, source_manifest, _source_texts_by_id(source_manifest, enriched_sources),
+        )
+    except Exception as exc:  # never let provenance bookkeeping break publication
+        log.warning("Chart source-ID reconciliation failed safely at stage=%s: %s", stage, type(exc).__name__)
+        return list(charts or []), {"error": type(exc).__name__}
+    if meta.get("chartsTouched"):
+        log.info("Chart source IDs reconciled at stage=%s: %s", stage or "?", meta)
+    meta["stage"] = stage
+    return reconciled, meta
+
+
+def _gallery_observation_origin_is_chart_verifiable(
+    origin: object, *, quote: object = "", publisher_text: object = "",
+) -> bool:
+    """Keep gallery inputs aligned with the provenance accepted by final export.
+
+    A search extract can supply parser context when its exact quoted row is also
+    present in a fetched publisher page for the same source. In that case the
+    chart point is publisher-corroborated; search-only observations still require
+    the explicit search-evidence opt-in.
+    """
+    normalized = str(origin or "").strip().casefold()
+    if normalized == "publisher_page":
+        return True
+    if (normalized == "search_extract" and str(quote or "").strip()
+            and _chart_excerpt_matches_source_text(quote, publisher_text)):
+        return True
+    return normalized == "search_extract" and _search_extract_evidence_allowed()
+
+
 _DATA_SOURCE_ENTITY_RE = re.compile(
     r"(?i)^(?:the\s+)?(?:rbi|reserve\s+bank(?:\s+of\s+india)?|npci|national\s+payments\s+corporation(?:\s+of\s+india)?|"
     r"sebi|nse|bse|mospi|nso|cso|imf|world\s+bank|ministry\b.*|government\b.*|goi|pib|dbie|cmie|"
@@ -3877,7 +3927,7 @@ def _filter_gallery_dataset_for_question(dataset, question: str):
     q = str(question or "").casefold()
     rows = list(getattr(dataset, "observations", []) or [])
     if any(term in q for term in ("promoter", "pledge", "pledging", "stake sale", "block deal", "bulk deal")):
-        terms = ("transaction", "shares transacted", "stake", "holding", "pledge", "encumber",
+        terms = ("transaction", "shares transacted", "shares sold", "stake", "holding", "pledge", "encumber",
                  "decrease in holding", "increase in holding", "net sell", "net buy",
                  "equity shares", "ownership", "shareholding")
         rows = [o for o in rows
@@ -3923,12 +3973,6 @@ def _filter_gallery_dataset_for_question(dataset, question: str):
         metadata_noise = re.compile(
             r"(?i)\b(?:\d+\s*(?:kb|mb|gb|bytes?|pages?)|file\s+size|table\s+of\s+contents|"
             r"download\s+(?:pdf|document)|no\.\s+of\s+schemes|current\s+net\s+owned\s+fund)\b"
-        )
-        period_pattern = re.compile(
-            r"(?i)\b(?:FY\s*['’]?\s*\d{2,4}(?:\s*[-–/]\s*\d{2,4})?|"
-            r"(?:19|20)\d{2}\s*[-–/]\s*(?:19|20)?\d{2}|(?:19|20)\d{2}|"
-            r"Q[1-4]\s*['’]?\s*FY\s*['’]?\s*\d{2,4}|"
-            r"(?:end[- ]March|at end[- ]March|as at|as of)\s+(?:\w+\s+)?(?:19|20)\d{2})\b"
         )
         filtered = []
 
@@ -4015,6 +4059,12 @@ def _filter_gallery_dataset_for_question(dataset, question: str):
             )
             if not is_relevant_metric or metadata_noise.search(combined_metric + " " + quote):
                 continue
+            # A prompt about deposit growth should not turn a demand-deposit
+            # balance table into another series. Keep that component only when
+            # the question asks for demand deposits explicitly.
+            if (re.search(r"(?i)\bdemand\s+deposits?\b", combined_metric)
+                    and not re.search(r"(?i)\bdemand\s+deposits?\b", q)):
+                continue
             # Provisions are often a valid accounting metric, but the current
             # broad prompt does not ask for provision amounts. RBI table parsing
             # can also surface that one column repeatedly while missing the
@@ -4084,7 +4134,7 @@ def _filter_gallery_dataset_for_question(dataset, question: str):
 def _append_evidence_chart_gallery(
     *, report_text: str, charts: list, question: str, enriched: list, source_manifest: list,
     report_tier: str, validator=None, normalizer=None, extra: dict | None = None,
-    entities: list[str] | None = None,
+    entities: list[str] | None = None, planned_types: list[str] | None = None,
 ) -> tuple[str, list, dict]:
     """Build the full-catalog evidence chart gallery and insert it into the report.
 
@@ -4108,28 +4158,33 @@ def _append_evidence_chart_gallery(
     dataset = build_evidence_dataset(sources, question, targets=targets)
 
     # Never let a table parser's row/column alignment create chart points that
-    # cannot be traced back to the quoted publisher text. The final PDF audit
-    # catches these later, but by then the chart may already have been rendered
-    # into a draft PDF. Validate each observation before it reaches chart_gallery.
-    # One source ID can contribute a fetched publisher page and a separate
-    # search extract. Keying by ID alone kept only the last (search) text, so
-    # every quote from the publisher page's tables was wrongly rejected. Match
-    # each quote against the text it came from (same ID and origin), falling
-    # back to that source's combined text.
+    # cannot be traced to source text. The final PDF audit catches these later,
+    # but by then a chart may already have been rendered into a draft PDF. Match
+    # each quote against its own origin, then allow a search-discovered point
+    # only when the exact quote and raw value also appear on the fetched page for
+    # that same source ID.
     source_text_by_origin: dict[tuple[str, str], str] = {}
     source_text_by_id: dict[str, str] = {}
+    publisher_text_by_id: dict[str, str] = {}
     for row in sources:
         if not isinstance(row, dict):
             continue
         row_id = str(row.get("id") or "").strip().upper()
         row_text = str(row.get("text") or "")
-        source_text_by_origin[(row_id, str(row.get("origin") or ""))] = row_text
+        row_origin = str(row.get("origin") or "").strip().casefold()
+        origin_key = (row_id, row_origin)
+        source_text_by_origin[origin_key] = (source_text_by_origin.get(origin_key, "") + "\n" + row_text).strip()
         source_text_by_id[row_id] = (source_text_by_id.get(row_id, "") + "\n" + row_text).strip()
+        if row_origin.strip().casefold() == "publisher_page":
+            publisher_text_by_id[row_id] = (publisher_text_by_id.get(row_id, "") + "\n" + row_text).strip()
 
+    search_observations_corroborated = 0
     def _observation_has_source_quote(obs) -> bool:
+        nonlocal search_observations_corroborated
         sid = str(getattr(obs, "source_id", "") or "").strip().upper()
         quote = str(getattr(obs, "quote", "") or "").strip()
-        source_text = (source_text_by_origin.get((sid, str(getattr(obs, "evidence_origin", "") or "")))
+        origin = str(getattr(obs, "evidence_origin", "") or "")
+        source_text = (source_text_by_origin.get((sid, origin.strip().casefold()))
                        or source_text_by_id.get(sid, ""))
         if not sid or not quote or not source_text:
             return False
@@ -4147,21 +4202,54 @@ def _append_evidence_chart_gallery(
         except (TypeError, ValueError):
             return False
         tokens = re.findall(r"(?<![A-Za-z])[-+]?(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d+)?", quote)
+        value_found_in_quote = False
         for token in tokens:
             try:
                 if abs(float(token.replace(",", "")) - expected) <= max(1e-8, abs(expected) * 1e-8):
-                    return True
+                    value_found_in_quote = True
+                    break
             except (TypeError, ValueError):
                 continue
-        return False
+        if not value_found_in_quote:
+            return False
+        publisher_text = publisher_text_by_id.get(sid, "")
+        if not _gallery_observation_origin_is_chart_verifiable(
+            origin, quote=quote, publisher_text=publisher_text,
+        ):
+            return False
+        if (origin.strip().casefold() == "search_extract"
+                and _chart_excerpt_matches_source_text(quote, publisher_text)):
+            # The observation was discovered in a search extract, but its exact
+            # quote and numeric value are present on the fetched publisher page.
+            # Record the stronger provenance so the final export audit checks the
+            # same source text that justified accepting the point.
+            obs.evidence_origin = "publisher_page"
+            search_observations_corroborated += 1
+        return True
 
     observations_before_quote_gate = len(dataset.observations)
     dataset.observations = [obs for obs in dataset.observations if _observation_has_source_quote(obs)]
     quote_rejected = observations_before_quote_gate - len(dataset.observations)
+    if search_observations_corroborated:
+        meta["searchObservationsCorroboratedByPublisher"] = search_observations_corroborated
     if quote_rejected:
         log.warning(
             "Evidence chart gallery source-quote gate rejected %d/%d observations without an exact quoted numeric value",
             quote_rejected, observations_before_quote_gate,
+        )
+    before_provenance_gate = len(dataset.observations)
+    dataset.observations = [
+        obs for obs in dataset.observations
+        if _gallery_observation_origin_is_chart_verifiable(
+            getattr(obs, "evidence_origin", ""),
+        )
+    ]
+    provenance_rejected = before_provenance_gate - len(dataset.observations)
+    if provenance_rejected:
+        meta["unverifiedProvenanceObservationsOmitted"] = provenance_rejected
+        log.info(
+            "Evidence chart gallery omitted %d search-only observation(s) that the final publisher-verification gate would reject",
+            provenance_rejected,
         )
     dataset = _filter_gallery_dataset_for_question(dataset, question)
     meta["observations"] = len(dataset)
@@ -4226,7 +4314,7 @@ def _append_evidence_chart_gallery(
     if len(dataset) < 3:
         log.info("Evidence chart gallery skipped — only %d numeric observation(s) extracted", len(dataset))
         return report_text, charts, meta
-    types = gallery_types_for(question, report_tier)
+    types = gallery_types_for(question, report_tier, planned_types=planned_types)
     result = build_chart_gallery(dataset, question, types=types, validator=validator, normalizer=normalizer, extra=extra)
     if not result.charts:
         return report_text, charts, meta
@@ -4548,7 +4636,9 @@ def _append_evidence_chart_gallery(
     if os.getenv("REPORT_CHART_GALLERY_LAYOUT", "inline").strip().casefold() == "section":
         updated = _insert_gallery_section(report_text, build_markdown)
     else:
-        updated, new_charts = blend_gallery_into_report(report_text, result, len(working) + 1)
+        updated, new_charts = blend_gallery_into_report(
+            report_text, result, len(working) + 1, question=question,
+        )
     working.extend(new_charts)
     meta.update({"charts": len(new_charts), "types": result.included_types,
                  "coverage": result.coverage, "sources": dataset.source_ids()})
@@ -4756,7 +4846,6 @@ def _source_table_point_evidence(
         row_values = row_cells[1:]
         target_period = clean_period(period)
         period_header_index = None
-        period_header_cells: list[str] = []
         period_header_values: list[str] = []
         # Find the nearest preceding header row containing at least two explicit periods.
         for prior in range(row_index - 1, max(-1, row_index - 26), -1):
@@ -4765,7 +4854,6 @@ def _source_table_point_evidence(
             populated = [value for value in values if value]
             if len(populated) >= 2 and len(populated) <= len(row_values) + 1:
                 period_header_index = prior
-                period_header_cells = cells
                 period_header_values = values
                 break
         if period_header_index is None:
@@ -5251,101 +5339,9 @@ GROQ_MAX_PROMPT_CHARS = 40_000  # total system+user budget Groq will reliably ac
 
 
 async def call_groq(user_prompt: str) -> str:
-    keys = get_groq_keys()
-    if not keys:
-        log.warning("Groq: no keys configured for report generation")
-        return ""
+    """Compatibility entry point for the extracted Groq report transport."""
+    return await report_llm.groq_report_writer(user_prompt, runtime=_sys.modules[__name__])
 
-    # Pre-flight size check — measure the REAL combined payload (system + user,
-    # untrimmed) against the budget. If it's already over, don't even attempt
-    # Groq: trimming a 57K-char prompt down to fit guts most of the source
-    # content anyway, and the previous "try anyway, 413, retry with harder
-    # trim" dance just burned every key with 2 doomed requests each (8 wasted
-    # round-trips, ~2s, before ever reaching Gemini). Skip straight there.
-    combined = len(SYSTEM_PROMPT) + len(user_prompt)
-    if combined > GROQ_MAX_PROMPT_CHARS:
-        log.info(
-            "Groq: skipping — combined payload %d chars (system %d + user %d) "
-            "exceeds %d char budget; going straight to Gemini",
-            combined, len(SYSTEM_PROMPT), len(user_prompt), GROQ_MAX_PROMPT_CHARS,
-        )
-        return ""
-
-    log.info("Groq: calling for report generation with %d key(s)  prompt=%d chars", len(keys), len(user_prompt))
-
-    # Accept the first non-empty successful response. Report depth is enforced
-    # by the selected tier contract and evidence validation, never a character floor.
-
-    for key in iter_reserved_groq_keys(keys):
-        if is_rate_limited(key):
-            log.debug("Groq: skipping rate-limited key ...%s", key[-4:])
-            continue
-        try:
-            log.debug("Groq: trying key ...%s", key[-4:])
-            t0 = time.perf_counter()
-            async with httpx.AsyncClient(timeout=90) as client:
-                res = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                    json={
-                        "model": "openai/gpt-oss-120b",  # llama-3.3-70b-versatile decommissioned by Groq 2026-08-16
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "max_tokens": 32768,
-                        "temperature": 0.2,
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-            if res.status_code == 413:
-                # We already checked the size upfront, so a 413 here means our
-                # estimate was wrong (denser tokenization, Groq-side quirk,
-                # etc.) — not something the next key will fix. Bail out to
-                # Gemini immediately instead of repeating the same oversized
-                # request against every remaining key.
-                log.warning(
-                    "Groq 413 on key ...%s despite passing the %d-char pre-check "
-                    "— aborting Groq for this request, going straight to Gemini",
-                    key[-4:], GROQ_MAX_PROMPT_CHARS,
-                )
-                mark_rate_limited(key, 120_000)
-                return ""
-            if res.status_code == 429:
-                log.warning("Groq 429 on key ...%s", key[-4:])
-                mark_rate_limited(key, 60_000)
-                continue
-            if res.status_code in (401, 403):
-                log.warning("Groq %d on key ...%s — banned for 24h", res.status_code, key[-4:])
-                mark_rate_limited(key, 24 * 60 * 60_000)
-                continue
-            if not res.is_success:
-                log.warning("Groq HTTP %d on key ...%s", res.status_code, key[-4:])
-                continue
-            try:
-                data = res.json()
-                err_code = (data.get("error") or {}).get("code", "")
-                if err_code in ("rate_limit_exceeded", "tokens_exhausted", "quota_exceeded"):
-                    log.warning("Groq quota error '%s' on key ...%s", err_code, key[-4:])
-                    mark_rate_limited(key, 60_000)
-                    continue
-                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            except Exception as exc:
-                log.warning("Groq: failed to parse response: %s", exc)
-                continue
-            if text:
-                elapsed = (time.perf_counter() - t0) * 1000
-                log.info("Groq: report generated in %.0fms (%d chars)", elapsed, len(text))
-                if text.strip():
-                    return text.strip()
-                log.warning("Groq: empty report response on key ...%s; trying the next key", key[-4:])
-                continue
-        except Exception as exc:
-            log.warning("Groq exception on key ...%s: %s", key[-4:], exc)
-            continue
-
-    log.error("Groq: all keys exhausted for report generation")
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -5363,9 +5359,9 @@ async def call_groq(user_prompt: str) -> str:
 # New keys issued in AI Studio now come out as AQ. by default; unrestricted
 # AIza Standard keys already stopped working as of June 19, 2026, and ALL
 # AIza keys — restricted or not — are cut off entirely from September 2026.
-# Both formats authenticate the same way against this same REST endpoint
-# (generativelanguage.googleapis.com) with the same ?key= query param, so
-# both are accepted here. What must still be excluded is gen-lang-client-*
+# Both formats authenticate the same way against this REST endpoint through
+# the x-goog-api-key header, so both are accepted here. What must still be
+# excluded is gen-lang-client-*
 # keys, which are Vertex AI / Google Cloud service-account-style keys that
 # need OAuth and return 400 Bad Request against this REST endpoint.
 def _is_rest_api_key(key: str) -> bool:
@@ -5373,13 +5369,15 @@ def _is_rest_api_key(key: str) -> bool:
 
 
 _DEFAULT_GEMINI_REPORT_MODELS = [
-    # Live-tested Action/report pool: 17/17 working for lite, 3.6 and 3.5;
-    # preview was 16/17 with one transient overload. Prefer the most reliable
-    # model first, but keep all four in the failover pool.
-    "gemini-3.5-flash-lite",
+    # Order updated 2026-11-05 from live probes (26k-token prompt, 16k output):
+    # gemini-3-flash-preview passed on keys 9 and 12 (stream finished in ~8 s),
+    # gemini-3.6-flash returned 503 on keys 0/3/6, gemini-3.5-flash returned 429
+    # on key 9. flash-lite is last: its 32k output cap is too small for a
+    # Deep Research report. All four stay in the failover pool.
+    "gemini-3-flash-preview",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-3-flash-preview",
+    "gemini-3.5-flash-lite",
 ]
 # Only allow the model IDs that were explicitly live-tested for this project.
 # A stale environment variable must never reintroduce retired/unknown models
@@ -5401,7 +5399,7 @@ else:
     GEMINI_MODELS = list(_DEFAULT_GEMINI_REPORT_MODELS)
 
 # Retain a zero-valued legacy constant for compatibility with downstream imports.
-# Tier sizing uses final-renderer page bands, not an arbitrary raw character floor.
+# Tier sizing uses evidence breadth. The final renderer reports pagination separately.
 MIN_REPORT_CHARS = 0
 
 # Key-pool scheduler.  With many keys (including keys from different accounts),
@@ -5433,7 +5431,9 @@ GEMINI_TIME_BUDGET_SECONDS = 150
 # transient, while a 401/403/429 is usually key/quota-specific.  A model is only
 # deprioritized after several independent keys report the same 503 in this call.
 GEMINI_MAX_503_PER_MODEL = 3
-GEMINI_MODEL_COOLDOWN_MS = 30_000
+# 503 = the whole model is overloaded, and probes showed it lasting minutes,
+# so skip it for 60 s (was 30 s) instead of retrying it every round.
+GEMINI_MODEL_COOLDOWN_MS = 60_000
 GEMINI_KEY_COOLDOWN_MS = 60_000
 GEMINI_TIMEOUT_KEY_COOLDOWN_MS = 10_000
 
@@ -5460,6 +5460,25 @@ def _gemini_hedge_delay(depth: str) -> float:
 def _gemini_model_cooling(model: str) -> bool:
     return bool(is_rate_limited(f"gemini:model:{model}"))
 
+
+def _gemini_gen_config(model: str, config: dict) -> dict:
+    """Return ``config`` with thinking minimised, exactly as the report writer does.
+
+    Gemini 3.x models think by default, and thought tokens are counted against
+    ``maxOutputTokens``. Helper calls (planner JSON, continuation, analysts, edit
+    pool) have small output caps and short read timeouts, so unmanaged thinking
+    shows up as truncated JSON, ``empty_or_truncated`` or a read timeout. Only the
+    main writer used to set this.
+    """
+    cfg = dict(config or {})
+    if "thinkingConfig" in cfg:
+        return cfg
+    if model.startswith("gemini-3"):
+        cfg["thinkingConfig"] = {"thinkingLevel": "minimal"}
+    elif model in {"gemini-2.5-flash", "gemini-2.5-flash-lite"}:
+        cfg["thinkingConfig"] = {"thinkingBudget": 0}
+    return cfg
+
 _GEMINI_MAX_OUTPUT = {
     "gemini-3.6-flash":       65_536,
     "gemini-3.5-flash":       65_536,
@@ -5472,9 +5491,10 @@ _DEPTH_OUTPUT_CAPS = {"brief": 16_384, "detailed": 65_536, "in_depth": 65_536}
 # settings, not report-section or visual quotas: Brief is focused, In-Detail
 # broadens evidence, and Deep Research uses the widest practical source set.
 # Retrieval and publisher-page extraction scale with the selected product tier.
-# These are candidate caps: relevance/evidence filters still reject weak pages.
-# Defaults favour maximum data-point coverage; each can be overridden with an env
-# var holding "brief,detailed,in_depth" integers (e.g. REPORT_TIER_SEARCH_LIMITS=10,30,50).
+# Search, enrichment and crawl budgets are separate. Search limits below remain
+# administrator-configurable, but report-level search calls also use a per-query
+# cap: otherwise 12 queries × 100 results plus min_results=98 generated huge,
+# overlapping result pools and unnecessary provider latency/cost.
 def _tier_limits(env_name: str, defaults: dict[str, int]) -> dict[str, int]:
     raw = os.getenv(env_name, "").strip()
     if not raw:
@@ -5499,6 +5519,23 @@ _TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"brief": 6, "detail
 # block is truncated before the extra observations reach the model.
 _TIER_NUMERIC_OBSERVATIONS = _tier_limits("REPORT_TIER_NUMERIC_OBSERVATIONS", {"brief": 120, "detailed": 250, "in_depth": 400})
 _TIER_EVIDENCE_CONTEXT_CHARS = _tier_limits("REPORT_TIER_EVIDENCE_CONTEXT_CHARS", {"brief": 40_000, "detailed": 85_000, "in_depth": 140_000})
+
+
+def _report_search_results_per_query(report_tier: str) -> int:
+    """Bound search fan-out while retaining enough candidates for evidence diversity."""
+    tier = str(report_tier or "detailed").casefold()
+    tier_cap = {"brief": 8, "detailed": 12, "in_depth": 18}.get(tier, 12)
+    try:
+        configured_cap = max(4, int(os.getenv("GG_REPORT_PER_QUERY_SEARCH_CAP", "18")))
+    except (TypeError, ValueError):
+        configured_cap = 18
+    configured_tier_limit = max(4, int(_TIER_SEARCH_LIMITS.get(tier, tier_cap)))
+    return max(4, min(tier_cap, configured_cap, configured_tier_limit))
+
+
+def _report_search_min_results(per_query_limit: int) -> int:
+    """Keep per-angle search minimum realistic; never request near 100 results by default."""
+    return max(3, min(6, int(per_query_limit) // 2))
 
 
 def _extract_requested_depth(user_prompt: str, report_tier: str | None = None) -> str:
@@ -5529,119 +5566,46 @@ def _gemini_candidate_keys(keys: list[str], model: str, limit: int) -> list[str]
     return out
 
 
+# ── Report-writer transport ────────────────────────────────────────────────
+# A full report takes 45-70 s to generate. With a plain generateContent call no
+# bytes arrive until the whole answer is finished, so a fixed read timeout kills
+# healthy generations. Streaming turns that timeout into a *stall* timeout (max
+# silence between chunks) plus a wall-clock cap per attempt. Set
+# GEMINI_REPORT_STREAMING=0 to restore the old single-response call.
+_GEMINI_REPORT_STREAMING = _os.environ.get("GEMINI_REPORT_STREAMING", "1").strip().lower() not in {"0", "false", "no", "off"}
+_GEMINI_STALL_TIMEOUTS = {"brief": 25.0, "detailed": 30.0, "in_depth": 35.0}
+_GEMINI_ATTEMPT_CAPS = {"brief": 70.0, "detailed": 120.0, "in_depth": 200.0}
+# (key, model) pairs whose stream has produced its first chunk. The hedging
+# scheduler reads this so it does not duplicate a prompt that is already flowing.
+_GEMINI_STREAMING_ATTEMPTS: set[tuple[str, str]] = set()
+
+
+async def _gemini_generate(
+    key: str, model: str, user_prompt: str, generation_config: dict, depth: str,
+) -> tuple[int, str, str]:
+    """Compatibility seam for the provider transport module."""
+    return await report_llm.gemini_generate(
+        key, model, user_prompt, generation_config, depth,
+        system_prompt=SYSTEM_PROMPT,
+        streaming=_GEMINI_REPORT_STREAMING,
+        request_timeouts=_GEMINI_REQUEST_TIMEOUTS,
+        stall_timeouts=_GEMINI_STALL_TIMEOUTS,
+        attempt_caps=_GEMINI_ATTEMPT_CAPS,
+        streaming_attempts=_GEMINI_STREAMING_ATTEMPTS,
+    )
+
+
 async def _gemini_one_attempt(
     user_prompt: str,
     report_tier: str,
     key: str,
     model: str,
 ) -> tuple[str, str, str]:
-    """Run exactly one Gemini attempt.
-
-    Returns (text, model_id, status_reason).  The status is deliberately simple
-    so the wave scheduler can distinguish success, key-specific failure and
-    model-wide transient failures without sharing mutable HTTP response state.
-    """
-    requested_depth = _extract_requested_depth(user_prompt, report_tier)
-    max_out = min(
-        _GEMINI_MAX_OUTPUT.get(model, 65_536),
-        _DEPTH_OUTPUT_CAPS.get(requested_depth, 65_536),
+    """Compatibility entry point for one extracted Gemini report attempt."""
+    return await report_llm.gemini_one_attempt(
+        user_prompt, report_tier, key, model, runtime=_sys.modules[__name__],
     )
-    generation_config = {"maxOutputTokens": max_out}
-    if model in {"gemini-2.5-flash", "gemini-2.5-flash-lite"}:
-        generation_config["thinkingConfig"] = {"thinkingBudget": 0}
-        generation_config["temperature"] = 0.1
-    elif model.startswith("gemini-3"):
-        generation_config["thinkingConfig"] = {"thinkingLevel": "minimal"}
 
-    timeout = _GEMINI_REQUEST_TIMEOUTS.get(requested_depth, 35)
-    t0 = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5, read=timeout, write=10, pool=5)
-        ) as client:
-            res = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                json={
-                    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                    "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                    "generationConfig": generation_config,
-                },
-            )
-    except asyncio.CancelledError:
-        raise
-    except httpx.TimeoutException as exc:
-        # A slow response means the model is busy, not that this key is bad.
-        # The old 60 s key cooldown removed healthy keys from the pool for the
-        # rest of the report (and from the analysts/audit that share it).
-        log.warning("Gemini attempt timeout model=%s key=...%s after %.0fms: %s",
-                    model, key[-4:], (time.perf_counter() - t0) * 1000, type(exc).__name__)
-        mark_rate_limited(f"report:gemini:{key}:{model}", GEMINI_TIMEOUT_KEY_COOLDOWN_MS)
-        return "", model, "timeout"
-    except Exception as exc:
-        log.warning(
-            "Gemini attempt exception model=%s key=...%s: %s%s",
-            model, key[-4:], type(exc).__name__,
-            f": {exc}" if str(exc) else " (no message)",
-        )
-        mark_rate_limited(f"report:gemini:{key}:{model}", GEMINI_KEY_COOLDOWN_MS)
-        return "", model, "exception"
-
-    elapsed = (time.perf_counter() - t0) * 1000
-    if res.status_code == 503:
-        log.warning(
-            "Gemini 503 model=%s key=...%s after %.0fms",
-            model, key[-4:], elapsed,
-        )
-        mark_rate_limited(f"gemini:model:{model}", GEMINI_MODEL_COOLDOWN_MS)
-        return "", model, "503"
-    if res.status_code == 429:
-        log.warning("Gemini 429 model=%s key=...%s", model, key[-4:])
-        mark_rate_limited(key, GEMINI_KEY_COOLDOWN_MS)
-        mark_rate_limited(f"report:gemini:{key}:{model}", GEMINI_KEY_COOLDOWN_MS)
-        return "", model, "429"
-    if res.status_code in (401, 403):
-        log.warning("Gemini %d on key=...%s — cooling this key", res.status_code, key[-4:])
-        mark_rate_limited(key, 24 * 60 * 60_000)
-        return "", model, str(res.status_code)
-    if res.status_code in (400, 404):
-        # 400/404 is model-level.  Other keys are not going to change the model
-        # existence/configuration, so the scheduler can skip this model.
-        log.warning("Gemini %d — model=%s unavailable/config-invalid", res.status_code, model)
-        return "", model, str(res.status_code)
-    if not res.is_success:
-        log.warning("Gemini HTTP %d model=%s key=...%s", res.status_code, model, key[-4:])
-        return "", model, str(res.status_code)
-
-    try:
-        payload = res.json()
-        candidate = (payload.get("candidates") or [{}])[0]
-        text = ((candidate.get("content") or {}).get("parts") or [{}])[0].get("text", "")
-        finish_reason = candidate.get("finishReason", "")
-    except Exception as exc:
-        log.warning("Gemini response parse failed model=%s key=...%s: %s", model, key[-4:], exc)
-        return "", model, "parse_error"
-
-    if not text or not text.strip():
-        return "", model, "empty"
-    if finish_reason == "MAX_TOKENS":
-        log.warning(
-            "Gemini MAX_TOKENS model=%s key=...%s (%d chars)",
-            model, key[-4:], len(text),
-        )
-        return "", model, "max_tokens"
-    if len(text) > 90_000:
-        log.warning("Gemini suspiciously long response model=%s key=...%s (%d chars)", model, key[-4:], len(text))
-        return "", model, "runaway"
-    lower = text.lower()
-    if re.search(r"##\s*2\.\s*methodology\b", lower):
-        log.warning("Gemini legacy fixed-structure drift model=%s key=...%s", model, key[-4:])
-        return "", model, "legacy_structure"
-
-    log.info(
-        "Gemini: report generated in %.0fms (%d chars) model=%s key=...%s",
-        elapsed, len(text), model, key[-4:],
-    )
-    return text.strip(), model, "success"
 
 
 async def _run_gemini_wave(
@@ -5653,190 +5617,20 @@ async def _run_gemini_wave(
     deadline: float,
     launched_out: list[str] | None = None,
 ) -> tuple[str, str, dict[str, int], int]:
-    """Run one hedged wave on a single model and return the first usable response.
+    """Compatibility entry point for the extracted Gemini hedge scheduler."""
+    return await report_llm.run_gemini_wave(
+        user_prompt, depth, model, keys, started, deadline, launched_out,
+        runtime=_sys.modules[__name__],
+    )
 
-    With a hedge delay > 0 the keys are launched one at a time: the next key
-    starts after ``hedge_delay`` seconds without an answer, or immediately when
-    an in-flight attempt fails fast for a key-specific reason. A 503/400/404 is
-    model-wide, so no further keys are launched on this model. With a delay of
-    0 every key starts at once (legacy behaviour). Slower siblings are cancelled
-    as soon as one response is accepted. ``launched_out`` (optional) receives
-    the keys that were actually used so unused ones can go back to the pool.
-    """
-    hedge_delay = _gemini_hedge_delay(depth)
-    queue = list(keys)
-    tasks: dict[asyncio.Task, str] = {}
-    stats: dict[str, int] = {}
-    best_text = ""
-    best_model = ""
-    stop_launching = False
-
-    def _launch() -> None:
-        key = queue.pop(0)
-        task = asyncio.create_task(_gemini_one_attempt(user_prompt, depth, key, model))
-        tasks[task] = key
-        if launched_out is not None:
-            launched_out.append(key)
-
-    # ``deadline`` is the absolute perf_counter timestamp computed by call_gemini.
-    def _remaining() -> float:
-        return max(0.0, deadline - time.perf_counter())
-
-    try:
-        if queue:
-            _launch()
-        if hedge_delay <= 0:
-            while queue:
-                _launch()
-        next_hedge_at = time.perf_counter() + hedge_delay
-        pending = set(tasks)
-        while pending or (queue and not stop_launching):
-            remaining = _remaining()
-            if remaining <= 0:
-                break
-            if not pending:
-                _launch()
-                pending = {t for t in tasks if not t.done()}
-                next_hedge_at = time.perf_counter() + hedge_delay
-                continue
-            wait_for = remaining
-            if queue and not stop_launching and hedge_delay > 0:
-                wait_for = max(0.05, min(wait_for, next_hedge_at - time.perf_counter()))
-            done, pending = await asyncio.wait(
-                pending, timeout=wait_for, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                key = tasks[task]
-                try:
-                    result = task.result()
-                except Exception as exc:
-                    stats["task_exception"] = stats.get("task_exception", 0) + 1
-                    log.warning("Gemini wave task exception model=%s key=...%s: %s", model, key[-4:], type(exc).__name__)
-                    continue
-                text, model_id, status = result
-                stats[status] = stats.get(status, 0) + 1
-                if text and len(text) > len(best_text):
-                    best_text, best_model = text, model_id
-                if text and text.strip():
-                    # The API layer has already rejected empty, truncated and
-                    # runaway responses; structured parsing and the evidence/
-                    # publication audits judge quality downstream.
-                    return text.strip(), model_id, stats, len(tasks)
-                if status in {"503", "400", "404"}:
-                    stop_launching = True
-                elif queue and not stop_launching:
-                    # Key-specific fast failure: replace it right away.
-                    _launch()
-                    pending = pending | {t for t in tasks if not t.done() and t not in done}
-                    next_hedge_at = time.perf_counter() + hedge_delay
-            if (not done and queue and not stop_launching and hedge_delay > 0
-                    and time.perf_counter() >= next_hedge_at):
-                log.info("Gemini wave: no answer after %.0fs on model=%s, adding a hedge request", hedge_delay, model)
-                _launch()
-                pending = {t for t in tasks if not t.done()}
-                next_hedge_at = time.perf_counter() + hedge_delay
-
-        return best_text, best_model, stats, len(tasks)
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def call_gemini(user_prompt: str, report_tier: str | None = None) -> tuple[str, str]:
-    # A short provider cooldown protects against a thundering herd, but it is
-    # deliberately scoped to the report writer and only lasts 15 seconds.
-    if is_rate_limited("gemini:report:provider"):
-        log.info("Gemini: short report-writer provider cooldown active — trying fallback provider")
-        return "", ""
-
-    keys = [k for k in get_gemini_keys() if _is_rest_api_key(k)]
-    if not keys:
-        log.warning("Gemini: no REST-compatible keys configured")
-        return "", ""
-
-    depth = _extract_requested_depth(user_prompt, report_tier)
-    deadline = _DEPTH_TIME_BUDGETS.get(depth, GEMINI_TIME_BUDGET_SECONDS)
-    wave_size = max(1, min(GEMINI_WAVE_SIZE, len(keys)))
-    max_total = min(GEMINI_MAX_TOTAL_ATTEMPTS, len(keys))
-    started = time.perf_counter()
-    deadline_at = started + deadline
-
-    log.info(
-        "Gemini scheduler: %d REST keys available; using up to %d unique keys across %d models; wave=%d; deadline=%ss; depth=%s",
-        len(keys), max_total, len(GEMINI_MODELS), wave_size, deadline, depth,
+    """Compatibility entry point for extracted Gemini report scheduling."""
+    return await report_llm.call_gemini(
+        user_prompt, report_tier, runtime=_sys.modules[__name__],
     )
 
-    # Rotate across models in bounded waves for availability. A non-empty,
-    # non-truncated response is validated downstream; length is not used as a
-    # proxy for research quality or completeness.
-    remaining = list(round_robin(keys))[:max_total]
-    attempts_done = 0
-    model_cursor = 0
-    model_round = 0
-
-    while remaining and attempts_done < max_total and time.perf_counter() < deadline_at:
-        model = GEMINI_MODELS[model_cursor % len(GEMINI_MODELS)]
-        model_cursor += 1
-        model_round += 1
-        # A model that returned 503 in the last 30 s (here, in the analysts or
-        # in another report) is overloaded; skip it while any other model is
-        # healthy instead of spending a wave on a near-certain 503.
-        if _gemini_model_cooling(model) and any(not _gemini_model_cooling(m) for m in GEMINI_MODELS):
-            if model_round <= len(GEMINI_MODELS) * 2:
-                log.info("Gemini scheduler: skipping model=%s (503 cooldown active)", model)
-                continue
-
-        model_keys = _gemini_candidate_keys(remaining, model, GEMINI_MAX_KEYS_PER_MODEL)
-        if not model_keys:
-            # A report-specific cooldown may have temporarily excluded these
-            # keys for this model. Give the next model its turn.
-            if model_round > len(GEMINI_MODELS) and not any(
-                _gemini_candidate_keys(remaining, m, 1) for m in GEMINI_MODELS
-            ):
-                break
-            continue
-
-        allocated = set(model_keys)
-        remaining = [k for k in remaining if k not in allocated]
-
-        # One bounded wave per model turn. If it fails, immediately rotate to
-        # the next model rather than spending another wave on the same model.
-        wave = model_keys[:wave_size]
-        if not wave:
-            continue
-
-        log.info(
-            "Gemini scheduler: model=%s round=%d keys=%d",
-            model, model_round, len(wave),
-        )
-        launched_keys: list[str] = []
-        text, chosen_model, stats, wave_attempts = await _run_gemini_wave(
-            user_prompt, depth, model, wave, started, deadline_at, launched_keys,
-        )
-        attempts_done += wave_attempts
-        # Keys the hedged wave never needed go back to the pool for later models.
-        unused = [k for k in model_keys if k not in set(launched_keys)]
-        if unused:
-            remaining = unused + remaining
-
-        if text and text.strip():
-            log.info(
-                "Gemini scheduler: accepted non-empty response (%d chars) model=%s after %d key attempts stats=%s",
-                len(text), chosen_model, attempts_done, stats,
-            )
-            return text.strip(), chosen_model
-
-    total_elapsed = time.perf_counter() - started
-
-    log.warning(
-        "Gemini scheduler: %d attempts exhausted in %.1fs with no usable response — moving to fallback providers",
-        attempts_done, total_elapsed,
-    )
-    mark_rate_limited("gemini:report:provider", 15_000)
-    return "", ""
 
 
 # ── Report-writer provider fallback ─────────────────────────────────────────
@@ -5850,14 +5644,193 @@ _REPORT_FALLBACK_SYSTEM = (
     "Write a complete source-grounded report using the supplied dynamic plan. Never invent facts, figures, "
     "citations or URLs. Use exact [S#] source IDs. Do not create a duplicate Sources/Data Sources list; "
     "the renderer owns the source appendix. Use useful analytical markdown and evidence-backed tables/charts. "
-    "The selected report tier controls research breadth, analytical depth, and a rendered page band measured by the final PDF renderer. "
-    "Treat the page band as an editorial objective, never as permission to pad, duplicate analysis, or invent facts. "
+    "The selected report tier controls research breadth and analytical depth. Do not target a page, word, character, section, statistic, table, or visualization count. "
+    "For workbook-only reports, evidence availability—not a fixed page band—determines appropriate length. Never pad, duplicate analysis, or invent facts to increase length. "
     "Choose section names, order, and optional components from the question and available evidence; do not impose "
     "a fixed outline. For deeper tiers, investigate additional relevant dimensions, comparisons, assumptions, "
     "counterarguments, risks, scenarios and evidence gaps only where the query and sources warrant them. "
     "Stop when the question is adequately answered by the available evidence. If the evidence is insufficient, "
     "state the limitation clearly rather than padding the report, manufacturing analysis, or inventing figures."
 )
+
+
+_REPORT_SOURCE_BLOCK_RE = re.compile(
+    r"(?ms)^- \[(?P<source_id>S\d+)\] \*\*(?P<title>.*?)\*\*\n"
+    r"Source: (?P<source>[^\n]*)\n(?P<body>.*?)"
+    r"(?=\n\n---\n\n- \[S\d+\] \*\*|\Z)"
+)
+_REPORT_SOURCE_STOPWORDS = frozenset(
+    "about above after again against all also and any are because been being between both could does each for from had has have how into its more most not of only other our over past report research should some such than that the their there these they this through under using was were what when where which with would year years india indian".split()
+)
+
+
+def _report_source_terms(question: str) -> list[str]:
+    terms = [
+        token for token in re.findall(r"[a-z0-9]+", str(question or "").casefold())
+        if len(token) >= 4 and token not in _REPORT_SOURCE_STOPWORDS
+    ]
+    if re.search(r"\bpromoter", question or "", re.I):
+        terms.extend(("promoter", "seller", "sold", "sale", "shares", "disposal", "exit", "transfer", "transferred", "sast", "regulation 29", "offer for sale"))
+    if re.search(r"\b(?:ftas?|free[- ]trade agreements?)\b", question or "", re.I):
+        terms.extend(("agreement", "signed", "signature", "tariff", "partner", "commerce ministry"))
+    if re.search(r"\bsector rotation\b", question or "", re.I):
+        terms.extend(("sector", "sectoral", "index", "indices", "quarter", "return", "flows", "fpi", "fii", "dii"))
+    return list(dict.fromkeys(terms))
+
+
+def _report_source_block_score(source_id: str, title: str, source: str, body: str, question: str) -> int:
+    title_text = str(title or "").casefold()
+    body_text = str(body or "").casefold()
+    all_text = f"{title_text} {source or ''} {body_text}"
+    score = 0
+    score += 16 if "DIRECT PUBLISHER PAGE TEXT" in body else 0
+    score += 7 if re.search(r"(?:^|\.)[^\s/]*(?:nseindia|bseindia|sebi|commerce\.gov\.in|pib\.gov\.in)", str(source or ""), re.I) else 0
+    for term in _report_source_terms(question):
+        if term in all_text:
+            score += 2 if len(term) < 6 else 3
+    if re.search(r"\b(?:sold|sale|disposal|disposed|stake sale|offer for sale|exit|transferred|transfer)\b", body_text):
+        score += 10
+    if re.search(r"\b(?:regulation\s*29|sast|promoter|promoter group|selling shareholder)\b", body_text):
+        score += 7
+    if re.search(r"\b(?:pledge|encumbrance|non.disposal undertaking|shareholding pattern)\b", body_text):
+        score -= 5
+    if re.search(r"\b(?:proposed|intention to|notice of the proposed)\b", body_text):
+        score -= 2
+    return score
+
+
+def _ranked_report_excerpt(text: str, question: str, max_chars: int) -> str:
+    value = str(text or "").strip()
+    if max_chars <= 0 or not value:
+        return ""
+    if len(value) <= max_chars:
+        return value
+
+    terms = _report_source_terms(question)
+    segments: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"[^\n]+", value):
+        raw = match.group(0).strip()
+        if not raw:
+            continue
+        # PDF/OCR text often has one very long line. Split it into overlapping
+        # windows so a relevant disclosure near the end is still represented.
+        windows = [raw[i:i + 420] for i in range(0, len(raw), 360)] if len(raw) > 520 else [raw]
+        for offset, window in enumerate(windows):
+            lower = window.casefold()
+            score = sum(3 for term in terms if term in lower)
+            if re.search(r"\b(?:sold|sale|disposal|disposed|promoter|seller|quarter|signed|signature|tariff|sector|index|return|flow)\b", lower):
+                score += 5
+            if re.search(r"\b\d[\d,.]*\s*(?:%|percent|shares?|crore|lakh|million|billion|\b(?:19|20)\d{2}\b)", lower):
+                score += 2
+            if re.search(r"(?i)\b(?:registered office|cin\s*:|phone|fax|dear sir|dear madam|thank you|yours faithfully)\b", lower):
+                score -= 8
+            segments.append((score, match.start() + offset * 360, window))
+
+    chosen: list[tuple[int, str]] = []
+    used = 0
+    # Preserve the filing's opening context, then select the strongest exact
+    # evidence excerpts across the full page rather than slicing only its head.
+    head = value[:min(260, max_chars)].strip()
+    if head:
+        chosen.append((0, head))
+        used = len(head)
+    for score, position, segment in sorted(segments, key=lambda item: (-item[0], item[1])):
+        if score <= 0 or any(position < existing_pos + len(existing_text) and existing_pos < position + len(segment)
+                              for existing_pos, existing_text in chosen):
+            continue
+        piece = segment.strip()
+        if not piece:
+            continue
+        remaining = max_chars - used - (2 if chosen else 0)
+        if remaining <= 0:
+            break
+        piece = piece[:remaining]
+        chosen.append((position, piece))
+        used += len(piece) + 2
+        if used >= max_chars:
+            break
+    if not chosen:
+        return value[:max_chars]
+    chosen.sort(key=lambda item: item[0])
+    excerpt = "\n…\n".join(piece for _, piece in chosen)
+    return excerpt[:max_chars]
+
+
+def _compact_report_source_blocks(source_text: str, question: str, max_chars: int) -> tuple[str, int, int]:
+    """Compact long source context while keeping useful, correctly named citations.
+
+    Retain source IDs only alongside the excerpts actually shown to the writer.
+    Rank blocks for the request, use exact passages from the full page, and
+    spread the budget across the source set instead of keeping only its first
+    and last few thousand characters.
+    """
+    original = str(source_text or "")
+    matches = list(_REPORT_SOURCE_BLOCK_RE.finditer(original))
+    if not matches:
+        return original[:max(0, max_chars)], 0, 0
+    if max_chars <= 0:
+        return "", 0, len(matches)
+    if len(original) <= max_chars:
+        return original, len(matches), 0
+
+    header = original[:matches[0].start()].strip()
+    rows = []
+    for index, match in enumerate(matches):
+        record = match.groupdict()
+        record["score"] = _report_source_block_score(
+            record["source_id"], record["title"], record["source"], record["body"], question,
+        )
+        record["index"] = index
+        rows.append(record)
+
+    header_cost = len(header) + 2 if header else 0
+    fixed_note_cost = 120
+    available = max(0, max_chars - header_cost - fixed_note_cost)
+    per_block_min = 560
+    max_blocks = max(1, available // per_block_min)
+    if len(rows) > max_blocks:
+        chosen = sorted(rows, key=lambda row: (-row["score"], row["index"]))[:max_blocks]
+    else:
+        chosen = rows
+    chosen.sort(key=lambda row: row["index"])
+    separators_cost = max(0, len(chosen) - 1) * 9
+    per_block_budget = max(220, (available - separators_cost) // max(1, len(chosen)))
+
+    blocks = []
+    for row in chosen:
+        prefix = f"- [{row['source_id']}] **{row['title']}**\nSource: {row['source']}\n"
+        block_budget = max(220, per_block_budget - len(prefix))
+        body = row["body"]
+        direct_match = re.search(
+            r"(?s)DIRECT PUBLISHER PAGE TEXT \(fetched from this URL\):\s*(.*?)(?=\n\nSEARCH-INDEX EXCERPT|\Z)", body,
+        )
+        search_match = re.search(r"(?s)SEARCH-INDEX EXCERPT[^\n]*:\s*(.*)\Z", body)
+        if direct_match:
+            page_text = direct_match.group(1).strip()
+            page_budget = min(len(page_text), max(220, int(block_budget * 0.78)))
+            excerpt = "DIRECT PUBLISHER PAGE TEXT (relevant excerpt from the fetched URL):\n" + _ranked_report_excerpt(page_text, question, page_budget)
+            if search_match and block_budget - len(excerpt) > 100:
+                remaining = block_budget - len(excerpt)
+                search_text = _ranked_report_excerpt(search_match.group(1), question, remaining)
+                if search_text:
+                    excerpt += "\n\nSEARCH-INDEX EXCERPT (partial):\n" + search_text
+        elif search_match:
+            excerpt = "SEARCH-INDEX EXCERPT (not verified on the publisher page):\n" + _ranked_report_excerpt(
+                search_match.group(1), question, max(100, block_budget - 65),
+            )
+        else:
+            excerpt = _ranked_report_excerpt(body, question, block_budget)
+        blocks.append((prefix + excerpt)[:per_block_budget])
+
+    allowed_ids = ", ".join(f"[{row['source_id']}]" for row in chosen)
+    policy = f"Writer citation IDs available in this compacted evidence set only: {allowed_ids}. Do not cite omitted source IDs."
+    output_parts = ([header] if header else []) + [policy, "\n\n---\n\n".join(blocks)]
+    result = "\n\n".join(part for part in output_parts if part)
+    # The note and separators are accounted for above, but keep an exact hard
+    # ceiling as provider limits are character based and must be deterministic.
+    if len(result) > max_chars:
+        result = result[:max_chars]
+    return result, len(chosen), len(rows) - len(chosen)
 
 
 def _compact_report_user_prompt(user_prompt: str, max_chars: int = 30_000) -> str:
@@ -5876,8 +5849,13 @@ def _compact_report_user_prompt(user_prompt: str, max_chars: int = 30_000) -> st
         ends = [i for i in (image_idx, instr_idx) if i > web_idx]
         end = min(ends) if ends else len(text)
         src = text[web_idx:end]
-        if len(src) > 12_000:
-            src = src[:9_000] + "\n...[source preview compacted]...\n" + src[-3_000:]
+        fixed_chars = sum(len(chunk) for chunk in chunks) + min(7_000, len(text[instr_idx:]) if instr_idx >= 0 else 0)
+        source_budget = max(1_200, max_chars - fixed_chars - 300)
+        question_match = re.search(r"(?im)^Research Question / Topic[^:]*:\s*([^\n]+)", text)
+        source_question = question_match.group(1) if question_match else text[:7_500]
+        src, kept_blocks, omitted_blocks = _compact_report_source_blocks(src, source_question, source_budget)
+        if omitted_blocks:
+            src += f"\n\n[Fallback context retained {kept_blocks} prioritized source blocks; {omitted_blocks} were omitted. Cite only IDs listed above.]"
         chunks.append("\n\n" + src)
     if instr_idx >= 0:
         chunks.append("\n\n" + text[instr_idx:instr_idx + 7_000])
@@ -5886,125 +5864,19 @@ def _compact_report_user_prompt(user_prompt: str, max_chars: int = 30_000) -> st
 
 
 async def _call_groq_report_fallback(user_prompt: str, report_tier: str) -> tuple[str, str]:
-    keys = get_groq_keys()
-    if not keys:
-        return "", ""
-    compact = _compact_report_user_prompt(user_prompt)
-    limit = GROQ_MAX_PROMPT_CHARS - len(_REPORT_FALLBACK_SYSTEM) - 1_000
-    if len(compact) > limit:
-        compact = _compact_report_user_prompt(user_prompt, max_chars=max(12_000, limit))
-
-    # Try the large model first, then the smaller model. The provider-specific
-    # 429/model state remains report-scoped, while the shared one-minute key
-    # reservation prevents concurrent chat/planner/report requests from reusing
-    # the same raw Groq key too quickly.
-    models = [
-        m.strip() for m in re.split(
-            r"[,;\n]+",
-            _os.environ.get(
-                "GROQ_REPORT_MODELS",
-                "openai/gpt-oss-120b,openai/gpt-oss-20b",
-            ),
-        ) if m.strip()
-    ][:3]
-    max_keys = min(int(_os.environ.get("REPORT_GROQ_FALLBACK_MAX_KEYS", REPORT_GROQ_FALLBACK_MAX_KEYS)), len(keys))
-    log.info(
-        "Report: trying Groq fallback models=%s across up to %d keys (prompt=%d chars, tier=%s)",
-        models, max_keys, len(compact), report_tier,
+    """Compatibility entry point for the extracted Groq fallback transport."""
+    return await report_llm.groq_report_fallback(
+        user_prompt, report_tier, runtime=_sys.modules[__name__],
     )
 
-    attempts = 0
-    for key in iter_reserved_groq_keys(keys, max_keys=max_keys):
-        if attempts >= max_keys:
-            break
-        # Do not use the generic raw key cooldown here.  That cooldown can have
-        # been set by an unrelated chat/planner request.  Report-specific 429/
-        # timeout state is isolated below.
-        if is_rate_limited(f"report:groq:{key}"):
-            continue
-        attempts += 1
-        for model in models:
-            if is_rate_limited(f"report:groq:{key}:{model}"):
-                continue
-            try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=5, read=35 if model.endswith("120b") else 25, write=10, pool=5)
-                ) as client:
-                    res = await client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        json={
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": _REPORT_FALLBACK_SYSTEM},
-                                {"role": "user", "content": compact},
-                            ],
-                            "max_tokens": (65_536 if report_tier in ("detailed", "in_depth") else 12_288),
-                            "temperature": 0.2,
-                            "response_format": {"type": "json_object"},
-                        },
-                    )
-                if res.status_code in (401, 403):
-                    mark_rate_limited(key, 24 * 60 * 60_000)
-                    break
-                if res.status_code == 429:
-                    log.warning("Report: Groq 429 model=%s key=...%s", model, key[-4:])
-                    mark_rate_limited(f"report:groq:{key}:{model}", 60_000)
-                    # Try the next model and then next key rather than aborting.
-                    continue
-                if res.status_code == 413:
-                    log.warning("Report: Groq 413 model=%s — compacting prompt further once", model)
-                    tighter = _compact_report_user_prompt(user_prompt, max_chars=16_000)
-                    if tighter == compact:
-                        continue
-                    compact = tighter
-                    continue
-                if not res.is_success:
-                    log.warning("Report: Groq fallback HTTP %d model=%s key=...%s", res.status_code, model, key[-4:])
-                    continue
-                try:
-                    data = res.json()
-                    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-                except Exception as exc:
-                    log.warning("Report: Groq fallback parse failed model=%s key=...%s: %s", model, key[-4:], exc)
-                    continue
-                if content and content.strip():
-                    log.info("Report: Groq fallback succeeded model=%s (%d chars)", model, len(content))
-                    return content.strip(), f"groq:{model}:fallback"
-            except Exception as exc:
-                log.warning("Report: Groq fallback exception model=%s key=...%s: %s", model, key[-4:], type(exc).__name__)
-                mark_rate_limited(f"report:groq:{key}:{model}", 20_000)
-                continue
-    log.warning("Report: Groq fallback exhausted report-scoped key/model pool after %d key slots", attempts)
-    return "", ""
 
 
 async def _call_openrouter_report_fallback(user_prompt: str, report_tier: str) -> tuple[str, str]:
-    key = _os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not key:
-        return "", ""
-    models = [m.strip() for m in re.split(r"[,;\n]+", _os.environ.get("OPENROUTER_REPORT_MODELS", "openai/gpt-oss-120b:free,meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-7b-instruct:free")) if m.strip()][:3]
-    compact = _compact_report_user_prompt(user_prompt, max_chars=30_000)
-    for model in models:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5)) as client:
-                res = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={"Authorization":f"Bearer {key}","Content-Type":"application/json","HTTP-Referer":"https://growthgradual.ai","X-Title":"Growth Gradual Research Intelligence"},
-                    json={"model":model,"messages":[{"role":"system","content":_REPORT_FALLBACK_SYSTEM},{"role":"user","content":compact}],"max_tokens":REPORT_OPENROUTER_MAX_TOKENS,"temperature":0.2,"response_format":{"type":"json_object"}},
-                )
-            if res.status_code in (401,403):
-                return "", ""
-            if res.status_code in (404,429):
-                continue
-            if not res.is_success:
-                continue
-            content = ((res.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            if content and content.strip():
-                return content.strip(), f"openrouter:{model}:fallback"
-        except Exception as exc:
-            log.warning("Report: OpenRouter fallback failed model=%s: %s", model, type(exc).__name__)
-    return "", ""
+    """Compatibility entry point for the extracted OpenRouter transport."""
+    return await report_llm.openrouter_report_fallback(
+        user_prompt, report_tier, runtime=_sys.modules[__name__],
+    )
+
 
 
 def _extract_prompt_source_blocks(user_prompt: str) -> list[dict]:
@@ -6222,142 +6094,10 @@ def _report_sections_from_value(value: object, *, depth: int = 0) -> str:
     return ""
 
 
-def _report_body_from_value(value: object, *, _seen: set[int] | None = None) -> str:
-    """Extract substantive report prose from common provider response shapes."""
-    if _seen is None:
-        _seen = set()
-    if isinstance(value, str):
-        candidate = value.replace("\\n", "\n").strip()
-        if candidate.startswith(("{", "[")):
-            try:
-                nested = json.loads(candidate, strict=False)
-                if isinstance(nested, dict) and isinstance(nested.get("report"), str) and len(nested["report"].strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
-                    return nested["report"].replace("\\n", "\n").strip()
-                nested_body = _report_body_from_value(nested, _seen=_seen)
-                if nested_body:
-                    return nested_body
-            except Exception:
-                pass
-        return candidate if len(candidate) >= _MIN_VALID_REPORT_BODY_CHARS else ""
-    if not isinstance(value, (dict, list, tuple)):
-        return ""
-    marker = id(value)
-    if marker in _seen:
-        return ""
-    _seen.add(marker)
-    if isinstance(value, (list, tuple)):
-        return max((_report_body_from_value(item, _seen=_seen) for item in value), key=len, default="")
-    for key in ("report", "content", "text", "output", "body", "markdown", "choices", "message", "response", "candidates", "parts", "data", "result"):
-        if key in value:
-            found = _report_body_from_value(value[key], _seen=_seen)
-            if found:
-                return found
-    return ""
 
 
-def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
-    """Recover report prose before normalization can silently discard it."""
-    field_candidates = []
-    for field in ("report", "content", "text", "output", "body", "markdown"):
-        marker = re.search(rf'(?:\\)?"{field}(?:\\)?"\s*:\s*(?:\\)?"', raw or "", flags=re.IGNORECASE)
-        if not marker:
-            continue
-        encoded = []
-        escaped = False
-        for ch in (raw or "")[marker.end():]:
-            if escaped:
-                encoded.append("\\")
-                encoded.append(ch)
-                escaped = False
-                continue
-            if ch == "\\":
-                escaped = True
-                continue
-            if ch == '"':
-                break
-            encoded.append(ch)
-        value = "".join(encoded)
-        try:
-            value = json.loads('"' + value + '"', strict=False)
-        except Exception:
-            value = value.replace("\\n", "\n").replace('\\"', '"')
-        if isinstance(value, str) and len(value.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
-            field_candidates.append(value.strip())
-    if field_candidates:
-        return _strip_leaked_prompt_tail(max(field_candidates, key=len))
-
-    field_candidates = []
-    for field in ("report", "content", "text", "output", "body", "markdown"):
-        marker = re.search(rf'(?:\\)?"{field}(?:\\)?"\s*:\s*(?:\\)?"', raw or "", flags=re.IGNORECASE)
-        if not marker:
-            continue
-        encoded = []
-        escaped = False
-        for ch in (raw or "")[marker.end():]:
-            if escaped:
-                encoded.append("\\")
-                encoded.append(ch)
-                escaped = False
-                continue
-            if ch == "\\":
-                escaped = True
-                continue
-            if ch == '"':
-                break
-            encoded.append(ch)
-        value = "".join(encoded)
-        try:
-            value = json.loads('"' + value + '"', strict=False)
-        except Exception:
-            value = value.replace("\\n", "\n").replace('\\"', '"')
-        if isinstance(value, str) and len(value.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
-            field_candidates.append(value.strip())
-    if field_candidates:
-        return _strip_leaked_prompt_tail(max(field_candidates, key=len))
-
-    encoded_reports = re.findall(r'\\?"report\\?"\s*:\s*\\?"((?:\\\\.|[^"\\])*)\\?"', raw or "", flags=re.DOTALL)
-    decoded_reports = []
-    for encoded in encoded_reports:
-        try:
-            decoded_reports.append(json.loads('"' + encoded + '"', strict=False))
-        except Exception:
-            decoded_reports.append(encoded.replace("\\n", "\n").replace('\\"', '"'))
-    best_encoded = max((x for x in decoded_reports if isinstance(x, str)), key=len, default="")
-    if len(best_encoded.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
-        return _strip_leaked_prompt_tail(best_encoded.strip())
-    candidates: list[object] = []
-    if isinstance(parsed, dict):
-        candidates.append(parsed)
-    try:
-        candidates.append(json.loads(raw, strict=False))
-    except Exception:
-        pass
-    obj = _extract_json_object(raw)
-    if obj is not None:
-        candidates.append(obj)
-    candidates.append(raw)
-    recovered_candidates = [_report_body_from_value(item) for item in candidates]
-    prose_candidates = [x for x in recovered_candidates if not x.lstrip().startswith(("{", "["))]
-    found = max(prose_candidates or recovered_candidates, key=len, default="")
-    for _ in range(3):
-        if not found.lstrip().startswith(("{", "[")):
-            break
-        nested_found = _report_body_from_value(found)
-        if not nested_found or nested_found == found:
-            break
-        found = nested_found
-    for _ in range(3):
-        if not found.lstrip().startswith(("{", "[")):
-            break
-        nested_found = _report_body_from_value(found)
-        if not nested_found or nested_found == found:
-            break
-        found = nested_found
-    return _strip_leaked_prompt_tail(found)
 
 
-def _report_section_count(text: str) -> int:
-    return len(_parse_report_sections(text or ""))
 
 
 _PARALLEL_EVIDENCE_ANALYSTS = [
@@ -6549,6 +6289,56 @@ def _parallel_analyst_prompt(
     )
 
 
+def _compact_parallel_groq_prompt(prompt: str, max_sources: int = 18, evidence_chars: int = 420) -> str:
+    """Build a balanced, source-quoted fallback when Groq rejects the full prompt.
+
+    Groq returns HTTP 413 for some otherwise valid evidence batches because its
+    effective request budget also includes the requested output. Keep the
+    question, rules and source IDs intact, but sample source excerpts evenly so
+    a retry does not silently discard every later publisher.
+    """
+    value = str(prompt or "")
+    marker = "SOURCE EVIDENCE:\n"
+    marker_at = value.find(marker)
+    if marker_at < 0:
+        return value[:12_000]
+
+    prefix = value[:marker_at]
+    evidence_text = value[marker_at + len(marker):]
+    blocks = [part.strip() for part in re.split(r"\n\s*---\s*\n", evidence_text) if part.strip()]
+    if len(blocks) > max_sources:
+        # Uniform sampling preserves coverage across the whole search result
+        # set instead of favouring the earliest result IDs.
+        positions = {
+            round(index * (len(blocks) - 1) / max(1, max_sources - 1))
+            for index in range(max_sources)
+        }
+        blocks = [block for index, block in enumerate(blocks) if index in positions]
+
+    compact_blocks: list[str] = []
+    for block in blocks:
+        match = re.match(r"(-\s*\[[^\]]+\]\s+\*\*[^\n]*\*\*)\s*\nSource:\s*([^\n]*)\n(.*)", block, flags=re.S)
+        if not match:
+            compact_blocks.append(block[:evidence_chars + 220])
+            continue
+        title_line, source_url, evidence = match.groups()
+        parsed_url = urlparse(source_url.strip())
+        source_host = parsed_url.netloc[:90]
+        source_path = parsed_url.path[:70]
+        source_line = f"Source: {source_host}{source_path}"
+        evidence = evidence.strip()
+        if len(evidence) > evidence_chars:
+            head_chars = int(evidence_chars * 0.72)
+            tail_chars = max(0, evidence_chars - head_chars - 30)
+            evidence = evidence[:head_chars] + "\n...[excerpt shortened]...\n" + (evidence[-tail_chars:] if tail_chars else "")
+        compact_blocks.append(f"{title_line[:220]}\n{source_line}\n{evidence}")
+
+    compact = prefix + "SOURCE EVIDENCE (balanced compact excerpts):\n" + "\n\n---\n\n".join(compact_blocks)
+    # Keep a hard cap even for unusually long titles or URLs. The normal
+    # evidence budget is 26K chars; this fallback targets roughly half that.
+    return compact[:15_000]
+
+
 async def _parallel_gemini_analyst_once(prompt: str, report_tier: str, key: str, model: str) -> tuple[str, str, str]:
     """Run one compact Gemini evidence task with a hard per-attempt time budget.
 
@@ -6572,7 +6362,8 @@ async def _parallel_gemini_analyst_once(prompt: str, report_tier: str, key: str,
         async with asyncio.timeout(per_call_seconds):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                     json={
                         "system_instruction": {"parts": [{"text": (
                             "You are an independent research-evidence analyst, not a report writer. "
@@ -6580,7 +6371,7 @@ async def _parallel_gemini_analyst_once(prompt: str, report_tier: str, key: str,
                             "quotes from supplied source evidence. Never invent a fact or number."
                         )}]},
                         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                        "generationConfig": {"maxOutputTokens": 3072, "temperature": 0.1},
+                        "generationConfig": _gemini_gen_config(model, {"maxOutputTokens": 3072, "temperature": 0.1}),
                     },
                 )
         if response.status_code == 429:
@@ -6631,50 +6422,70 @@ async def _parallel_groq_analyst(question: str, report_tier: str, prompt: str) -
     max_attempts = max(1, min(2, int(os.getenv("REPORT_PARALLEL_GROQ_MAX_KEYS", "2"))))
     quota_cooldown_ms = max(60_000, int(os.getenv("REPORT_PARALLEL_QUOTA_COOLDOWN_MS", "300000")))
     transient_cooldown_ms = max(2_000, min(30_000, int(os.getenv("REPORT_PARALLEL_TRANSIENT_COOLDOWN_MS", "12000"))))
-    for key in iter_reserved_groq_keys(groq_keys, max_keys=max_attempts):
+    reserved_keys = list(iter_reserved_groq_keys(groq_keys, max_keys=max_attempts))
+    compact_prompt = _compact_parallel_groq_prompt(prompt)
+    has_compact_retry = len(compact_prompt) < len(prompt)
+    compact_mode = False
+    for key in reserved_keys:
         if is_rate_limited(f"report:groq:{key}") or is_rate_limited(f"report:groq:{key}:{model}"):
             continue
-        try:
-            # Groq's 120B model needed more than the old 4.5 s read timeout for
-            # a full evidence prompt (the EV run's reviewer returned nothing).
-            _groq_call_s = max(4.0, min(30.0, float(os.getenv("REPORT_PARALLEL_GROQ_TIMEOUT_SECONDS", "11"))))
-            async with asyncio.timeout(_groq_call_s):
-                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.5, read=max(3.0, _groq_call_s - 1.0), write=2.5, pool=1.5)) as client:
-                    response = await client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        json={
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": "You are an independent source-evidence auditor. Output only requested JSON findings. Never invent evidence."},
-                                {"role": "user", "content": prompt},
-                            ],
-                            "max_tokens": 3000, "temperature": 0.1,
-                            "response_format": {"type": "json_object"},
-                        },
-                    )
+        while True:
+            active_prompt = compact_prompt if compact_mode else prompt
+            max_tokens = 1600 if compact_mode else 3000
+            try:
+                # Groq's 120B model needed more than the old 4.5 s read timeout for
+                # a full evidence prompt (the EV run's reviewer returned nothing).
+                _groq_call_s = max(4.0, min(30.0, float(os.getenv("REPORT_PARALLEL_GROQ_TIMEOUT_SECONDS", "11"))))
+                async with asyncio.timeout(_groq_call_s):
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.5, read=max(3.0, _groq_call_s - 1.0), write=2.5, pool=1.5)) as client:
+                        response = await client.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                            json={
+                                "model": model,
+                                "messages": [
+                                    {"role": "system", "content": "You are an independent source-evidence auditor. Output only requested JSON findings. Never invent evidence."},
+                                    {"role": "user", "content": active_prompt},
+                                ],
+                                "max_tokens": max_tokens, "temperature": 0.1,
+                                "response_format": {"type": "json_object"},
+                            },
+                        )
+            except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError) as exc:
+                mark_rate_limited(f"report:groq:{key}", transient_cooldown_ms)
+                mark_rate_limited(f"report:groq:{key}:{model}", transient_cooldown_ms)
+                log.warning("Parallel evidence Groq reviewer transient timeout (%s); trying a reserve key", type(exc).__name__)
+                break
+            except Exception as exc:
+                log.warning("Parallel evidence Groq reviewer failed: %s", type(exc).__name__)
+                break
             if response.status_code == 429:
                 mark_rate_limited(key, quota_cooldown_ms)
                 mark_rate_limited(f"report:groq:{key}", quota_cooldown_ms)
                 mark_rate_limited(f"report:groq:{key}:{model}", quota_cooldown_ms)
-                continue
+                break
             if response.status_code in (401, 403):
                 mark_rate_limited(key, 24 * 60 * 60_000)
                 mark_rate_limited(f"report:groq:{key}", 24 * 60 * 60_000)
-                continue
+                mark_rate_limited(f"report:groq:{key}:{model}", 24 * 60 * 60_000)
+                break
+            if response.status_code == 413:
+                if not compact_mode and has_compact_retry:
+                    compact_mode = True
+                    log.warning(
+                        "Parallel evidence Groq reviewer HTTP 413; retrying once with a compact prompt (%d -> %d chars)",
+                        len(prompt), len(compact_prompt),
+                    )
+                    continue
+                log.warning("Parallel evidence Groq reviewer HTTP 413 after compact retry")
+                break
             if not response.is_success:
                 log.warning("Parallel evidence Groq reviewer HTTP %d", response.status_code)
-                continue
+                break
             text = (((response.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             if text:
                 return text[:8000], f"groq:{model}"
-        except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError) as exc:
-            mark_rate_limited(f"report:groq:{key}", transient_cooldown_ms)
-            mark_rate_limited(f"report:groq:{key}:{model}", transient_cooldown_ms)
-            log.warning("Parallel evidence Groq reviewer transient timeout (%s); trying a reserve key", type(exc).__name__)
-            continue
-        except Exception as exc:
-            log.warning("Parallel evidence Groq reviewer failed: %s", type(exc).__name__)
+            break
     return "", ""
 
 
@@ -6882,7 +6693,9 @@ async def run_parallel_evidence_analysis(
             if gap not in gaps:
                 gaps.append(gap)
         for finding in result.get("findings") or []:
-            signature = re.sub(r"[^a-z0-9]+", " ", str(finding.get("claim") or "").casefold()).strip()
+            signature = re.sub(
+                r"[^a-z0-9]+", " ", str(finding.get("claim") or "").casefold(),
+            ).strip()
             if not signature:
                 continue
             prior = by_signature.get(signature)
@@ -6956,39 +6769,12 @@ async def call_report_writer(
     report_plan: dict | None = None,
     fallback_sources: list[dict] | None = None,
 ) -> tuple[str, str]:
-    depth = report_tier or "detailed"
-    # Keep the outer deadline longer than the Gemini key-pool scheduler so its
-    # multi-key waves can actually use the account diversity configured by the
-    # operator before falling back to Groq/OpenRouter.
-    deadline = {"brief":60,"detailed":150,"in_depth":240}.get(depth,150)
-    try:
-        raw, model = await asyncio.wait_for(call_gemini(user_prompt, report_tier), timeout=deadline)
-    except asyncio.TimeoutError:
-        log.warning("Report: Gemini hard deadline %ss reached — switching provider", deadline)
-        mark_rate_limited("gemini:report:provider", 60_000)
-        raw, model = "", ""
-    if raw:
-        parsed_preview = _recover_report_body(raw)
-        log.info(
-            "%sprovider=%s model=%s raw response chars=%d parsed report chars=%d section count=%d",
-            "[IN_DEPTH] " if depth == "in_depth" else "Report: ",
-            (model.split(":", 1)[0] if model else "unknown"), model or "unknown",
-            len(raw), len(parsed_preview), _report_section_count(parsed_preview),
-        )
-        return raw, model
-    raw, model = await _call_groq_report_fallback(user_prompt, depth)
-    if raw:
-        return raw, model
-    raw, model = await _call_openrouter_report_fallback(user_prompt, depth)
-    if raw:
-        return raw, model
-    log.error("Report: all configured report-writer fallbacks exhausted")
-    # Never turn a temporary provider outage into a hard 503 for a report request.
-    # Build a transparent, source-only evidence digest so the UI can still render a
-    # useful report and the normal pagination/QA pipeline can continue.
-    return _deterministic_report_json(
-        user_prompt, depth, report_plan=report_plan, sources=fallback_sources
+    """Compatibility entry point for report writer provider selection."""
+    return await report_llm.call_report_writer(
+        user_prompt, report_tier, report_plan, fallback_sources,
+        runtime=_sys.modules[__name__],
     )
+
 
 # ── AI image generation (Imagen + Gemini) ───────────────────────────────────
 # Used only for the rare, optional editorial/illustrative images described in
@@ -7073,14 +6859,16 @@ async def _call_imagen(client: httpx.AsyncClient, model: str, key: str, prompt: 
     candidates). There's no generationConfig/responseModalities here;
     Imagen is images-only by definition."""
     return await client.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict?key={key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict",
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
         json={"instances": [{"prompt": prompt}], "parameters": {"sampleCount": 1}},
     )
 
 
 async def _call_gemini_flash_image(client: httpx.AsyncClient, model: str, key: str, prompt: str) -> httpx.Response:
     return await client.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
         # NOTE: generationConfig.responseModalities used to be omitted
         # entirely. gemini-2.5-flash-image (a dedicated, image-only model)
         # tolerates that and defaults to returning an image anyway — but
@@ -7147,7 +6935,6 @@ async def generate_gemini_image(prompt: str) -> tuple[bytes | None, str]:
         log.warning("Image gen: no usable API keys configured")
         return None, ""
 
-    all_models = [(m, "gemini") for m in GEMINI_IMAGE_MODELS] + [(m, "imagen") for m in IMAGEN_MODELS]
     # Image generation is optional. Use a single bounded fallback key/model
     # rather than exhausting the entire credential pool and consuming the
     # report request's latency budget.
@@ -7179,7 +6966,7 @@ async def generate_gemini_image(prompt: str) -> tuple[bytes | None, str]:
                 mark_rate_limited(key, 24 * 60 * 60_000)
                 continue
             if not res.is_success:
-                log.warning("Image gen: HTTP %d model=%s key=...%s", res.status_code, model, key[-4:])
+                log.warning("Image gen: HTTP %d model=%s key=...%s", res.status_code, model, "[redacted]")
                 if res.status_code == 404:
                     dead_models.add(model)  # this model isn't available at all — skip straight to the next model
                 continue
@@ -7192,15 +6979,15 @@ async def generate_gemini_image(prompt: str) -> tuple[bytes | None, str]:
                     # list when every candidate image was filtered out by
                     # the safety filter — there's no separate
                     # `promptFeedback` block like the chat models have.
-                    log.warning("Image gen: Imagen returned no predictions model=%s key=...%s", model, key[-4:])
+                    log.warning("Image gen: Imagen returned no predictions model=%s key=...%s", model, "[redacted]")
                     continue
                 b64 = predictions[0].get("bytesBase64Encoded")
                 if b64:
                     elapsed = (time.perf_counter() - t0) * 1000
-                    log.info("Image gen: generated in %.0fms model=%s key=...%s", elapsed, model, key[-4:])
+                    log.info("Image gen: generated in %.0fms model=%s key=...%s", elapsed, model, "[redacted]")
                     import base64 as _b64mod
                     return _b64mod.b64decode(b64), "imagen"
-                log.warning("Image gen: prediction had no image bytes model=%s key=...%s", model, key[-4:])
+                log.warning("Image gen: prediction had no image bytes model=%s key=...%s", model, "[redacted]")
             else:
                 candidates = body.get("candidates") or []
                 if not candidates:
@@ -7215,19 +7002,19 @@ async def generate_gemini_image(prompt: str) -> tuple[bytes | None, str]:
                     # cause. Handle it explicitly here instead.
                     block_reason = (body.get("promptFeedback") or {}).get("blockReason")
                     log.warning("Image gen: no candidates returned model=%s key=...%s blockReason=%s",
-                                model, key[-4:], block_reason or "unknown")
+                                model, "[redacted]", block_reason or "unknown")
                     continue
                 parts = candidates[0].get("content", {}).get("parts", [])
                 for part in parts:
                     inline = part.get("inlineData") or part.get("inline_data")
                     if inline and inline.get("data"):
                         elapsed = (time.perf_counter() - t0) * 1000
-                        log.info("Image gen: generated in %.0fms model=%s key=...%s", elapsed, model, key[-4:])
+                        log.info("Image gen: generated in %.0fms model=%s key=...%s", elapsed, model, "[redacted]")
                         import base64 as _b64mod
                         return _b64mod.b64decode(inline["data"]), "gemini"
-                log.warning("Image gen: no image data in response model=%s key=...%s", model, key[-4:])
+                log.warning("Image gen: no image data in response model=%s key=...%s", model, "[redacted]")
         except Exception as exc:
-            log.warning("Image gen exception model=%s key=...%s: %s", model, key[-4:], exc)
+            log.warning("Image gen exception model=%s key=...%s: %s", model, "[redacted]", exc)
             continue
     log.warning("Image gen: all key×model combinations exhausted for prompt=%r", prompt[:80])
     return None, ""
@@ -7257,14 +7044,24 @@ async def _generate_ai_report_images(
             idx = 0
         if 1 <= idx <= len(candidates):
             c = candidates[idx - 1]
-            resolved[i] = {
+            selected = {
                 "url": c["url"],
                 "caption": str(entry.get("caption") or c.get("description") or "Source image").strip()[:160],
             }
+            for key in (
+                "sourceUrl", "sourceURL", "sourceTitle", "publisher", "sourceType",
+                "publicationDate", "publication_date", "domain", "method", "methodology",
+            ):
+                if c.get(key):
+                    selected[key] = c[key]
+            resolved[i] = selected
             mask[i] = True
             continue
         prompt = str(entry.get("prompt") or "").strip()
         if not prompt or len(ai_jobs) >= max_images:
+            continue
+        if _image_candidate_is_portrait(subject, prompt):
+            log.info("Image gen: skipping person-focused image because people are not central to the report question")
             continue
         # For named company/product/event reports, prefer real source-backed imagery.
         # Synthetic images are reserved for conceptual/scientific scenes where exact
@@ -7364,7 +7161,8 @@ async def extract_data_from_images(question: str, file_images: list[dict]) -> st
                 # a key was silently hanging instead of returning a fast 429).
                 async with httpx.AsyncClient(timeout=20) as client:
                     res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                         json={
                             "contents": [{"role": "user", "parts": parts}],
                             "generationConfig": {"maxOutputTokens": 65536, "temperature": 0.1},
@@ -7385,7 +7183,7 @@ async def extract_data_from_images(question: str, file_images: list[dict]) -> st
                     # already used elsewhere for 403s) and move to the next
                     # key immediately instead of burning through all models.
                     mark_rate_limited(key, 24 * 60 * 60_000)
-                    log.warning("extract_data_from_images: key=...%s got 403 — banned for 24h", key[-4:])
+                    log.warning("extract_data_from_images: key=...%s got 403 — banned for 24h", "[redacted]")
                     break
                 if res.status_code == 503:
                     continue
@@ -7401,7 +7199,7 @@ async def extract_data_from_images(question: str, file_images: list[dict]) -> st
                 # every remaining model for the same key, each eating another
                 # full timeout window. Mark it rate-limited (short backoff) and
                 # move to the next key so a bad key can't stall the whole call.
-                log.warning("extract_data_from_images error model=%s key=...%s: %s", model, key[-4:], exc)
+                log.warning("extract_data_from_images error model=%s key=...%s: %s", model, "[redacted]", exc)
                 mark_rate_limited(key, 30_000)
                 break
 
@@ -7410,21 +7208,11 @@ async def extract_data_from_images(question: str, file_images: list[dict]) -> st
 
 
 def _build_followup_search_query(question: str, conversation_context: str) -> str:
-    """
-    Follow-up report questions (e.g. "what about its peers", "and the risks")
-    are often meaningless to a search engine on their own — they only make
-    sense alongside the prior turn. Fold in a short topical hint from the
-    most recent assistant response so the search engine gets grounding,
-    without injecting a paragraph of prior answer text into the query — a
-    search engine needs a topic phrase, not 300 characters of prose.
-    """
+    """Add a short topical hint to follow-up questions for web search."""
     if not conversation_context.strip():
         return question
 
-    # conversation_context is "User: ...\n\nAssistant: ...\n\nUser: ...\n\nAssistant: ..."
-    # Grab the last Assistant block (and the User turn that produced it) —
-    # that's the exchange this follow-up is actually building on.
-    turns = [t.strip() for t in conversation_context.split("\n\n") if t.strip()]
+    turns = [turn.strip() for turn in conversation_context.split("\n\n") if turn.strip()]
     last_assistant = ""
     last_user = ""
     for idx in range(len(turns) - 1, -1, -1):
@@ -7436,16 +7224,10 @@ def _build_followup_search_query(question: str, conversation_context: str) -> st
     if not last_assistant:
         return question
 
-    # If that exchange was just smalltalk (e.g. "hi" → "Hello, nice to meet
-    # you"), it carries no real topical grounding — folding it in actively
-    # hurts search relevance rather than helping it, so treat this as if
-    # there were no prior context at all.
     from routes.chat import is_smalltalk
     if is_smalltalk(last_user):
         return question
 
-    # Minimal topic only — first clause of the prior answer, capped short —
-    # enough to ground a pronoun ("its peers") without injecting prose.
     topic = re.split(r"[.\n]", last_assistant, maxsplit=1)[0].strip()[:60]
     return f"{question} {topic}".strip() if topic else question
 
@@ -7541,31 +7323,19 @@ _TRAILING_TIME_PHRASE_RE = re.compile(
 # token-budget changes needed here).
 _QUERY_BUILDER_MODEL = "openai/gpt-oss-20b"
 
-_QUERY_BUILDER_SYSTEM_PROMPT = """You turn a finance research question into short, clean web-search queries.
+_QUERY_BUILDER_SYSTEM_PROMPT = """You plan independent web searches for an evidence-grounded research report.
 
-A RECENT CONVERSATION may be provided above the QUESTION for grounding only.
-If QUESTION is a short follow-up that has no real subject of its own — it
-leans on a pronoun ("it", "that", "this"), or is just an instruction to
-turn the prior answer into a report/summary/breakdown ("give it as a
-report", "make that a report", "turn this into a report") — first resolve
-what QUESTION is actually asking about from the conversation (the company,
-person, sector, event, or topic the prior turns were discussing). Build
-every query below about that resolved subject, never about the literal
-follow-up phrase itself. If QUESTION already names its own subject, ignore
-the conversation and use QUESTION as-is — do not go looking for a different
-topic in it.
+Resolve a subject-less follow-up from the supplied conversation. If the question names its own subject, use that subject only.
 
-Given the (resolved) question, produce up to 4 short search-engine queries (each under 12 words, plain keyword/phrase style, no question marks, no "show me"/"what is"/other conversational framing) that together cover these angles:
-1. The core question itself
-2. Key financial metrics / hard numbers for the same topic
-3. Sector or peer comparison for the same topic (skip if the question is already a direct comparison)
-4. Historical trend / performance over time for the same topic (skip if the core question already asks about a specific time trend)
+Return concise web-search queries (plain keywords/phrases, each under 14 words, no conversational framing) that cover distinct evidence angles relevant to THIS request. Choose angles from the subject and evidence needs; do not force irrelevant dimensions. Prefer primary data, official datasets/regulator releases, dated series, original filings, methodological definitions, segment/sector breakdowns, comparison groups, alternative explanations, counter-evidence, and expert claims when relevant. Use separate queries to retrieve different evidence rather than paraphrasing the same query. The exact number requested by the caller is a maximum, not a quota.
 
-Respond ONLY with a JSON object, no other text: {"queries": ["...", "...", ...]}"""
+Do not design report sections or a fixed report outline here. This is only a retrieval plan. Do not invent facts or answer the research question.
+
+Respond ONLY with a JSON object: {\"queries\": [\"...\", \"...\"]}"""
 
 
-async def _llm_build_multi_angle_queries(question: str, conversation_context: str = "") -> list[str] | None:
-    """Best-effort Groq call that rewrites `question` into up to 4 clean
+async def _llm_build_multi_angle_queries(question: str, conversation_context: str = "", max_queries: int = 4) -> list[str] | None:
+    """Best-effort Groq call that rewrites `question` into bounded clean
     Tavily-ready search queries. Returns None (never []) on any failure —
     missing keys, HTTP/parse errors, empty/malformed output — so the caller
     can fall back to the regex-based _build_multi_angle_search_queries
@@ -7604,20 +7374,20 @@ async def _llm_build_multi_angle_queries(question: str, conversation_context: st
                     json={
                         "model": _QUERY_BUILDER_MODEL,
                         "messages": [
-                            {"role": "system", "content": _QUERY_BUILDER_SYSTEM_PROMPT},
+                            {"role": "system", "content": _QUERY_BUILDER_SYSTEM_PROMPT + f"\n\nReturn at most {max(1, min(12, int(max_queries)))} distinct queries."},
                             {"role": "user", "content": user_content},
                         ],
-                        "max_tokens": 300,
+                        "max_tokens": 700 if max_queries > 4 else 300,
                         "temperature": 0.2,
                         "response_format": {"type": "json_object"},
                     },
                 )
             if res.status_code in (401, 403):
-                log.warning("Query-builder Groq HTTP %d on key ...%s — banning for 24h", res.status_code, key[-4:])
+                log.warning("Query-builder Groq HTTP %d on key ...%s — banning for 24h", res.status_code, "[redacted]")
                 mark_rate_limited(key, 24 * 60 * 60_000)
                 continue
             if res.status_code == 429:
-                log.debug("Query-builder Groq 429 on key ...%s", key[-4:])
+                log.debug("Query-builder Groq 429 on key ...%s", "[redacted]")
                 retry_ms = 60_000
                 try:
                     retry_ms = max(60_000, int(float(res.headers.get("retry-after", "60")) * 1000))
@@ -7627,7 +7397,7 @@ async def _llm_build_multi_angle_queries(question: str, conversation_context: st
                 mark_rate_limited(f"{key}:{_QUERY_BUILDER_MODEL}", retry_ms)
                 continue
             if not res.is_success:
-                log.debug("Query-builder Groq HTTP %d on key ...%s", res.status_code, key[-4:])
+                log.debug("Query-builder Groq HTTP %d on key ...%s", res.status_code, "[redacted]")
                 continue
             data = res.json()
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -7637,9 +7407,17 @@ async def _llm_build_multi_angle_queries(question: str, conversation_context: st
                 return None
             log.info("Query-builder: Groq produced %d angle quer(y/ies): %r",
                       len(queries), [q[:60] for q in queries])
-            return queries[:4]
+            # Deduplicate normalized query phrases and respect the tier-specific retrieval budget.
+            seen_query_keys = set()
+            unique_queries = []
+            for query in queries:
+                key = re.sub(r"[^a-z0-9]+", " ", query.casefold()).strip()
+                if key and key not in seen_query_keys:
+                    seen_query_keys.add(key)
+                    unique_queries.append(query)
+            return unique_queries[:max(1, min(12, int(max_queries)))]
         except Exception as exc:
-            log.debug("Query-builder Groq exception on key ...%s: %s", key[-4:], exc)
+            log.debug("Query-builder Groq exception on key ...%s: %s", "[redacted]", exc)
             continue
 
     log.info("Query-builder: Groq unavailable/exhausted — falling back to regex query builder")
@@ -7694,7 +7472,7 @@ def _research_domain_from_intent(question: str, intent: "RequestIntent | None") 
                             "genomic", "pathogen", "influenza", "h5n1", "trial", "vaccine")
     ):
         return "scientific"
-    if "regulatory" in evidence or "regulat" in label or any(k in text for k in ("regulation", "regulatory", "compliance", "sebi", "policy", "law")):
+    if "regulat" in label or any(k in text for k in ("free trade agreement", "trade agreement", "fta", "regulation", "regulatory", "compliance", "sebi", "policy", "law")):
         return "regulatory"
     if "comparison" in evidence or " vs " in text or " versus " in text:
         return "comparison"
@@ -7870,6 +7648,12 @@ def _drop_boilerplate_and_entityless_sources(sources: list[dict], question: str,
     try:
         entities = [e for e in extract_requested_entities(question) if _evidence_entity_key(e) not in _AMBIGUOUS_SINGLE_ENTITY_WORDS]
         resolver = EntityResolver(entities) if len(entities) >= 2 else None
+        # FPI hypothesis testing deliberately spans multiple channels/institutions;
+        # requiring every source to mention two names extracted from the prompt
+        # can delete official FDI, debt, IPO and sector-series sources. Boilerplate
+        # filtering below still applies.
+        if _is_fpi_flow_research(question):
+            resolver = None
     except Exception:
         resolver = None
     kept: list[dict] = []
@@ -8054,6 +7838,45 @@ def _rank_sources_by_topic(sources: list[dict], question: str, limit: int, per_d
     return internal + chosen + deferred
 
 
+def _has_promoter_share_sale_context(hay: str) -> bool:
+    """Return true only when a promoter/seller action concerns equity shares.
+
+    Exchange pages and scraped PDFs often contain unrelated phrases such as
+    "Vijay Sales", "sales increased", or generic promoter boilerplate. A sale
+    word elsewhere on the page is not evidence of a promoter stake transaction.
+    """
+    action_re = re.compile(
+        r"\b(?:sold|sell(?:s|ing)?|dispos(?:al|ed)|divest\w*|offload\w*|"
+        r"transfer(?:red)?|sale|offer\s+for\s+sale|OFS)\b", re.I,
+    )
+    actor_re = re.compile(
+        r"\b(?:promoters?|promoter\s+group|selling\s+shareholders?|"
+        r"outgoing\s+promoters?|sellers?)\b", re.I,
+    )
+    promoter_re = re.compile(r"\b(?:promoters?|promoter\s+group)\b", re.I)
+    share_asset_re = re.compile(
+        r"\b(?:equity\s+shares?|shares?|shareholding|share\s+capital|"
+        r"paid[- ]up\s+capital|stake|holdings?)\b", re.I,
+    )
+    negative_re = re.compile(
+        r"\b(?:no|not|never|without)\b.{0,80}\b(?:sold|sell|sale|dispos(?:al|ed)|"
+        r"divest\w*|offload\w*|transfer(?:red)?)\b", re.I,
+    )
+    cleaned = re.sub(r"\bnon[-â€â€‘â€“ ]disposal\b", " ", str(hay or ""), flags=re.I)
+    fragments = re.split(r"(?<=[.!?])\s+|[;\n|]+", cleaned)
+    for index, fragment in enumerate(fragments):
+        context = " ".join(fragments[max(0, index - 1):min(len(fragments), index + 2)])[:900]
+        for action in action_re.finditer(fragment):
+            left = max(0, action.start() - 240)
+            right = min(len(context), action.end() + 240)
+            window = context[left:right]
+            if negative_re.search(window):
+                continue
+            if actor_re.search(window) and promoter_re.search(window) and share_asset_re.search(window):
+                return True
+    return False
+
+
 def _filter_relevant_sources(
     sources: list[dict], question: str, intent: "RequestIntent | None", *,
     require_context: bool = False, report_tier: str | None = None,
@@ -8128,6 +7951,116 @@ def _filter_relevant_sources(
                 variants.add(term + "es")
             return any(re.search(rf"(?<![a-z0-9]){re.escape(variant)}(?![a-z0-9])", hay) for variant in variants)
         return sum(1 for term in candidate_terms if matches(term))
+
+    # FPI hypothesis-testing explicitly asks whether selling in listed secondary
+    # market shares coexists with investment through primary issues, debt, FDI,
+    # custody and sector reallocation. These complementary channels may not say
+    # "FII" in the page text, so the generic query-term gate used to discard
+    # evidence necessary to test the user's counter-hypothesis.
+    if _is_fpi_flow_research(question, intent):
+        dimension_patterns = {
+            "portfolio_flows": re.compile(r"(?i)\b(?:fii|fiis|fpi|fpis|foreign portfolio|foreign institutional|net portfolio investment|net equity investment|portfolio flows?)\b"),
+            "primary_market": re.compile(r"(?i)\b(?:ipo|ipos|qip|qips|primary market|public issue|public offering|new issuance|follow.on offering)\b"),
+            "ownership": re.compile(r"(?i)\b(?:shareholding pattern|foreign shareholding|ownership|frontline stocks?|nifty ?50|sensex|listed equities|secondary market|equity holdings?)\b"),
+            "sector": re.compile(r"(?i)\b(?:sectoral|sector wise|sector-wise|financial services|capital goods|information technology|automobiles?|healthcare|energy|industrials?)\b"),
+            "direct_investment": re.compile(r"(?i)\b(?:foreign direct investment|\bfdi\b|\bdpiit\b|greenfield|brownfield|equity capital inflows)\b"),
+            "debt": re.compile(r"(?i)\b(?:debt securities|government securities|corporate bonds?|fully accessible route|\bfar\b|voluntary retention route|\bvrr\b|bond inflows?)\b"),
+            "macro_drivers": re.compile(r"(?i)\b(?:rupee|currency depreciation|us treasury|bond yields?|emerging markets?|risk.off|valuation|earnings growth|geopolitical|global flows?)\b"),
+            "expert_claim": re.compile(r"(?i)\b(?:gautam duggad|primary issuance|equivalent amount|ten years|10 years|decade)\b"),
+        }
+        ranked_fpi = []
+        for score, hits, idx, src in scored:
+            hay = _hay(src)
+            title = str(src.get("title") or "")
+            url = str(src.get("url") or "")
+            body = " ".join(str(src.get(k) or "") for k in ("pageContent", "page_content", "fullContent", "snippet"))
+            groups = {name for name, pattern in dimension_patterns.items() if pattern.search(hay)}
+            if not groups:
+                continue
+            host = (urlparse(url).hostname or "").casefold()
+            official = any(host == d or host.endswith("." + d) for d in (
+                "sebi.gov.in", "rbi.org.in", "nsdl.co.in", "cdslindia.com", "nseindia.com",
+                "bseindia.com", "dpiit.gov.in", "mospi.gov.in", "pib.gov.in", "imf.org", "worldbank.org",
+            ))
+            has_quant_or_period = bool(re.search(r"\d|\b(?:fy\s?\d{2,4}|calendar year|monthly|quarterly|annual|historical|inflow|outflow|investment|holdings|shareholding)\b", body, re.I))
+            if require_context:
+                # Require actual article/publisher text, not a title-only keyword hit.
+                if len(body.strip()) < 220 or not has_quant_or_period:
+                    continue
+                # A single clearly identified channel can itself be material
+                # counter-evidence (FDI, IPO/QIP, debt, sector holdings, or the
+                # named analyst claim). Do not require every relevant page to
+                # restate the FPI acronym when it substantiates a distinct channel.
+            rank_score = score + hits * 4 + len(groups) * 10 + (12 if official else 0)
+            ranked_fpi.append((rank_score, len(groups), idx, src))
+        ranked_fpi.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        fpi_limit = 40 if require_context else 50
+        chosen = [item[3] for item in ranked_fpi[:fpi_limit]]
+        if chosen:
+            log.info("FPI-flow relevance gate retained %d/%d sources (require_context=%s; complementary channels preserved)",
+                     len(chosen), len(sources), require_context)
+            return internal + chosen
+        log.warning("FPI-flow relevance gate retained 0/%d sources; no source matched a material investment-flow dimension", len(sources))
+        return internal
+
+    # Sector-rotation reports are built from sector-index performance, institutional
+    # flow, ownership, valuation/factor and macro pages. Those pages (NSDL sector-wise
+    # FPI tables, NSE/SEBI data pages, ownership news) almost never contain the words
+    # "sector rotation", so the generic two-subject-term gate below discarded nearly
+    # all of them in a live run (87 of 112 results) and kept mostly commentary blogs.
+    # Rank by evidence dimension instead, and keep official data hosts.
+    if _is_sector_rotation_report_request(question):
+        rotation_dimensions = {
+            "sector_performance": re.compile(r"(?i)\b(?:sectoral|sector[ -]wise|sector indices|sector index|sector returns?|sector performance|sector leadership|sector rotation|nifty (?:auto|bank|it|fmcg|pharma|metal|realty|energy|psu bank|private bank|financial services|healthcare|media|consumer durables|infra))\b"),
+            "flows": re.compile(r"(?i)\b(?:fii|fiis|fpi|fpis|dii|diis|foreign (?:portfolio|institutional)|domestic institutional|net (?:buyers?|sellers?|inflows?|outflows?)|mutual fund flows?|sip inflows?|nsdl|etf flows?)\b"),
+            "ownership": re.compile(r"(?i)\b(?:shareholding pattern|institutional ownership|ownership|holdings? (?:of|by)|stake in nifty|16[ -]quarter)\b"),
+            "valuation_factor": re.compile(r"(?i)\b(?:p/?e ratio|price[ -]to[ -]earnings|valuations?|momentum|quality factor|value factor|low volatility|factor (?:performance|investing|rotation)|style factor)\b"),
+            "macro_volatility": re.compile(r"(?i)\b(?:india vix|volatility|rupee|bond yields?|crude|repo rate|rbi|inflation|tariffs?|gdp|earnings (?:growth|season)|corporate earnings)\b"),
+        }
+        rotation_official_hosts = (
+            "nsdl.co.in", "cdslindia.com", "nseindia.com", "nseindia.in", "niftyindices.com", "bseindia.com",
+            "sebi.gov.in", "rbi.org.in", "amfiindia.com", "mospi.gov.in", "pib.gov.in", "imf.org", "worldbank.org",
+        )
+        try:
+            from utils.site_crawler import _is_utility_link as _rotation_utility_link
+        except Exception:  # pragma: no cover - import safety only
+            _rotation_utility_link = lambda _u: False  # noqa: E731
+        ranked_rotation = []
+        for score, hits, idx, src in scored:
+            url = str(src.get("url") or "")
+            host = (urlparse(url).hostname or "").casefold()
+            if _LOW_VALUE_HOST_RE.search(host) or _rotation_utility_link(url):
+                continue
+            body = " ".join(str(src.get(k) or "") for k in ("pageContent", "page_content", "fullContent", "snippet"))
+            title = str(src.get("title") or "")
+            hay = f"{title} {url} {body}"
+            groups = {name for name, pattern in rotation_dimensions.items() if pattern.search(hay)}
+            if not groups:
+                continue
+            official = any(host == d or host.endswith("." + d) for d in rotation_official_hosts)
+            crawled = str(src.get("source_type") or src.get("kind") or "") == "website_crawl"
+            # Pages found by following internal links must prove their own
+            # relevance with two evidence dimensions, not one passing mention.
+            if crawled and len(groups) < 2:
+                continue
+            digits = sum(ch.isdigit() for ch in body[:20000])
+            if require_context:
+                minimum_chars = 120 if official else 220
+                if len(body.strip()) < minimum_chars:
+                    continue
+                if not official and digits < 20 and len(groups) < 2:
+                    continue
+            rank = score + len(groups) * 10 + (14 if official else 0) + min(digits // 200, 6) * 2
+            ranked_rotation.append((rank, len(groups), idx, src))
+        ranked_rotation.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        rotation_limit = 40 if require_context else 50
+        chosen_rotation = [item[3] for item in ranked_rotation[:rotation_limit]]
+        if chosen_rotation:
+            log.info("Sector-rotation relevance gate retained %d/%d sources (require_context=%s; official data hosts preserved)",
+                     len(chosen_rotation), len(sources), require_context)
+            return internal + chosen_rotation
+        log.warning("Sector-rotation relevance gate retained 0/%d sources", len(sources))
+        return internal
 
     # Banking queries were previously routed through generic finance relevance
     # logic. Because words like "RBI", "regulation", and "bank" occur on many
@@ -8273,29 +8206,194 @@ def _filter_relevant_sources(
         return internal
 
     # Exchange/regulator disclosure pages often use formal filing labels rather
-    # than the user's wording (e.g. "Regulation 29" instead of "promoter stake
-    # sale"). Preserve these official primary sources for promoter-transaction
-    # research when both the topic and the filing vocabulary match.
+    # than the user's wording. For stake-sale/exit requests, however, returning
+    # every page that merely says "promoter" or "shareholding" lets pledge
+    # notices and old filings dominate the writer's evidence context.
     promoter_topic = bool(re.search(
         r"promoter|share pledg|stake sale|promoter exit|bulk deal|block deal|offer for sale",
         f"{getattr(intent, 'resolved_topic', '')} {question}", re.I,
     ))
     if promoter_topic:
+        promoter_event_task = bool(re.search(
+            r"\bpromoter\b|\bpromoters\b", f"{getattr(intent, 'resolved_topic', '')} {question}", re.I,
+        ) and re.search(
+            r"\b(?:stake\s+sales?|exits?|sell(?:ing)?|sale|sales|disposal|divest(?:ment|ed)?)\b",
+            question, re.I,
+        ))
+
+        def _promoter_source_window_match(src: dict, hay: str) -> bool | None:
+            periods = requested_indian_fy_quarters(question)
+            if not periods:
+                return None
+            start_day, end_day = periods[0][1], periods[-1][2]
+            title = str(src.get("title") or src.get("publisherPageTitle") or src.get("publisher_page_title") or "")
+            lead = " ".join((title, str(src.get("snippet") or ""), hay[:700]))
+            lead_date = next((
+                parsed for match in _CALENDAR_DATE_RE.finditer(lead)
+                if (parsed := _parse_calendar_date(match.group(0))) is not None
+            ), None)
+            # Exchange offer-for-sale notices are frequently dated after the
+            # last completed quarter and quote earlier historical dates in the
+            # same filing. Their displayed filing date is the operative date
+            # for the proposal, so an out-of-window notice cannot be pulled in
+            # by unrelated older dates lower on the page.
+            if (
+                lead_date is not None
+                and not (start_day <= lead_date <= end_day)
+                and re.search(r"\b(?:offer\s+for\s+sale|OFS|proposed\s+sale)\b", lead, re.I)
+            ):
+                return False
+            action_dates: list = []
+            action_re = re.compile(
+                r"\b(?:sold|sell(?:s|ing)?|sale|dispos(?:al|ed)|divest\w*|offload\w*|"
+                r"transfer(?:red)?|offer\s+for\s+sale|OFS)\b", re.I,
+            )
+            for action in action_re.finditer(hay[:60_000]):
+                left = max(0, action.start() - 240)
+                right = min(len(hay), action.end() + 240)
+                action_context = hay[left:right]
+                if not _has_affirmative_sale_action(action_context):
+                    continue
+                for date_match in _CALENDAR_DATE_RE.finditer(action_context):
+                    parsed = _parse_calendar_date(date_match.group(0))
+                    date_left = max(0, date_match.start() - 100)
+                    date_right = min(len(action_context), date_match.end() + 100)
+                    date_context = action_context[date_left:date_right]
+                    date_prefix = action_context[max(0, date_match.start() - 140):date_match.start()]
+                    # Dates attached to an SPA/letter of offer are agreement or
+                    # notice dates, not completed-sale dates. Keep them out of
+                    # the event-quarter decision unless the same passage says
+                    # the transfer/sale was completed on that date.
+                    agreement_date = bool(re.search(
+                        r"\b(?:SPA|share\s+purchase\s+agreement|share\s+sale\s+agreement|"
+                        r"agreement|letter\s+of\s+offer)\s+(?:dated|of)\s*$", date_prefix, re.I,
+                    ))
+                    explicit_event_date = bool(re.search(
+                        r"\b(?:date\s+of\s+(?:transfer|sale|transaction)|transaction\s+date|"
+                        r"sale\s+date|transfer\s+date|sold|disposed|divested|transferred|"
+                        r"completed\s+(?:the\s+)?(?:transfer|sale)|consummat\w*)\b", date_context, re.I,
+                    ))
+                    if parsed and explicit_event_date and (not agreement_date or re.search(
+                        r"\b(?:completed|consummat\w*|date\s+of\s+(?:transfer|sale|transaction))\b",
+                        date_context, re.I,
+                    )) and parsed not in action_dates:
+                        action_dates.append(parsed)
+            if action_dates:
+                return any(start_day <= item <= end_day for item in action_dates)
+
+            header_dates: list = []
+            for value in (
+                src.get("title"), src.get("published"), src.get("publishedDate"),
+                src.get("publication_date"), src.get("publicationDate"),
+            ):
+                for date_match in _CALENDAR_DATE_RE.finditer(str(value or "")):
+                    parsed = _parse_calendar_date(date_match.group(0))
+                    if parsed and parsed not in header_dates:
+                        header_dates.append(parsed)
+            if not header_dates:
+                filing_date_match = re.search(
+                    r"(?im)^\s*(?:date|filing\s+date|disclosure\s+date)\s*[:\-]\s*([^\n|]{6,50})",
+                    hay[:2_000],
+                )
+                if filing_date_match:
+                    filing_date = _parse_calendar_date(filing_date_match.group(1))
+                    if filing_date:
+                        header_dates.append(filing_date)
+            if header_dates:
+                return any(start_day <= item <= end_day for item in header_dates)
+
+            body_dates = [
+                parsed for match in _CALENDAR_DATE_RE.finditer(hay[:60_000])
+                if (parsed := _parse_calendar_date(match.group(0))) is not None
+            ]
+            if body_dates and all(item < start_day or item > end_day for item in body_dates):
+                return False
+            return None
+
+        _has_affirmative_sale_action = _has_promoter_share_sale_context
+
         official_disclosure = []
         for _score, _hits, _idx, src in scored:
             url = str(src.get("url") or "")
-            host = (urlparse(url).netloc or "").lower()
+            host = (urlparse(url).hostname or "").casefold()
             hay = " ".join(str(src.get(k) or "") for k in ("title", "snippet", "fullContent", "pageContent", "page_content")).casefold()
-            official_host = any(x in host for x in ("nseindia.com", "bseindia.com", "sebi.gov.in"))
+            official_host = any(
+                host == domain_name or host.endswith("." + domain_name)
+                for domain_name in ("nseindia.com", "bseindia.com", "sebi.gov.in")
+            )
+            promoter_signal = bool(re.search(
+                r"\b(?:promoter|promoters|promoter group|selling shareholder|seller)\b", hay,
+            ))
+            transaction_signal = _has_affirmative_sale_action(hay)
             filing_terms = bool(re.search(
-                r"promoter|shareholding|bulk.{0,10}deal|block.{0,10}deal|offer.{0,10}sale|"
-                r"regulation\s*29|disclos|pledge|stake|divest|share sale",
+                r"promoter|bulk.{0,10}deals?|block.{0,10}deals?|offer.{0,10}sale|"
+                r"regulation\s*29|SAST|disclos|stake|divest|share sale|selling shareholder",
                 hay, re.I,
             ))
-            if official_host and filing_terms:
-                official_disclosure.append(src)
+            if not (official_host and filing_terms):
+                continue
+            if promoter_event_task:
+                if require_context:
+                    page_text = str(
+                        src.get("pageContent") or src.get("page_content")
+                        or src.get("publisherEvidenceExcerpt") or src.get("publisher_evidence_excerpt") or ""
+                    ).strip()
+                    fetch_status = str(src.get("pageFetchStatus") or src.get("page_fetch_status") or "").casefold()
+                    if fetch_status not in {"ok", "success", "fetched"} or len(page_text) < 180:
+                        continue
+                    hay = " ".join((str(src.get("title") or ""), page_text)).casefold()
+                    fetch_url = str(
+                        src.get("pageFetchFinalUrl") or src.get("pageFetchUrl")
+                        or src.get("publisherPageUrl") or src.get("url") or ""
+                    )
+                    fetch_host = (urlparse(fetch_url).hostname or "").casefold()
+                    official_host = any(
+                        fetch_host == domain_name or fetch_host.endswith("." + domain_name)
+                        for domain_name in ("nseindia.com", "bseindia.com", "sebi.gov.in")
+                    )
+                    promoter_signal = bool(re.search(
+                        r"\b(?:promoter|promoters|promoter group|selling shareholder|seller)\b", hay,
+                    ))
+                    transaction_signal = _has_affirmative_sale_action(hay)
+                    filing_terms = bool(re.search(
+                        r"promoter|bulk.{0,10}deal|block.{0,10}deal|offer.{0,10}sale|"
+                        r"regulation\s*29|SAST|disclos|stake|divest|share sale|selling shareholder",
+                        hay, re.I,
+                    ))
+                    # The final pass accepts only a fetched official filing
+                    # with a direct promoter-seller/share-sale context.
+                    if not (official_host and promoter_signal and transaction_signal and filing_terms):
+                        continue
+                    if re.search(r"\b(?:pledge|encumbrance|non.disposal undertaking)\b", hay) and not transaction_signal:
+                        continue
+                    if _promoter_source_window_match(src, hay) is False:
+                        continue
+                else:
+                    # Before fetching, preserve official promoter filing
+                    # candidates even when snippets omit the transaction
+                    # passage. The page fetch applies the strict transaction
+                    # and date checks above.
+                    transaction_candidate = bool(re.search(
+                        r"\b(?:regulation\s*29|SAST|stake\s+sale|share\s+sale|"
+                        r"promoter\s+exit|offer\s+for\s+sale|OFS|bulk.{0,10}deals?|block.{0,10}deals?)\b", hay, re.I,
+                    ))
+                    transaction_context_candidate = promoter_signal or bool(re.search(
+                        r"\b(?:bulk|block)\s+.{0,10}deals?\b", hay, re.I,
+                    ))
+                    if not (official_host and transaction_context_candidate and filing_terms and transaction_candidate):
+                        continue
+                    # Search may return a page body rather than a bare snippet.
+                    # If that candidate already exposes an explicit transaction
+                    # date, reject out-of-window sales before spending a fetch slot.
+                    # Unknown dates remain eligible for the strict fetched-page pass.
+                    if _promoter_source_window_match(src, hay) is False:
+                        continue
+            official_disclosure.append(src)
         if official_disclosure:
             return internal + official_disclosure
+        if promoter_event_task:
+            log.warning("Promoter-sale relevance gate retained 0/%d official in-window transaction sources", len(scored))
+            return internal
 
     high_grounding = domain in {"scientific", "regulatory", "comparison", "financial"}
     if high_grounding and terms:
@@ -8591,6 +8689,132 @@ def _build_sector_quarterly_return_chart(rows: list, source_manifest: list) -> d
     }
 
 
+# Heading patterns used to anchor injected sector charts under the section they
+# belong to. The writer's planner names sections freely ("Quarterly Sectoral
+# Leadership Heatmap"), so match on intent words rather than exact titles.
+_SECTOR_HEATMAP_HEADING_RE = (
+    r"(?im)^#{1,6}\s+[^\n]*(?:heat[ -]?map|sector(?:al)?\s+leadership|"
+    r"quarterly\s+sector(?:al)?\s+(?:leadership|performance|return))[^\n]*$"
+)
+_SECTOR_QUARTERLY_HEADING_RE = (
+    r"(?im)^#{1,6}\s+[^\n]*(?:eight[ -]?quarter|quarterly[ -]sector[ -]?return matrix|"
+    r"sector performance matrix|quarterly sector return analysis|sector return matrix|"
+    r"quarterly\s+sector(?:al)?|sector(?:al)?\s+(?:leadership|performance|rotation\s+(?:pattern|history|timeline)))"
+    r"[^\n]*$"
+)
+_SECTOR_RANKING_HEADING_RE = (
+    r"(?im)^#{1,6}\s+[^\n]*(?:leaders?\s*(?:and|&)\s*laggards?|sector\s+rankings?|"
+    r"rotation\s+patterns?|leadership|cumulative|compounded)[^\n]*$"
+)
+
+
+def _end_of_first_paragraph_after(text: str, heading_end: int) -> int:
+    """Offset just after the intro paragraph that follows a heading.
+
+    The chart goes after the section's opening paragraph (which usually says
+    "the heatmap below ..."), not between the heading and its text. When the
+    heading is followed directly by a table, list, heading or end of text, the
+    chart goes right after the heading.
+    """
+    rest = text[heading_end:]
+    # Body text glued to the heading (no blank line) is part of the heading
+    # block: keep the established behaviour of anchoring right after it.
+    if not re.match(r"[ \t]*\n[ \t]*\n", rest):
+        return heading_end
+    lead = re.match(r"\s*", rest)
+    start = heading_end + (lead.end() if lead else 0)
+    if start >= len(text):
+        return heading_end
+    first = text[start:start + 1]
+    if first in {"#", "|", "-", "*", ">", "["} or re.match(r"\d+[.)]\s", text[start:start + 6]):
+        return heading_end
+    block_end = re.search(r"\n\s*\n", text[start:])
+    return start + block_end.start() if block_end else len(text.rstrip())
+
+
+def _insert_sector_chart_marker(
+    report_text: str,
+    chart_index: int,
+    heading_pattern: str | None = None,
+) -> str:
+    """Place a real chart placeholder after its matching heading or at report end."""
+    text = str(report_text or "")
+    marker = f"[CHART_{int(chart_index)}]"
+    marker_re = re.compile(rf"\[\s*CHART[_ ]{int(chart_index)}\s*\]", re.I)
+    if marker_re.search(text):
+        return text
+    if heading_pattern:
+        heading = re.search(heading_pattern, text)
+        if heading:
+            insert_at = _end_of_first_paragraph_after(text, heading.end())
+            return text[:insert_at] + "\n\n" + marker + text[insert_at:]
+    source_headings = list(re.finditer(
+        r"(?im)^#{1,6}\s+(?:data\s+sources?|sources?|references|bibliography)\b[^\n]*$",
+        text,
+    ))
+    excluded_pattern = re.compile(
+        r"(?i)^(?:source[-\s]+derived\s+evidence|source[-\s]+extracted\b.*|"
+        r"evidence\s+gaps\s+and\s+interpretation|evidence[-\s]+based\s+research\s+record|"
+        r"research\s+provenance)$"
+    )
+    excluded_headings = []
+    for match in re.finditer(r"(?m)^(#{1,6})\s+(.*?)\s*#*\s*$", text):
+        heading = re.sub(r"[*_`]", "", match.group(2)).strip()
+        if excluded_pattern.match(heading):
+            excluded_headings.append(match)
+    # A final cleanup removes these internal-only sections. Keep a fallback
+    # chart marker ahead of the last such section so the chart spec and report
+    # text do not become detached at the public-output boundary.
+    boundaries = source_headings or excluded_headings
+    if boundaries:
+        insert_at = boundaries[-1].start()
+        before = text[:insert_at].rstrip()
+        after = text[insert_at:].lstrip("\n")
+        chart_block = f"{marker}\n\n{after}"
+        return f"{before}\n\n{chart_block}" if before else chart_block
+    return text.rstrip() + "\n\n" + marker + "\n"
+
+
+def _is_sector_return_heatmap(chart: object) -> bool:
+    if not isinstance(chart, dict) or normalize_chart_type(
+        chart.get("type") or chart.get("chartType") or chart.get("chart_type") or ""
+    ) != "heatmap":
+        return False
+    title = str(chart.get("title") or chart.get("name") or "").casefold()
+    return bool(
+        re.search(r"\bsector(?:al)?\b", title)
+        and re.search(r"\b(?:return|rotation|performance)\b", title)
+    )
+
+
+def _use_calculated_sector_return_heatmap(
+    report_text: str,
+    charts: list,
+    calculated_heatmap: dict,
+) -> tuple[str, list]:
+    """Replace writer-made sector heatmaps with the verified eight-quarter matrix."""
+    result = list(charts or [])
+    matching_indices = [i for i, chart in enumerate(result) if _is_sector_return_heatmap(chart)]
+    if matching_indices:
+        for index in matching_indices:
+            previous = result[index]
+            # Keep only the writer's short editorial explanation. Every data,
+            # source, title and provenance field comes from the deterministic
+            # market-data matrix so a shorter model-made window cannot win.
+            editorial = {
+                key: previous[key]
+                for key in ("rationale", "takeaway")
+                if isinstance(previous, dict) and str(previous.get(key) or "").strip()
+            }
+            result[index] = {**previous, **calculated_heatmap, **editorial}
+        marker_index = matching_indices[0] + 1
+        text = _insert_sector_chart_marker(report_text, marker_index, _SECTOR_HEATMAP_HEADING_RE)
+        return text, result
+
+    result.append(calculated_heatmap)
+    return _insert_sector_chart_marker(report_text, len(result), _SECTOR_HEATMAP_HEADING_RE), result
+
+
 def _build_sector_compounded_return_chart(rows: list, source_manifest: list) -> dict | None:
     """Rank complete sector series by compounded return across the requested quarters."""
     if not isinstance(rows, list) or not rows:
@@ -8704,12 +8928,18 @@ def _sector_rotation_topic_quality_filter(report_text: str, charts: list) -> tup
             " ".join(str(x) for x in (chart.get("labels") or [])[:30]),
             " ".join(str(x) for x in (chart.get("categories") or [])[:30]),
         ])
-        signature = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
         # Stable payload signature prevents identical visuals with slightly
         # different titles from appearing twice in the same report.
         try:
             payload = json.dumps(
-                {k: chart.get(k) for k in ("type", "chartType", "data", "series", "labels", "categories", "datasets")},
+                {k: chart.get(k) for k in (
+                    "type", "chartType", "data", "series", "labels", "categories", "datasets",
+                    # Native-shape visuals keep observations outside a
+                    # `series` array. Omitting these fields made every
+                    # heatmap share the same type-only fingerprint, so a
+                    # shorter model preview could win over verified data.
+                    "rows", "columns", "values", "events", "nodes", "links", "sets", "stages",
+                )},
                 sort_keys=True, default=str, separators=(",", ":"),
             )
         except Exception:
@@ -8852,7 +9082,10 @@ def _build_sector_quarterly_return_heatmap(rows: list, source_manifest: list) ->
         return None
     return {
         "type": "heatmap",
-        "title": "Quarterly Sector Return Heatmap",
+        "title": (
+            f"Quarterly Sector Return Heatmap ({len(quarters)} completed quarters: "
+            f"{quarters[0]} to {quarters[-1]})"
+        ),
         "xLabel": "Completed calendar quarter",
         "yLabel": "NSE sector index",
         "unit": "%",
@@ -8863,6 +9096,33 @@ def _build_sector_quarterly_return_heatmap(rows: list, source_manifest: list) ->
         "evidenceBasis": "calculated",
         "basisNote": "Quarterly returns calculated from observed month-end index closes; missing values remain blank.",
     }
+
+
+def _ensure_sector_heatmap_chart_anchor(
+    report_text: str, charts: list, question: str,
+) -> tuple[str, list, bool]:
+    """Keep the verified sector matrix and its report placeholder in sync.
+
+    Final section hygiene can remove an internal provenance section that held a
+    chart marker while leaving the already-audited chart object in the registry.
+    Strip those sections first, restore only the deterministic sector heatmap's
+    marker when needed, then re-canonicalize the chart slots by document order.
+    """
+    result = list(charts or [])
+    if not _is_sector_rotation_report_request(question):
+        return str(report_text or ""), result, False
+    text = strip_excluded_report_sections(report_text)
+    changed = text != str(report_text or "")
+    for index, chart in enumerate(result, start=1):
+        if not _is_sector_return_heatmap(chart):
+            continue
+        marker_re = re.compile(rf"\[\s*CHART[_ ]{index}\s*\]", re.I)
+        if not marker_re.search(text):
+            text = _insert_sector_chart_marker(text, index, _SECTOR_HEATMAP_HEADING_RE)
+            changed = True
+    if changed:
+        text, result, _registry_meta = _canonicalize_chart_registry(text, result)
+    return text, result, changed
 
 
 def _is_local_company_investor_discovery(text: str) -> bool:
@@ -8995,12 +9255,87 @@ def _entity_metric_search_queries(question: str, qtype: str = "", intent=None, t
             out.append(q)
     return out[:7]
 
+def _is_fpi_flow_research(question: str, intent: "RequestIntent | None" = None) -> bool:
+    """Recognize research about FII/FPI flows without triggering on every market question."""
+    text = f"{question or ''} {getattr(intent, 'resolved_topic', '')}".casefold()
+    mentions_foreign_portfolio = bool(re.search(
+        r"\b(?:fii|fiis|fpi|fpis|foreign institutional investors?|foreign portfolio investors?|portfolio flows?)\b", text
+    ))
+    india_anchor = bool(re.search(r"\b(india|indian|nifty|sensex|nse|bse|sebi|nsdl|cdsl)\b", text))
+    return mentions_foreign_portfolio and india_anchor
+
+
+def _fpi_research_queries(question: str, intent: "RequestIntent | None" = None) -> list[str]:
+    """Build distinct retrieval angles for FPI-flow hypothesis testing, not report headings.
+
+    This is a query plan only. Section structure remains dynamic and is chosen by the
+    report planner after the available evidence is inspected.
+    """
+    topic = str(getattr(intent, "resolved_topic", "") or "India foreign portfolio investor FPI flows").strip()
+    if len(topic) > 90:
+        topic = topic[:90].rsplit(" ", 1)[0]
+    return [
+        f"{topic} SEBI NSDL monthly net equity debt hybrid FPI investment data historical",
+        "site:sebi.gov.in/statistics/fpi-investment.html FPI investment details calendar year financial year archive",
+        "site:cdslindia.com/eservices/Publications/FIICalendar FPI equity debt hybrid monthly net investments",
+        "site:nsdl.co.in FPI investment equity debt monthly flow historical sector wise India",
+        "India FPI primary market IPO QIP public issue foreign portfolio investor inflows annual data",
+        "India FPI secondary market net selling Nifty 50 frontline stocks shareholding pattern quarterly history",
+        "India FPI sector wise holdings financials IT automobiles capital goods NSE data historical",
+        "site:rbi.org.in foreign investment inflows net portfolio investment India annual time series FDI",
+        "site:dpiit.gov.in India FDI inflows sector wise annual factsheet 2015 2025",
+        "India foreign investors debt investment FAR VRR government securities corporate bonds FPI data",
+        "Gautam Duggad FII FPI outflows primary market inflows India past ten years interview",
+        "India FPI outflows valuation currency rupee US yields emerging market peer comparison analysis",
+    ]
+
+
+def _complete_deep_research_query_plan(
+    queries: list[str], question: str, intent: "RequestIntent | None", max_queries: int = 12,
+) -> list[str]:
+    """Add missing retrieval angles for Deep Research while keeping the subject and plan dynamic."""
+    output: list[str] = []
+    seen: set[str] = set()
+    def add(q: str) -> None:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(q or "").casefold()).strip()
+        if normalized and normalized not in seen and len(output) < max_queries:
+            seen.add(normalized)
+            output.append(" ".join(str(q).split()).strip())
+    for query in queries or []:
+        add(query)
+    if len(output) >= max_queries:
+        return output
+    topic = str(getattr(intent, "resolved_topic", "") or "").strip()
+    if not topic:
+        clean = _TRAILING_TIME_PHRASE_RE.sub("", _LEADING_INSTRUCTION_RE.sub("", question or "")).strip()
+        topic = re.split(r"[.\n]", clean, maxsplit=1)[0].strip() or clean
+    topic = topic[:90].rsplit(" ", 1)[0] if len(topic) > 90 else topic
+    suffixes = [
+        "official primary data statistics methodology definitions",
+        "historical annual time series source tables",
+        "segment sector business channel breakdown data",
+        "counter evidence competing explanations alternative hypothesis",
+        "independent analyst views original interview quote verification",
+        "limitations comparability data coverage methodological caveats",
+        "international peer comparison benchmark flows",
+        "policy regulatory framework original official publications",
+    ]
+    for suffix in suffixes:
+        add(f"{topic} {suffix}")
+        if len(output) >= max_queries:
+            break
+    return output
+
+
 async def _build_multi_angle_search_queries(
     question: str,
     conversation_context: str,
     qtype: str,
     intent: "RequestIntent | None" = None,
+    report_tier: str = "detailed",
 ) -> list[str]:
+    from datetime import date
+
     # Bug fix: the base/angle-1 query used to be built straight from the raw
     # `question` — conversational framing ("Give me a research report on...")
     # and all — and only the *later* regex-fallback angles ran it through
@@ -9014,6 +9349,100 @@ async def _build_multi_angle_search_queries(
     cleaned_question = _TRAILING_TIME_PHRASE_RE.sub(
         "", _LEADING_INSTRUCTION_RE.sub("", question)
     ).strip() or question
+
+    query_cap = 12 if report_tier == "in_depth" else 6 if report_tier == "detailed" else 4
+    sector_rotation_task = (
+        _is_sector_rotation_report_request(question)
+        or _is_sector_rotation_report_request(str(getattr(intent, "resolved_topic", "") or ""))
+    )
+    if (report_tier == "in_depth" and _is_fpi_flow_research(question, intent)
+            and not sector_rotation_task):
+        fpi_queries = _fpi_research_queries(question, intent)
+        log.info("Deep Research FPI query plan: %d independent evidence angles", len(fpi_queries))
+        return fpi_queries[:query_cap]
+
+    # A few cross-domain research questions have stable primary-source paths.
+    # Generic modifier queries missed these sources even when the question
+    # explicitly asked for sector flows, exchange disclosures, FTA texts, or
+    # macroeconomic measures. Keep these plans bounded and source-oriented.
+    subject = (str(getattr(intent, "resolved_topic", "") or "") + " " + cleaned_question).casefold()
+    focused_queries: list[str] | None = None
+    if re.search(r"\bsector rotation\b", subject):
+        focused_queries = [
+            "India NSE sectoral indices quarterly performance sector rotation last eight quarters",
+            "NSE sectoral index historical data quarter-wise India sector indices",
+            "NSDL FPI FII sector-wise flows India equity quarterly data",
+            "NSE India sectoral indices historical market data quarterly comparison",
+            "India sector rotation quarterly domestic institutional investor flows sectoral indices",
+        ]
+        if report_tier == "in_depth":
+            focused_queries.extend([
+                "site:nseindia.com sectoral indices historical quarterly returns official data India last eight completed quarters",
+                "NSDL FPI sector-wise equity holdings and flows India quarterly; DII allocation by sector primary data",
+                "Indian sector rotation drivers quarterly earnings valuations oil rupee rates sector index performance counterevidence",
+            ])
+    elif re.search(r"\bpromoter (?:exits?|stake sales?)\b|\bstake sales? by .*promoters?\b", subject):
+        if report_tier == "in_depth":
+            quarter_periods = requested_indian_fy_quarters(question, date.today())
+            if len(quarter_periods) >= 8:
+                requested_quarters = quarter_periods[-8:]
+                focused_queries = []
+                for exchange in ("nseindia.com", "bseindia.com"):
+                    for offset in range(0, len(requested_quarters), 2):
+                        quarter_group = requested_quarters[offset:offset + 2]
+                        quarter_terms = " ".join(label for label, _, _ in quarter_group)
+                        period_start = quarter_group[0][1]
+                        period_end = quarter_group[-1][2]
+                        focused_queries.append(
+                            f"site:{exchange} promoter seller completed equity share sale disposal "
+                            f"SAST Regulation 29 bulk deal block deal OFS exchange disclosure India "
+                            f"{quarter_terms} {period_start.isoformat()} through {period_end.isoformat()}"
+                        )
+                full_dates = f"{requested_quarters[0][1].isoformat()} through {requested_quarters[-1][2].isoformat()}"
+            else:
+                full_dates = "India past eight completed quarters"
+                focused_queries = []
+            focused_queries.extend([
+                f"NSE BSE India promoter bulk deal block deal seller transaction data {full_dates}",
+                f"NSE BSE promoter offer for sale OFS completed promoter divestment filing {full_dates}",
+                f"India listed-company quarterly promoter shareholding pattern stake-sale proportions {full_dates}",
+                "Indian promoter sale reasons stated in NSE BSE filings debt repayment succession diversification liquidity distinguish pledge release and dilution",
+            ])
+        else:
+            focused_queries = [
+                "proportion of NSE BSE promoter exits stake sales shareholding pattern quarterly India",
+                "NSE BSE bulk deals block deals promoter stake sale disclosures India",
+                "Indian listed companies promoter shareholding pattern exchange filings changes",
+                "SEBI corporate actions promoter transaction disclosures bulk block deals India",
+                "promoter stake sale reasons company exchange filings India quarterly",
+            ]
+    elif re.search(r"\bftas?\b|free trade agreement", subject):
+        focused_queries = [
+            "Ministry of Commerce India free trade agreements official agreement text tariff schedules",
+            "India FTA agreement text tariff schedules official government trade agreement",
+            "India free trade agreements effectiveness utilization exports imports tariff reduction data",
+            "India FTA international comparison trade diversion trade creation evidence",
+            "India free trade agreement implementation rules of origin official notifications",
+        ]
+        if report_tier == "in_depth":
+            fta_window = _requested_rolling_year_window(question, date.today())
+            window_terms = f" {fta_window[0].isoformat()} through {fta_window[1].isoformat()}" if fta_window else ""
+            focused_queries.extend([
+                f"site:commerce.gov.in India FTA CEPA ECTA TEPA agreement exact signing date official records{window_terms}",
+                f"site:pib.gov.in India free trade agreement signed signing ceremony date government press release{window_terms}",
+                "India FTA utilization preferential tariff utilization trade creation diversion export impact quantitative international comparison",
+            ])
+    elif re.search(r"\bindian economy\b|\bindia(?:n)? economic(?: outlook| growth)?\b", subject):
+        focused_queries = [
+            "MoSPI India GDP quarterly growth sectoral GVA official data",
+            "MoSPI India manufacturing industrial production IIP capacity investment data",
+            "India economy household consumption business investment exports manufacturing official statistics",
+            "India GDP inflation employment business risks historical macroeconomic trends",
+            "India international comparisons GDP growth manufacturing inflation World Bank IMF data",
+        ]
+    if focused_queries:
+        log.info("Focused source query plan selected: queries=%d", len(focused_queries))
+        return focused_queries[:query_cap]
 
     # General banking-sector outlooks need a purpose-built source set BEFORE
     # generic entity/metric planning. Broad prompts were sometimes misread as
@@ -9205,10 +9634,12 @@ async def _build_multi_angle_search_queries(
                 continue
             queries.append(candidate)
             existing_keys.add(key)
-            if len(queries) >= 5:
+            if len(queries) >= query_cap:
                 break
-        log.info("Intent-driven search angles (%s): %r", intent.source, [q[:85] for q in queries[:5]])
-        return queries[:5]
+        if report_tier == "in_depth":
+            queries = _complete_deep_research_query_plan(queries, question, intent, max_queries=query_cap)
+        log.info("Intent-driven search angles (%s tier=%s cap=%d): %r", intent.source, report_tier, query_cap, [q[:100] for q in queries])
+        return queries[:query_cap]
 
     base = _augment_query_for_historical_data(
         _build_followup_search_query(cleaned_question, conversation_context)
@@ -9246,7 +9677,6 @@ async def _build_multi_angle_search_queries(
                 "investment outlook forecasts projections opportunities risks",
             ]
         queries = [base]
-        base_terms = set(re.findall(r"[a-z0-9]+", base.casefold()))
         for suffix in suffixes:
             candidate = f"{topic} {suffix}".strip()
             terms = set(re.findall(r"[a-z0-9]+", candidate.casefold()))
@@ -9261,18 +9691,24 @@ async def _build_multi_angle_search_queries(
             ):
                 continue
             queries.append(candidate)
-            if len(queries) >= 5:
+            if len(queries) >= query_cap:
                 break
-        return queries[:5]
+        if report_tier == "in_depth":
+            queries = _complete_deep_research_query_plan(queries, question, intent, max_queries=query_cap)
+        return queries[:query_cap]
 
     # Try the LLM query-builder first — it handles arbitrary phrasing far
     # better than the regex heuristics below (no risk of run-on queries like
     # the one that used to send 3 of 4 angle searches to Tavily as a single
     # garbled sentence). Falls through to the regex builder if Groq has no
     # keys configured, is rate-limited, or returns anything unusable.
-    llm_queries = await _llm_build_multi_angle_queries(question, conversation_context)
+    llm_queries = await _llm_build_multi_angle_queries(
+        question, conversation_context, max_queries=query_cap,
+    )
     if llm_queries:
-        return llm_queries
+        if report_tier == "in_depth":
+            llm_queries = _complete_deep_research_query_plan(llm_queries, question, intent, max_queries=query_cap)
+        return llm_queries[:query_cap]
 
     # Short topic phrase to build angle variants from — first clause of the
     # raw question, not the (possibly follow-up-grounded) base query, so each
@@ -9322,10 +9758,11 @@ async def _build_multi_angle_search_queries(
     if not _HISTORICAL_INTENT_RE.search(base):
         queries.append(f"{topic} historical trend performance data")
 
-    # Cap at 4 — each additional query multiplies total Tavily calls by the
-    # full key count (see exa_search's per-query key fan-out), so this
-    # is a deliberate ceiling, not an arbitrary one.
-    return queries[:4]
+    # Deep Research uses a wider distinct-query plan. Independent query angles
+    # diversify the result pool; adding more provider keys to the same query does not.
+    if report_tier == "in_depth":
+        queries = _complete_deep_research_query_plan(queries, question, intent, max_queries=query_cap)
+    return queries[:query_cap]
 
 
 # Signals that a question is actually about specific company/companies'
@@ -9454,7 +9891,9 @@ def _extract_company_candidates_core(question: str, intent=None) -> list[str]:
         return []
     candidates: list[str] = []
     ignored = {
-        "create", "prepare", "give", "show", "tell", "use", "compare", "comparison",
+        "create", "prepare", "give", "show", "tell", "use", "compare", "comparison", "how", "can", "you", "explain", "list", "analyze", "analyse",
+        "support", "substantial", "easy", "understand", "will", "appreciate", "exhaustive", "all", "promoter", "promoters",
+        "stake", "sale", "sales", "past", "quarter", "quarters", "uhni", "uhnis", "fta", "ftas",
         "report", "research", "brief", "basic", "standard", "detailed", "detail", "deep", "advanced",
         "generate", "write", "assess", "evaluate", "cover", "analysis", "analyze", "analyse", "covering", "business",
         "financial", "performance", "strategy", "positioning", "international",
@@ -9748,7 +10187,36 @@ def _action_requests_chart_addition(instruction: str, visual_alternative: bool |
     if visual_alternative is True or _action_requests_visual_alternative(instruction):
         return False
     clean_instruction = _strip_negated_visual_operations(instruction)
-    return bool(re.search(r"\b(?:add|insert|create|include|append)\b.{0,50}\b(?:chart|graph|plot|visualization)\b", clean_instruction, re.I))
+    return bool(re.search(r"\b(?:add|insert|create|include|append)\b.{0,70}\b(?:charts?|graphs?|plots?|visuali[sz]ations?)\b", clean_instruction, re.I))
+
+
+def _action_requested_chart_count(instruction: str, visual_alternative: bool | None = None) -> int:
+    """Return the number of new charts requested, capped to keep Actions bounded.
+
+    Singular wording produces one chart. A plural/vague request such as
+    "add some charts" produces two distinct charts by default, while explicit
+    numeric/word counts are respected up to four.
+    """
+    if not _action_requests_chart_addition(instruction, visual_alternative):
+        return 0
+    clean = re.sub(r"(?im)^\s*target\s+sections?\s*:.*(?:\n|$)", " ", str(instruction or ""))
+    count_words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "four": 4}
+    match = re.search(
+        r"\b(\d+|one|a|an|two|three|four)\s+(?:additional\s+)?(?:charts?|graphs?|plots?|visuali[sz]ations?)\b",
+        clean, re.I,
+    )
+    if match:
+        token = match.group(1).casefold()
+        try:
+            count = int(token)
+        except ValueError:
+            count = count_words.get(token, 1)
+        return max(1, min(4, count))
+    # Unspecified plural intent ("some charts", "add charts") should not be
+    # silently reduced to just one visual.
+    if re.search(r"\b(?:charts|graphs|plots|visuali[sz]ations)\b", clean, re.I):
+        return 2
+    return 1
 
 
 def _action_requests_chart_operation(instruction: str) -> bool:
@@ -10070,7 +10538,7 @@ _ACTION_NUMBER_RE = re.compile(
     r"(?:"
     r"(?:[$₹€£]\s*\d[\d,]*(?:\.\d+)?\s*(?:billion|million|thousand|crore|lakh|lakhs|bn|mn|cr|K|M|B)?)"
     r"|(?:\d[\d,]*(?:\.\d+)?\s*%)"
-    r"|(?:\d[\d,]*(?:\.\d+)?\s*(?:lakh\s+crore|billion\s+units|quarters?|weeks?|months?|years?|trillion|billion|million|thousand|lakhs?|crore|sq\.?\s*ft|sqft|tonnes?|tons?|GWh|MWh|kWh|TWh|GW|MW|kW|TW|BU|km|kg|days?|bn|mn|cr|m|K|M|B)(?![A-Za-z0-9]))"
+    r"|(?:\d[\d,]*(?:\.\d+)?\s*(?:[-\u2010-\u2015]\s*)?(?:lakh\s+crore|billion\s+units|quarters?|weeks?|months?|years?|minutes?|trillion|billion|million|thousand|lakhs?|crore|sq\.?\s*ft|sqft|tonnes?|tons?|GWh|MWh|kWh|TWh|GW|MW|kW|TW|BU|km|kg|days?|bn|mn|cr|m|K|M|B)(?![A-Za-z0-9]))"
     r"|(?<![A-Za-z0-9])\d[\d,]*(?:\.\d+)?(?![A-Za-z0-9])"
     r")", re.I
 )
@@ -10098,8 +10566,20 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
     month_names = r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
     text = re.sub(rf"\b(?:{month_names})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
     text = re.sub(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{month_names})\.?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
+    text = re.sub(rf"\b(?:{month_names})\.?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
     text = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-](?:19|20)\d{2}\b", " ", text)
+    # Clock times are schedule labels. The duration around them remains a claim.
+    text = re.sub(r"(?i)\b(?:0?[1-9]|1[0-2]):[0-5]\d\s*(?:a\.?m\.?|p\.?m\.?)\b", " ", text)
     text = re.sub(r"\b(?:table|chart|figure|fig\.?|page)\s*(?:no\.?\s*)?#?\s*\d+\b", " ", text, flags=re.I)
+    # Ordered-list ordinals are layout, not numeric evidence claims. Require a
+    # line-start marker followed by whitespace so values such as 1.25% remain.
+    text = re.sub(r"(?m)^[ \t]*(?:\(?\d{1,3}[.)]|\(\d{1,3}\))[ \t]+(?=\S)", " ", text)
+    # e-CoO 2.0 is the name/version of India's electronic Certificate of Origin
+    # platform, not a quantitative claim. Do not strip a percentage adjacent to it.
+    text = re.sub(
+        r"(?i)\be[\-‐‑–—]?\s*coo\s+\d+(?:\.\d+)*(?!\s*(?:%|percent|per\s+cent))\b",
+        " ", text,
+    )
     # Ordinal/identifier labels are not reportable quantities: "tier-2 and
     # tier-3 cities", "Basel III", "Phase 2", "Section 7", "Pillar 2",
     # "Covid-19", "G20", "Annex 4". These previously became scalar:2 / scalar:3
@@ -10111,9 +10591,20 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
         " ", text,
     )
     text = re.sub(r"(?i)\b(?:covid|sars[- ]cov)[- ]?\d+\b|\bG\s?-?(?:7|8|20)\b|\b[2345]G\b|\bIndustry\s+\d\.0\b|\bWeb\s?\d(?:\.0)?\b", " ", text)
+    text = re.sub(
+        r"(?i)\bNifty\s+(?:50|100|200|500|Next\s+50|Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b|"
+        r"\b(?:Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b",
+        " ", text,
+    )
     # Forecast horizons and fiscal-year ranges are reporting periods, not
     # quantities: "12-month outlook", "next 12 months", "2023-24", "H1:2025-26".
     text = re.sub(r"(?i)\b\d{1,3}[- ](?:month|year|week|day|quarter)(?:s)?(?=[- ](?:outlook|horizon|forecast|view|period|window|plan|target|cagr|average|high|low|tenor|bond|yield|g-?sec|deposit|loan|returns?|change|growth|performance)\b)", " ", text)
+    text = re.sub(
+        r"(?i)\b\d{1,3}(?:\s*[/,]\s*\d{1,3})*[- ](?:months?|years?|weeks?|days?|quarters?)\s+"
+        r"(?:(?:trailing|rolling|historical|calendar|fiscal)\s+){0,2}"
+        r"(?:basis|horizon|window|period|cycle|data|history|historical|returns?|comparison|performance)\b",
+        " ", text,
+    )
     text = re.sub(r"(?i)\b(?:next|coming|following|past|last|previous|over\s+the\s+next|over\s+the\s+past)\s+\d{1,3}\s+(?:months?|years?|quarters?|weeks?)\b", " ", text)
     text = re.sub(r"(?i)\b(?:H[12]|Q[1-4])\s*[:\-]?\s*(?:19|20)\d{2}\s*[-/‐-―]\s*\d{2}\b", " ", text)
     text = re.sub(r"\b(?:19|20)\d{2}\s*[-/‐-―]\s*(?:(?:19|20)\d{2}|\d{2})\b(?!\s*(?:%|per\s?cent))", " ", text)
@@ -10126,6 +10617,11 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
     )
     text = re.sub(r"(?i)\b\d{1,3}\s+smaller\s+peers?\s+omitted\b", " ", text)
     # More generated-caption descriptors and month-year labels ("Sep-24").
+    # Two-digit month/year forms also appear with a space before the apostrophe.
+    text = re.sub(
+        r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s*['\u2019]\s?\d{2}\b",
+        " ", text,
+    )
     text = re.sub(
         r"(?i)\b\d{1,3}\s+entit(?:y|ies)\s*[×x]\s*\d{1,3}\s+metrics?\b|±\s*\d+(?:\.\d+)?\s*σ|\b\d{1,3}\s+(?:reported\s+|extracted\s+)?metrics\b|"
         r"\b\d{1,3}\s+(?:reported\s+)?observations?\s+grouped\s+into\s+\d{1,3}\s+(?:equal-width\s+)?bands?\b|\(\s*\d{1,3}\s+periods?\s*\)",
@@ -10424,8 +10920,12 @@ async def _action_web_research(instruction: str, section_heading: str, title: st
         additions.append(record)
         prior_urls.add(url.lower().rstrip("/"))
 
-    combined = build_source_registry(prior + additions)
-    start = len(prior) + 1
+    # `prior` is canonical; extend it instead of renumbering. Passing
+    # prior + additions made the registry non-canonical, so every existing S#
+    # was reassigned from S1 whenever the report's appendix had gaps (Brief tier,
+    # cited-only appendix) and edited sections cited the wrong sources.
+    combined = build_source_registry(prior, additional_sources=additions)
+    start = _next_source_number(prior)
     # Map by URL so evidence uses the final canonical S# IDs.
     by_url = {str(x.get("url") or "").lower().rstrip("/"): x for x in combined if str(x.get("url") or "").strip()}
     for item in raw or []:
@@ -10434,7 +10934,7 @@ async def _action_web_research(instruction: str, section_heading: str, title: st
         url = str(item.get("url") or "").strip().lower().rstrip("/")
         reg = by_url.get(url)
         if not reg or int(re.sub(r"\D", "", str(reg.get("id") or "0")) or 0) < start:
-            continue
+            continue  # existing source: its ID is unchanged and it is not "fresh" evidence
         snippet = str(item.get("content") or item.get("fullContent") or item.get("snippet") or "").strip()
         if len(snippet) > 2200:
             snippet = snippet[:2200] + " …"
@@ -10818,8 +11318,6 @@ def _action_edit_validation(original: str, edited: str, instruction: str, eviden
     # Multiple unrelated tables are allowed in normal edits; this guard is
     # deliberately scoped to table/comparison instructions and only fires
     # when the source section already contained a table.
-    original_table_count = len(re.findall(r"(?m)^(?:\|[^\n]+\|)\s*$", original))
-    edited_table_count = len(re.findall(r"(?m)^(?:\|[^\n]+\|)\s*$", edited))
     table_intent = _action_requests_table(instruction)
     if table_intent:
         original_blocks = _action_table_blocks(original)
@@ -10848,7 +11346,6 @@ def _action_edit_validation(original: str, edited: str, instruction: str, eviden
             # final fallback below attempts an evidence-only table. If no valid
             # comparison can be made, that alone must not invalidate otherwise
             # safe prose edits because the user said 'where supported'.
-            optional_visual_choice = _action_requests_visual_alternative(instruction)
             if original_blocks and edited_blocks and not explicit_table_addition:
                 original_signatures = _action_table_signatures(original)
                 edited_signatures = _action_table_signatures(edited)
@@ -10858,7 +11355,12 @@ def _action_edit_validation(original: str, edited: str, instruction: str, eviden
             if original_blocks and not edited_blocks:
                 problems.append("existing table was removed without a replacement")
 
-    if not _action_has_material_change(original, edited):
+    if not _action_has_material_change(original, edited) and not _action_is_chart_only_addition(instruction):
+        # A chart is added to the chart registry later in the Action pipeline,
+        # after this prose-preservation gate. For a chart-only request, an
+        # unchanged section body is valid: the new [CHART_n] marker is attached
+        # only after a supported chart specification has been created. All
+        # citation, URL, entity, numeric and placeholder checks above still run.
         problems.append("edit produced no material change")
 
     return (not problems, problems)
@@ -11297,6 +11799,44 @@ def _action_has_material_change(original: str, edited: str) -> bool:
     return norm(original) != norm(edited)
 
 
+def _action_is_chart_only_addition(instruction: str) -> bool:
+    """Whether a chart can be the sole material result of this Action.
+
+    New chart objects are created after section-text validation. Permit the
+    text to remain unchanged only when the user's requested operation is just
+    adding a chart (including its data points), not when the same request also
+    asks for prose, table, image, citation, or other edits.
+    """
+    raw = str(instruction or "")
+    if not _action_requests_chart_addition(raw):
+        return False
+
+    clean = re.sub(r"(?im)^\s*target\s+sections?\s*:.*(?:\n|$)", " ", raw)
+    clean = re.sub(r"(?im)^\s*instruction\s*:\s*", " ", clean)
+    # Remove the actual chart-add operation and its directly associated data
+    # points. Any separate edit request remains for the check below.
+    clean = re.sub(
+        r"\b(?:add|insert|create|include|append)\b[^.!?;\n]{0,100}"
+        r"\b(?:charts?|graphs?|plots?|visuali[sz]ations?)\b"
+        r"(?:[^.!?;\n]{0,45}\bdata\s+points?\b)?",
+        " ", clean, flags=re.I,
+    )
+    # Accept common chart-only wording variants without making 'data points'
+    # itself count as a second operation.
+    clean = re.sub(r"\b(?:and|with|using|based\s+on|from)\s+(?:some\s+)?(?:supported\s+|existing\s+)?data\s+points?\b", " ", clean, flags=re.I)
+    # Detect separate prose/structure operations that must still create a text
+    # change. Negative preservation language is not a positive operation.
+    clean = re.sub(r"(?im)^.*\b(?:do\s+not|don't|dont|leave|keep|preserve|retain)\b.*$", " ", clean)
+    other_operation = re.search(
+        r"\b(?:rewrite|rephrase|expand|shorten|condense|summari[sz]e|improve|revise|edit|"
+        r"correct|repair|refresh|replace|remove|delete|modify|change|reorganize|restructure|"
+        r"simplify|clarify|update|add|insert|include|append|create|generate|build|make|"
+        r"produce|draft|construct|convert|format|reformat|populate|tabulate)\b",
+        clean, re.I,
+    )
+    return other_operation is None
+
+
 def _best_matching_section(instruction: str, sections: list[dict]) -> tuple[int, float]:
     """Pick the section whose heading best overlaps with the user's edit
     instruction via simple word-overlap scoring — deterministic, and doesn't
@@ -11320,9 +11860,8 @@ def _best_matching_section(instruction: str, sections: list[dict]) -> tuple[int,
 
 
 # ── Tier-aware report expansion ─────────────────────────────────────────────
-# The final-renderer page band is a delivery objective. Expansion remains
-# evidence-driven: each accepted module must add distinct, grounded analysis and
-# stops when the source material cannot defensibly support more.
+# Tier expansion is evidence-driven: each accepted module must add distinct,
+# grounded analysis and stops when the source material cannot support more.
 _TIER_EXPANSION_PASSES = {
     "brief": 0,
     "detailed": 4,
@@ -11339,6 +11878,7 @@ _TIER_EXPANSION_TIME_BUDGETS = {
     # Deep Research remains bounded by the asynchronous job lifecycle.
     "in_depth": 480,
 }
+_TIER_EXPANSION_ATTEMPT_TIMEOUT_SECONDS = 35.0
 
 def _quality_render_snapshot(report_text: str, title: str, question: str, summary: str,
                            key_stats: list, charts: list, sources: object,
@@ -11523,6 +12063,7 @@ async def _gemini_independent_report_audit(
                   for x in (images or [])[:12] if isinstance(x, dict)]
 
     prompt = {
+        "current_date": time.strftime("%Y-%m-%d", time.localtime()),
         "task": "Independently audit this generated research report. Do not rewrite it. Compare each numeric claim with supplied excerpts. Inspect citationClaimGroups and supportByToken first: adjacent/grouped citations may collectively support different numbers in one claim, so do not require every co-cited source to repeat every number. A claim is source-covered only if every numeric token is supported by at least one source cited with that claim. Still flag a claim whose token has no supporting cited source. Individual-source claimEvidenceMatched=false is diagnostic, not by itself proof the whole citation group is unsupported. A URL or title alone is not evidence. Do not claim to have opened URLs or verified facts beyond supplied excerpts. A chart is not defective merely because it has fewer than five points: two-period comparisons and short authentic time series are valid when every observation is supported. Never recommend adding invented points to meet a preferred density band.",
         "required_output": {
             "status": "PASS, WARNING, or FAIL",
@@ -11537,6 +12078,8 @@ async def _gemini_independent_report_audit(
                    "charts": chart_meta, "images": image_meta, "sources": source_meta,
                    "deterministic_audits": deterministic_audits or {}},
         "rules": [
+            "Use current_date when judging whether a reporting period is complete. A period ending on or before current_date is completed; do not mark 2025 or 2026 incomplete solely because it is recent.",
+            "Treat numbered Markdown headings and ordered-list prefixes such as '3. **Three-Stage Anatomy…**' as structural ordinals, not factual quantities. Continue auditing any numeric claim in the heading or list text itself.",
             "Identify repeated sections/tables and leaked internal tokens such as [[SECTION: ...]] or unresolved [CHART_n].",
             "Flag numeric claims that conflict within the report, suspiciously identical values across distinct entities, and forecast series that are not internally coherent; do not declare a claim false without source evidence.",
             "Assess whether chart metadata suggests too few points for the selected tier, but respect chart-type suitability and evidence-limited exceptions.",
@@ -11549,6 +12092,7 @@ async def _gemini_independent_report_audit(
         "contents": [{"role": "user", "parts": [{"text": json.dumps(prompt, ensure_ascii=False)}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 5000},
     }
+    _audit_base_config = request_body["generationConfig"]
     last_reason = "provider_unavailable"
     # The old 10 s read timeout was shorter than a ~60 KB prompt with up to
     # 5,000 JSON output tokens usually needs, so many reviewers timed out and
@@ -11558,20 +12102,30 @@ async def _gemini_independent_report_audit(
     except (TypeError, ValueError):
         _audit_read_s = 20.0
 
+    def _cool_audit_key(key: str, model: str, cooldown_ms: int) -> None:
+        for identifier in (key, f"report:gemini:{key}", f"report:gemini:{key}:{model}"):
+            mark_rate_limited(identifier, cooldown_ms)
+
     async def _attempt(model: str, key: str) -> dict:
         """One bounded audit call. Return metadata only; never log the API key."""
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=_audit_read_s, write=4, pool=4)) as client:
                 response = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                    json=request_body,
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    json={**request_body, "generationConfig": _gemini_gen_config(model, _audit_base_config)},
                 )
             if response.status_code == 503:
                 mark_rate_limited(f"gemini:model:{model}", GEMINI_MODEL_COOLDOWN_MS)
                 return {"reason": "http_503", "model": model}
             if response.status_code == 429:
+                quota_cooldown_ms = max(
+                    60_000, int(os.getenv("REPORT_PARALLEL_QUOTA_COOLDOWN_MS", "300000")),
+                )
+                _cool_audit_key(key, model, quota_cooldown_ms)
                 return {"reason": "rate_limited", "model": model}
             if response.status_code in (401, 403):
+                _cool_audit_key(key, model, 24 * 60 * 60_000)
                 return {"reason": "invalid_or_forbidden_key", "model": model}
             if not response.is_success:
                 return {"reason": f"http_{response.status_code}", "model": model}
@@ -11601,6 +12155,8 @@ async def _gemini_independent_report_audit(
                 "bodyTruncated": len(report_text) > 42000,
             }
         except Exception as exc:
+            if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError)):
+                _cool_audit_key(key, model, GEMINI_TIMEOUT_KEY_COOLDOWN_MS)
             log.warning("Gemini report audit attempt failed model=%s error=%s", model, type(exc).__name__)
             return {"reason": type(exc).__name__, "model": model}
 
@@ -11651,9 +12207,19 @@ async def _gemini_independent_report_audit(
         try:
             queue = list(plan)
 
-            def _launch_next() -> None:
-                model, key = queue.pop(0)
-                tasks[asyncio.create_task(_attempt(model, key))] = (model, key)
+            def _launch_next() -> bool:
+                while queue:
+                    model, key = queue.pop(0)
+                    if (
+                        is_rate_limited(key)
+                        or is_rate_limited(f"report:gemini:{key}")
+                        or is_rate_limited(f"report:gemini:{key}:{model}")
+                        or is_rate_limited(f"gemini:model:{model}")
+                    ):
+                        continue
+                    tasks[asyncio.create_task(_attempt(model, key))] = (model, key)
+                    return True
+                return False
 
             _launch_next()
             log.info("Gemini report audit (hedged) model=%s reviewers_planned=%d", plan[0][0], len(plan))
@@ -12012,11 +12578,85 @@ def _replace_unsupported_financial_claims(text: str, sources: list[dict], contex
     return cleaned, count
 
 
+_LEAD_IN_BLOCKER_QUOTE_RE = re.compile(r"(?i)^>\s*\*{0,2}(?:quantitative evidence limitation|chart not included)")
+
+
+def _remove_dangling_lead_ins(report_text: str) -> tuple[str, int]:
+    """Delete orphaned lead-ins left behind after unsupported sentences/rows are redacted.
+
+    Redaction removes the claim but not the sentence that introduced it, which
+    leaves lines such as "This shift was fueled by:" followed by nothing, a
+    truncated bold fragment ("- **Weight vs."), or an H3 with no body. Only
+    structural leftovers are removed; sentences that carry content are kept.
+    """
+    lines = str(report_text or "").split("\n")
+    total = 0
+    heading_re = re.compile(r"(#{1,6})\s+\S")
+    for _ in range(6):
+        n = len(lines)
+        keep = [True] * n
+        in_code = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code or not stripped:
+                continue
+            nxt = next((j for j in range(i + 1, n) if lines[j].strip()), None)
+            nxt_text = lines[nxt].strip() if nxt is not None else ""
+            heading = heading_re.match(stripped)
+            if heading:
+                level = len(heading.group(1))
+                next_heading = heading_re.match(nxt_text) if nxt is not None else None
+                if level >= 3 and (nxt is None or (next_heading and len(next_heading.group(1)) <= level)):
+                    keep[i] = False
+                continue
+            if stripped.count("|") >= 2 or stripped.startswith(">") or re.fullmatch(r"\[CHART_\d+\]", stripped):
+                continue
+            plain = re.sub(r"[\s*_`]+$", "", stripped)
+            is_list = bool(re.match(r"(?:[-*+]|\d+[.)])\s", stripped))
+            # Truncated bold fragment, e.g. "- **Weight vs."
+            if stripped.count("**") % 2 == 1 and len(stripped) < 140:
+                keep[i] = False
+                continue
+            if not plain.endswith(":"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            if nxt is None:
+                keep[i] = False
+                continue
+            nxt_line = lines[nxt]
+            nxt_indent = len(nxt_line) - len(nxt_line.lstrip())
+            nxt_plain = re.sub(r"[\s*_`]+$", "", nxt_text)
+            nxt_is_list = bool(re.match(r"(?:[-*+]|\d+[.)])\s", nxt_text))
+            blocked = (
+                heading_re.match(nxt_text)
+                or re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", nxt_text)
+                or _LEAD_IN_BLOCKER_QUOTE_RE.match(nxt_text)
+                or (not nxt_is_list and nxt_plain.endswith(":") and not is_list)
+                # A list-item label with no body and no nested content.
+                or (is_list and nxt_is_list and nxt_indent <= indent)
+            )
+            if blocked:
+                keep[i] = False
+        removed = keep.count(False)
+        if not removed:
+            break
+        total += removed
+        lines = [line for line, k in zip(lines, keep) if k]
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return text, total
+
+
 def _sanitize_unverified_financial_claims(report_text: str, charts: list, sources: list[dict]) -> tuple[str, list, int]:
     """Redact unverified financial/percentage figures and table-chart values before publication."""
-    total = 0
+    claim_cleaned, unsupported_sentences = _redact_unsupported_cited_claim_sentences(
+        str(report_text or ""), sources,
+    )
+    total = unsupported_sentences
     cleaned_lines = []
-    for line in str(report_text or "").splitlines():
+    for line in claim_cleaned.splitlines():
         if "|" in line and re.fullmatch(r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*", line):
             cleaned_lines.append(line)
             continue
@@ -12045,7 +12685,6 @@ def _sanitize_unverified_financial_claims(report_text: str, charts: list, source
     i = 0
     while i < len(cleaned_lines):
         if i + 1 < len(cleaned_lines) and is_pipe_row(cleaned_lines[i]) and is_table_separator(cleaned_lines[i + 1]):
-            table_start = i
             j = i + 2
             while j < len(cleaned_lines) and is_pipe_row(cleaned_lines[j]) and cleaned_lines[j].strip():
                 j += 1
@@ -12125,7 +12764,76 @@ def _sanitize_unverified_financial_claims(report_text: str, charts: list, source
                 # An empty structured table is not a useful publication artifact.
                 continue
         cleaned_charts.append(chart)
+    if total:
+        cleaned_text, _dangling = _remove_dangling_lead_ins(cleaned_text)
+        if _dangling:
+            log.info("Report: removed %d dangling lead-in line(s) left by evidence redaction", _dangling)
     return cleaned_text, cleaned_charts, total
+
+
+def _sanitize_report_financial_claims_for_publication(
+    report_text: str,
+    charts: list,
+    sources: list[dict],
+    *,
+    deterministic_report: str = "",
+    trusted_blocks: list[str] | None = None,
+) -> tuple[str, list, int]:
+    """Keep an exact deterministic report intact while validating model-authored text normally.
+
+    The promoter ledger is rendered from parsed official filings. Its quarter totals are
+    derived across multiple filing rows, so the generic publisher-line matcher cannot
+    verify those table cells as though they were copied from a single source row. The
+    separate scope and citation audits remain authoritative for this report.
+    """
+    if deterministic_report and str(report_text or "") == deterministic_report:
+        return str(report_text or ""), charts, 0
+    masked, tokens = _mask_trusted_report_blocks(report_text, trusted_blocks)
+    cleaned, cleaned_charts, count = _sanitize_unverified_financial_claims(masked, charts, sources)
+    return _restore_trusted_report_blocks(cleaned, tokens), cleaned_charts, count
+
+
+def _mask_trusted_report_blocks(report_text: str, blocks: list[str] | None) -> tuple[str, list[tuple[str, str]]]:
+    """Temporarily replace exact source-derived blocks while generic guards run."""
+    masked = str(report_text or "")
+    replacements: list[tuple[str, str]] = []
+    for index, block in enumerate(blocks or []):
+        if not isinstance(block, str) or not block or block not in masked:
+            continue
+        token = "GGTRUSTEDREPORTBLOCK" + ("X" * index)
+        while token in masked or any(token == prior for prior, _ in replacements):
+            token += "X"
+        masked = masked.replace(block, token, 1)
+        replacements.append((token, block))
+    return masked, replacements
+
+
+def _restore_trusted_report_blocks(report_text: str, replacements: list[tuple[str, str]]) -> str:
+    restored = str(report_text or "")
+    for token, block in replacements:
+        if token in restored:
+            restored = restored.replace(token, block, 1)
+        else:
+            # The exact block came from a deterministic official-source parser.
+            # If a generic cleanup unexpectedly deletes its token, keep that
+            # sourced evidence visible; the publication audit will still check it.
+            restored = restored.rstrip() + "\n\n" + block
+    return restored
+
+
+def _sanitize_report_tables_for_publication(
+    report_text: str,
+    sources: list[dict] | None,
+    *,
+    deterministic_report: str = "",
+    trusted_blocks: list[str] | None = None,
+) -> tuple[str, list[dict]]:
+    """Preserve exact deterministic ledger tables; audit their citations separately."""
+    if deterministic_report and str(report_text or "") == deterministic_report:
+        return str(report_text or ""), []
+    masked, tokens = _mask_trusted_report_blocks(report_text, trusted_blocks)
+    cleaned, findings = sanitize_unverified_markdown_tables(masked, sources)
+    return _restore_trusted_report_blocks(cleaned, tokens), findings
 
 
 def _sanitize_report_key_stats(items: object, sources: list[dict]) -> tuple[list, int]:
@@ -12247,15 +12955,78 @@ def _chart_has_payload(chart: dict) -> bool:
     ctype = normalize_chart_type(chart.get("type") or chart.get("chart_type") or chart.get("chartType") or "")
     if ctype == "table":
         cols, rows = chart.get("columns"), chart.get("rows")
-        return isinstance(cols, list) and len(cols) >= 2 and isinstance(rows, list) and len(rows) >= 2 and any(
-            any(str(cell or "").strip() for cell in (row.values() if isinstance(row, dict) else row if isinstance(row, (list, tuple)) else [row]))
-            for row in rows
+        populated_rows = [
+            row for row in (rows or [])
+            if any(str(cell or "").strip() for cell in (row.values() if isinstance(row, dict) else row if isinstance(row, (list, tuple)) else [row]))
+        ]
+        return isinstance(cols, list) and len(cols) >= 2 and isinstance(rows, list) and len(populated_rows) >= 2 and any(
+            sum(bool(str(cell or "").strip()) for cell in (row.values() if isinstance(row, dict) else row if isinstance(row, (list, tuple)) else [row])) >= 2
+            for row in populated_rows
         )
     # Count helper understands native diagram/event/heatmap structures as well as series.
     try:
         return count_chart_points(chart) > 0
     except Exception:
         return False
+
+
+def _reattach_server_workbook_provenance(raw_chart: dict, normalized_chart: dict) -> dict:
+    """Preserve exact workbook provenance through lossy chart normalizers.
+
+    Chart normalizers intentionally retain only renderer fields. That is useful
+    for model-authored charts, but it used to strip the server-only workbook flag
+    and each point's evidence quote immediately before the final publication gate.
+    The gate then treated deterministic, source-backed charts as unverified.
+    This helper carries provenance only from server-generated workbook charts;
+    numeric evidence is still checked independently by chart_evidence_audit.
+    """
+    if not (
+        isinstance(raw_chart, dict)
+        and raw_chart.get("_serverWorkbookEvidence") is True
+        and str(raw_chart.get("sourceOrigin") or "").strip().casefold() == "uploaded_workbook"
+        and isinstance(normalized_chart, dict)
+    ):
+        return normalized_chart
+    result = dict(normalized_chart)
+    result["sourceOrigin"] = "uploaded_workbook"
+    result["_serverWorkbookEvidence"] = True
+    for key in ("sourceIds", "source", "sources"):
+        if raw_chart.get(key) and not result.get(key):
+            result[key] = raw_chart[key]
+    raw_series = [x for x in (raw_chart.get("series") or []) if isinstance(x, dict)]
+    new_series = [dict(x) if isinstance(x, dict) else x for x in (result.get("series") or [])]
+    evidence_keys = ("evidenceSource", "evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow")
+    for series_index, new_item in enumerate(new_series):
+        if not isinstance(new_item, dict):
+            continue
+        new_name = str(new_item.get("name") or new_item.get("label") or "").strip().casefold()
+        old_item = next((x for x in raw_series if str(x.get("name") or x.get("label") or "").strip().casefold() == new_name), None)
+        if old_item is None and series_index < len(raw_series):
+            old_item = raw_series[series_index]
+        if not isinstance(old_item, dict):
+            continue
+        old_points = [x for x in (old_item.get("data") or old_item.get("values") or []) if isinstance(x, dict)]
+        data_key = "data" if isinstance(new_item.get("data"), list) else "values" if isinstance(new_item.get("values"), list) else None
+        if not data_key:
+            continue
+        new_points = []
+        for point_index, raw_point in enumerate(new_item.get(data_key) or []):
+            if not isinstance(raw_point, dict):
+                new_points.append(raw_point)
+                continue
+            point = dict(raw_point)
+            label = str(point.get("label") or point.get("name") or point.get("x") or "").strip().casefold()
+            old_point = next((x for x in old_points if str(x.get("label") or x.get("name") or x.get("x") or "").strip().casefold() == label), None)
+            if old_point is None and len(old_points) == len(new_item.get(data_key) or []) and point_index < len(old_points):
+                old_point = old_points[point_index]
+            if old_point:
+                for key in evidence_keys:
+                    if old_point.get(key) is not None:
+                        point[key] = old_point[key]
+            new_points.append(point)
+        new_item[data_key] = new_points
+    result["series"] = new_series
+    return result
 
 
 def _filter_final_chart_specs(report_text: str, charts: list, normalizer, validator, auto_type=None, adapter=None) -> tuple[str, list, list[str]]:
@@ -12299,6 +13070,8 @@ def _filter_final_chart_specs(report_text: str, charts: list, normalizer, valida
                     if isinstance(adapted, dict):
                         typed = auto_type(adapted) if callable(auto_type) else adapted
                         candidate = normalizer(typed) if callable(normalizer) else typed
+                        if isinstance(candidate, dict):
+                            candidate = _reattach_server_workbook_provenance(raw_copy, candidate)
                         if not isinstance(candidate, dict) or not _chart_has_payload(candidate):
                             candidate = None
                 except Exception:
@@ -12324,6 +13097,88 @@ def _filter_final_chart_specs(report_text: str, charts: list, normalizer, valida
         log.warning("Final chart publication gate removed %d invalid/empty/untitled chart(s): %s", len(dropped), dropped[:8])
     remapped = reconcile_orphaned_chart_references(remapped, kept)
     return remapped, kept, dropped
+
+
+
+def _final_chart_evidence_gate(
+    report_text: str,
+    charts: list,
+    source_manifest: list,
+    enriched_sources: list,
+    *,
+    question: str = "",
+    normalizer=None,
+    validator=None,
+    adapter=None,
+    auto_type=None,
+    stage: str = "final",
+) -> tuple[str, list[dict], list[dict], dict, dict]:
+    """Apply the same shape and source-evidence checks before report publication.
+
+    The gate drops malformed or unsupported visuals, remaps their markers, then
+    audits the exact remaining text/charts/source registry. On an unexpected
+    validator failure it removes all visuals and returns a blocking finding so
+    the report cannot silently claim chart verification.
+    """
+    normalizer = normalizer or (lambda chart: chart)
+    validator = validator or _validate_chart_spec
+    adapter = adapter or _normalise_inline_chart_spec
+    text, shaped_charts, dropped = _filter_final_chart_specs(
+        str(report_text or ""), list(charts or []), normalizer, validator,
+        auto_type=auto_type, adapter=adapter,
+    )
+    final_manifest = _merge_source_evidence_statuses(
+        list(source_manifest or []), list(enriched_sources or []),
+    )
+    # Every producer (writer, gallery, sector builders, repairs, actions) must
+    # leave charts citing IDs that exist in THIS manifest and that actually hold
+    # the quoted lines; otherwise a chart that was fine upstream fails here (or
+    # later at PDF/HTML export) with "source IDs do not resolve".
+    shaped_charts, _gate_id_meta = _reconcile_charts_to_manifest(shaped_charts, final_manifest, enriched_sources, stage=f"gate:{stage}")
+    try:
+        text, shaped_charts, sanitation = sanitize_charts_for_publication(
+            text, shaped_charts, final_manifest, question=question,
+            require_publisher_verification=True,
+        )
+        audited = audit_chart_evidence_consistency(
+            text, shaped_charts, final_manifest, require_publisher_verification=True,
+            question=question,
+        )
+        remaining = list(sanitation.get("remainingFindings") or [])
+        remaining.extend(audited.get("chartTableVerificationConflicts") or [])
+        remaining.extend(audited.get("chartEvidenceFailures") or [])
+        deduped = []
+        seen = set()
+        for finding in remaining:
+            key = repr(finding)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(finding)
+        meta = {
+            "stage": stage,
+            "droppedInvalidCharts": dropped,
+            "removedCharts": int(sanitation.get("removedCharts") or 0) + len(dropped),
+            "prunedPoints": int(sanitation.get("prunedPoints") or 0),
+            "residualFindings": len(deduped),
+            "findings": deduped,
+        }
+    except Exception as exc:
+        log.exception("Final chart evidence gate failed at stage=%s; dropping visuals", stage)
+        mask = [False] * len(shaped_charts)
+        text = _remap_chart_placeholders(text, shaped_charts, mask)
+        shaped_charts = []
+        audited = {"chartTableVerificationConflicts": [], "chartEvidenceFailures": [], "blocking": True}
+        meta = {
+            "stage": stage, "droppedInvalidCharts": dropped,
+            "removedCharts": len(charts or []), "prunedPoints": 0,
+            "residualFindings": 1,
+            "findings": [{"reason": "gate_error", "error": type(exc).__name__}],
+        }
+    log.info(
+        "Final chart evidence gate stage=%s charts=%d removed=%d residual=%d",
+        stage, len(shaped_charts), meta["removedCharts"], meta["residualFindings"],
+    )
+    return text, shaped_charts, final_manifest, audited, meta
 
 
 def _chart_period_forms(label: object) -> set[str]:
@@ -12416,7 +13271,10 @@ def _ground_writer_chart_points(charts: list, source_manifest: list, enriched: l
     or the preceding sentence). A grounded point gets evidenceSource /
     evidenceQuote / evidenceValue; nothing is inferred or changed otherwise.
     """
-    from utils.chart_evidence_audit import _value_windows, _label_terms_present, _source_ids as _chart_source_ids
+    from utils.chart_evidence_audit import (
+        _value_windows, _label_terms_present, _source_ids as _chart_source_ids,
+        quarter_tokens as _quarter_tokens, quarter_window_ok as _quarter_window_ok,
+    )
     meta = {"pointsChecked": 0, "pointsGrounded": 0, "chartsTouched": 0}
     rows = _gallery_source_texts(source_manifest, enriched)
     texts: dict[str, list[tuple[str, str]]] = {}
@@ -12486,6 +13344,12 @@ def _ground_writer_chart_points(charts: list, source_manifest: list, enriched: l
                 label_is_period = bool(_chart_period_forms(label)) and not re.search(r"[A-Za-z]{4,}", re.sub(r"(?i)\b(?:FY|Q[1-4]|H[12]|end|march|sept?(?:ember)?|jan|feb|mar|apr|may|jun|jul|aug|oct|nov|dec)\w*", "", label))
                 entity_text = series_name if label_is_period else label
                 period_forms = _chart_period_forms(label) or _chart_period_forms(series_name)
+                # Calendar quarters must match exactly: from the point, else the series,
+                # else the chart title/axis ("... (Q2 2025)" with sector labels).
+                wanted_quarters = (
+                    _quarter_tokens(label) or _quarter_tokens(series_name)
+                    or _quarter_tokens(title, chart.get("xLabel"))
+                )
                 subject = _claim_subject_stems(" ".join([title, series_name, label]))
                 entity_stems = _claim_subject_stems(entity_text)
                 found = None
@@ -12502,6 +13366,8 @@ def _ground_writer_chart_points(charts: list, source_manifest: list, enriched: l
                             if subject and not (subject & _claim_subject_stems(context)):
                                 continue
                             if period_forms and not any(form.casefold() in context.casefold() for form in period_forms):
+                                continue
+                            if wanted_quarters and not _quarter_window_ok(own, context, value, wanted_quarters):
                                 continue
                             token = next((m.group(0) for m in re.finditer(r"[-+]?(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d+)?", own)
                                           if abs(float(m.group(0).replace(",", "")) - float(value)) <= max(0.001, abs(float(value)) * 0.002)), None)
@@ -12998,7 +13864,6 @@ def _expand_source_supported_market_cagr_chart(
 
     match_candidate = None
     for source_block in source_blocks:
-        source_numbers = extract_numbers(source_block)
         rates: list[float] = []
         for pattern in cagr_patterns:
             for match in re.finditer(pattern, source_block, re.I):
@@ -13147,6 +14012,9 @@ def _evaluate_auto_repair_candidate(
     source_evidence = (repair_deterministic or {}).get("sourceEvidenceAudit", {})
     if isinstance(source_evidence, dict) and bool(source_evidence.get("blocking")):
         return False, "source_evidence_blocker_remains", False
+    scope_coverage = (repair_deterministic or {}).get("scopeCoverageAudit", {})
+    if isinstance(scope_coverage, dict) and bool(scope_coverage.get("blocking")):
+        return False, "requested_scope_coverage_blocker_remains", False
     if find_incomplete_numeric_fragments(repaired_text):
         return False, "incomplete_numeric_fragment_remains", False
     findings = (repair_audit or {}).get("findings", []) if isinstance(repair_audit, dict) else []
@@ -13172,6 +14040,9 @@ def _evaluate_exact_patch_candidate(
     source_evidence = (repair_deterministic or {}).get("sourceEvidenceAudit", {})
     if isinstance(source_evidence, dict) and bool(source_evidence.get("blocking")):
         return False, "source_evidence_blocker_remains", False
+    scope_coverage = (repair_deterministic or {}).get("scopeCoverageAudit", {})
+    if isinstance(scope_coverage, dict) and bool(scope_coverage.get("blocking")):
+        return False, "requested_scope_coverage_blocker_remains", False
     if find_incomplete_numeric_fragments(repaired_text):
         return False, "incomplete_numeric_fragment_remains", False
     # Measured pagination is useful for layout QA only; removing duplicated or
@@ -13222,7 +14093,6 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
     source-level mismatches remain diagnostic metadata and are not silently hidden.
     """
     rows = [item for item in (sources or []) if isinstance(item, dict)]
-    source_by_id = {str(item.get("id") or "").strip().upper(): item for item in rows}
     groups_by_id: dict[str, dict] = {}
     has_group_metadata = False
     for source in rows:
@@ -13245,6 +14115,15 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
                 continue
             fetch_status = str(source.get("pageFetchStatus") or "unknown").casefold()
             origin = str(source.get("evidenceExcerptOrigin") or source.get("evidenceOrigin") or "").casefold()
+            calculated_evidence_available = bool(
+                source.get("evidenceAvailable", source.get("evidence_available"))
+                or source.get("chartEvidenceExcerpt")
+            )
+            if is_trusted_calculated_sector_source(source) and calculated_evidence_available:
+                # The full quarter matrix is locally calculated from observed
+                # daily closes and retained as exact source evidence. It has no
+                # publisher-page fetch to warn about.
+                continue
             has_publisher_page_evidence = bool(
                 fetch_status == "ok"
                 and "publisher_page" in origin
@@ -13281,6 +14160,7 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
                     "groupId": group.get("groupId"),
                     "sourceIds": list(group.get("sourceIds") or []),
                     "claim": str(group.get("claim") or "")[:500],
+                    "sentence": str(group.get("sentence") or "")[:1800],
                     "claimTokens": tokens,
                     "unmatchedNumericClaims": unmatched,
                     "supportByToken": support_by_token,
@@ -13349,6 +14229,73 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
     }
 
 
+def _redact_unsupported_cited_claim_sentences(
+    report_text: str, sources: list[dict] | None,
+) -> tuple[str, int]:
+    """Remove sentences whose cited sources fail the strict numeric evidence audit."""
+    audit = _source_evidence_quality_audit(sources)
+    groups = [
+        item for item in (audit.get("mismatchedCitationGroups") or [])
+        if isinstance(item, dict)
+    ]
+    text = str(report_text or "")
+    removed = 0
+    patterns: list[re.Pattern] = []
+    for group in groups:
+        sentence = re.sub(r"\s+", " ", str(group.get("sentence") or "")).strip()
+        if not sentence:
+            sentence = re.sub(r"\s+", " ", str(group.get("claim") or "")).strip()
+        words = sentence.split()
+        if len(words) < 3:
+            continue
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        if any(pattern.pattern == existing.pattern for existing in patterns):
+            continue
+        patterns.append(pattern)
+
+    for pattern in sorted(patterns, key=lambda item: len(item.pattern), reverse=True):
+        match = pattern.search(text)
+        if not match:
+            continue
+        text = text[:match.start()] + text[match.end():]
+        removed += 1
+
+    if not removed:
+        return text, 0
+
+    # Remove table headers that have no verified data rows left.
+    lines = text.splitlines()
+    cleaned_lines: list[str] = []
+    separator = re.compile(r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    index = 0
+    while index < len(lines):
+        if index + 1 < len(lines) and "|" in lines[index] and separator.fullmatch(lines[index + 1]):
+            end = index + 2
+            while end < len(lines) and "|" in lines[end] and lines[end].strip():
+                end += 1
+            if end > index + 2:
+                cleaned_lines.extend(lines[index:end])
+            index = end
+            continue
+        cleaned_lines.append(lines[index])
+        index += 1
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned_lines)).strip()
+    disclosure = (
+        "> **Quantitative evidence limitation:** One or more numerical statements were omitted "
+        "because their cited sources did not verify the figures."
+    )
+    if "Quantitative evidence limitation:" not in text:
+        source_heading = re.search(r"(?im)^#{1,6}\s+(?:sources|references|source notes)\b.*$", text)
+        if source_heading:
+            text = (
+                text[:source_heading.start()].rstrip() + "\n\n" + disclosure + "\n\n"
+                + text[source_heading.start():].lstrip()
+            )
+        else:
+            text = (text.rstrip() + "\n\n" + disclosure).strip()
+    return text, removed
+
+
 def _publication_audit_is_blocking(audit: object) -> bool:
     """Fail closed for deterministic structural defects that make publication unsafe."""
     if not isinstance(audit, dict):
@@ -13384,7 +14331,15 @@ def _apply_deterministic_audit_gate(gemini_audit: dict, deterministic_audits: di
     evidence_audit = evidence_audit if isinstance(evidence_audit, dict) else {}
     evidence_flags = list(evidence_audit.get("flags") or [])
     flags.extend(evidence_flags)
-    blocking = _publication_audit_is_blocking(publication) or bool(evidence_audit.get("blocking"))
+    scope_audit = deterministic_audits.get("scopeCoverageAudit") if isinstance(deterministic_audits, dict) else {}
+    scope_audit = scope_audit if isinstance(scope_audit, dict) else {}
+    scope_flags = list(scope_audit.get("flags") or [])
+    flags.extend(scope_flags)
+    blocking = (
+        _publication_audit_is_blocking(publication)
+        or bool(evidence_audit.get("blocking"))
+        or bool(scope_audit.get("blocking"))
+    )
     model_status = str(result.get("status") or "unknown").upper()
     model_blocking = bool(result.get("blocking")) or model_status == "FAIL"
     if model_blocking:
@@ -13418,6 +14373,7 @@ def _apply_deterministic_audit_gate(gemini_audit: dict, deterministic_audits: di
         )
     for flag in flags:
         lower_flag = str(flag).casefold()
+        scope_flag = flag in scope_flags
         evidence_flag = (
             ("source evidence" in lower_flag and ("numeric claim" in lower_flag or "cited claim" in lower_flag))
             or "numeric chart observations" in lower_flag
@@ -13425,6 +14381,7 @@ def _apply_deterministic_audit_gate(gemini_audit: dict, deterministic_audits: di
         )
         severity = (
             "critical" if blocking and evidence_flag else
+            "high" if blocking and scope_flag else
             "critical" if blocking and any(token in lower_flag for token in (
                 "continuation markers", "chart placeholders", "image placeholders", "source identifiers",
                 "duplicate tables", "chart reference", "cagr footnote", "forecast/terminal year",
@@ -13435,11 +14392,14 @@ def _apply_deterministic_audit_gate(gemini_audit: dict, deterministic_audits: di
         if not any(str(item.get("issue") or "") == str(flag) for item in findings if isinstance(item, dict)):
             findings.append({
                 "severity": severity,
-                "category": "source" if evidence_flag else "formatting",
+                "category": "source" if evidence_flag else ("scope" if scope_flag else "formatting"),
                 "location": "Deterministic publication audit",
                 "issue": str(flag),
                 "evidence": str(flag),
-                "recommended_fix": "Repair the cited claim/evidence mapping and rerun the publication audit.",
+                "recommended_fix": (
+                    "Fill the requested period-by-period coverage from verified sources and rerun the scope audit."
+                    if scope_flag else "Repair the cited claim/evidence mapping and rerun the publication audit."
+                ),
             })
     result["findings"] = findings[:60]
     result["blocking"] = blocking
@@ -13470,10 +14430,13 @@ def _classify_publication_outcome(deterministic_audits: dict | None, report_text
     status = _publication_status_from_audits(audits)
     publication = audits.get("publicationAudit") if isinstance(audits.get("publicationAudit"), dict) else {}
     evidence = audits.get("sourceEvidenceAudit") if isinstance(audits.get("sourceEvidenceAudit"), dict) else {}
+    scope = audits.get("scopeCoverageAudit") if isinstance(audits.get("scopeCoverageAudit"), dict) else {}
     body = str(report_text or "").strip()
     categories: list[str] = []
     if bool(evidence.get("blocking")):
         categories.append("source_evidence")
+    if bool(scope.get("blocking")):
+        categories.append("scope_coverage")
     if publication.get("chartEvidenceFailures") or publication.get("chartTableVerificationConflicts") or publication.get("chartEvidenceGateFindings"):
         categories.append("chart_evidence")
     if any(bool(publication.get(key)) for key in _STRUCTURAL_PUBLICATION_KEYS):
@@ -13498,6 +14461,9 @@ def _classify_publication_outcome(deterministic_audits: dict | None, report_text
             summary.append({"stage": "chart_evidence", "issue": str(item.get("reason") or item.get("issue") or "Chart value lacks source support.")[:220],
                             "claim": str(item.get("chartTitle") or "")[:160], "sources": list(item.get("sourceIds") or [])[:6]})
     if not summary:
+        for flag in (scope.get("flags") or [])[:4]:
+            summary.append({"stage": "scope_coverage", "issue": str(flag)[:220]})
+    if not summary:
         for item in (findings or [])[:5]:
             if isinstance(item, dict) and str(item.get("severity") or "").casefold() in {"critical", "high"}:
                 summary.append({"stage": str(item.get("category") or "publication"), "issue": str(item.get("issue") or "")[:220]})
@@ -13517,9 +14483,10 @@ def _publication_status_from_audits(deterministic_audits: dict | None) -> str:
     audits = deterministic_audits if isinstance(deterministic_audits, dict) else {}
     publication = audits.get("publicationAudit") if isinstance(audits.get("publicationAudit"), dict) else {}
     evidence = audits.get("sourceEvidenceAudit") if isinstance(audits.get("sourceEvidenceAudit"), dict) else {}
-    if _publication_audit_is_blocking(publication) or bool(evidence.get("blocking")):
+    scope = audits.get("scopeCoverageAudit") if isinstance(audits.get("scopeCoverageAudit"), dict) else {}
+    if _publication_audit_is_blocking(publication) or bool(evidence.get("blocking")) or bool(scope.get("blocking")):
         return "FAIL"
-    if publication.get("flags") or evidence.get("flags"):
+    if publication.get("flags") or evidence.get("flags") or scope.get("flags"):
         return "WARNING"
     return "PASS"
 
@@ -13542,6 +14509,7 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
         if not isinstance(raw, dict):
             continue
         item = dict(raw)
+        trusted_calculated_sector = is_trusted_calculated_sector_source(raw)
         evidence = evidence_by_id.get(str(item.get("id") or "").strip().upper())
         if evidence:
             # Carry publisher-extracted metadata alongside the stable source ID.
@@ -13581,6 +14549,14 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
             item["page_fetch_relevance_matched"] = evidence.get("pageFetchRelevanceMatched")
             item["page_fetch_reject_reason"] = evidence.get("pageFetchRejectReason")
             item["page_fetch_candidate_chars"] = evidence.get("pageFetchCandidateChars")
+            if trusted_calculated_sector:
+                # This is exact server-generated data from observed daily
+                # closes, not a fetched publisher page. Preserve its distinct
+                # provenance and its own fetch semantics through the registry.
+                item["evidence_origin"] = "calculated_from_daily_market_data"
+                item["evidence_excerpt_origin"] = "calculated_from_daily_market_data"
+                item["page_fetch_status"] = "not_applicable"
+                item["evidence_available"] = bool(str(item.get("chartEvidenceExcerpt") or "").strip())
             # PDF chart validation needs actual public source text, not only status flags.
             # Expose a small excerpt ONLY from a successfully fetched public publisher page.
             # Never expose search-only snippets, private/OKF retrieval, or uploaded document text.
@@ -13777,6 +14753,16 @@ def _attach_audit_source_evidence(
             found.add(token)
         return found
 
+    def _claim_numbers(value: str) -> set[str]:
+        """Ignore Markdown list/heading ordinals while retaining factual numbers."""
+        text = str(value or "")
+        # Citation segmentation can flatten a numbered Markdown heading into
+        # the claim text (for example, ".3. **Three-Stage Anatomy...**"). That
+        # prefix is structure, not a claimed count. The whitespace and
+        # formatting-marker lookahead keeps decimal values such as 3.56 intact.
+        text = re.sub(r"(?<![A-Za-z0-9])\d{1,2}[.)](?=\s+[*_`]*[A-Za-z])", " ", text)
+        return numbers(text)
+
     stop_words = {"the", "and", "for", "with", "from", "that", "this", "were", "was", "are", "into", "over", "under", "during", "according", "reported", "expected", "projected", "india", "banking", "sector"}
 
     def words(value: str) -> set[str]:
@@ -13807,8 +14793,6 @@ def _attach_audit_source_evidence(
         table_header_text = ""
         row_context: dict[str, str] = {}
         unit_re = re.compile(r"(\b(?:GW|MW|KW|TW|TWh|GWh|MWh|kWh|BU|billion units|crore|lakh|million|billion|trillion|per\s?cent)\b|%)", re.I)
-        bare_value_re = re.compile(r"^\s*(?:[-—–]|-?\d[\d,]*(?:\.\d+)?%?)\s*$")
-
         def flush_paragraph() -> None:
             if paragraph:
                 joined = re.sub(r"\s+", " ", " ".join(paragraph)).strip()
@@ -13920,6 +14904,16 @@ def _attach_audit_source_evidence(
 
         parts: list[str] = []
         for block in blocks:
+            if block in row_context:
+                # A citation at the end of a Markdown/table row applies to the
+                # complete row. Splitting on punctuation inside a cell (for
+                # example, "Mr. Rao") detached the citation from the issuer and
+                # other columns, causing false numeric subject mismatches.
+                row = block.strip()
+                if len(row) >= 35:
+                    parts.append(row)
+                    _TABLE_ROW_CONTEXT[row] = row_context[block]
+                continue
             sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9₹$])|(?<=;)\s+", block)
             block_parts = [sentence.strip() for sentence in sentences if len(sentence.strip()) >= 35]
             parts.extend(block_parts)
@@ -13932,9 +14926,12 @@ def _attach_audit_source_evidence(
     by_path_rows: dict[str, list[dict]] = {}
     by_source_id: dict[str, dict] = {}
     by_title: dict[str, list[dict]] = {}
+    calculated_sector_sources: list[dict] = []
     for row in enriched_sources or []:
         if not isinstance(row, dict):
             continue
+        if is_trusted_calculated_sector_source(row):
+            calculated_sector_sources.append(row)
         exact_key, path_key, _ = url_keys(row.get("url") or row.get("sourceUrl") or row.get("source_url"))
         if exact_key:
             by_exact[exact_key] = row
@@ -13980,7 +14977,7 @@ def _attach_audit_source_evidence(
             if len(segment) < 12:
                 segment = sentence[:first.start()].strip(" ,;:–—-\t") or sentence
             ids = list(dict.fromkeys(value.upper() for value in ids))
-            claim_tokens = sorted(numbers(segment))
+            claim_tokens = sorted(_claim_numbers(segment))
             if ids:
                 group_seed = f"{sentence_index}|{segment}|{','.join(ids)}"
                 group_id = hashlib.sha1(group_seed.encode("utf-8", errors="replace")).hexdigest()[:14]
@@ -14027,7 +15024,16 @@ def _attach_audit_source_evidence(
         # Permit ID-only matching solely for legacy records with no other identity.
         if original is None and source_id and not exact_key and not title_key:
             original = by_source_id.get(source_id)
+        # Internal source URLs are intentionally removed from the public
+        # registry. Resolve this one stable server-calculated dataset by its
+        # validated provenance instead of losing its exact numeric evidence.
+        if original is None and is_trusted_calculated_sector_source(item) and len(calculated_sector_sources) == 1:
+            original = calculated_sector_sources[0]
         original = original or {}
+        trusted_calculated_sector = (
+            is_trusted_calculated_sector_source(item)
+            or is_trusted_calculated_sector_source(original)
+        )
 
         # Internal-only fields used solely by the verified table-to-chart builder.
         # Keep the long fetched table out of the public source manifest; it is never
@@ -14052,7 +15058,13 @@ def _attach_audit_source_evidence(
 
         content_candidates: list[tuple[str, str]] = []
         seen_candidate_text: set[str] = set()
-        evidence_rows = [
+        evidence_rows = []
+        if trusted_calculated_sector:
+            evidence_rows.append((
+                original.get("chartEvidenceExcerpt") or item.get("chartEvidenceExcerpt"),
+                "calculated_from_daily_market_data",
+            ))
+        evidence_rows.extend([
             (original.get("pageContent"), "publisher_page"),
             (item.get("pageContent"), "publisher_page"),
             (original.get("evidenceContent"), "source_evidence"),
@@ -14077,7 +15089,7 @@ def _attach_audit_source_evidence(
             (item.get("evidenceExcerpt"), "search_extract"),
             (item.get("snippet"), "search_extract"),
             (item.get("description"), "search_extract"),
-        ]
+        ])
         for candidate, origin in evidence_rows:
             if not isinstance(candidate, str) or not candidate.strip():
                 continue
@@ -14103,7 +15115,7 @@ def _attach_audit_source_evidence(
         deduped_sentences = list(sentence_origin.items())
 
         cited_claims = claim_segments_by_source.get(source_id, []) if source_id else []
-        claim_numbers = set().union(*(numbers(claim) for claim in cited_claims)) if cited_claims else set()
+        claim_numbers = set().union(*(_claim_numbers(claim) for claim in cited_claims)) if cited_claims else set()
         claim_words = set().union(*(words(claim) for claim in cited_claims)) if cited_claims else words(str(item.get("title") or ""))
 
         def number_matches(left: str, right: str) -> bool:
@@ -14259,11 +15271,16 @@ def _attach_audit_source_evidence(
                 if str(original.get("evidenceOrigin") or item.get("evidenceOrigin") or "").casefold() == "okf_retrieval"
                 else "source_evidence"
             )
+        elif trusted_calculated_sector and excerpt_origins:
+            item["evidenceExcerptOrigin"] = "calculated_from_daily_market_data"
         elif excerpt_origins:
             item["evidenceExcerptOrigin"] = "search_extract_only"
         else:
             item["evidenceExcerptOrigin"] = str(original.get("evidenceOrigin") or item.get("evidenceOrigin") or "metadata_only")
-        item["pageFetchStatus"] = str(original.get("pageFetchStatus") or item.get("pageFetchStatus") or "unknown")
+        item["pageFetchStatus"] = (
+            "not_applicable" if trusted_calculated_sector
+            else str(original.get("pageFetchStatus") or item.get("pageFetchStatus") or "unknown")
+        )
         item["pageFetchRelevanceMatched"] = original.get("pageFetchRelevanceMatched")
         item["pageFetchRejectReason"] = original.get("pageFetchRejectReason")
         item["pageFetchCandidateChars"] = original.get("pageFetchCandidateChars")
@@ -14503,11 +15520,12 @@ async def _auto_repair_report_once(
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=24, write=6, pool=4)) as client:
                     response = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                         json={
                             "system_instruction": {"parts": [{"text": "You are a precise line editor. Output only JSON exact-match patches, never a complete rewrite. Evidence-bound and conservative."}]},
                             "contents": [{"role": "user", "parts": [{"text": json.dumps(payload, ensure_ascii=False)}]}],
-                            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0, "maxOutputTokens": 2500},
+                            "generationConfig": _gemini_gen_config(model, {"responseMimeType": "application/json", "temperature": 0.0, "maxOutputTokens": 2500}),
                         },
                     )
                 if not response.is_success:
@@ -14537,9 +15555,10 @@ async def _run_independent_report_audit(
     """Run a separate Gemini review and deterministic publication gate on all return paths."""
     deterministic = {
         "chartDensity": _chart_density_audit(charts, report_tier),
-        "publicationAudit": audit_report_publication(report_text, charts, images, sources),
+        "publicationAudit": audit_report_publication(report_text, charts, images, sources, question=question),
         "sourceEvidenceAudit": _source_evidence_quality_audit(sources),
         "structure": audit_report_structure(report_text),
+        "scopeCoverageAudit": audit_requested_report_scope(question, report_text, sources),
     }
     started = time.perf_counter()
     log.info("Gemini independent report audit started — tier=%s chars=%d charts=%d sources=%d",
@@ -14581,17 +15600,17 @@ async def _ensure_report_page_budget(
     evidence_text: str, title: str, summary: str, key_stats: list, charts: list,
     sources: object, presentation: object, web_images: list | None = None,
     file_images: list | None = None, theme: dict | None = None,
+    requested_pages: int | None = None,
 ) -> tuple[str, int | None]:
-    """Measure the final PDF and deepen the report toward its configured page band.
-
-    Expansion is driven by measured page shortfall and may add only new, source-grounded
-    content. If evidence or the time budget is exhausted, the shortfall is returned;
-    this function never manufactures content or removes distinct findings to force a band.
-    """
+    """Measure pagination; expand only when the user explicitly requested pages."""
     spec = get_report_tier_spec(report_tier)
-    minimum = int(spec.page_target.minimum or 1)
-    target = int(spec.page_target.target or minimum)
     maximum = int(spec.page_target.maximum)
+    explicit_target = int(requested_pages) if requested_pages is not None and 6 <= int(requested_pages) <= 100 else None
+    minimum = explicit_target or 1
+    target = explicit_target or 1
+    if explicit_target is not None:
+        maximum = max(maximum, explicit_target)
+        log.info("Report page budget: explicit requested target=%d", explicit_target)
     expanded = normalize_report_markdown(strip_generation_markers(report_text))
     pages = _rendered_page_count_preflight(
         expanded, title, question, summary, key_stats, charts, sources,
@@ -14601,9 +15620,12 @@ async def _ensure_report_page_budget(
     if pages is None:
         log.warning("Report page target unavailable: final PDF renderer could not measure tier=%s", report_tier)
         return expanded, None
+    if explicit_target is None:
+        log.info("Report pagination measured: pages=%d tier=%s; no implicit length target applied", pages, report_tier)
+        return expanded, pages
 
     total_budget = {"brief": 18.0, "detailed": 180.0, "in_depth": 480.0}.get(report_tier, 180.0)
-    # Brief only needs to reach its 6-page minimum, not force the 8-page midpoint.
+    # Explicit page requests are bounded; no default tier expands to a page minimum.
     # A single corrective pass avoids repeated LLM writes and PDF preflights.
     max_rounds = {"brief": 1, "detailed": 4, "in_depth": 7}.get(report_tier, 4)
     max_passes = {"brief": 1, "detailed": 4, "in_depth": 7}.get(report_tier, 4)
@@ -14611,7 +15633,7 @@ async def _ensure_report_page_budget(
     min_growth = {"brief": 2_000, "detailed": 7_000, "in_depth": 10_000}.get(report_tier, 7_000)
     started = time.perf_counter()
 
-    # Brief is explicitly a 6–10 page band, not an exact 8-page mandate.
+    # The explicit user request is the only page-count generation target.
     # Requiring the midpoint created avoidable LLM expansion + PDF preflight
     # rounds even after a valid 6-page brief was ready. Longer tiers still aim
     # toward their preferred target because depth is part of their contract.
@@ -14640,7 +15662,21 @@ async def _ensure_report_page_budget(
         _rounds_cap = 0
     if _rounds_cap > 0:
         max_rounds = min(max_rounds, _rounds_cap)
-    if pages < expansion_threshold:
+    # Evidence-limited gate. Thin verified evidence AND a report far below the band
+    # means more rounds can only restate the same facts or add claims the
+    # publication guard will then redact (the guard removed 251 numbers in the
+    # last run). Stop and disclose the shortfall instead of padding.
+    _band_ratio = pages / max(1, minimum)
+    _evidence_limited = (
+        report_tier != "brief" and _fetched_sources < _thin_limit and _band_ratio < 0.5
+    )
+    if pages < expansion_threshold and _evidence_limited:
+        log.warning(
+            "Report page-band: evidence-limited (%d fetched sources < %d, rendered=%d is %.0f%% of the %d-page minimum); "
+            "skipping expansion and disclosing the shortfall instead of padding",
+            _fetched_sources, _thin_limit, pages, _band_ratio * 100, minimum,
+        )
+    elif pages < expansion_threshold:
         if len(str(evidence_text or "").strip()) < 900:
             log.warning(
                 "Report page-band shortfall: rendered=%d target=%d minimum=%d; usable source evidence is insufficient",
@@ -15394,7 +16430,6 @@ def _dedupe_redundant_report_content(report_text: str, relevant_topics: set[str]
     # Claim removal can leave the continuation's H3/H4 label with no body.
     # Strip only headings whose block is now empty; retain every heading that
     # still has prose, a table, a citation, or a visual placeholder beneath it.
-    lines = result.splitlines()
     heading_matches = list(re.finditer(r"(?m)^(#{3,4})\s+[^\n]+$", result))
     if heading_matches:
         heading_ranges = []
@@ -15425,7 +16460,6 @@ def _dedupe_semantically_duplicate_table_charts(report_text: str, charts: list |
     covers at least 75% of the smaller table. Tables containing distinct metrics
     or new numeric rows are retained.
     """
-    import math as _math
     import re as _re
 
     original = [dict(c) if isinstance(c, dict) else c for c in (charts or [])]
@@ -15630,223 +16664,33 @@ def _select_expansion_evidence(evidence_text: str, question: str, headings: list
 def _coverage_digest(report_text: str, max_chars: int = 7_000) -> str:
     """Summarize current section coverage without echoing the full report back
     into every expansion prompt. Keep continuation context small and focused."""
-    sections = _parse_report_sections(report_text)
-    parts: list[str] = []
-    for sec in sections:
-        body = report_text[sec["start"]:sec["end"]]
-        body_clean = re.sub(r"\s+", " ", body).strip()
-        if len(body_clean) > 800:
-            body_clean = body_clean[:500] + " … " + body_clean[-280:]
-        parts.append(f"## {sec['heading']}\n{body_clean}")
-    digest = "\n\n".join(parts)
-    return digest[:max_chars]
+    return report_llm.coverage_digest(report_text, max_chars, parse_sections=_parse_report_sections)
 
 
 def _planned_headings_for_expansion(report_plan: dict | None, report_text: str) -> list[str]:
-    existing = [s["heading"] for s in _parse_report_sections(report_text) if s.get("level", 0) == 2]
-    if not existing:
-        existing = [s["heading"] for s in _parse_report_sections(report_text) if s.get("heading")]
-    if not report_plan:
-        return existing
-    planned = [str(s.get("heading") or "").strip() for s in (report_plan.get("sections") or []) if str(s.get("heading") or "").strip()]
-    # Prefer planned order, but only headings that already exist in the generated report.
-    lower_existing = {h.lower(): h for h in existing}
-    out = [lower_existing[h.lower()] for h in planned if h.lower() in lower_existing]
-    out.extend(h for h in existing if h not in out)
-    return out
+    return report_llm.planned_headings(report_plan, report_text, parse_sections=_parse_report_sections)
 
 
 def _insert_section_addition(report_text: str, heading: str, addition: str) -> str:
     """Insert markdown after an existing top-level section, before the next
     top-level heading. The addition contains H3/H4 content only."""
-    sections = _parse_report_sections(report_text)
-    target = next((s for s in sections if s.get("heading", "").strip().lower() == heading.strip().lower()), None)
-    if not target:
-        return report_text
-    addition = (addition or "").strip()
-    if not addition:
-        return report_text
-    # Strip accidental echo of the exact H2 heading from the model.
-    addition = re.sub(rf"^##[ \t]+{re.escape(heading)}[ \t]*\n+", "", addition, count=1, flags=re.IGNORECASE)
-    end = target["end"]
-    prefix = report_text[:end].rstrip()
-    suffix = report_text[end:]
-    return prefix + "\n\n" + addition + "\n\n" + suffix.lstrip("\n")
+    return report_llm.insert_section_addition(
+        report_text, heading, addition, parse_sections=_parse_report_sections,
+    )
 
 
 async def _call_groq_plain_continuation(prompt: str, report_tier: str) -> tuple[str, str]:
-    """Fallback provider for report-depth continuation when Gemini is down."""
-    keys = get_groq_keys()
-    if not keys:
-        return "", ""
-    # Keep the *combined* request safely below provider context/payload limits.
-    # Preserve both the task/section contract at the start and selected evidence
-    # near the end; a simple prefix slice often cut away all of the evidence.
-    def excerpt(value: str, limit: int) -> str:
-        value = str(value or "")
-        if len(value) <= limit:
-            return value
-        marker = "\n\n[Middle of continuation context omitted to stay within provider limits]\n\n"
-        remaining = max(0, limit - len(marker))
-        head = int(remaining * 0.30)
-        tail = remaining - head
-        return value[:head] + marker + value[-tail:]
-
-    compact = excerpt(prompt, 14_000)
-    system = (
-        "You are a continuation editor for a professional Growth Gradual research report. "
-        "Return ONLY new markdown content for the requested existing sections. "
-        "Never create an H2/top-level section. Never repeat existing content. "
-        "Use only evidence supplied in the prompt. Do not invent numbers, dates, rankings, "
-        "company facts or citations. Add useful H3/H4 analysis, comparisons, mechanisms, "
-        "historical context and implications when supported. For the selected longer tier, continue the selected existing sections enough to satisfy its requested depth/page band without filler. "
+    """Compatibility seam for the extracted Groq continuation caller."""
+    return await report_llm.groq_plain_continuation(
+        prompt, report_tier, runtime=_sys.modules[__name__],
     )
-    attempted = 0
-    for key in iter_reserved_groq_keys(keys, max_keys=4):
-        # The report-specific failure namespace distinguishes continuation
-        # errors; the shared 60-second key reservation still coordinates this
-        # request against chat/planner/report calls using the same credentials.
-        if is_rate_limited(f"report:groq:{key}"):
-            continue
-        attempted += 1
-        token_budget = 6_000 if report_tier == "in_depth" else (4_500 if report_tier == "detailed" else 2_500)
-        # A 413 is a request-size problem, not a bad-key problem. Retry once with
-        # a materially smaller request/token reservation rather than rotating
-        # through several keys and repeating the same oversized payload.
-        variants = [(compact, token_budget), (excerpt(prompt, 7_500), min(3_500, token_budget))]
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5)) as client:
-                res = None
-                for variant_no, (user_content, max_tokens) in enumerate(variants):
-                    res = await client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-                        json={
-                            "model": "openai/gpt-oss-120b",
-                            "messages": [
-                                {"role": "system", "content": system},
-                                {"role": "user", "content": user_content},
-                            ],
-                            # Each request is a single, bounded continuation chunk.
-                            "max_tokens": max_tokens,
-                            "temperature": 0.2,
-                        },
-                    )
-                    if res.status_code == 413 and variant_no == 0:
-                        log.warning("Report: Groq continuation HTTP 413; retrying with compact prompt/token budget")
-                        continue
-                    break
-            if res is None:
-                continue
-            if res.status_code in (401, 403):
-                mark_rate_limited(f"report:groq:{key}", 24 * 60 * 60_000)
-                continue
-            if res.status_code == 429:
-                mark_rate_limited(f"report:groq:{key}", 60_000)
-                continue
-            if res.status_code == 413:
-                log.warning("Report: Groq continuation still returned HTTP 413 after compact retry")
-                # The fallback is deterministic for the same provider/model;
-                # another API key will not make an oversized payload smaller.
-                return "", ""
-            if not res.is_success:
-                log.warning("Report: Groq continuation HTTP %d key=...%s", res.status_code, key[-4:])
-                continue
-            content = ((res.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            if content and content.strip():
-                return content.strip(), "groq:gpt-oss-120b:continuation"
-        except Exception as exc:
-            log.warning("Report: Groq continuation failed on key ...%s: %s", key[-4:], type(exc).__name__)
-    log.warning("Report: Groq continuation produced no usable content after %d attempted keys", attempted)
-    return "", ""
 
 
 async def _call_gemini_plain_continuation(prompt: str, report_tier: str) -> tuple[str, str]:
-    """Call Gemini with a small continuation-only contract.
-
-    The main report writer has a JSON/document contract. Reusing that contract
-    for long continuation work can make a short model reply look like a valid
-    answer and prevents us from reliably growing the report. This helper uses
-    plain markdown with section markers so continuation calls are independent
-    and composable.
-    """
-    # Use compact Gemini continuation first. Groq is a fallback after Gemini
-    # has failed, because its previous 30k-token reservations frequently caused
-    # HTTP 413 on already-large Deep Research prompts.
-    keys = [k for k in get_gemini_keys() if _is_rest_api_key(k)]
-    if not keys:
-        groq_text, groq_model = await _call_groq_plain_continuation(prompt, report_tier)
-        if groq_text:
-            return groq_text, groq_model
-        return "", ""
-
-    key_candidates = round_robin(keys)[:2]
-    # A small diversified probe: two known production-capable models, then a
-    # second key for the most reliable lite model. Avoid repeatedly hammering
-    # the same throttled model/key pair in every page-budget cycle.
-    attempts = [
-        ("gemini-3.5-flash-lite", key_candidates[0]),
-        ("gemini-3.6-flash", key_candidates[-1]),
-        ("gemini-3.5-flash-lite", key_candidates[-1]),
-    ]
-    for model, key in attempts:
-            if is_rate_limited(f"{key}:{model}") or is_rate_limited(key):
-                continue
-            try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=5, read=25, write=8, pool=5)
-                ) as client:
-                    res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                        json={
-                            "system_instruction": {
-                                "parts": [{
-                                    "text": (
-                                        "You are a continuation editor for a professional Growth Gradual research report. "
-                                        "Return ONLY new markdown content for the requested existing sections. "
-                                        "Never create an H2/top-level section. Never repeat the executive summary, conclusion, "
-                                        "methodology or source list. Use only evidence supplied in the prompt. "
-                                        "Do not invent numbers, dates, rankings, company facts or citations. "
-                                        "Write analytical prose, H3/H4 subsections, comparisons, mechanisms, historical context, "
-                                        "counterpoints, assumptions, sensitivities and implications when supported."
-                                    )
-                                }]
-                            },
-                            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                            "generationConfig": {
-                                "maxOutputTokens": 2500 if report_tier == "brief" else (4500 if report_tier == "detailed" else 6000),
-                            },
-                        },
-                    )
-                if res.status_code in (401, 403, 404):
-                    mark_rate_limited(f"{key}:{model}", 24 * 60 * 60_000)
-                    continue
-                if res.status_code == 429:
-                    mark_rate_limited(f"{key}:{model}", 120_000)
-                    continue
-                if res.status_code >= 500:
-                    mark_rate_limited(f"{key}:{model}", 30_000)
-                    continue
-                if not res.is_success:
-                    continue
-                data = res.json()
-                text_parts = []
-                for cand in data.get("candidates") or []:
-                    for part in ((cand.get("content") or {}).get("parts") or []):
-                        if isinstance(part, dict) and part.get("text"):
-                            text_parts.append(str(part["text"]))
-                text = "\n".join(text_parts).strip()
-                if text:
-                    return text, model
-            except Exception as exc:
-                mark_rate_limited(f"{key}:{model}", 30_000)
-                log.warning("Report: plain continuation model=%s key=...%s failed: %s", model, key[-4:], type(exc).__name__)
-                continue
-    groq_text, groq_model = await _call_groq_plain_continuation(prompt, report_tier)
-    if groq_text:
-        log.info("Report: Gemini continuation unavailable — Groq fallback supplied %d chars", len(groq_text))
-        return groq_text, groq_model
-    return "", ""
+    """Compatibility seam for the extracted Gemini continuation caller."""
+    return await report_llm.gemini_plain_continuation(
+        prompt, report_tier, runtime=_sys.modules[__name__],
+    )
 
 
 def _parse_continuation_sections(text: str) -> list[tuple[str, str]]:
@@ -15856,46 +16700,12 @@ def _parse_continuation_sections(text: str) -> list[tuple[str, str]]:
     wrap the same material in JSON. Unwrap known content fields or heading/body rows;
     never paste raw JSON serialization into a reader-facing report.
     """
-    raw = re.sub(r"^```(?:json|markdown)?\s*|\s*```$", "", str(text or "").strip(), flags=re.I)
-    if not raw:
-        return []
+    return report_llm.parse_continuation_sections(text)
 
-    if raw.startswith("{"):
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            payload = None
-        if isinstance(payload, dict):
-            rows = payload.get("sections")
-            if isinstance(rows, list):
-                recovered = []
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    heading = str(row.get("heading") or row.get("title") or row.get("section") or "").strip()
-                    body = str(row.get("content") or row.get("body") or row.get("markdown") or row.get("text") or "").strip()
-                    if heading and body:
-                        recovered.append((heading, body))
-                if recovered:
-                    return recovered
-            for key in ("continuation", "content", "markdown", "text", "output", "report"):
-                candidate = payload.get(key)
-                if isinstance(candidate, str) and candidate.strip():
-                    raw = candidate.strip()
-                    break
-            else:
-                return []
 
-    out = []
-    for m in re.finditer(
-        r"\[\[SECTION:\s*(.+?)\]\]\s*(.*?)\s*\[\[END SECTION\]\]",
-        raw, re.IGNORECASE | re.DOTALL,
-    ):
-        heading = m.group(1).strip()
-        body = m.group(2).strip()
-        if heading and body:
-            out.append((heading, body))
-    return out
+def _is_no_additional_evidence_response(value: object) -> bool:
+    text = re.sub(r"^```(?:text|markdown)?\s*|\s*```$", "", str(value or "").strip(), flags=re.I)
+    return text.strip().upper() == "NO_ADDITIONAL_EVIDENCE"
 
 
 async def _expand_report_semantically(
@@ -15908,8 +16718,7 @@ async def _expand_report_semantically(
     """Complete planned coverage using relevant evidence before final pagination.
 
     This semantic pass fills omitted planned sections and deepens existing ones.
-    A later renderer-measured pass checks the selected tier page band and may
-    request more grounded material if the report is materially shorter than target.
+    A separate renderer-measured pass handles explicit user page requests only.
     """
     tier = str(report_tier or "detailed").lower()
     if tier == "brief" or _TIER_EXPANSION_PASSES.get(tier, 0) <= 0:
@@ -15935,6 +16744,8 @@ async def _expand_report_semantically(
     max_missing_per_pass = 3 if tier == "detailed" else 3
     max_existing_per_pass = 2 if tier == "detailed" else 3
     expanded = normalize_report_markdown(strip_generation_markers(report_text)).strip()
+    provider_recovery_retry = False
+    exhausted_headings: set[str] = set()
 
     def section_state(text: str) -> tuple[list[str], dict[str, str]]:
         headings: list[str] = []
@@ -15962,7 +16773,12 @@ async def _expand_report_semantically(
             break
         existing_headings, _bodies = section_state(expanded)
         existing_lower = {h.casefold() for h in existing_headings}
-        missing = [h for h in planned if h.casefold() not in existing_lower and not re.search(r"\b(?:sources?|appendix|methodology|data notes?)\b", h, re.I)]
+        missing = [
+            h for h in planned
+            if h.casefold() not in existing_lower
+            and h.casefold() not in exhausted_headings
+            and not re.search(r"\b(?:sources?|appendix|methodology|data notes?)\b", h, re.I)
+        ]
         if missing:
             chosen = missing[:max_missing_per_pass]
             mode = "create_missing_planned_sections"
@@ -15974,7 +16790,8 @@ async def _expand_report_semantically(
                 if section.get("level", 0) != 2:
                     continue
                 heading = str(section.get("heading") or "").strip()
-                if not heading or re.search(r"\b(?:sources?|appendix|methodology|data notes?)\b", heading, re.I):
+                if (not heading or heading.casefold() in exhausted_headings
+                        or re.search(r"\b(?:sources?|appendix|methodology|data notes?)\b", heading, re.I)):
                     continue
                 body = expanded[section["start"]:section["end"]]
                 words = len(re.findall(r"\S+", body))
@@ -16017,7 +16834,7 @@ OBJECTIVE
 {structure_instructions}
 
 QUALITY RULES
-- The selected tier has a renderer-measured page band. Approach it only through useful, new analysis supported by the material below; never fill space with repetition or unsupported claims. If the evidence cannot support further expansion, return NO_ADDITIONAL_EVIDENCE.
+- Continue with useful, new analysis supported by the material below; never fill space with repetition or unsupported claims. If the evidence cannot support further expansion, return NO_ADDITIONAL_EVIDENCE.
 - Preserve geography, entity identity, time periods, units, and all source distinctions. Do not confuse similarly named places or firms.
 - Do not invent investor mandates, fund sizes, cheque sizes, recent investment activity, company locations, contacts, figures, or citations.
 - Avoid repeating the executive summary or existing paragraphs. If the evidence is only a directory listing, state that and avoid inferring that it proves investment fit.
@@ -16036,6 +16853,11 @@ Required output format:
 [[SECTION: Exact heading from the selected list]]
 Markdown content with useful analysis and citations.
 [[END SECTION]]""".strip()
+        if provider_recovery_retry:
+            prompt += (
+                "\n\nRECOVERY ATTEMPT: The prior call returned no usable provider response. "
+                "Retry this same section selection with concise valid markers and source-grounded content."
+            )
         try:
             raw, model_used = await asyncio.wait_for(
                 _call_gemini_plain_continuation(prompt, tier),
@@ -16043,10 +16865,24 @@ Markdown content with useful analysis and citations.
             )
         except asyncio.TimeoutError:
             log.warning("Report: %s timed out on pass %d", mode, pass_no + 1)
-            break
-        if not raw or "NO_ADDITIONAL_EVIDENCE" in raw.upper():
-            log.info("Report: tier completion found no additional defensible content on pass %d", pass_no + 1)
-            break
+            raw, model_used = "", ""
+        except Exception as exc:
+            log.warning("Report: %s provider failed on pass %d (%s)", mode, pass_no + 1, type(exc).__name__)
+            raw, model_used = "", ""
+        if not raw:
+            if not provider_recovery_retry:
+                provider_recovery_retry = True
+                log.warning("Report: tier completion provider failure on pass %d; scheduling one recovery attempt", pass_no + 1)
+            else:
+                exhausted_headings.update(h.casefold() for h in chosen)
+                provider_recovery_retry = False
+                log.warning("Report: tier completion recovery failed on pass %d; rotating sections", pass_no + 1)
+            continue
+        provider_recovery_retry = False
+        if _is_no_additional_evidence_response(raw):
+            exhausted_headings.update(h.casefold() for h in chosen)
+            log.info("Report: tier completion found no evidence for selected sections on pass %d; rotating", pass_no + 1)
+            continue
         parts = _parse_continuation_sections(raw)
         if not parts:
             # Recover markerless Markdown from provider fallbacks. A wrapper mismatch
@@ -16059,8 +16895,9 @@ Markdown content with useful analysis and citations.
                     plain = re.sub(r"(?m)^#{1,2}\s+", "### ", plain.strip())
                     parts = [(first, plain)]
         if not parts:
-            log.warning("Report: tier completion response did not match section-marker contract after recovery; pass=%d", pass_no + 1)
-            break
+            exhausted_headings.update(h.casefold() for h in chosen)
+            log.warning("Report: tier completion response did not match section-marker contract after recovery; rotating, pass=%d", pass_no + 1)
+            continue
         before = len(expanded)
         accepted = 0
         for heading, body in parts:
@@ -16086,7 +16923,8 @@ Markdown content with useful analysis and citations.
         gained = len(expanded) - before
         log.info("Report: tier completion pass %d mode=%s model=%s sections=%d chars_added=%d", pass_no + 1, mode, model_used or "unknown", accepted, max(0, gained))
         if gained < 220 or accepted == 0:
-            break
+            exhausted_headings.update(h.casefold() for h in chosen)
+            log.info("Report: tier completion made little progress on pass %d; rotating sections", pass_no + 1)
     return expanded
 
 
@@ -16133,7 +16971,12 @@ async def _expand_report_to_tier(
         expansion_budget = min(max(expansion_budget, 8), 25)
     deadline = time.perf_counter() + expansion_budget
     expanded = report_text
-    no_progress = 0
+    # Headings whose last continuation was rejected (hygiene stripped it again or it
+    # added almost nothing). Without this the ranking keeps choosing the same "thinnest"
+    # sections, so every pass sends a byte-identical prompt and gets the same
+    # duplicate text back.
+    exhausted_headings: set[str] = set()
+    provider_recovery_retry = False
 
     def section_depths(text: str) -> list[tuple[str, int]]:
         out = []
@@ -16196,14 +17039,16 @@ async def _expand_report_to_tier(
         if len(expanded) >= target or time.perf_counter() >= deadline:
             break
 
-        remaining = target - len(expanded)
         depths = section_depths(expanded)
         depth_map = {h.lower(): n for h, n in depths}
-        ranked = list(enumerate(headings))
+        ranked = [p for p in enumerate(headings) if p[1].lower() not in exhausted_headings]
         ranked.sort(key=lambda p: (1 if excluded.search(p[1]) else 0, depth_map.get(p[1].lower(), 10**9), p[0]))
         chosen = [h for _, h in ranked if not excluded.search(h)][:3]
         if not chosen:
             chosen = [h for _, h in ranked[:3]]
+        if not chosen:
+            log.info("Report: tier expansion stopped; every planned section was already tried without new content")
+            break
 
         # Renderer-driven Brief completion used to overshoot badly: when only
         # ~1,000 chars remained, the continuation still generated three 450-word
@@ -16223,9 +17068,15 @@ async def _expand_report_to_tier(
         # Each pass should deepen selected sections in a focused way, not add
         # a stack of alternate headings for the same theme. The true export
         # renderer, not a prose quota, determines whether another pass is needed.
+        recovery_directive = (
+            "\nPROVIDER RECOVERY: The previous attempt returned no usable response. Retry this same focused scope once, "
+            "using the existing evidence only; do not broaden the section list or repeat already-covered analysis.\n"
+            if provider_recovery_retry else ""
+        )
         prompt = f"""
 Continue the existing {report_tier} research report on:
 {question}
+{recovery_directive}
 
 The selected report tier requires substantially deeper analytical coverage.
 Do NOT redesign the report and do NOT create new top-level sections.
@@ -16243,7 +17094,7 @@ REPETITION RULES (STRICT):
 - When there are 3 or more separate drivers, risks, steps, mechanisms, entities, or implications, use concise bullets with bold lead-ins or a compact comparison/risk table rather than a paragraph that narrates the list.
 - Use a timeline for dated changes, a comparison table for entities with common fields, a risk matrix when likelihood/impact is supported, and a short highlighted implication only when the source-grounded text supports it. Do not invent data, force charts, or use ASCII art/pseudo-diagrams.
 - Vary the structure across modules instead of repeating the same paragraph → chart → takeaway pattern. A visual must replace or organize prose, not duplicate it.
-- Never emit the continuation wrapper strings as reader-facing content. If no meaningful new analysis exists for a selected section, omit that section marker entirely. The page band is an editorial goal, not permission to pad; stop when evidence is exhausted.
+- Never emit the continuation wrapper strings as reader-facing content. If no meaningful new analysis exists for a selected section, omit that section marker entirely; stop when evidence is exhausted.
 
 Potential analytical dimensions, only when absent from the current coverage and supported by evidence:
 - historical evolution and inflection points
@@ -16271,11 +17122,39 @@ New content with concise paragraphs, bullets, or an evidence-backed table as app
 [[END SECTION]]
 """.strip()
 
-        raw, model_used = await _call_gemini_plain_continuation(prompt, report_tier)
+        remaining_seconds = deadline - time.perf_counter()
+        if remaining_seconds <= 0:
+            log.warning("Report: tier expansion deadline reached before provider attempt; preserving accepted content")
+            break
+        try:
+            raw, model_used = await asyncio.wait_for(
+                _call_gemini_plain_continuation(prompt, report_tier),
+                timeout=min(_TIER_EXPANSION_ATTEMPT_TIMEOUT_SECONDS, remaining_seconds),
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            log.warning("Report: tier expansion timed out on pass %d; scheduling recovery within remaining budget", pass_no + 1)
+            raw, model_used = "", ""
+        except Exception as exc:
+            log.warning("Report: tier expansion provider failed on pass %d (%s)", pass_no + 1, type(exc).__name__)
+            raw, model_used = "", ""
         if not raw:
-            no_progress += 1
-            if no_progress >= 2:
-                break
+            if not provider_recovery_retry:
+                provider_recovery_retry = True
+                log.warning("Report: tier expansion provider failure on pass %d; scheduling one recovery attempt", pass_no + 1)
+            else:
+                # Provider failures are not semantic no-progress passes. After
+                # one changed-prompt retry, rotate headings to avoid replaying it.
+                exhausted_headings.update(h.lower() for h in chosen)
+                provider_recovery_retry = False
+                log.warning("Report: tier expansion recovery failed on pass %d; rotating sections", pass_no + 1)
+            continue
+        provider_recovery_retry = False
+
+        if _is_no_additional_evidence_response(raw):
+            exhausted_headings.update(h.lower() for h in chosen)
+            log.info("Report: tier expansion found no evidence for selected sections on pass %d; rotating", pass_no + 1)
             continue
 
         parts = _parse_continuation_sections(raw)
@@ -16295,7 +17174,7 @@ New content with concise paragraphs, bullets, or an evidence-backed table as app
             if target_override is not None:
                 # Cap accepted material to the remaining budget. Providers may
                 # ignore requested word counts and return a 4k-char module when
-                # only ~1k chars are needed to reach the measured page target.
+                # only ~1k chars are needed to complete the explicit page request.
                 remaining_chars = max(0, target - len(expanded))
                 body = trim_module_to_budget(body, remaining_chars - 8)
                 if not body:
@@ -16327,12 +17206,8 @@ New content with concise paragraphs, bullets, or an evidence-backed table as app
         added_chars = max(0, len(expanded) - (before_hygiene - added_chars)) if added_chars else 0
 
         if added_chars < 800:
-            no_progress += 1
-            log.info("Report: tier expansion pass %d made little progress (%d chars); rotating", pass_no + 1, added_chars)
-            if no_progress >= 2:
-                break
-        else:
-            no_progress = 0
+            exhausted_headings.update(h.lower() for h in chosen)
+            log.info("Report: tier expansion pass %d made little progress (%d chars); rotating to untried sections", pass_no + 1, added_chars)
 
         log.info(
             "Report: tier expansion pass %d added %d chars (now %d / %d; model=%s)",
@@ -16500,7 +17375,7 @@ async def _call_llm_plain(system_prompt: str, user_prompt: str) -> str:
                 else:
                     log.warning("Section-edit Groq returned %d; using Gemini fallback", res.status_code)
             except Exception as exc:
-                log.warning("Section-edit Groq call failed on key ...%s: %s", key[-4:], exc)
+                log.warning("Section-edit Groq call failed on key ...%s: %s", "[redacted]", exc)
 
     keys = [k for k in round_robin(get_gemini_keys()) if _is_rest_api_key(k)]
     models = list(dict.fromkeys(GEMINI_MODELS or _DEFAULT_GEMINI_REPORT_MODELS))
@@ -16522,10 +17397,11 @@ async def _call_llm_plain(system_prompt: str, user_prompt: str) -> str:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=10, write=5, pool=4)) as client:
                 res = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                     json={
                         "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
-                        "generationConfig": {"temperature": 0.25, "maxOutputTokens": 8192},
+                        "generationConfig": _gemini_gen_config(model, {"temperature": 0.25, "maxOutputTokens": 8192}),
                     },
                 )
             if res.status_code == 200:
@@ -16549,13 +17425,13 @@ async def _call_llm_plain(system_prompt: str, user_prompt: str) -> str:
                 # Only cool the exact pair briefly. Other models on the same key
                 # remain immediately eligible, which matches the live key×model test.
                 mark_rate_limited(pair, 1_500)
-                log.warning("Section-edit Gemini transient %d on model %s/key ...%s", res.status_code, model, key[-4:])
+                log.warning("Section-edit Gemini transient %d on model %s/key ...%s", res.status_code, model, "[redacted]")
                 return "", model, str(res.status_code)
             mark_rate_limited(pair, 10_000)
             return "", model, str(res.status_code)
         except Exception as exc:
             mark_rate_limited(pair, 1_500)
-            log.warning("Section-edit Gemini exception model=%s/key ...%s: %s", model, key[-4:], exc)
+            log.warning("Section-edit Gemini exception model=%s/key ...%s: %s", model, "[redacted]", exc)
             return "", model, "exception"
 
     while attempts < min(24, len(keys) * len(models)) and time.monotonic() < deadline:
@@ -16854,7 +17730,16 @@ async def _call_llm_json(
     down so subsequent requests do not repeatedly probe the same bad key.
     """
     groq_attempts = 0
-    for key in iter_reserved_groq_keys(get_groq_keys(), max_keys=max_groq_attempts):
+    # A Groq 413 is a request-size problem that no key can fix. The Deep Research
+    # planner prompt is ~45k chars, which is always over Groq's per-request token
+    # limit, so it was burning a call (and its time budget) on a guaranteed 413
+    # before Gemini ever started. Route oversized payloads straight to Gemini.
+    _groq_json_safe_chars = int(os.getenv("GG_GROQ_JSON_SAFE_CHARS", "18000"))
+    _groq_json_eligible = (len(system_prompt) + len(user_prompt)) <= _groq_json_safe_chars
+    if not _groq_json_eligible:
+        log.info("%s payload=%d chars exceeds Groq safe threshold=%d; routing directly to Gemini",
+                 purpose, len(system_prompt) + len(user_prompt), _groq_json_safe_chars)
+    for key in iter_reserved_groq_keys(get_groq_keys(), max_keys=max_groq_attempts if _groq_json_eligible else 0):
         if groq_attempts >= max(0, max_groq_attempts):
             break
         if is_rate_limited(key):
@@ -16893,6 +17778,9 @@ async def _call_llm_json(
                 mark_rate_limited(key, 60_000)
             elif res.status_code >= 500:
                 mark_rate_limited(key, 30_000)
+            elif res.status_code == 413:
+                log.warning("%s Groq HTTP 413 (payload too large); not retrying on another key", purpose)
+                break
             else:
                 log.debug("%s Groq returned HTTP %s", purpose, res.status_code)
         except Exception as e:
@@ -16915,14 +17803,15 @@ async def _call_llm_json(
             try:
                 async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                     res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                         json={
                             "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
-                            "generationConfig": {
+                            "generationConfig": _gemini_gen_config(model, {
                                 "temperature": 0.2,
                                 "maxOutputTokens": 4096,
                                 "responseMimeType": "application/json",
-                            },
+                            }),
                         },
                     )
                 if res.status_code == 200:
@@ -16967,7 +17856,8 @@ def _report_body_from_value(value: object, *, _seen: set[int] | None = None) -> 
     if _seen is None:
         _seen = set()
     if isinstance(value, str):
-        candidate = value.replace("\\n", "\n").strip()
+        candidate = value.replace("\
+", "\n").strip()
         if candidate.startswith(("{", "[")):
             try:
                 nested = json.loads(candidate, strict=False)
@@ -17073,7 +17963,8 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         try:
             value = json.loads('"' + value + '"', strict=False)
         except Exception:
-            value = value.replace("\\n", "\n").replace('\\"', '"')
+            value = value.replace("\
+", "\n").replace('\\"', '"')
         if isinstance(value, str) and len(value.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
             field_candidates.append(value.strip())
     if field_candidates:
@@ -17101,8 +17992,10 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         if fragment.endswith('"'):
             fragment = fragment[:-1]
         fragment = (
-            fragment.replace('\\r\\n', '\n')
-            .replace('\\n', '\n')
+            fragment.replace('\\r\
+', '\n')
+            .replace('\
+', '\n')
             .replace('\\t', '\t')
             .replace('\\"', '"')
             .replace('\\\\', '\\')
@@ -17124,7 +18017,8 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         try:
             decoded_reports.append(json.loads('"' + encoded + '"', strict=False))
         except Exception:
-            decoded_reports.append(encoded.replace("\\n", "\n").replace('\\"', '"'))
+            decoded_reports.append(encoded.replace("\
+", "\n").replace('\\"', '"'))
     if decoded_reports:
         best_encoded = max((x for x in decoded_reports if isinstance(x, str)), key=len, default="")
         if len(best_encoded.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
@@ -17775,6 +18669,8 @@ async def _plan_report_structure(
     wants_more_data_viz: bool,
     intent: "RequestIntent | None" = None,
     report_tier: str = "detailed",
+    file_only_report: bool = False,
+    workbook_analytics: dict | None = None,
 ) -> dict | None:
     """Explicit planning pass: decide the section list and per-section
     presentation format from the request + a preview of the actual source
@@ -17829,11 +18725,11 @@ async def _plan_report_structure(
                 PLANNING_SYSTEM_PROMPT,
                 planning_user_prompt,
                 max_groq_attempts=1,
-                max_gemini_attempts=1,
-                timeout_seconds=5.5,
+                max_gemini_attempts=2,
+                timeout_seconds=12.0,
                 purpose="report planner",
             ),
-            timeout=13.0,
+            timeout=28.0,
         )
         plan = _normalize_report_plan_shape(plan_raw, report_tier)
         plan_errors = _report_plan_validation_errors(plan)
@@ -17844,7 +18740,7 @@ async def _plan_report_structure(
                 len(plan_raw.get("sections") or []) if isinstance(plan_raw, dict) and isinstance(plan_raw.get("sections"), list) else "n/a",
                 len(plan.get("sections") or []) if isinstance(plan, dict) else "n/a", report_tier,
             )
-            remaining = 10.0
+            remaining = 16.0
             repair_prompt = (
                 "Repair the previous report-plan response. Return valid JSON only, following the planner schema exactly. "
                 f"The validator rejected the previous response for: {', '.join(plan_errors)}. "
@@ -17857,7 +18753,7 @@ async def _plan_report_structure(
             repaired_raw = await asyncio.wait_for(
                 _call_llm_json(
                     PLANNING_SYSTEM_PROMPT, repair_prompt, max_groq_attempts=1,
-                    max_gemini_attempts=1, timeout_seconds=5.0, purpose="report planner repair",
+                    max_gemini_attempts=1, timeout_seconds=12.0, purpose="report planner repair",
                 ),
                 timeout=remaining,
             )
@@ -17880,6 +18776,36 @@ async def _plan_report_structure(
     if not _validate_report_plan(plan):
         fallback_reason = _report_plan_validation_errors(plan)
         plan = _fallback_report_plan(question, intent=intent, report_tier=report_tier)
+        # The depth toggle must remain meaningful even if the optional model
+        # planner returns malformed JSON or times out. For workbook-only PMS
+        # reports, use an evidence-driven analytical outline instead of the
+        # generic two-section fallback; the writer can still omit unsupported
+        # analyses and workbook charts are inserted from deterministic data.
+        if file_only_report and isinstance(workbook_analytics, dict) and workbook_analytics.get("kind") == "pms_strategy_performance":
+            _pms_depth = str(report_tier or "detailed").casefold()
+            _pms_sections = [
+                ("Executive Findings", "Summarize the most material strategy-performance findings calculated from the uploaded workbook, with scope and limitations.", "mixed"),
+                ("Workbook Coverage and Methodology", "Describe worksheets, usable records, return horizons, exclusions, and calculation methods supported by the workbook analysis.", "mixed"),
+                ("One-Year Strategy Performance", "Compare the leading one-year strategies using reported values and the deterministic workbook ranking chart.", "mixed"),
+                ("Three-Year Strategy Performance", "Compare strategies with valid three-year observations; identify missing values and avoid incomparable periods.", "mixed"),
+                ("Five-Year Strategy Performance", "Compare strategies with valid five-year observations and explain coverage limitations.", "mixed"),
+                ("Cross-Horizon and AMC Comparison", "Synthesize only comparisons supported by comparable observations, strategy identities, and reporting horizons.", "mixed"),
+                ("Data Quality and Evidence Limitations", "Report missing, undisclosed, inconsistent, or unavailable fields without converting them to zero.", "bullets"),
+                ("Conclusions and Analytical Implications", "State concise conclusions directly supported by workbook calculations and disclose what cannot be concluded.", "prose"),
+            ]
+            if _pms_depth == "brief":
+                _pms_sections = _pms_sections[:3] + _pms_sections[-1:]
+            elif _pms_depth == "in_depth":
+                _pms_sections += [
+                    ("Return Distribution and Dispersion", "Analyze distribution and spread across valid strategy observations where the workbook contains sufficient numeric data.", "mixed"),
+                    ("Strategy-Level Exceptions", "Highlight notable outliers or inconsistencies with their worksheet and row evidence.", "mixed"),
+                ]
+            plan["sections"] = [{"heading": h, "purpose": purpose, "format": fmt,
+                                 "format_reason": "Selected for the requested workbook analysis depth and available evidence."}
+                                for h, purpose, fmt in _pms_sections]
+            plan["depth"] = report_tier
+            plan["tier"] = report_tier
+            plan["depth_reason"] = "Workbook-specific fallback preserving the selected report depth when the optional planner fails."
         log.warning(
             "Report: planner fallback selected tier=%s reason=%s fallback_sections=%d",
             report_tier, fallback_reason[:8], len(plan.get("sections") or []),
@@ -17957,8 +18883,8 @@ def _format_plan_for_prompt(plan: dict) -> str:
         lines.append(f"\nPlanner notes: {notes}")
     depth_guidance = {
         "brief": "Brief: prioritize decision-useful evidence and stop when the supported core answer is complete, with necessary caveats.",
-        "detailed": "In-Detail: retain the core answer and findings, then add source-backed drivers, comparisons, historical context, quantitative evidence, implementation implications and risks to support the 25–30 page band.",
-        "in_depth": "Deep Research: broaden the source base and triangulate claims; extend the core analysis with granular history, entity/segment comparisons, scenarios, sensitivities, contradictions, methodology and evidence gaps to support the 70–100 page band where evidence permits.",
+        "detailed": "In-Detail: retain the core answer and findings, then add source-backed drivers, comparisons, historical context, quantitative evidence, implementation implications and risks supported by the request and evidence.",
+        "in_depth": "Deep Research: broaden the source base and triangulate claims; extend the core analysis with granular history, entity/segment comparisons, scenarios, sensitivities, contradictions, methodology and evidence gaps where the evidence supports distinct analysis.",
     }.get(str(plan.get("depth") or "detailed"), "")
     if depth_guidance:
         lines.append(f"Depth execution guidance: {depth_guidance}")
@@ -18354,6 +19280,7 @@ async def _edit_report_section_single_body(body: dict):
         )[:30000]
 
     newly_added_chart_index: int | None = None
+    newly_added_chart_indices: list[int] = []
     chart_updated = False
     image_updated = False
     chart_removed = False
@@ -18924,11 +19851,20 @@ async def _edit_report_section_single_body(body: dict):
             "The point band is a target only when source resolution and chart semantics support it. If insufficient distinct evidence exists, "
             "return exactly {\"error\": \"insufficient data\"}; do not pad with fake values."
         )
-        new_chart_user_prompt = f"SECTION TEXT:\n{new_section_text}\n\nINSTRUCTION:\n{instruction}"
+        new_chart_user_prompt = (
+            f"SECTION TEXT:\n{new_section_text}\n\n"
+            f"INSTRUCTION:\n{instruction}\n\n"
+            "REPORT-WIDE SUPPORTED EVIDENCE CONTEXT (use only when directly relevant to this section):\n"
+            f"{action_context}\n\n"
+            "Build the chart for the selected section. You may use report-wide evidence above when it directly supports "
+            "the section's analysis, but do not import unrelated metrics, invent values, or infer missing observations. "
+            "Keep the chart title and takeaway aligned to the selected section."
+        )
         new_chart = await _call_llm_json(new_chart_system_prompt, new_chart_user_prompt)
         if new_chart and "error" not in new_chart and _validate_chart_spec(new_chart):
             charts.append(new_chart)
             newly_added_chart_index = len(charts)
+            newly_added_chart_indices.append(newly_added_chart_index)
             chart_updated = True
 
     # Explicitly asking to add a chart means add a new visual, even when this
@@ -18959,7 +19895,75 @@ async def _edit_report_section_single_body(body: dict):
         if additional_chart and "error" not in additional_chart and _validate_chart_spec(additional_chart):
             charts.append(additional_chart)
             newly_added_chart_index = len(charts)
+            newly_added_chart_indices.append(newly_added_chart_index)
             chart_updated = True
+
+    # Plural chart requests produce multiple distinct visuals where supported.
+    # The first chart is built above using the section and its evidence context;
+    # each extra pass is asked for a different analytic angle and cannot reuse
+    # an earlier chart's data object as a duplicate.
+    requested_new_chart_count = _action_requested_chart_count(instruction, visual_alternative_requested)
+    while len(newly_added_chart_indices) < requested_new_chart_count:
+        action_tier = str(body.get("reportTier") or body.get("depth") or body.get("reportDepth") or "detailed").strip().lower()
+        extra_chart_system_prompt = (
+            "Build ONE ADDITIONAL and DISTINCT evidence-grounded chart for the selected report section. "
+            "Do not duplicate the chart type, title, series, or analytic comparison of the charts already supplied. "
+            "Choose a complementary analytical angle and a suitable supported chart type from: pie, bar, line, area, "
+            "scatter, bubble, doughnut, histogram, boxplot, waterfall, funnel, radar, polar_area, treemap, heatmap, "
+            "stacked_bar, grouped_bar, horizontal_bar, stacked_area, step_line, spline, combo, candlestick, ohlc, "
+            "gauge, bullet, pictogram, pareto, dot_plot, lollipop, violin, density, ridgeline, gantt, timeline, "
+            "marimekko, sunburst, sankey, chord, network, tree, flowchart, venn, funnel_pyramid, population_pyramid, "
+            "progress, kpi, sparkline, error_bar, control_chart and arrow. Use only numbers and relationships directly "
+            "supported by the selected section or relevant evidence context; never invent, estimate, interpolate or pad. "
+            "For scalar-series charts return {\"type\": string, \"title\": string, \"unit\": string, \"xLabel\": string, \"yLabel\": string, "
+            "\"series\": [{\"name\": string, \"data\": [{\"label\": string, \"value\": number}, ...]}], "
+            "\"rationale\": string, \"takeaway\": string}. Use the native schema for special chart types. "
+            + chart_density_contract(action_tier) + "\n"
+            "If no distinct, well-supported chart remains, return exactly {\"error\": \"insufficient data\"}."
+        )
+        existing_new_chart_summaries = json.dumps(
+            [
+                {
+                    "type": charts[index - 1].get("type"),
+                    "title": charts[index - 1].get("title"),
+                    "series": charts[index - 1].get("series"),
+                }
+                for index in newly_added_chart_indices if 0 < index <= len(charts)
+            ],
+            ensure_ascii=False,
+        )
+        extra_chart_user_prompt = (
+            f"SELECTED SECTION TEXT:\n{new_section_text}\n\n"
+            f"INSTRUCTION:\n{instruction}\n\n"
+            f"ALREADY CREATED CHARTS (avoid duplicates):\n{existing_new_chart_summaries}\n\n"
+            "REPORT-WIDE SUPPORTED EVIDENCE CONTEXT (only use directly relevant evidence):\n"
+            f"{action_context}"
+        )
+        extra_chart = await _call_llm_json(extra_chart_system_prompt, extra_chart_user_prompt)
+        if not extra_chart or "error" in extra_chart or not _validate_chart_spec(extra_chart):
+            break
+        charts.append(extra_chart)
+        new_index = len(charts)
+        newly_added_chart_indices.append(new_index)
+        if newly_added_chart_index is None:
+            newly_added_chart_index = new_index
+        chart_updated = True
+
+    if requested_new_chart_count and len(newly_added_chart_indices) < requested_new_chart_count:
+        if requested_new_chart_count == 1:
+            error_message = (
+                "The chart could not be created safely because the section did not contain enough distinct, supported data points or the chart provider failed. The report was left unchanged."
+            )
+        else:
+            error_message = (
+                "The requested charts could not all be created safely because the available evidence did not support enough distinct data views or the chart provider failed. The report was left unchanged."
+            )
+        return JSONResponse({
+            "error": error_message,
+            "editedSection": target["heading"],
+            "preserved": True,
+            "details": [f"Created {len(newly_added_chart_indices)} of {requested_new_chart_count} requested chart(s) with valid specifications."],
+        }, status_code=422)
 
     # Chart operations are part of the Action contract, not best-effort side
     # effects. Never report a successful edit when a requested chart could not
@@ -18991,8 +19995,8 @@ async def _edit_report_section_single_body(body: dict):
     # If we just built a brand-new chart for a section that had none, make
     # sure its placeholder actually appears in the rewritten text — the
     # rewrite LLM call above never knew this chart would exist.
-    if newly_added_chart_index is not None:
-        placeholder = f"[CHART_{newly_added_chart_index}]"
+    for chart_index in newly_added_chart_indices:
+        placeholder = f"[CHART_{chart_index}]"
         if placeholder not in new_section_text:
             new_section_text = new_section_text.rstrip("\n") + f"\n\n{placeholder}\n\n"
 
@@ -19067,7 +20071,13 @@ async def start_report_job(request: Request):
         return JSONResponse({"error": "Invalid request body."}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "Invalid request body."}, status_code=400)
+    requested_pages = requested_report_page_count(str(body.get("question") or ""), body.get("requestedPageCount") or body.get("targetPages"))
     tier = str(body.get("reportTier") or body.get("depth") or body.get("reportDepth") or "").strip().lower()
+    if requested_pages is not None:
+        tier = "in_depth" if requested_pages >= 70 else "detailed" if requested_pages > 10 else "brief"
+        body["requestedPageCount"] = requested_pages
+        body["reportTier"] = tier
+        log.info("Explicit report page target detected before job start: pages=%d tier=%s", requested_pages, tier)
     if tier not in ("brief", "detailed", "in_depth"):
         return JSONResponse({"error": "Invalid report tier. Use brief, detailed, or in_depth."}, status_code=400)
     _prune_report_jobs()
@@ -19204,7 +20214,7 @@ async def report_job_status(job_id: str):
         # completed report into the misleading "HTTP 200" empty-report error.
         if isinstance(result, dict):
             for key in ("report", "summary", "title", "reportId", "revision", "reportTier", "reportStyle", "kicker", "pageTarget", "charts", "images", "keyStats", "sources", "theme", "presentation", "recommendedFormat", "publicationStatus", "qualityReview", "geminiAudit",
-                        "publicationOutcome", "failedStage", "blockingCategories", "failureSummary", "draftAvailable", "chartPipeline"):
+                        "publicationOutcome", "failedStage", "blockingCategories", "failureSummary", "draftAvailable", "chartPipeline", "researchCoverage", "renderedPages", "pageBudget"):
                 if key in result:
                     response[key] = result[key]
     elif job.get("status") == "failed":
@@ -19270,13 +20280,70 @@ async def generate_report(request: Request):
     embedded_file_images: list[dict] = body.get("embeddedFileImages", [])
     session_id: str     = body.get("sessionId", "").strip()
     has_rag: bool       = bool(body.get("hasRag", False))
+    # Parse structured PMS workbook tables deterministically. This is used only
+    # for uploaded-file reports; it never substitutes external financial data.
+    try:
+        workbook_analytics = build_pms_workbook_analytics(file_context) if "[Sheet:" in str(file_context or "") else {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
+    except Exception as _workbook_analytics_exc:
+        workbook_analytics = {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
+        log.warning("Workbook analytics preflight failed safely: %s", type(_workbook_analytics_exc).__name__)
+    _has_structured_sheet_context = "[sheet:" in str(file_context or "").casefold()
+    _source_doc_names = " ".join(
+        str(item.get("name") or item.get("title") or "") if isinstance(item, dict) else str(item)
+        for item in (source_documents or [])
+    )
+    if not _has_structured_sheet_context and re.search(r"\.xlsx?\b", _source_doc_names, re.I):
+        log.warning(
+            "Workbook-wide analytics unavailable: an Excel source is attached but file_context has no [Sheet:] blocks; "
+            "RAG top-k chunks are not a complete workbook substitute, so deterministic workbook charts cannot be built."
+        )
+    file_only_report = is_file_only_workbook_report(
+        question, file_context, source_documents, has_rag=has_rag,
+    )
+    if file_only_report:
+        # A workbook-only instruction must not silently reuse prior web sources,
+        # market/news KB entries, or unrelated external image candidates.
+        if sources:
+            log.info("Workbook-only report: ignoring %d pre-attached external source(s)", len(sources))
+        sources = []
+        if workbook_analytics.get("kind") == "pms_strategy_performance":
+            by_name = {str(x.get("filename") or "").casefold(): x for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)}
+            evidence_by_file = workbook_analytics.get("evidenceByFile") or {}
+            for filename, file_info in by_name.items():
+                original_name = str(file_info.get("filename") or filename)
+                excerpt = str(evidence_by_file.get(filename) or evidence_by_file.get(original_name) or "")[:16000]
+                match = next((d for d in source_documents if str(d.get("name") or d.get("title") or "").casefold() == filename), None)
+                if match is None:
+                    match = {"name": original_name, "title": original_name, "kind": "Uploaded document", "sourceType": "Uploaded document"}
+                    source_documents.append(match)
+                if excerpt:
+                    match.update({
+                        "chartEvidenceExcerpt": excerpt,
+                        "evidenceOrigin": "uploaded_workbook",
+                        "evidence_origin": "uploaded_workbook",
+                        "pageFetchStatus": "not_applicable",
+                        "page_fetch_status": "not_applicable",
+                        "evidenceAvailable": True,
+                        "evidence_available": True,
+                        "sourceType": "Uploaded workbook",
+                    })
+            log.info("Workbook-only report mode enabled; PMS strategies=%d deterministic_charts=%d files=%d period_coverage=%s",
+                     len(workbook_analytics.get("strategies") or []), len(workbook_analytics.get("charts") or []),
+                     len(workbook_analytics.get("files") or []),
+                     workbook_analytics.get("periodCoverage") or {})
+        else:
+            log.info("Workbook-only report mode enabled; external research disabled")
     rag_status: dict = {"requested": has_rag, "status": "not_requested", "retrievedChunks": 0, "sourceCount": 0}
     rag_source_rows: list[dict] = []
     requested_depth = str(body.get("depth") or body.get("reportDepth") or "").strip().lower()
     report_tier: str     = str(body.get("reportTier") or requested_depth or "detailed").strip().lower()
-    # The frontend report-depth picker is authoritative. Do not infer a tier
-    # from natural-language words inside the research prompt: a user may ask
-    # for a "detailed discussion" while intentionally running Brief.
+    requested_page_count = requested_report_page_count(question, body.get("requestedPageCount") or body.get("targetPages"))
+    # Ordinary prose adjectives do not override the UI tier. An explicit page-count
+    # constraint does, because it is an unambiguous delivery requirement.
+    if requested_page_count is not None:
+        report_tier = "in_depth" if requested_page_count >= 70 else "detailed" if requested_page_count > 10 else "brief"
+        body["requestedPageCount"] = requested_page_count
+        log.info("Report explicit page target resolved: pages=%d tier=%s", requested_page_count, report_tier)
     if report_tier not in ("brief", "detailed", "in_depth"):
         return JSONResponse({"error": "Invalid reportTier. Use brief, detailed, or in_depth."}, status_code=400)
     tier_spec = get_report_tier_spec(report_tier)
@@ -19530,9 +20597,14 @@ async def generate_report(request: Request):
             log.info("Report: extracted %d chars from images", len(extracted_image_context))
 
     # ── Decide source strategy ─────────────────────────────────────────────────
+    search_queries: list[str] = []
     has_file_data = bool(file_context.strip()) or bool(extracted_image_context.strip()) or bool(rag_source_rows)
 
-    if has_file_data and not sources:
+    if file_only_report and has_file_data:
+        sources = []
+        image_candidates_raw.clear()
+        log.info("Report: workbook-only source strategy — external search and source reuse disabled")
+    elif has_file_data and not sources:
         from routes.chat import (
             exa_search_multi as _exa_search_multi,
             _looks_like_ai_overview, needs_web_search as _needs_web_search,
@@ -19550,21 +20622,27 @@ async def generate_report(request: Request):
             # market context, comparisons, recent news) — supplement with web data.
             log.info("Report: file-first mode — supplementing with web search")
             search_queries = await _build_multi_angle_search_queries(
-                question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent,
+                question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
             )
             if len(search_queries) > 1:
                 log.info("Report: file-first mode — %d-angle search: %r",
                           len(search_queries), [q[:60] for q in search_queries])
-            search_limit = _TIER_SEARCH_LIMITS.get(report_tier, 15)
+            search_limit = _report_search_results_per_query(report_tier)
+            search_minimum = _report_search_min_results(search_limit)
+            log.info("Report search budget: angles=%d per_query_limit=%d per_query_minimum=%d tier=%s",
+                     len(search_queries), search_limit, search_minimum, report_tier)
             searched = await _exa_search_multi(
-                search_queries, max_results=search_limit, min_results=max(4, search_limit - 2),
+                search_queries, max_results=search_limit, min_results=search_minimum,
                 images_out=image_candidates_raw,
                 historical_intent=bool(_HISTORICAL_INTENT_RE.search(question)),
                 max_keys_per_query=2,
             )
             sources = [
-                {"title": r["title"], "url": r["url"],
-                 "snippet": r["snippet"], "fullContent": r.get("fullContent", "")}
+                {"title": r.get("title", ""), "url": r.get("url", ""),
+                 "snippet": r.get("snippet", ""), "fullContent": r.get("fullContent", ""),
+                 "searchQuery": r.get("searchQuery", ""), "publisher": r.get("publisher", ""),
+                 "published": r.get("published") or r.get("publishedDate") or r.get("published_at", ""),
+                 "sourceType": r.get("sourceType") or r.get("source_type", "web search result")}
                 for r in searched
             ]
         else:
@@ -19579,21 +20657,27 @@ async def generate_report(request: Request):
             _looks_like_ai_overview, classify_query as _classify_query,
         )
         search_queries = await _build_multi_angle_search_queries(
-            question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent,
+            question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
         )
         if search_queries != [question]:
             log.info("Report: search enriched into %d angle(s): %r",
                       len(search_queries), [q[:100] for q in search_queries])
-        search_limit = _TIER_SEARCH_LIMITS.get(report_tier, 15)
+        search_limit = _report_search_results_per_query(report_tier)
+        search_minimum = _report_search_min_results(search_limit)
+        log.info("Report search budget: angles=%d per_query_limit=%d per_query_minimum=%d tier=%s",
+                 len(search_queries), search_limit, search_minimum, report_tier)
         searched = await _exa_search_multi(
-            search_queries, max_results=search_limit,
+            search_queries, max_results=search_limit, min_results=search_minimum,
             images_out=image_candidates_raw,
             historical_intent=bool(_HISTORICAL_INTENT_RE.search(question)),
             max_keys_per_query=2,
         )
         sources = [
-            {"title": r["title"], "url": r["url"],
-             "snippet": r["snippet"], "fullContent": r.get("fullContent", "")}
+            {"title": r.get("title", ""), "url": r.get("url", ""),
+             "snippet": r.get("snippet", ""), "fullContent": r.get("fullContent", ""),
+             "searchQuery": r.get("searchQuery", ""), "publisher": r.get("publisher", ""),
+             "published": r.get("published") or r.get("publishedDate") or r.get("published_at", ""),
+             "sourceType": r.get("sourceType") or r.get("source_type", "web search result")}
             for r in searched
         ]
         log.info("Report: self-search returned %d sources across %d angle(s)",
@@ -19611,9 +20695,9 @@ async def generate_report(request: Request):
         # Do not inject stored web research into a pure file-only report. When
         # outside/current context is requested, the file-first branch already
         # populated `sources`, so reuse remains allowed.
-        _allow_stored_library = (not has_file_data) or bool(sources)
+        _allow_stored_library = (not file_only_report) and ((not has_file_data) or bool(sources))
         if not _allow_stored_library:
-            raise RuntimeError("file-only request; stored web research not applicable")
+            raise RuntimeError("workbook-only request; stored web research not applicable")
         # Search-result persistence runs asynchronously. Looking up the same
         # library immediately after a broad fresh search can contend with those
         # writes and add many seconds while returning duplicate material. Skip
@@ -19658,7 +20742,10 @@ async def generate_report(request: Request):
                 if _stored_added:
                     log.info("Report: reused %d stored web source(s) for topic=%r", _stored_added, _stored_query[:80])
     except Exception as exc:
-        log.warning("Report: stored web research lookup unavailable: %s: %s", type(exc).__name__, str(exc)[:140])
+        if file_only_report:
+            log.info("Report: skipped stored web research for workbook-only request")
+        else:
+            log.warning("Report: stored web research lookup unavailable: %s: %s", type(exc).__name__, str(exc)[:140])
 
     # Scraped market-news knowledge base: full articles that readers opened in
     # the feed (ET, Business Standard, Mint, Moneycontrol, ...) are stored with
@@ -19720,6 +20807,45 @@ async def generate_report(request: Request):
     sources = _filter_relevant_sources(sources, question, intent, report_tier=report_tier)
     sources = _dedupe_enriched_sources(sources)
     sources = _drop_boilerplate_and_entityless_sources(sources, question)
+    if report_tier == "in_depth" and _is_fpi_flow_research(question, intent) and not has_file_data and len(sources) < 35:
+        # Top up thin source pools by missing evidence dimensions, rather than
+        # letting a 100-page request proceed with a handful of overlapping URLs.
+        # This is capped and uses the same relevance gate as the primary search.
+        try:
+            from routes.chat import exa_search_multi as _exa_search_multi
+            existing_queries = {re.sub(r"[^a-z0-9]+", " ", q.casefold()).strip() for q in search_queries}
+            topup_candidates = [
+                "site:nseindia.com shareholding pattern foreign portfolio investors quarterly top holdings India",
+                "site:bseindia.com foreign portfolio investor shareholding pattern listed companies India",
+                "site:sebi.gov.in primary market IPO QIP foreign portfolio investor participation annual statistics",
+                "India FPI sector-wise ownership changes financial services IT capital goods autos data",
+                "DPIIT RBI foreign direct investment India sector wise annual inflows net FDI 2015 2025",
+                "India foreign portfolio investment debt government securities FAR VRR monthly official data",
+                "Gautam Duggad FII selling primary market IPO QIP inflows India original interview transcript",
+                "India foreign investor equity outflows valuation currency US Treasury yields annual comparative data",
+            ]
+            topup_queries = [q for q in topup_candidates if re.sub(r"[^a-z0-9]+", " ", q.casefold()).strip() not in existing_queries][:6]
+            search_queries = list(search_queries) + topup_queries
+            log.info("Deep Research FPI source top-up: current=%d target_minimum=35 extra_angles=%d", len(sources), len(topup_queries))
+            searched_topup = await _exa_search_multi(
+                topup_queries, max_results=12, min_results=4, images_out=image_candidates_raw,
+                historical_intent=bool(_HISTORICAL_INTENT_RE.search(question)), max_keys_per_query=1,
+            ) if topup_queries else []
+            topup_sources = [{
+                "title": row.get("title", ""), "url": row.get("url", ""),
+                "snippet": row.get("snippet", ""), "fullContent": row.get("fullContent", ""),
+                "searchQuery": row.get("searchQuery", ""), "publisher": row.get("publisher", ""),
+                "published": row.get("published") or row.get("publishedDate") or row.get("published_at", ""),
+                "sourceType": row.get("sourceType") or row.get("source_type", "web search result"),
+            } for row in searched_topup]
+            topup_sources = _filter_relevant_sources(topup_sources, question, intent, report_tier=report_tier)
+            known_urls = {str(row.get("url") or "").strip().casefold().rstrip("/") for row in sources}
+            additions = [row for row in topup_sources if str(row.get("url") or "").strip().casefold().rstrip("/") not in known_urls]
+            sources = _dedupe_enriched_sources(sources + additions)
+            sources = _drop_boilerplate_and_entityless_sources(sources, question)
+            log.info("Deep Research FPI source top-up result: discovered=%d added=%d pool=%d", len(searched_topup), len(additions), len(sources))
+        except Exception as _fpi_topup_exc:
+            log.warning("Deep Research FPI source top-up failed safely: %s", type(_fpi_topup_exc).__name__)
     if sources_before_filter and len(sources) < sources_before_filter:
         log.info("Report: relevance gate removed %d off-topic web sources", sources_before_filter - len(sources))
     record_research_stage("sources_after_relevance_filter", {"count": len(sources), "sources": sources})
@@ -19740,8 +20866,36 @@ async def generate_report(request: Request):
             strict_sources = [{"title": r["title"], "url": r["url"], "snippet": r["snippet"], "fullContent": r.get("fullContent", "")} for r in searched_strict]
             sources = _dedupe_enriched_sources(_filter_relevant_sources(strict_sources, question, intent, report_tier=report_tier))
             log.info("Report: strict relevance search retained %d/%d unique, relevant sources", len(sources), len(strict_sources))
+            if not sources and strict_queries:
+                # Retry the same strict subject angles once across a second
+                # provider key with a lower minimum. Some providers return an
+                # empty batch transiently; that should not become a false
+                # no-source 502 when another configured key can answer it.
+                retry_queries = strict_queries[:3]
+                search_queries = list(dict.fromkeys(list(search_queries) + retry_queries))
+                searched_retry = await _exa_search_multi(
+                    retry_queries, max_results=min(8, strict_limit), min_results=2,
+                    images_out=image_candidates_raw,
+                    historical_intent=bool(_HISTORICAL_INTENT_RE.search(question)),
+                    max_keys_per_query=2,
+                )
+                retry_sources = [{
+                    "title": row.get("title", ""), "url": row.get("url", ""),
+                    "snippet": row.get("snippet", ""), "fullContent": row.get("fullContent", ""),
+                    "searchQuery": row.get("searchQuery", ""), "publisher": row.get("publisher", ""),
+                    "published": row.get("published") or row.get("publishedDate") or row.get("published_at", ""),
+                    "sourceType": row.get("sourceType") or row.get("source_type", "web search result"),
+                } for row in searched_retry]
+                retry_sources = _dedupe_enriched_sources(
+                    _filter_relevant_sources(retry_sources, question, intent, report_tier=report_tier)
+                )
+                sources = retry_sources
+                log.info(
+                    "Report: second-key strict retry retained %d relevant source(s) from %d result(s)",
+                    len(sources), len(searched_retry),
+                )
         except Exception as exc:
-            log.warning("Report: strict relevance search failed: %s", exc)
+            log.warning("Report: strict relevance search failed: %s", type(exc).__name__)
 
     record_research_stage("sources_after_strict_search", {"count": len(sources), "sources": sources})
 
@@ -19772,7 +20926,14 @@ async def generate_report(request: Request):
             return JSONResponse(
                 {"error": "Could not retrieve data for this topic. Please try again.",
                  "report": "Could not retrieve data for this topic. Please try again.",
-                 "charts": [], "keyStats": [], "summary": "", "title": ""},
+                 "charts": [], "keyStats": [], "summary": "", "title": "",
+                 "failedStage": "source_retrieval",
+                 "blockingCategories": ["source_retrieval"],
+                 "failureSummary": [{
+                     "stage": "source_retrieval",
+                     "issue": "No relevant source was found after the initial, strict-subject and one bounded second-key search.",
+                 }],
+                 "draftAvailable": False},
                 status_code=502,
             )
         log.info("Report: no web sources found, but question doesn't require live data — "
@@ -19786,15 +20947,17 @@ async def generate_report(request: Request):
     sector_rotation_request = _is_sector_rotation_report_request(question)
     quarterly_rows: list[dict] = []
     quarterly_source: dict | None = None
+    quote_source: dict | None = None
+    hist_source: dict | None = None
     # Only questions that are actually about stock-market index levels get the
     # Yahoo index blocks. The old pattern matched bare "index"/"market", so an
     # EV question mentioning "market share" (or "India Electric Mobility
     # Index") received Nifty/Sensex quotes that took 2 of the 10 Brief
     # enrichment slots and confused the writer.
-    _is_index_question = bool(_INDEX_QUESTION_RE.search(question)) or bool(
+    _is_index_question = (not file_only_report) and (bool(_INDEX_QUESTION_RE.search(question)) or bool(
         "market_data" in intent.evidence_needed
         and re.search(r"\b(?:stock|equity|share)\s+(?:market|index|indices)\b", question, re.IGNORECASE)
-    )
+    ))
     if _is_index_question:
         try:
             quotes = await fetch_index_quotes()
@@ -19869,7 +21032,7 @@ async def generate_report(request: Request):
     # capitalized company-like phrase, regardless of keyword match. This is
     # safe — a candidate that isn't a real company simply fails to resolve
     # in screener_kb / Yahoo lookup and is silently dropped, same as today.
-    _early_company_candidates = _extract_company_candidates(question, intent=intent)
+    _early_company_candidates = [] if file_only_report else _extract_company_candidates(question, intent=intent)
     _gallery_ohlc_series: list[dict] = []
     # Named companies plus either stock language or a request for reported
     # financial metrics (profit, assets, NPAs, deposits…) — the Screener.in KB
@@ -19972,7 +21135,7 @@ async def generate_report(request: Request):
     # Prioritize sources that actually mention the named entities/topics in the
     # request. This does not delete provenance; it only determines which results
     # are enriched and shown first to the report writer.
-    _company_names_for_ranking = _extract_company_candidates(question, intent=intent)
+    _company_names_for_ranking = [] if file_only_report else _extract_company_candidates(question, intent=intent)
     if _company_names_for_ranking:
         q_tokens = {t for t in re.findall(r"[a-z0-9&]+", question.lower()) if len(t) >= 4}
         scored_sources = []
@@ -20036,6 +21199,49 @@ async def generate_report(request: Request):
     enriched_raw = list(await asyncio.gather(
         *[enrich(s, i) for i, s in enumerate(_enrich_queue)]
     ))
+    # A burst of timeouts / connection errors is a transport fault, not evidence
+    # scarcity (one run verified 1 of 28 pages while the host's DNS was dropping).
+    # Retry just those rows once, gently, so a brief network blip does not turn a
+    # source-rich question into a "thin evidence" report.
+    _transient = {"timeout", "network_error"}
+    _web_enriched = [r for r in enriched_raw if not str((r or {}).get("url") or "").startswith("internal://")]
+    _failed_idx = [
+        i for i, r in enumerate(enriched_raw)
+        if str((r or {}).get("pageFetchStatus") or "") in _transient
+    ]
+    if _web_enriched and _failed_idx:
+        # Retry any transient failure, not only a burst: a live run lost the
+        # MOFSL and Goldman Sachs PDFs (both answered 200, extraction timed
+        # out) to search-extract-only status because 5 of 28 is under the old
+        # 40% burst threshold. Official hosts and PDFs go first; cap the retry.
+        def _retry_priority(i: int) -> tuple[int, int]:
+            _u = str((_enrich_queue[i] or {}).get("url") or "").casefold()
+            _official = bool(re.search(r"(?:nsdl\.co\.in|nseindia\.(?:com|in)|niftyindices\.com|sebi\.gov\.in|rbi\.org\.in|bseindia\.com|amfiindia\.com)", _u))
+            return (0 if _official else 1, 0 if _u.split("?")[0].endswith(".pdf") else 1)
+        _failed_idx = sorted(_failed_idx, key=_retry_priority)[:12]
+        log.warning("Report: %d of %d publisher fetches failed with timeout/network_error; retrying them once",
+                    len(_failed_idx), len(_web_enriched))
+        await asyncio.sleep(2.0)
+        _retry_sem = asyncio.Semaphore(4)
+
+        async def _retry_enrich(i: int) -> tuple[int, dict]:
+            src = dict(_enrich_queue[i] or {})
+            try:
+                async with _retry_sem:
+                    return i, await _enrich_report_source(
+                        src, i, question, intent, max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                    )
+            except Exception:
+                return i, enriched_raw[i]
+
+        _retried = await asyncio.gather(*[_retry_enrich(i) for i in _failed_idx])
+        _recovered = 0
+        for i, row in _retried:
+            if str((row or {}).get("pageFetchStatus") or "") == "ok":
+                _recovered += 1
+            if str((row or {}).get("pageFetchStatus") or "") == "ok" or i not in _failed_idx:
+                enriched_raw[i] = row
+        log.info("Report: fetch retry recovered %d of %d pages", _recovered, len(_failed_idx))
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",
@@ -20061,6 +21267,35 @@ async def generate_report(request: Request):
             enriched = enriched + _rescued
     except Exception as _rescue_exc:
         log.debug("Report: entity+metric rescue skipped: %s", type(_rescue_exc).__name__)
+
+    # Keep the three local market datasets in canonical evidence even when the
+    # generic web-page relevance heuristic does not understand their schema.
+    # Their fixed order is also the stable S1-S3 order used by the report.
+    _authoritative_market_sources = [
+        source for source in (hist_source, quarterly_source, quote_source)
+        if isinstance(source, dict)
+    ]
+    if _authoritative_market_sources:
+        def _market_source_slug(source: object) -> str:
+            if not isinstance(source, dict):
+                return ""
+            raw_url = str(source.get("url") or source.get("sourceUrl") or source.get("source_url") or "").strip().casefold()
+            return raw_url.split("internal://", 1)[-1].strip("/") if raw_url.startswith("internal://") else ""
+
+        _authoritative_by_slug: dict[str, dict] = {}
+        for _candidate in _authoritative_market_sources:
+            _slug = _market_source_slug(_candidate)
+            _enriched_match = next((
+                row for row in _pre_gate_enriched
+                if _slug and _market_source_slug(row) == _slug
+            ), None)
+            _authoritative_by_slug[_slug or str(len(_authoritative_by_slug))] = _enriched_match or _candidate
+        _authoritative_slugs = {slug for slug in _authoritative_by_slug if slug and not slug.isdigit()}
+        _remaining_enriched = [
+            row for row in enriched if _market_source_slug(row) not in _authoritative_slugs
+        ]
+        enriched = _dedupe_enriched_sources(list(_authoritative_by_slug.values()) + _remaining_enriched)
+        log.info("Report: retained %d authoritative market dataset(s) after relevance filtering", len(_authoritative_by_slug))
     if len(enriched) < before_page_relevance:
         log.warning("Report: post-fetch relevance gate removed %d source(s) whose extracted content did not match the topic/metrics",
                     before_page_relevance - len(enriched))
@@ -20173,24 +21408,27 @@ async def generate_report(request: Request):
         "sources": enriched,
     })
 
-    # Persist the richer, actually-fetched page text as well as the raw search
-    # result. This means a later report/action can reuse the same evidence
-    # without losing the deeper page content collected during this run.
-    try:
-        from utils.research_store import persist_web_search_results
-        _persist_rows = [x for x in enriched if isinstance(x, dict) and str(x.get("url") or "").strip()]
-        if _persist_rows:
-            async def _persist_enriched_web_research():
-                try:
-                    await asyncio.to_thread(
-                        persist_web_search_results, question, _persist_rows,
-                        provider="report-enrichment",
-                    )
-                except Exception as _persist_exc:
-                    log.warning("Report: enriched web research persistence skipped: %s", type(_persist_exc).__name__)
-            asyncio.create_task(_persist_enriched_web_research())
-    except Exception as _persist_import_exc:
-        log.debug("Report: web research persistence helper unavailable: %s", type(_persist_import_exc).__name__)
+    # Persist enriched publisher research only for reports that actually requested
+    # external evidence. A workbook-only report must not repopulate a legacy web
+    # source library after the user has deliberately cleared it for storage.
+    if file_only_report:
+        log.info("Workbook-only report: skipped external web-source persistence")
+    else:
+        try:
+            from utils.research_store import persist_web_search_results
+            _persist_rows = [x for x in enriched if isinstance(x, dict) and str(x.get("url") or "").strip()]
+            if _persist_rows:
+                async def _persist_enriched_web_research():
+                    try:
+                        await asyncio.to_thread(
+                            persist_web_search_results, question, _persist_rows,
+                            provider="report-enrichment",
+                        )
+                    except Exception as _persist_exc:
+                        log.warning("Report: enriched web research persistence skipped: %s", type(_persist_exc).__name__)
+                asyncio.create_task(_persist_enriched_web_research())
+        except Exception as _persist_import_exc:
+            log.debug("Report: web research persistence helper unavailable: %s", type(_persist_import_exc).__name__)
 
     # The calculated sector-quarter dataset is not a publisher web page. It is
     # constructed locally AFTER the external web-source enrichment/filtering
@@ -20226,10 +21464,79 @@ async def generate_report(request: Request):
     # so one RBI publication cannot appear as multiple S# sources/observations.
     enriched = _dedupe_enriched_sources(enriched)
 
+    # ── Evidence-first chart plan, step 1: find what the question's charts need and
+    # fetch what is missing BEFORE the writer runs. Charts used to be proposed and
+    # then pruned by audits, so a required dataset that was never retrieved just
+    # vanished late. New pages are appended after the existing ones, so every
+    # already-assigned S# stays the same (build_source_registry never renumbers).
+    _chart_plan_cov: list = []
+    _chart_plan_gap_meta: dict = {"enabled": False}
+    _chart_planner_on = (not file_only_report) and os.getenv("REPORT_CHART_PLANNER", "on").strip().casefold() not in {"off", "0", "false", "none"}
+    if _chart_planner_on:
+        try:
+            _chart_needs = _plan_chart_needs(question, report_tier)
+            _prov_manifest = build_source_registry(enriched, source_documents)
+            _prov_cov = _assess_chart_coverage(_chart_needs, _gallery_source_texts(_prov_manifest, enriched))
+            _gap_queries = [] if search_audit_mode else _chart_gap_queries(
+                _prov_cov, limit=int(os.getenv("REPORT_CHART_GAP_QUERIES", "3") or 3))
+            _chart_plan_gap_meta = {
+                "enabled": True, "needs": len(_chart_needs),
+                "unmetBefore": [c.need.key for c in _prov_cov if c.status != "satisfied"],
+                "queries": _gap_queries, "pagesAdded": 0,
+            }
+            if _gap_queries:
+                _report_progress("chart_data_gap", "Fetching data needed for the planned charts…", 49)
+                from routes.chat import exa_search_multi as _gap_exa_search_multi
+                _gap_results = await asyncio.wait_for(
+                    _gap_exa_search_multi(
+                        _gap_queries, max_results=6, min_results=3, images_out=None,
+                        historical_intent=bool(_HISTORICAL_INTENT_RE.search(question)), max_keys_per_query=1,
+                    ),
+                    timeout=float(os.getenv("REPORT_CHART_GAP_FETCH_SECONDS", "30") or 30),
+                )
+                _known_identities = {source_identity_key(row) for row in enriched if source_identity_key(row)}
+                _gap_seeds = []
+                for _item in _gap_results or []:
+                    if not isinstance(_item, dict):
+                        continue
+                    _seed = {"title": _item.get("title", ""), "url": _item.get("url", ""),
+                             "snippet": _item.get("snippet", ""), "fullContent": _item.get("fullContent", "")}
+                    _ident = source_identity_key(_seed)
+                    if _ident and _ident not in _known_identities:
+                        _known_identities.add(_ident)
+                        _gap_seeds.append(_seed)
+                _gap_seeds = _gap_seeds[:8]
+                if _gap_seeds:
+                    _gap_rows = list(await asyncio.gather(*[enrich(seed, 1000 + i) for i, seed in enumerate(_gap_seeds)]))
+                    _gap_rows = _filter_relevant_sources(_gap_rows, question, intent, require_context=True, report_tier=report_tier)
+                    if _gap_rows:
+                        enriched = _dedupe_enriched_sources(enriched + _gap_rows)
+                        audit_discovered_sources.extend(_gap_rows)
+                        _chart_plan_gap_meta["pagesAdded"] = len(_gap_rows)
+                        log.info("Report: chart-data gap fetch added %d page(s) for unmet chart needs %s",
+                                 len(_gap_rows), _chart_plan_gap_meta["unmetBefore"])
+        except Exception as _gap_exc:
+            _chart_plan_gap_meta["error"] = type(_gap_exc).__name__
+            log.warning("Report: chart-data gap fetch skipped safely: %s: %s", type(_gap_exc).__name__, str(_gap_exc)[:160])
+
     # The appendix and the writer prompt MUST share the exact same canonical
     # source IDs. The same canonical manifest is then used by charts, audit,
     # Show Report and PDF export.
     source_manifest = build_source_registry(enriched, source_documents)
+    workbook_source_id = ""
+    if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance":
+        workbook_names = [str(x.get("filename") or "").strip() for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)]
+        _name_keys = {x.casefold() for x in workbook_names if x}
+        _workbook_source = next((item for item in source_manifest if isinstance(item, dict)
+                                 and str(item.get("title") or "").strip().casefold() in _name_keys), None)
+        if _workbook_source:
+            workbook_source_id = str(_workbook_source.get("id") or "").upper()
+            _workbook_excerpt = str(_workbook_source.get("chartEvidenceExcerpt") or "")
+            if workbook_source_id and _workbook_excerpt:
+                log.info("Workbook analytics source resolved: id=%s title=%r excerpt_chars=%d",
+                         workbook_source_id, _workbook_source.get("title"), len(_workbook_excerpt))
+        if not workbook_source_id:
+            log.warning("Workbook analytics has no canonical source ID; deterministic charts will not be published")
     if rag_source_rows:
         rag_identities = {source_identity_key(row) for row in rag_source_rows}
         rag_status["sourceIds"] = [
@@ -20331,6 +21638,22 @@ async def generate_report(request: Request):
                 "recommendedFormat": "html",
             }, status_code=200)
 
+    # Evidence-first chart plan, step 2: with the final canonical IDs fixed, bind
+    # each planned chart to the sources that can support it and tell the writer
+    # which charts to draw, which to skip, and which IDs to cite.
+    _chart_plan_block = ""
+    if _chart_planner_on:
+        try:
+            _chart_plan_cov = _assess_chart_coverage(
+                _plan_chart_needs(question, report_tier), _gallery_source_texts(source_manifest, enriched),
+            )
+            _chart_plan_block = _chart_writer_plan_block(_chart_plan_cov)
+            _chart_plan_gap_meta.update(_chart_plan_meta_dict(_chart_plan_cov))
+            record_research_stage("chart_plan", {**_chart_plan_gap_meta, "block": _chart_plan_block})
+        except Exception as _plan_exc:
+            _chart_plan_cov = []
+            log.warning("Report: chart plan skipped safely: %s: %s", type(_plan_exc).__name__, str(_plan_exc)[:160])
+
     # V19 evidence + analytics layer:
 
     # knowledge graph and run only statistics that are justified by extracted
@@ -20350,12 +21673,19 @@ async def generate_report(request: Request):
     for _item in enriched:
         _item2 = dict(_item)
         _canon = _canonical_by_identity.get(_engine_source_identity(_item))
-        if _canon:
-            _item2["id"] = _canon.get("id")
-            _item2["canonical_id"] = _canon.get("id")
+        if not _canon:
+            # A row without a canonical ID used to fall back to its list position
+            # (S{i+1}) inside the engine, which collides with a DIFFERENT real
+            # source and attached its numbers to the wrong citation.
+            log.warning("Report: evidence-engine row %r has no canonical source ID; excluded rather than numbered by position",
+                        str(_item.get("title") or _item.get("url") or "")[:80])
+            continue
+        _item2["id"] = _canon.get("id")
+        _item2["canonical_id"] = _canon.get("id")
         _engine_sources.append(_item2)
+    report_topic = str(getattr(intent, "resolved_topic", "") or question or "").strip()
     _report_progress("analysis", "Cross-checking facts and preparing report structure…", 57)
-    research_engine_context = build_research_engine_context(_engine_sources, question=report_topic if 'report_topic' in locals() else question)
+    research_engine_context = build_research_engine_context(_engine_sources, question=report_topic)
     research_engine_block = format_engine_context(
         research_engine_context,
         max_chars=_TIER_EVIDENCE_CONTEXT_CHARS.get(report_tier, _TIER_EVIDENCE_CONTEXT_CHARS["detailed"]),
@@ -20425,26 +21755,42 @@ async def generate_report(request: Request):
         src_parts.append(
             f"- [{canonical['id']}] **{canonical['title']}**\nSource: {source_reference}\n{evidence or 'NO EXTRACTED SOURCE TEXT AVAILABLE. Do not cite this source for any precise factual or numeric claim.'}{citation_rule}"
         )
-    src_text = "\n\n---\n\n".join(src_parts)
+    full_src_text = "\n\n---\n\n".join(src_parts)
+    source_context_limit = {
+        "brief": 48_000,
+        "detailed": 96_000,
+        "in_depth": 180_000,
+    }.get(report_tier, 96_000)
+    src_text, _writer_source_blocks_kept, _writer_source_blocks_omitted = _compact_report_source_blocks(
+        full_src_text, report_topic, source_context_limit,
+    )
+    if len(src_text) < len(full_src_text):
+        log.info(
+            "Report: bounded writer source context from %d to %d chars; source blocks kept=%d omitted=%d",
+            len(full_src_text), len(src_text), _writer_source_blocks_kept, _writer_source_blocks_omitted,
+        )
     _capture_manifest_by_id = {
         str(src.get("id") or "").upper(): src for src in source_manifest if isinstance(src, dict)
     }
     _capture_writer_blocks = []
-    for _block in src_parts:
-        _block_match = re.match(r"- \[([A-Z]?S\d+)\] \*\*(.*?)\*\*\nSource: ([^\n]*)\n(.*)", _block, flags=re.S)
-        _block_id = _block_match.group(1).upper() if _block_match else ""
+    _capture_source_matches = list(_REPORT_SOURCE_BLOCK_RE.finditer(src_text))
+    for _block_match in _capture_source_matches:
+        _block_id = _block_match.group("source_id").upper()
         _block_meta = _capture_manifest_by_id.get(_block_id, {})
         _block_kind = " ".join(str(_block_meta.get(k) or "") for k in ("source_type", "sourceType", "kind", "type")).casefold()
         _block_private = any(term in _block_kind for term in ("uploaded document", "user upload", "private document", "attached file")) or str(_block_meta.get("url") or "").startswith("internal://")
         _capture_writer_blocks.append({
             "sourceId": _block_id,
-            "title": (_block_match.group(2) if _block_match else "")[:300],
-            "url": _block_match.group(3) if _block_match else "",
-            "evidenceChars": len(_block_match.group(4)) if _block_match else len(_block),
-            "evidenceText": "[omitted from diagnostic capture: uploaded/private source text]" if _block_private else (_block_match.group(4) if _block_match else _block),
+            "title": _block_match.group("title")[:300],
+            "url": _block_match.group("source"),
+            "evidenceChars": len(_block_match.group("body")),
+            "evidenceText": "[omitted from diagnostic capture: uploaded/private source text]" if _block_private else _block_match.group("body"),
         })
     record_research_stage("writer_source_evidence", {
-        "sourceBlockCount": len(src_parts),
+        "sourceBlockCount": len(_capture_source_matches),
+        "availableSourceBlockCount": len(src_parts),
+        "omittedSourceBlockCount": _writer_source_blocks_omitted,
+        "inputEvidenceChars": len(full_src_text),
         "totalPromptEvidenceChars": len(src_text),
         "sourceBlocks": _capture_writer_blocks,
     })
@@ -20454,10 +21800,10 @@ async def generate_report(request: Request):
     # with YAML frontmatter) were written to Supabase Storage under
     # paperly-okf/<session_id>/. Fetching them here gives the report LLM a
     # structured, typed view of each source document — much cleaner than the
-    # raw chunked text that comes back from FAISS retrieval, which improves
+    # raw chunked text that comes back from pgvector retrieval, which improves
     # title accuracy, section attribution, and factual grounding.
     okf_context = ""
-    if session_id and has_file_data:
+    if session_id and has_file_data and not file_only_report:
         try:
             # [File: name] markers in file_context come from files actually
             # attached THIS turn (see buildFilePayload on the frontend) — use
@@ -20539,17 +21885,21 @@ async def generate_report(request: Request):
     # still request an AI-generated illustrative scene when no useful source image
     # exists, but source-backed images are the safer choice for named companies,
     # products and real-world events.
+    image_requested = _prompt_requests_report_images(question)
     image_subject = str(getattr(intent, "resolved_topic", "") or question or "").strip()
     # Official statistical sources (RBI, ministries) rarely carry a lead image.
     # When the research search produced no relevant candidate, run one bounded
     # news search purely for an illustrative, publisher-credited image. It never
     # adds evidence or sources to the report.
-    _existing_image_candidates = _filter_image_candidates(image_candidates_raw, limit=8, subject=image_subject)
+    _existing_image_candidates = (
+        _filter_image_candidates(image_candidates_raw, limit=8, subject=image_subject)
+        if image_requested else []
+    )
     _has_editorial_image = any(
         any(name in str(c.get("sourceUrl") or "").casefold() for name in _EDITORIAL_IMAGE_DOMAINS)
         for c in _existing_image_candidates
     )
-    if (not no_web_sources and not _has_editorial_image
+    if (image_requested and not file_only_report and not no_web_sources and not _has_editorial_image
             and os.getenv("REPORT_IMAGE_SUPPLEMENT", "1").strip().casefold() not in {"0", "false", "off", "no"}):
         _image_query = _image_search_query(question, intent)
         if _image_query:
@@ -20585,8 +21935,9 @@ async def generate_report(request: Request):
                     log.info("Supplemental og:image lookup skipped: %s", type(_og_exc).__name__)
             image_candidates_raw.extend(_supplemental_images)
             log.info("Supplemental image search query=%r candidates=%d", _image_query[:80], len(_supplemental_images))
-    image_candidates = _filter_image_candidates(
-        image_candidates_raw, limit=8, subject=image_subject
+    image_candidates = (
+        _filter_image_candidates(image_candidates_raw, limit=8, subject=image_subject)
+        if image_requested else []
     )
     for candidate in image_candidates:
         # If the provider did not return an embedding-page URL, associate it
@@ -20599,12 +21950,19 @@ async def generate_report(request: Request):
             candidate["sourceTitle"] = source_title
         if source_title and not candidate.get("publisher"):
             candidate["publisher"] = source_title
-    image_candidates_block = _build_image_candidates_block(image_candidates)
+    image_candidates_block = _build_image_candidates_block(image_candidates, question)
+    if not image_requested:
+        image_candidates_block = (
+            '\n\nIMAGE POLICY: The user did not request photographs or illustrations. '
+            'Return "images": [] and "aiImages": []. Use an uploaded-file image only '
+            'when it directly supports the requested analysis.\n'
+        )
 
     from datetime import date
     _today_date = date.today()
     today = _today_date.strftime("%A, %B %d, %Y")
     quarter_anchor = _past_n_quarters_anchor(question, _today_date)
+    scope_contract = _requested_scope_contract(question, _today_date)
 
     # ── Explicit planning pass ────────────────────────────────────────────
     # Decide the section list and per-section presentation format from the
@@ -20623,6 +21981,8 @@ async def generate_report(request: Request):
         wants_more_data_viz=wants_more_data_viz,
         intent=intent,
         report_tier=report_tier,
+        file_only_report=file_only_report,
+        workbook_analytics=workbook_analytics,
     )
     plan_block = f"\n\n{_format_plan_for_prompt(report_plan)}\n" if report_plan else ""
     report_presentation = report_plan.get("presentation") if isinstance(report_plan, dict) else None
@@ -20631,8 +21991,6 @@ async def generate_report(request: Request):
     # message may include command framing ("Prepare a report on ..."), while
     # resolved_topic is the actual research subject and is the safer anchor for
     # titles, entity mentions, and follow-up reports.
-    report_topic = str(getattr(intent, "resolved_topic", "") or question or "").strip()
-
     # Make tier depth explicit in the writer prompt. This avoids the former
     # contradiction where the schema said "NO fixed page count" while the
     # selected UI tier asked for a materially deeper report.
@@ -20654,15 +22012,61 @@ async def generate_report(request: Request):
             "research product rather than a padded summary."
         ),
     }.get(report_tier, "")
-    tier_execution = (
-        f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
-        f"RENDERED PAGE BAND: {tier_spec.page_target.minimum}–{tier_spec.page_target.maximum} pages; preferred target {tier_spec.page_target.target}. Aim for the preferred target using unique source-backed analysis and final-renderer pagination checks; never pad or invent evidence. If available evidence is insufficient, state the limitation.\n"
-        f"Research breadth: {tier_spec.research_breadth}; evidence intensity: {tier_spec.evidence_intensity}.\n"
-        + chart_density_contract(report_tier) + "\n"
-        f"Depth instruction: {_depth_instructions} "
-        "The exact section names, order, KPI use and visual mix remain driven by THIS request and THIS evidence. "
-        "If a requested dimension cannot be supported by the available sources, identify the evidence gap instead of fabricating it. "
-    )
+    if file_only_report:
+        tier_execution = (
+            f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
+            "WORKBOOK-ONLY MODE: use the uploaded workbook as the sole factual source. Do not search the web, reuse stored web sources, "
+            "guess company identities from the prompt, or add unrelated stock/news imagery. Calculate numerical comparisons from parsed workbook "
+            "values; preserve units, periods and missing markers. Cite the workbook and worksheet for material findings. Use evidence-driven length; "
+            "do not run repeated expansion passes or pad to a page target.\n"
+            + chart_density_contract(report_tier) + "\n"
+            f"Depth instruction: {_depth_instructions} "
+            "Select only analyses supported by the workbook; state data gaps explicitly."
+        )
+    else:
+        tier_execution = (
+            f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
+            + (f"EXPLICIT PAGE REQUEST: {requested_page_count} pages. Reach it only with distinct source-backed analysis; never pad or invent evidence.\n" if requested_page_count else "Do not target a page, word, or character count. Let the request and evidence determine length.\n")
+            + f"Research breadth: {tier_spec.research_breadth}; evidence intensity: {tier_spec.evidence_intensity}.\n"
+            + chart_density_contract(report_tier) + "\n"
+            f"Depth instruction: {_depth_instructions} "
+            "The exact section names, order, KPI use and visual mix remain driven by THIS request and THIS evidence. "
+            "If a requested dimension cannot be supported by the available sources, identify the evidence gap instead of fabricating it. "
+        )
+
+    research_coverage = audit_research_coverage(
+        enriched, tier=report_tier, query_count=len(search_queries), requested_pages=requested_page_count,
+        question=question,
+    ) if not file_only_report else None
+    if research_coverage:
+        log.info("Deep Research coverage snapshot: tier=%s queries=%d sources=%d domains=%d verified_pages=%d official_domains=%d status=%s gaps=%s",
+                 report_tier, research_coverage["queryAngleCount"], research_coverage["uniqueSourceCount"],
+                 research_coverage["distinctPublisherDomains"], research_coverage["publisherPagesVerified"],
+                 research_coverage["officialSourceCount"], research_coverage["status"], research_coverage["coverageGaps"])
+        if report_tier == "in_depth" and research_coverage["status"] != "adequate":
+            log.warning("Deep Research evidence coverage is thin; do not imply exhaustive support. Gaps: %s", research_coverage["coverageGaps"])
+    coverage_prompt_block = ""
+    if research_coverage:
+        coverage_prompt_block = (
+            "\n\nRESEARCH COVERAGE AUDIT (actual measured counts, not a quality guarantee):\n"
+            + json.dumps(research_coverage, ensure_ascii=False)
+            + "\nUse the available evidence with discipline. If coverage is marked thin, explicitly disclose material evidence gaps; "
+            "do not claim exhaustive coverage and do not pad by restating points.\n"
+        )
+    fpi_methodology_contract = ""
+    if _is_fpi_flow_research(question, intent):
+        fpi_methodology_contract = (
+            "\n\nFPI/FII HYPOTHESIS-TESTING RULES (analytical constraints, not a fixed report outline):\n"
+            "Distinguish secondary-market net equity flows, gross purchases and sales, primary-market subscriptions (IPO/QIP and other issuance), "
+            "listed-stock ownership/shareholding, debt-security flows (including FAR/VRR when supported), and FDI into businesses. These are different "
+            "instruments and accounting measures; do not add or describe them as equivalent unless the original sources establish compatible definitions, "
+            "periods, currency and net/gross basis. Distinguish net FDI from gross FDI and don't equate corporate capital raised with secondary-market selling. "
+            "Separate net capital flows from changes in portfolio market value caused by prices, currency or index composition. Frontline-index ownership can "
+            "support a claim about those stocks but cannot by itself establish that foreign investors left India as a whole. Examine sector reallocations and "
+            "company-level evidence where data permits, with periods aligned across sources. Verify the exact context and wording of any attribution to Gautam "
+            "Duggad; if the alleged ten-year equivalence is not directly evidenced or the measures are non-comparable, state that explicitly. Keep the hypothesis, "
+            "counter-hypothesis, findings and unresolved data gaps analytically distinct; do not assume either is true in advance.\n"
+        )
 
     user_prompt = (
         f"Today's date is {today}. Resolve \"latest\", \"current\", \"this quarter/year\", "
@@ -20672,26 +22076,34 @@ async def generate_report(request: Request):
         f"below don't clearly establish which period is \"current\" as of {today}, say so "
         f"rather than guessing."
         + quarter_anchor
+        + scope_contract
         + "\n\n"
         f"Research Question / Topic (this — and ONLY this — defines the report's title and subject): {report_topic}\n"
         + tier_execution
+        + coverage_prompt_block
+        + fpi_methodology_contract
         + writer_style_contract(report_style, report_topic, report_tier)
         + plan_block
         + research_engine_prompt_block
+        + (f"\n{_chart_plan_block}" if _chart_plan_block else "")
         + (f"\nPRIMARY SOURCE — ANALYSE THIS FIRST (uploaded file data takes highest priority):{file_section}" if file_section else "")
         + conversation_section
         + (img_placement_instruction if img_placement_instruction else "")
         + (
-            f"\n\nSupplementary web sources ({len(enriched)} results):\n\n{src_text}\n\n"
-            if not no_web_sources else
-            "\n\nNO WEB SOURCES: A web search for this topic returned nothing usable — this is "
-            "expected for a personal/advisory question rather than a news or market-data query. "
-            "Write the report entirely from your own financial/business knowledge and reasoning. "
-            "Do NOT invent citations, publication names, statistics, or URLs you were not actually "
-            "given — attribute nothing to a 'source' that doesn't exist here. Where a number is a "
-            "reasonable estimate or industry rule-of-thumb rather than a verified figure, say so "
-            "explicitly (e.g. 'typically', 'a common benchmark is', 'as a rough estimate'). Omit any "
-            "References/Sources/Methodology section entirely, since there are no sources to list.\n\n"
+            "\n\nWORKBOOK-ONLY EVIDENCE: The uploaded workbook is the sole factual source for this request. "
+            "Do not search the web, reuse stored web sources, cite external sources, or supplement with model-memory statistics. "
+            "Use the parsed workbook data and the deterministic workbook comparison charts supplied below; clearly distinguish calculations from raw observations.\n\n"
+            if file_only_report else
+            (f"\n\nSupplementary web sources ({len(enriched)} results):\n\n{src_text}\n\n"
+             if not no_web_sources else
+             "\n\nNO WEB SOURCES: A web search for this topic returned nothing usable — this is "
+             "expected for a personal/advisory question rather than a news or market-data query. "
+             "Write the report entirely from your own financial/business knowledge and reasoning. "
+             "Do NOT invent citations, publication names, statistics, or URLs you were not actually "
+             "given — attribute nothing to a 'source' that doesn't exist here. Where a number is a "
+             "reasonable estimate or industry rule-of-thumb rather than a verified figure, say so "
+             "explicitly (e.g. 'typically', 'a common benchmark is', 'as a rough estimate'). Omit any "
+             "References/Sources/Methodology section entirely, since there are no sources to list.\n\n")
         )
         + image_candidates_block
         + "INSTRUCTIONS:\n"
@@ -20704,9 +22116,9 @@ async def generate_report(request: Request):
         "3A. CITATION GRANULARITY: Put citations immediately after the factual clause they support. When a sentence contains separate claims, split it into clauses/sentences and cite each source locally. Do NOT place a grouped citation after a compound sentence unless every listed source supports every material number and fact in that sentence. Cite policy/source A after the policy claim and source B after the separate target/waiver claim, rather than implying each source verifies all figures.\n"
         "3B. TABLE-CELL EVIDENCE: Treat each numeric table cell as a separate factual claim. A citation on a row must be attached to the exact data cell or row values it supports; at least one cited source must explicitly contain each material numeric value or a clearly equivalent unit-normalized value. Do not infer annual sector additions from different-date cumulative totals unless you show the calculation, label the result as a calculated estimate, and cite both inputs. If the supplied source excerpts do not establish a table value, write 'Not available in the retrieved evidence' instead of guessing or borrowing a citation from a general sector overview. Do not let a source cited for a row's capacity value implicitly support another cell's annual addition, policy claim, or driver.\n"
         "3C. INVESTOR DISCOVERY INTEGRITY: Distinguish direct capital providers (VC funds, angel investors and corporate investment arms) from incubators, R&D organizations, export agencies, industry associations and technology parks. Do not label an ecosystem enabler as an investor unless the source documents a direct investment or funding programme. Never invent fund names, check sizes, portfolio valuations, aggregate funding totals, eligibility or pitch access. A numeric funding/check-size/valuation/export claim can appear only when a cited, fetched publisher page supports the exact number, unit, subject and period; otherwise state that it was not verified in retrieved publisher-page evidence. Never emit NaN/Infinity or a computed percentage without valid finite inputs.\n"
-        "4. Follow CHART RULES exactly — charts are mandatory wherever sourced numeric evidence exists; preserve supplied data exactly and do not fabricate values. When there are chartable series, create explicit chart/mixed analytical sections (or dedicated metric-specific subsections) and place [CHART_n] immediately within the section that interprets the data. Never leave several material charts detached from the relevant analysis; a standalone 'Charts & Data Analysis' section is a valid fallback only when charts cannot be placed contextually.\n"
-        "5. Write the report at the selected tier and its renderer-measured page band. Brief targets 6–10 pages; In-Detail targets 25–30 pages and must retain the core answer while adding substantive source-backed analysis; Deep Research targets 70–100 pages when the available evidence can support that scope and must broaden both the independent source base and analytical depth. Use the planner's question-driven structure; do not impose a fixed section-count template. Grow primarily through additional evidence-backed charts and data tables (every distinct sourced series, comparison, ranking or breakdown gets its own chart), with prose limited to short cited interpretation—not narrative padding, generic background, repetition or invented figures. If the evidence cannot support the full band, disclose the shortfall rather than adding prose. Insert [CHART_n] inline wherever valid chart data exists.\n"
-        "6. Choose prose, tables, charts, bullets, timelines, comparisons, risk matrices, KPI/callout blocks, or images according to the evidence and the selected tier. For analytical research reports, do NOT default to paragraph-after-paragraph prose: use a mixed treatment when the evidence contains distinct drivers, comparisons, rankings, time series, risks, scenarios, or other structures that read better as lists/tables/charts/callouts. Keep paragraphs short and single-purpose; avoid more than two consecutive long analytical paragraphs when a meaningful structured treatment is available. Charts are mandatory: chart every distinct set of sourced observations (two or more comparable values) rather than describing the numbers in prose; never create decorative visuals or charts from invented, padded or non-comparable values. AI-generated illustrative images are optional and should be used only when they materially improve a genuinely non-numeric/thematic section.\n"
+        "4. Add charts when they clarify comparable, source-supported values or answer an explicit chart request. Preserve source data and citations; never invent points. Put each [CHART_n] beside the section that interprets it, with a dedicated data section only as a fallback.\n"
+        "5. Write at the selected tier without a page, word, or character target. Brief should be concise; In-Detail and Deep Research should add distinct, source-backed analysis and broader evidence. Use the planner's question-driven structure; do not impose a fixed section-count template. Add charts or tables only when they make verified evidence clearer; do not add one for every data series. Stop when material questions are answered or the evidence is exhausted. Never pad, repeat, or invent figures. Insert [CHART_n] inline wherever valid chart data exists.\n"
+        "6. Choose prose, tables, charts, bullets, timelines, comparisons, risk matrices, KPI/callout blocks, or images according to the request and evidence. Use structured treatments when they make distinct drivers, comparisons, time series, risks, or scenarios easier to inspect. Keep paragraphs short and avoid repetition. Do not force charts, images, or KPI cards to fill space; omit visuals whose values cannot be verified.\n"
         "6A. REPETITION CONTROL: treat every section and subsection as a distinct analytical job. Before writing a new subsection, identify what the report has already established and do not restate the same market-size figures, drivers, history, company facts, or implications under a new heading. A new module must add a genuinely different lens (for example, mechanics, comparison, economics, scenario, sensitivity, risk, or implementation). Do not paraphrase an earlier paragraph just to increase depth.\n"
         + ("7. Insert [FILE_IMG_n] references inline where you reference data visible in that extracted image/chart.\n" if embedded_file_images else "")
         + (
@@ -20715,26 +22127,37 @@ async def generate_report(request: Request):
         )
         + "9. Respond ONLY with the JSON object — no markdown fences, no text outside JSON."
     )
+    if file_only_report:
+        # Later, more-specific instruction resolves the generic template's web-source wording.
+        user_prompt += (
+            "\n\nFINAL WORKBOOK-ONLY OVERRIDE: Ignore any generic instruction above that mentions web sources, external research, "
+            "company-market APIs, publisher images, or fixed page targets. This request is grounded exclusively in the attached workbook. "
+            "Do not introduce external facts. Provide complete workbook-derived comparisons, include the supplied verified chart data, and stop "
+            "when the supported analysis is complete rather than repeating expansion passes."
+        )
 
     # Additive multi-model evidence analysis: independent tasks run concurrently,
     # but the original evidence blocks and final publication gates remain authoritative.
     _report_progress("parallel_analysis", "Running parallel evidence analysts…", 63)
-    _parallel_analysis_result = {"enabled": True, "findings": [], "gaps": [], "analysts": 0}
-    try:
-        _parallel_analysis_result = await run_parallel_evidence_analysis(
-            question=question, report_tier=report_tier, source_text=src_text,
-            research_engine_context=str(research_engine_block or ""), report_plan=report_plan,
-        )
-        _parallel_analysis_notes = _format_parallel_evidence_notes(_parallel_analysis_result)
-        if _parallel_analysis_notes:
-            _instructions_marker = "INSTRUCTIONS:\n1. The uploaded file content"
-            _marker_at = user_prompt.find(_instructions_marker)
-            if _marker_at >= 0:
-                user_prompt = user_prompt[:_marker_at] + _parallel_analysis_notes + "\n\n" + user_prompt[_marker_at:]
-            else:
-                user_prompt += "\n\n" + _parallel_analysis_notes
-    except Exception as _parallel_exc:
-        log.warning("Parallel evidence analysis failed safely; using the existing writer path: %s", type(_parallel_exc).__name__)
+    _parallel_analysis_result = {"enabled": not file_only_report, "findings": [], "gaps": [], "analysts": 0}
+    if file_only_report:
+        log.info("Workbook-only report: skipped parallel external-evidence analyst stage")
+    else:
+        try:
+            _parallel_analysis_result = await run_parallel_evidence_analysis(
+                question=question, report_tier=report_tier, source_text=src_text,
+                research_engine_context=str(research_engine_block or ""), report_plan=report_plan,
+            )
+            _parallel_analysis_notes = _format_parallel_evidence_notes(_parallel_analysis_result)
+            if _parallel_analysis_notes:
+                _instructions_marker = "INSTRUCTIONS:\n1. The uploaded file content"
+                _marker_at = user_prompt.find(_instructions_marker)
+                if _marker_at >= 0:
+                    user_prompt = user_prompt[:_marker_at] + _parallel_analysis_notes + "\n\n" + user_prompt[_marker_at:]
+                else:
+                    user_prompt += "\n\n" + _parallel_analysis_notes
+        except Exception as _parallel_exc:
+            log.warning("Parallel evidence analysis failed safely; using the existing writer path: %s", type(_parallel_exc).__name__)
     record_research_stage("parallel_evidence_analysis_summary", {
         "enabled": bool(_parallel_analysis_result.get("enabled", True)),
         "analysts": int(_parallel_analysis_result.get("analysts") or 0),
@@ -20817,7 +22240,7 @@ async def generate_report(request: Request):
             if ch == '\\':
                 nxt = text[i + 1] if i + 1 < n else ''
                 if nxt in _VALID_ESCAPES:
-                    # Genuine JSON escape sequence (\", \\, \n, \uXXXX, etc.) — copy verbatim.
+                    # Genuine JSON escape sequence; copy it verbatim.
                     out.append(ch)
                     i += 1
                     if i < n:
@@ -20872,7 +22295,8 @@ async def generate_report(request: Request):
     def _fix_invalid_json_escapes(text: str) -> str:
         """Defense-in-depth beyond _repair_string_value above: escape any
         backslash anywhere in the JSON text that isn't part of a valid JSON
-        escape sequence (\\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, \\uXXXX).
+        escape sequence (\\", \\\\, \\/, \\b, \\f, \
+, \\r, \\t, \\uXXXX).
         The model occasionally emits stray backslashes outside the
         title/report/summary fields too — e.g. a chart title or keyStat
         label containing "43\\%" or "Rs.\\1,000" — which json.loads rejects
@@ -21014,6 +22438,11 @@ async def generate_report(request: Request):
             if pts:
                 top = max(pts, key=lambda p: _num(p))
                 return f"{top.get('label', 'The largest segment')} accounts for the largest share in {title or 'this composition'}."
+        if ctype in ("line", "sparkline") and sum(isinstance(item, dict) for item in series) > 1:
+            # Flattening the first values from several lines into one sequence
+            # creates false single-series takeaways (for example, "decreases
+            # from -2.75 to -7.34" on a 10-sector comparison).
+            return ""
         vals = []
         labels = []
         for ser in series[:3]:
@@ -21035,6 +22464,20 @@ async def generate_report(request: Request):
         peak_idx = vals.index(vmax)
         return f"{labels[peak_idx] or 'The leading category'} is the highest displayed observation at {_format_chart_number(vmax)}, while the lowest is {_format_chart_number(vmin)}."
 
+    def _safe_chart_chain(raw_chart):
+        """Run the chart clean-up chain; a malformed chart is dropped, never fatal.
+
+        Returns an empty placeholder (no title, no series) on failure so that
+        `_is_plausible_chart` rejects it and `_remap_chart_placeholders` keeps
+        the [CHART_n] numbering aligned.
+        """
+        try:
+            c = _normalise_inline_chart_spec(raw_chart) or raw_chart
+            return _normalize_chart_spec(_recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(c)))
+        except Exception as exc:
+            log.warning("Chart dropped: malformed spec could not be normalised (%s: %s)", type(exc).__name__, exc)
+            return {"type": "bar", "series": []}
+
     def _normalize_chart_spec(ch: dict) -> dict:
         if not isinstance(ch, dict):
             return ch
@@ -21042,6 +22485,10 @@ async def generate_report(request: Request):
         ctype = normalize_chart_type(ch.get("type") or ch.get("chart_type") or ch.get("chartType") or "bar")
         ch["type"] = ctype
         series = ch.get("series") or []
+        if isinstance(series, dict):
+            series = [series]
+        elif not isinstance(series, (list, tuple)):
+            series = []
         # Drop accidental duplicate labels inside a series while preserving first occurrence.
         clean_series = []
         for ser in series:
@@ -21056,9 +22503,12 @@ async def generate_report(request: Request):
                     continue
                 seen.add(label); data.append(pt)
             clean_series.append({**ser, "data": data})
-        if clean_series:
+        # Always adopt the sanitized list. Previously, when every entry was a
+        # non-dict (e.g. the model emitted series as a list of strings), the raw
+        # list survived and later `series[0].get(...)` calls crashed the job.
+        if "series" in ch or clean_series:
             ch["series"] = clean_series
-            series = clean_series
+        series = clean_series
         # Prefer horizontal bars when category labels are long or numerous.
         # This is a renderer-legibility rule, not a change to the underlying data.
         if ctype == "bar" and series:
@@ -21156,7 +22606,15 @@ async def generate_report(request: Request):
                 "candlestick": "Use a range view because open, high, low and close values are materially different dimensions.",
             }
             ch["rationale"] = rationale_map.get(ctype, "Use a categorical comparison because the evidence is best read across named items.")
-        if not ch.get("takeaway"):
+        _takeaway = str(ch.get("takeaway") or "").strip()
+        if ctype in {"line", "sparkline"} and len(series) > 1:
+            # A generic single-series summary can accidentally flatten values
+            # from different entities into one false start-to-end movement.
+            if len(series) > 3 or re.search(r"(?i)^the\s+series\s+(?:increases?|decreases?|rises?|falls?|remains?)\b", _takeaway):
+                ch["takeaway"] = ""
+            elif not _takeaway:
+                ch["takeaway"] = _derive_chart_takeaway(ch)
+        elif not _takeaway:
             ch["takeaway"] = _derive_chart_takeaway(ch)
         return ch
 
@@ -21795,27 +23253,31 @@ async def generate_report(request: Request):
             # already did this; omitting it on the primary path caused the same
             # generated charts to fail validation, then survive only after the
             # unrelated images UnboundLocalError forced JSON salvage.
-            chart = _normalise_inline_chart_spec(raw_chart) or raw_chart
-            chart = _normalize_chart_spec(chart)
-            chart, _cagr_expanded = _expand_source_supported_market_cagr_chart(
-                chart, src_text or "", report_tier
-            )
-            if _cagr_expanded:
-                log.info(
-                    "Chart: expanded market-size CAGR projection into %d source-grounded annual points; intermediate values are labelled calculated estimates",
-                    len((chart.get("series") or [{}])[0].get("data") or []),
+            try:
+                chart = _normalise_inline_chart_spec(raw_chart) or raw_chart
+                chart = _normalize_chart_spec(chart)
+                chart, _cagr_expanded = _expand_source_supported_market_cagr_chart(
+                    chart, src_text or "", report_tier
                 )
-            chart = _auto_chart_type(chart)
-            chart = _normalize_chart_spec(chart)
-            chart = _recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(chart))
-            chart = _normalize_chart_spec(chart)
-            assessment = chart_density_assessment(chart, report_tier)
-            if assessment.get("applicable"):
-                log.info(
-                    "Chart density profile=%s type=%s observations=%s preferred=%s-%s title=%r",
-                    assessment.get("profile"), assessment.get("type"), assessment.get("count", 0),
-                    assessment.get("minimum", 0), assessment.get("maximum", 0), chart.get("title", "?"),
-                )
+                if _cagr_expanded:
+                    log.info(
+                        "Chart: expanded market-size CAGR projection into %d source-grounded annual points; intermediate values are labelled calculated estimates",
+                        len((chart.get("series") or [{}])[0].get("data") or []),
+                    )
+                chart = _auto_chart_type(chart)
+                chart = _normalize_chart_spec(chart)
+                chart = _recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(chart))
+                chart = _normalize_chart_spec(chart)
+                assessment = chart_density_assessment(chart, report_tier)
+                if assessment.get("applicable"):
+                    log.info(
+                        "Chart density profile=%s type=%s observations=%s preferred=%s-%s title=%r",
+                        assessment.get("profile"), assessment.get("type"), assessment.get("count", 0),
+                        assessment.get("minimum", 0), assessment.get("maximum", 0), chart.get("title", "?"),
+                    )
+            except Exception as _chart_exc:
+                log.warning("Chart dropped: malformed spec could not be processed (%s: %s)", type(_chart_exc).__name__, _chart_exc)
+                chart = {"type": "bar", "series": []}
             original_charts_list.append(chart)
         valid_mask = [_is_plausible_chart(c) for c in original_charts_list]
         valid_mask = _drop_duplicate_charts(valid_mask, original_charts_list)
@@ -21978,7 +23440,92 @@ async def generate_report(request: Request):
         # into the now-shorter array (see _remap_chart_placeholders docstring).
         report_text = _remap_chart_placeholders(report_text, original_charts_list, valid_mask)
 
-        original_images_list = parsed.get("images") or []
+        # Add deterministic, workbook-derived PMS comparisons after LLM chart cleanup,
+        # so these exact data-backed charts enter the same final validation/rendering path.
+        if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+            try:
+                _raw_workbook_charts = workbook_analytics.get("charts") or []
+                _existing_chart_titles = {str(c.get("title") or "").casefold().strip() for c in charts if isinstance(c, dict)}
+                _workbook_charts_to_add = []
+                for _raw_workbook_chart in _raw_workbook_charts:
+                    # Normalize first: the generic chart normalizer intentionally
+                    # drops unknown model metadata, including workbook evidence.
+                    # Reattach deterministic workbook provenance afterwards so the
+                    # final evidence gate can validate each plotted value against
+                    # the exact raw worksheet row rather than treating it as an
+                    # ungrounded model-generated chart.
+                    _candidate_chart = _normalize_chart_spec(_raw_workbook_chart)
+                    _candidate_chart = dict(_candidate_chart or {})
+                    _candidate_chart["sourceOrigin"] = "uploaded_workbook"
+                    # This flag is set only on charts computed by the server-side
+                    # workbook analytics path. It lets the evidence gate validate
+                    # exact workbook row quotes without incorrectly requiring a
+                    # fetched public publisher webpage for a private uploaded file.
+                    _candidate_chart["_serverWorkbookEvidence"] = True
+                    _candidate_chart["sourceIds"] = [workbook_source_id] if workbook_source_id else []
+                    _candidate_chart["source"] = [workbook_source_id] if workbook_source_id else []
+                    _raw_series_by_name = {
+                        str(_series.get("name") or _series.get("label") or "").strip().casefold(): _series
+                        for _series in (_raw_workbook_chart.get("series") or []) if isinstance(_series, dict)
+                    }
+                    _normalized_series = []
+                    for _series in (_candidate_chart.get("series") or []):
+                        if not isinstance(_series, dict):
+                            continue
+                        _series = dict(_series)
+                        _series_key = str(_series.get("name") or _series.get("label") or "").strip().casefold()
+                        _raw_series = _raw_series_by_name.get(_series_key)
+                        _raw_points = (_raw_series or {}).get("data") or (_raw_series or {}).get("values") or []
+                        _raw_points_by_label = {
+                            str(_point.get("label") or _point.get("name") or "").strip().casefold(): _point
+                            for _point in _raw_points if isinstance(_point, dict)
+                        }
+                        _data_key = "data" if isinstance(_series.get("data"), list) else "values"
+                        _normalized_points = []
+                        for _point in (_series.get(_data_key) or []):
+                            if not isinstance(_point, dict):
+                                _normalized_points.append(_point)
+                                continue
+                            _point = dict(_point)
+                            _point_key = str(_point.get("label") or _point.get("name") or _point.get("x") or "").strip().casefold()
+                            _raw_point = _raw_points_by_label.get(_point_key)
+                            if _raw_point:
+                                for _evidence_key in ("evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow"):
+                                    if _raw_point.get(_evidence_key) is not None:
+                                        _point[_evidence_key] = _raw_point[_evidence_key]
+                            if workbook_source_id:
+                                _point["evidenceSource"] = workbook_source_id
+                            _normalized_points.append(_point)
+                        _series[_data_key] = _normalized_points
+                        _normalized_series.append(_series)
+                    _candidate_chart["series"] = _normalized_series
+                    _candidate_title = str(_candidate_chart.get("title") or "").casefold().strip()
+                    if _candidate_title in _existing_chart_titles or not _is_plausible_chart(_candidate_chart):
+                        continue
+                    _workbook_charts_to_add.append(_candidate_chart)
+                    _existing_chart_titles.add(_candidate_title)
+                if _workbook_charts_to_add:
+                    _chart_start_index = len(charts) + 1
+                    charts.extend(_workbook_charts_to_add)
+                    _workbook_chart_intro = (
+                        "The following rankings are calculated from reported return values in the uploaded PMS workbook. "
+                        "Missing and undisclosed observations are excluded, not treated as zero."
+                    )
+                    report_text = (report_text or "").rstrip() + "\n\n" + _workbook_chart_intro + "\n\n" + workbook_charts_section(
+                        _workbook_charts_to_add, start_index=_chart_start_index,
+                    ) + "\n"
+                    log.info("Workbook analytics: added %d deterministic evidence-backed chart(s) to report body",
+                             len(_workbook_charts_to_add))
+                # For file-only PMS reports, publish deterministic KPIs rather than
+                # unsupported LLM-invented keyStats.
+                if workbook_analytics.get("keyStats"):
+                    parsed["keyStats"] = list(workbook_analytics["keyStats"])
+            except Exception as _workbook_chart_exc:
+                log.warning("Workbook chart insertion failed safely: %s", type(_workbook_chart_exc).__name__)
+
+        original_images_list = (
+            [] if file_only_report or not image_requested else (parsed.get("images") or [])
+        )
         try:
             images, images_valid_mask = await asyncio.wait_for(
                 _generate_ai_report_images(original_images_list, subject=question, candidates=image_candidates),
@@ -21991,17 +23538,14 @@ async def generate_report(request: Request):
             log.info("AI image generation: produced %d / %d requested", len(images), len(original_images_list))
 
         # ── Deterministic safety net ──────────────────────────────────────
-        # The model is asked to pick 2-4 relevant images (see IMAGE RULES),
-        # but after many rounds of it punting to [] even with decent
-        # candidates available, don't make "is there a photo in this report"
-        # depend entirely on the model feeling confident enough to comply.
-        images, was_forced = _force_fallback_images(images, image_candidates, model_used)
+        # Image selection is optional. Keep only images selected by the writer
+        # (or requested as a grounded generated illustration); do not fill an
+        # empty selection with a search engine's lead photo.
+        images, _ = ([], False) if file_only_report else _force_fallback_images(images, image_candidates, model_used)
         if report_tier == "brief" and len(images) > 4:
             images = list(images[:4])
             images_valid_mask = list(images_valid_mask[:4])
-        if was_forced:
-            images_valid_mask = [True] * len(images)
-        elif not image_candidates and not images:
+        if not image_candidates and not images:
             # Was previously logged whenever the FALLBACK candidate pool was
             # empty, regardless of whether the model's own AI-generated
             # `images` (see _generate_ai_report_images above) already had
@@ -22063,13 +23607,16 @@ async def generate_report(request: Request):
         pre_expand_chars = len(report_text)
         if report_tier == "in_depth":
             log.info("[IN_DEPTH] initial report chars: %d", pre_expand_chars)
-        report_text = await _expand_report_to_tier(
-            report_text=report_text,
-            question=question,
-            report_tier=report_tier,
-            report_plan=report_plan,
-            evidence_text=src_text if not no_web_sources else file_section,
-        )
+        if file_only_report:
+            log.info("Workbook-only report: skipped semantic/page-band expansion to prevent repetitive padding")
+        else:
+            report_text = await _expand_report_to_tier(
+                report_text=report_text,
+                question=question,
+                report_tier=report_tier,
+                report_plan=report_plan,
+                evidence_text=src_text if not no_web_sources else file_section,
+            )
         report_text = strip_generation_markers(report_text)
         if len(report_text) != pre_expand_chars:
             log.info(
@@ -22089,7 +23636,7 @@ async def generate_report(request: Request):
         # Finalise imagery before page preflight so the body and final export
         # receive the same visual placeholders. Byte fetching remains in the
         # PDF route; this pass only establishes deterministic document shape.
-        images, _ = _top_up_images(images, image_candidates, model_used)
+        images, _ = ([], False) if file_only_report else _top_up_images(images, image_candidates, model_used)
         report_text = _inject_fallback_image_placeholders(report_text, images)
 
         # The modular expansion writer may add fresh Markdown tables after the
@@ -22119,14 +23666,24 @@ async def generate_report(request: Request):
         # Ground page-range enforcement in the same A4 renderer used for the
         # final PDF. The character budget is an intermediate generation signal;
         # actual pagination is the acceptance criterion.
-        report_text, preflight_pages = await _ensure_report_page_budget(
-            report_text=report_text, question=report_topic, report_tier=report_tier,
-            report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-            title=str(parsed.get("title") or report_topic), summary=str(parsed.get("summary") or ""),
-            key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
-            presentation=report_presentation, web_images=images,
-            file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
-        )
+        if file_only_report:
+            preflight_pages = _rendered_page_count_preflight(
+                report_text, str(parsed.get("title") or report_topic), question,
+                str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
+                source_manifest, report_presentation, report_tier, web_images=images,
+                file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+            )
+            log.info("Workbook-only report: measured PDF preflight pages=%s without forcing page-band expansions", preflight_pages)
+        else:
+            report_text, preflight_pages = await _ensure_report_page_budget(
+                report_text=report_text, question=report_topic, report_tier=report_tier,
+                report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                title=str(parsed.get("title") or report_topic), summary=str(parsed.get("summary") or ""),
+                key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
+                presentation=report_presentation, web_images=images,
+                file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                requested_pages=requested_page_count,
+            )
         report_text = strip_generation_markers(report_text)
         if preflight_pages is not None:
             log.info("Report: final pagination preflight = %d pages (advisory upper review threshold %d)",
@@ -22194,6 +23751,7 @@ async def generate_report(request: Request):
         report_text, charts, _dropped_final_charts = _filter_final_chart_specs(
             report_text, charts, _normalize_chart_spec, _is_plausible_chart, _auto_chart_type, _normalise_inline_chart_spec
         )
+        _chart_pipeline.record("planned", [], note={k: v for k, v in _chart_plan_gap_meta.items() if k != "block"})
         _chart_pipeline.record("writer_candidates", _charts_before_shape_check)
         _chart_pipeline.record("shape_validated", charts, removed=[
             {"title": str(title)[:140], "reason": "empty, untitled or implausible chart specification"}
@@ -22225,7 +23783,11 @@ async def generate_report(request: Request):
                 else:
                     chart.pop("source", None)
             cleaned_charts.append(chart)
-        charts = cleaned_charts
+        # The loop above only rewrote one provenance key; the audit reads
+        # sourceIds/source_ids first, so an orphan could survive there and fail
+        # the evidence gate. One shared reconciliation cleans every key and
+        # re-points quoted points to the source that actually holds the quote.
+        charts, _post_writer_id_meta = _reconcile_charts_to_manifest(cleaned_charts, source_manifest, enriched, stage="post_writer")
 
         report_text = _strip_citation_markers(report_text)
         # Debug: verify [WEB_IMG_n] placeholders are in final report_text
@@ -22236,13 +23798,14 @@ async def generate_report(request: Request):
         # ── Top up: rules ask for 2-4 images, but the model has sometimes
         # selected just 1 even with more decent candidates left unused — don't
         # leave the report thinner on photos than what was actually available.
-        images, _ = _top_up_images(images, image_candidates, model_used)
+        images, _ = ([], False) if file_only_report else _top_up_images(images, image_candidates, model_used)
 
         # ── Fallback: inject a [WEB_IMG_n] marker for any image (model-picked,
         # forced, or topped-up) that doesn't already have one in the body, so
         # it actually renders (both in the UI and in the PDF).
         _report_text_before_inject = report_text
         report_text = _inject_fallback_image_placeholders(report_text, images)
+        report_text, images = _remove_images_from_valuation_sections(report_text, images)
         if report_text != _report_text_before_inject:
             log.info("Report: injected fallback [WEB_IMG_n] placeholder(s) — %d image(s) total now placed", len(images))
         _report_progress("quality_checks", "Checking citations, charts, duplication and layout…", 91)
@@ -22316,6 +23879,87 @@ async def generate_report(request: Request):
         except Exception as exc:
             log.warning("Report: source-appendix normalization skipped: %s", type(exc).__name__)
 
+        promoter_exit_request = bool(
+            re.search(r"\bpromoters?\b", question, re.I)
+            and re.search(r"\b(?:stake\s+sales?|exits?|sell(?:ing)?|disposals?)\b", question, re.I)
+            and requested_indian_fy_quarters(question, _today_date)
+        )
+        _promoter_ledger_failed = False
+        _promoter_ledger_trusted = False
+        _promoter_ledger_rendered_report = ""
+        if promoter_exit_request:
+            _promoter_publisher_rows = []
+            try:
+                _promoter_publisher_rows = _publisher_sources_with_manifest_ids(source_manifest, enriched)
+                _promoter_events = extract_verified_promoter_events(
+                    question, _promoter_publisher_rows, as_of_date=_today_date,
+                )
+                _promoter_report, _promoter_ledger_meta = render_promoter_evidence_report(
+                    question, _promoter_events, _promoter_publisher_rows, as_of_date=_today_date,
+                )
+                if _promoter_report:
+                    # The generic writer produced contradictory counts and
+                    # company-specific claims without source matches. Replace
+                    # that narrative with a filing-derived ledger so each
+                    # completed event, proposed offer and unknown quarter has
+                    # an explicit evidence status.
+                    _promoter_ledger_rendered_report = normalize_report_markdown(_promoter_report)
+                    _promoter_ledger_trusted = bool(_promoter_ledger_rendered_report)
+                    report_text = _promoter_ledger_rendered_report
+                    charts = []
+                    images = []
+                    images_valid_mask = []
+                    parsed["title"] = "Indian Promoter Stake Sales: Verified Filing Review"
+                    parsed["kicker"] = "Evidence-limited exchange filing review"
+                    parsed["summary"] = (
+                        f"The retrieved NSE/BSE pages contain {_promoter_ledger_meta.get('datedCompletedCount', 0)} "
+                        "completed promoter sale records with an exact event date; quarter gaps remain unknown, not zero."
+                    )
+                    parsed["keyStats"] = []
+                    parsed["images"] = []
+                    source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                    audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                    record_research_stage("promoter_transaction_ledger", _promoter_ledger_meta)
+                    log.info(
+                        "Promoter evidence report normalized: dated_completed=%d date_unknown=%d proposed=%d ambiguous=%d",
+                        _promoter_ledger_meta.get("datedCompletedCount", 0),
+                        _promoter_ledger_meta.get("completedDateUnknownCount", 0),
+                        _promoter_ledger_meta.get("proposedCount", 0),
+                        _promoter_ledger_meta.get("statusUnclearCount", 0),
+                    )
+            except Exception as _promoter_repair_exc:
+                _promoter_ledger_failed = True
+                log.warning(
+                    "Promoter evidence-ledger normalization failed safely: %s",
+                    type(_promoter_repair_exc).__name__,
+                )
+                try:
+                    _promoter_report, _promoter_ledger_meta = render_promoter_extraction_failure_report(
+                        question, _promoter_publisher_rows, as_of_date=_today_date,
+                    )
+                except Exception:
+                    _promoter_report = (
+                        "## Scope and status\n\n"
+                        "The requested promoter-sale extraction failed before a reliable ledger could be produced. "
+                        "No transaction count or issuer-level exit claim is asserted. Activity is unknown, not zero.\n"
+                    )
+                    _promoter_ledger_meta = {"applicable": True, "extractionFailed": True}
+                if _promoter_report:
+                    _promoter_ledger_rendered_report = normalize_report_markdown(_promoter_report)
+                    _promoter_ledger_trusted = bool(_promoter_ledger_rendered_report)
+                    report_text = _promoter_ledger_rendered_report
+                    charts = []
+                    images = []
+                    images_valid_mask = []
+                    parsed["title"] = "Indian Promoter Stake Sales: Evidence Extraction Incomplete"
+                    parsed["kicker"] = "Draft — transaction ledger could not be verified"
+                    parsed["summary"] = "No transaction count or full-exit classification is asserted because safe extraction failed."
+                    parsed["keyStats"] = []
+                    parsed["images"] = []
+                    source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                    audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                    record_research_stage("promoter_transaction_ledger", _promoter_ledger_meta)
+
         # Sector-rotation report: force the actual calculated matrix and chart
         # into the final artifact before the last validation pass.
         if sector_rotation_request:
@@ -22325,16 +23969,9 @@ async def generate_report(request: Request):
             _quarter_chart = _build_sector_quarterly_return_chart(quarterly_rows, source_manifest)
             if _quarter_chart and not any(_is_sector_quarterly_return_chart(c) for c in (charts or [])):
                 charts = list(charts or []) + [_quarter_chart]
-                _chart_marker = f"[CHART_{len(charts)}]"
-                _section_match = re.search(
-                    r"(?im)^#{1,6}\\s+[^\\n]*(?:eight[ -]?quarter|quarterly[ -]sector[ -]?return matrix|sector performance matrix|quarterly sector return analysis|sector return matrix)[^\\n]*$",
-                    report_text or "",
+                report_text = _insert_sector_chart_marker(
+                    report_text, len(charts), _SECTOR_QUARTERLY_HEADING_RE,
                 )
-                if _section_match:
-                    _insert_at = _section_match.end()
-                    report_text = report_text[:_insert_at] + "\\n\\n" + _chart_marker + report_text[_insert_at:]
-                else:
-                    report_text = (report_text or "").rstrip() + "\\n\\n" + _chart_marker + "\\n"
                 log.info("Sector-rotation quality gate injected verified quarterly chart (%d sectors, %d quarters)",
                          len(_quarter_chart.get("series") or []), len(quarterly_rows[0].get("quarters") or []))
             _compound_chart = _build_sector_compounded_return_chart(quarterly_rows, source_manifest)
@@ -22342,25 +23979,16 @@ async def generate_report(request: Request):
                                             for c in (charts or []) if isinstance(c, dict)):
                 charts = list(charts or []) + [_compound_chart]
                 _compound_marker = f"[CHART_{len(charts)}]"
-                _leaders_heading = re.search(r"(?im)^#{1,6}\s+[^\n]*(?:leaders?\s*(?:and|&)\s*laggards?|sector rankings?|rotation patterns?)[^\n]*$", report_text or "")
-                if _leaders_heading:
-                    _insert_at = _leaders_heading.end()
-                    report_text = report_text[:_insert_at] + "\n\n" + _compound_marker + report_text[_insert_at:]
-                else:
-                    report_text = (report_text or "").rstrip() + "\n\n" + _compound_marker + "\n"
+                report_text = _insert_sector_chart_marker(
+                    report_text, len(charts), _SECTOR_RANKING_HEADING_RE,
+                )
                 log.info("Sector-rotation quality gate injected evidence-linked compounded-return ranking (%d fully covered sectors)",
                          len((_compound_chart.get("series") or [{}])[0].get("data") or []))
             _quarter_heatmap = _build_sector_quarterly_return_heatmap(quarterly_rows, source_manifest)
-            if _quarter_heatmap and not any("quarterly sector return heatmap" in str(c.get("title") or "").casefold()
-                                            for c in (charts or []) if isinstance(c, dict)):
-                charts = list(charts or []) + [_quarter_heatmap]
-                _heatmap_marker = f"[CHART_{len(charts)}]"
-                _heatmap_heading = re.search(r"(?im)^#{1,6}\\s+[^\\n]*sector return heatmap[^\\n]*$", report_text or "")
-                if _heatmap_heading:
-                    _heatmap_at = _heatmap_heading.end()
-                    report_text = report_text[:_heatmap_at] + "\\n\\n" + _heatmap_marker + report_text[_heatmap_at:]
-                else:
-                    report_text = (report_text or "").rstrip() + "\\n\\n" + _heatmap_marker + "\\n"
+            if _quarter_heatmap:
+                report_text, charts = _use_calculated_sector_return_heatmap(
+                    report_text, list(charts or []), _quarter_heatmap,
+                )
                 log.info("Sector-rotation quality gate injected evidence-linked quarterly heatmap (%d sectors, %d quarters)",
                          len(_quarter_heatmap.get("rows") or []), len(_quarter_heatmap.get("columns") or []))
             report_text, charts, _topic_chart_filter = _sector_rotation_topic_quality_filter(report_text, charts)
@@ -22399,6 +24027,16 @@ async def generate_report(request: Request):
             preflight_pages = final_chart_gate_pages
         report_text = reconcile_orphaned_chart_references(report_text, charts)
         report_text = ensure_requested_chart_disclosure(report_text, question, charts)
+        report_text, _orphan_narration_meta = reconcile_orphaned_chart_narration(report_text, charts)
+        if _orphan_narration_meta.get("removedLines"):
+            log.warning("Report removed %d chart-description line(s) after the chart payload was empty", _orphan_narration_meta["removedLines"])
+
+        # The filing-derived promoter ledger is the source of truth for this
+        # request. Restore it after generic writer/chart hygiene so later guards
+        # validate its citations and scope without rewriting its derived rows.
+        if _promoter_ledger_trusted:
+            report_text = _promoter_ledger_rendered_report
+            charts = []
 
         # A distinct, logged publication-audit stage. The result is not inferred
         # from the report-generation provider and deterministic blockers cannot
@@ -22413,13 +24051,16 @@ async def generate_report(request: Request):
         # Publication guard: remove invalid or unsupported financial numbers before
         # the independent audit and before the UI receives KPI/chart payloads.
         # The PDF/HTML/DOCX export audits remain enabled as a second line of defence.
-        report_text, charts, _unverified_metric_redactions = _sanitize_unverified_financial_claims(
+        report_text, charts, _unverified_metric_redactions = _sanitize_report_financial_claims_for_publication(
             report_text, charts, audit_sources,
+            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
         )
         # Do this before the publication audit: unsupported financial figures
         # are removed or neutralized, invalid table rows are dropped, and model-
         # emitted HTML wrappers are normalized before either renderer sees them.
         report_text = normalize_report_markdown(_decode_leaked_unicode_escapes(report_text))
+        if _promoter_ledger_trusted:
+            _promoter_ledger_rendered_report = report_text
         parsed["keyStats"], _removed_key_stats = _sanitize_report_key_stats(
             parsed.get("keyStats", []), audit_sources,
         )
@@ -22427,10 +24068,13 @@ async def generate_report(request: Request):
         # cited publisher evidence supports a real comparison. Add plotted charts
         # strictly from sanitized table values; the subsequent independent chart
         # evidence gate can still reject any unsupported observation.
-        report_text, charts, _verified_table_charts_added = _add_verified_numeric_charts_from_tables(
-            report_text, charts, audit_sources, report_tier,
-            normalizer=_normalize_chart_spec, validator=_is_plausible_chart,
-        )
+        if _promoter_ledger_trusted:
+            _verified_table_charts_added = 0
+        else:
+            report_text, charts, _verified_table_charts_added = _add_verified_numeric_charts_from_tables(
+                report_text, charts, audit_sources, report_tier,
+                normalizer=_normalize_chart_spec, validator=_is_plausible_chart,
+            )
         if _verified_table_charts_added:
             log.info("Report: added %d source-verified chart(s) from table data", _verified_table_charts_added)
             _chart_pages = _rendered_page_count_preflight(
@@ -22451,6 +24095,10 @@ async def generate_report(request: Request):
 
         # Ground writer chart points in the full fetched source text before the
         # evidence gate (see _ground_writer_chart_points).
+        charts, _planned_bound = _bind_charts_to_plan(charts, _chart_plan_cov)
+        if _planned_bound:
+            log.info("Chart plan bound %d source-less writer chart(s) to planned evidence IDs", _planned_bound)
+        charts, _pre_ground_id_meta = _reconcile_charts_to_manifest(charts, source_manifest, enriched, stage="before_grounding")
         try:
             charts, _grounding_meta = _ground_writer_chart_points(charts, source_manifest, enriched)
             if _grounding_meta.get("pointsGrounded"):
@@ -22464,7 +24112,9 @@ async def generate_report(request: Request):
         # validator used at export time. This prevents a predictable HTTP 422 after
         # the report has already been presented as complete.
         public_chart_sources = _merge_source_evidence_statuses(source_manifest, audit_sources)
-        _chart_evidence = audit_chart_evidence_consistency(report_text, charts, public_chart_sources)
+        _chart_evidence = audit_chart_evidence_consistency(
+            report_text, charts, public_chart_sources, question=question,
+        )
         _original_charts = list(charts or [])
         _original_chart_count = len(_original_charts)
         charts, _removed_chart_indices, _pruned_chart_points = prune_unsupported_chart_points(
@@ -22487,6 +24137,21 @@ async def generate_report(request: Request):
         # usable numeric observations after pruning.
         if _removed_chart_indices or _pruned_chart_points:
             if _removed_chart_indices:
+                _stale_chart_indices = {
+                    int(_finding.get("chartIndex"))
+                    for _finding in (_chart_evidence.get("chartEvidenceFailures") or [])
+                    if isinstance(_finding, dict)
+                    and str(_finding.get("chartIndex", "")).isdigit()
+                    and _finding.get("reason") == "The chart source period falls outside the time window requested by the user."
+                }
+                if _stale_chart_indices:
+                    report_text, _stale_narration_removed = remove_stale_chart_narration(
+                        report_text, _original_charts, _stale_chart_indices & set(_removed_chart_indices),
+                        _chart_evidence.get("chartEvidenceFailures") or [],
+                    )
+                    if _stale_narration_removed:
+                        log.info("Report removed %d adjacent line(s) describing charts outside the requested time window",
+                                 _stale_narration_removed)
                 _removed_set = set(_removed_chart_indices)
                 _chart_keep_mask = [idx not in _removed_set for idx in range(1, _original_chart_count + 1)]
                 report_text = _remap_chart_placeholders(report_text, _original_charts, _chart_keep_mask)
@@ -22513,13 +24178,17 @@ async def generate_report(request: Request):
         # that cannot be matched to a directly fetched publisher row; the gallery
         # below can then build actual visual series from the extracted evidence.
         _charts_before_table_handoff = list(charts or [])
-        report_text, charts, _table_handoff = remove_unverified_table_chart_specs(
-            report_text, charts, enriched,
-        )
+        if _promoter_ledger_trusted:
+            _table_handoff = {"removedTables": 0, "removed": [], "remainingCharts": 0}
+        else:
+            report_text, charts, _table_handoff = remove_unverified_table_chart_specs(
+                report_text, charts, enriched,
+            )
         _chart_pipeline.record("table_handoff", charts, removed=_removed_chart_reasons(
             _charts_before_table_handoff, charts, None, "table chart rows could not be matched to a fetched publisher row"))
-        report_text, _table_integrity_findings = sanitize_unverified_markdown_tables(
+        report_text, _table_integrity_findings = _sanitize_report_tables_for_publication(
             report_text, enriched,
+            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
         )
         report_text, _ratio_integrity = repair_banking_growth_and_ratio_labels(
             report_text, enriched, source_manifest,
@@ -22538,26 +24207,35 @@ async def generate_report(request: Request):
         # source lines (not from the writer's prose, which the evidence gates
         # above may have pruned). Inserted after the chart evidence gate; its
         # charts carry per-point quotes that the final audits verify.
-        try:
-            report_text, charts, _gallery_meta = _append_evidence_chart_gallery(
-                report_text=report_text, charts=charts, question=question, enriched=enriched,
-                source_manifest=source_manifest, report_tier=report_tier,
-                validator=_is_plausible_chart, normalizer=_normalize_chart_spec,
-                entities=_early_company_candidates if '_early_company_candidates' in locals() else None,
-                extra={
-                    "ohlc": locals().get("_gallery_ohlc_series") or [],
-                    "pipeline": {
-                        "queries": len(locals().get("search_queries") or []),
-                        "cited": len(source_manifest or []),
+        if promoter_exit_request:
+            _gallery_meta = {
+                "charts": 0,
+                "coverageStatus": "partial_research_sample",
+                "coverageReason": "A non-exhaustive filing sample cannot support a market-wide promoter-sales chart or denominator.",
+            }
+        else:
+            try:
+                report_text, charts, _gallery_meta = _append_evidence_chart_gallery(
+                    report_text=report_text, charts=charts, question=question, enriched=enriched,
+                    source_manifest=source_manifest, report_tier=report_tier,
+                    validator=_is_plausible_chart, normalizer=_normalize_chart_spec,
+                    entities=_early_company_candidates if '_early_company_candidates' in locals() else None,
+                    planned_types=_planned_chart_types(_chart_plan_cov),
+                    extra={
+                        "ohlc": locals().get("_gallery_ohlc_series") or [],
+                        "pipeline": {
+                            "queries": len(locals().get("search_queries") or []),
+                            "cited": len(source_manifest or []),
+                        },
                     },
-                },
-            )
-        except Exception as _gallery_exc:
-            _gallery_meta = {"charts": 0}
-            log.warning("Evidence chart gallery failed safely: %s: %s", type(_gallery_exc).__name__, str(_gallery_exc)[:200])
+                )
+            except Exception as _gallery_exc:
+                _gallery_meta = {"charts": 0}
+                log.warning("Evidence chart gallery failed safely: %s: %s", type(_gallery_exc).__name__, str(_gallery_exc)[:200])
         _chart_pipeline.record("gallery_added", charts, note={
             k: _gallery_meta.get(k) for k in ("charts", "observations", "types", "surfacedDataPoints", "coverageStatus",
-                                              "coverageReason", "evidenceTableRowsRejected") if _gallery_meta.get(k) is not None
+                                              "coverageReason", "evidenceTableRowsRejected",
+                                              "unverifiedProvenanceObservationsOmitted") if _gallery_meta.get(k) is not None
         })
         if _gallery_meta.get("charts"):
             report_text = normalize_report_markdown(report_text)
@@ -22571,6 +24249,76 @@ async def generate_report(request: Request):
             )
             if _gallery_pages is not None:
                 preflight_pages = _gallery_pages
+
+        # The writer sometimes overlooks a directly fetched, dated signing
+        # announcement in a large FTA evidence set. Surface only those official
+        # publisher records that name the agreement, state it was signed, and
+        # carry an in-window date; never synthesize a no-signing result.
+        _fta_signature_events = []
+        _fta_signature_table_block = ""
+        try:
+            _fta_publisher_rows = _publisher_sources_with_manifest_ids(source_manifest, enriched)
+            _fta_signature_events = extract_verified_fta_signatures(question, _fta_publisher_rows)
+            if _fta_signature_events:
+                _fta_signature_table_block = _verified_fta_signing_block_for_report(
+                    report_text, question, _fta_signature_events, as_of_date=_today_date,
+                )
+                _fta_event_by_id = {
+                    str(event.get("source_id") or "").strip().upper(): event
+                    for event in _fta_signature_events
+                }
+
+                def _attach_fta_event_evidence(rows):
+                    for _row in rows or []:
+                        if not isinstance(_row, dict):
+                            continue
+                        _event = _fta_event_by_id.get(str(_row.get("id") or "").strip().upper())
+                        if not _event:
+                            continue
+                        _quote = str(_event.get("publisher_evidence_excerpt") or "").strip()[:2500]
+                        _row["publisherEvidenceExcerpt"] = _quote
+                        _row["evidenceExcerpt"] = _quote
+                        _row["evidenceExcerptOrigin"] = "publisher_page"
+                        _row["evidence_excerpt_origin"] = "publisher_page"
+                        _row["evidence_origin"] = "publisher_page"
+                        _row["evidenceOrigin"] = "publisher_page"
+                        _row["pageFetchStatus"] = "ok"
+
+                _attach_fta_event_evidence(audit_sources)
+                _scope_before_fta_repair = audit_requested_report_scope(question, report_text, audit_sources)
+                _fta_coverage_before_repair = _scope_before_fta_repair.get("ftaSignatureCoverage") or {}
+                _event_dates = {
+                    event["signature_date"].isoformat()
+                    for event in _fta_signature_events if event.get("signature_date")
+                }
+                _report_dates = set(_fta_coverage_before_repair.get("signatureDatesInWindow") or [])
+                _fta_signature_table_complete = bool(
+                    _fta_coverage_before_repair.get("explicitWindow")
+                    and _fta_coverage_before_repair.get("datedSignatureTable")
+                    and _fta_coverage_before_repair.get("officialCitedSource")
+                    and _event_dates.issubset(_report_dates)
+                )
+                if not _fta_signature_table_complete:
+                    report_text = _insert_verified_fta_signing_table(
+                        report_text, question, _fta_signature_events,
+                    )
+                    source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                    audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                    _attach_fta_event_evidence(audit_sources)
+                    _fta_scope_pages = _rendered_page_count_preflight(
+                        report_text, str(parsed.get("title") or report_topic), question,
+                        str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
+                        source_manifest, report_presentation, report_tier, web_images=images,
+                        file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                    )
+                    if _fta_scope_pages is not None:
+                        preflight_pages = _fta_scope_pages
+                    log.info(
+                        "FTA scope repair: surfaced %d dated signature event(s) from verified official pages",
+                        len(_fta_signature_events),
+                    )
+        except Exception as _fta_scope_repair_exc:
+            log.warning("FTA signature-evidence repair skipped safely: %s", type(_fta_scope_repair_exc).__name__)
 
         _report_progress("independent_audit", "Running the final evidence and publication audit…", 95)
         gemini_audit, final_deterministic_audits = await _run_independent_report_audit(
@@ -22588,7 +24336,7 @@ async def generate_report(request: Request):
         # and deterministic chart rules, not whole-report editorial rewrites. The
         # LLM repair stage only receives precise factual/source/sentence findings.
         _repairable_findings = [f for f in _audit_findings if _is_text_repairable_audit_finding(f)]
-        if _repairable_findings:
+        if _repairable_findings and not _promoter_ledger_trusted:
             log.info("Report exact-patch repair started — repairable_findings=%d total_findings=%d pages=%s",
                      len(_repairable_findings), len(_audit_findings), preflight_pages)
             _repair_text, _repair_provider = await _auto_repair_report_once(
@@ -22668,22 +24416,42 @@ async def generate_report(request: Request):
                                 _repair_provider, _repair_pages, _repair_reason, str(_publication_audit_is_blocking(_repair_pub)).lower())
             else:
                 log.warning("Report auto-repair unavailable; retaining audited original and its warnings")
+        elif _repairable_findings and _promoter_ledger_trusted:
+            log.info("Report auto-repair skipped: the promoter ledger is filing-derived and requires new source coverage, not paraphrase")
 
         # Final publication-boundary guard: repairs are model output too, so
         # validate the accepted text/tables again instead of assuming the earlier
         # audit still describes what will be published. This also prevents an
         # edit after validation from leaving an em-dash metric row behind.
+        if _fta_signature_table_block and _fta_signature_table_block not in report_text:
+            _fta_signature_table_block = _verified_fta_signing_block_for_report(
+                report_text, question, _fta_signature_events, as_of_date=_today_date,
+            )
+            report_text = _insert_verified_fta_signing_table(
+                report_text, question, _fta_signature_events, as_of_date=_today_date,
+            )
+            source_manifest = ensure_cited_source_records(report_text, source_manifest)
+            audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+            log.info("Restored %d source-verified FTA signing row(s) before final validation",
+                     len(_fta_signature_events))
+        if _promoter_ledger_trusted:
+            report_text = _promoter_ledger_rendered_report
+            charts = []
         source_manifest = ensure_cited_source_records(report_text, source_manifest)
         audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
         _text_before_final_guard = report_text
         _charts_before_final_guard = repr(charts)
-        report_text, charts, _postrepair_metric_redactions = _sanitize_unverified_financial_claims(
+        report_text, charts, _postrepair_metric_redactions = _sanitize_report_financial_claims_for_publication(
             report_text, charts, audit_sources,
+            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
+            trusted_blocks=[_fta_signature_table_block] if _fta_signature_table_block else [],
         )
         parsed["keyStats"], _postrepair_key_stats_removed = _sanitize_report_key_stats(
             parsed.get("keyStats", []), audit_sources,
         )
         report_text = normalize_report_markdown(_decode_leaked_unicode_escapes(report_text))
+        if _promoter_ledger_trusted:
+            _promoter_ledger_rendered_report = report_text
         report_text = reconcile_orphaned_chart_references(report_text, charts)
         source_manifest = ensure_cited_source_records(report_text, source_manifest)
         audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
@@ -22711,13 +24479,14 @@ async def generate_report(request: Request):
         _final_pageband_ran = False
         if (
             str(report_tier).casefold() == "brief"
+            and not file_only_report
+            and requested_page_count is not None
             and preflight_pages is not None
-            and tier_spec.page_target.minimum is not None
-            and preflight_pages < int(tier_spec.page_target.minimum)
+            and preflight_pages < int(requested_page_count)
         ):
             log.info(
-                "Report post-evidence page-band pass: pages=%d minimum=%d; starting bounded expansion",
-                preflight_pages, int(tier_spec.page_target.minimum),
+                "Report post-evidence explicit page-request pass: pages=%d target=%d; starting bounded expansion",
+                preflight_pages, int(requested_page_count),
             )
             _pageband_input_text = report_text
             try:
@@ -22731,6 +24500,7 @@ async def generate_report(request: Request):
                     sources=source_manifest, presentation=report_presentation,
                     web_images=images, file_images=embedded_file_images,
                     theme=_resolve_theme(parsed.get("theme"), question),
+                    requested_pages=requested_page_count,
                 )
                 report_text = normalize_report_markdown(strip_generation_markers(report_text))
                 _final_pageband_ran = report_text != _pageband_input_text
@@ -22771,8 +24541,8 @@ async def generate_report(request: Request):
                     images=images, sources=audit_sources, timeout_seconds=24.0,
                 )
                 log.info(
-                    "Post-evidence Brief page-band result: pages=%s minimum=%s audit=%s",
-                    preflight_pages, tier_spec.page_target.minimum, gemini_audit.get("status", "unknown"),
+                    "Post-evidence Brief page-request result: pages=%s target=%s audit=%s",
+                    preflight_pages, requested_page_count, gemini_audit.get("status", "unknown"),
                 )
         elif str(report_tier).casefold() == "brief" and preflight_pages is None:
             log.warning("Post-evidence Brief page-band sizing skipped because the final renderer could not measure pagination")
@@ -22780,11 +24550,16 @@ async def generate_report(request: Request):
         # Repeat source consistency repairs after any LLM audit/repair pass: repaired
         # text is untrusted and must not reintroduce unsupported numeric tables,
         # faux chart tables, or a known reversed ratio label.
-        report_text, charts, _final_table_handoff = remove_unverified_table_chart_specs(
-            report_text, charts, enriched,
-        )
-        report_text, _final_table_findings = sanitize_unverified_markdown_tables(
+        if _promoter_ledger_trusted:
+            _final_table_handoff = {"removedTables": 0, "removed": [], "remainingCharts": 0}
+        else:
+            report_text, charts, _final_table_handoff = remove_unverified_table_chart_specs(
+                report_text, charts, enriched,
+            )
+        report_text, _final_table_findings = _sanitize_report_tables_for_publication(
             report_text, enriched,
+            deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
+            trusted_blocks=[_fta_signature_table_block] if _fta_signature_table_block else [],
         )
         report_text, _final_ratio_repair = repair_banking_growth_and_ratio_labels(
             report_text, enriched, source_manifest,
@@ -22804,28 +24579,52 @@ async def generate_report(request: Request):
         # make PDF/HTML/DOCX export fail with HTTP 422. Prune with the exact same
         # validator the exporters use so the report that is shown is the report
         # that can be exported.
-        _final_chart_gate_changed = bool(locals().get("_force_final_reaudit"))
+        report_text, charts, _period_gate_meta = drop_charts_outside_requested_window(
+            report_text, charts, source_manifest, question,
+        )
+        _period_gate_removed = list(_period_gate_meta.get("findings") or [])
+        if _period_gate_meta.get("removedCharts"):
+            log.warning(
+                "Report requested-window gate removed %d chart(s) with source periods outside the requested window: %s",
+                _period_gate_meta.get("removedCharts", 0),
+                [item.get("chartTitle") for item in _period_gate_removed[:8]],
+            )
+            _chart_pipeline.record(
+                "requested_window_validated", charts,
+                removed=[
+                    {
+                        "title": item.get("chartTitle"),
+                        "index": item.get("chartIndex"),
+                        "reason": item.get("reason"),
+                        "sourcePeriod": item.get("sourcePeriod"),
+                    }
+                    for item in _period_gate_removed
+                ],
+            )
+        _final_chart_gate_changed = (
+            bool(locals().get("_force_final_reaudit"))
+            or bool(_period_gate_meta.get("removedCharts"))
+        )
         _final_chart_gate_findings: list[dict] = []
         _charts_before_final_gate = list(charts or [])
-        try:
-            _gate_sources = _merge_source_evidence_statuses(source_manifest, audit_sources)
-            _gate_text, _gate_charts, _gate_meta = sanitize_charts_for_publication(
-                report_text, charts, _gate_sources, question=question,
-                require_publisher_verification=True,
+        _gate_text, _gate_charts, _gate_manifest, _gate_audit, _gate_meta = _final_chart_evidence_gate(
+            report_text, charts, source_manifest, audit_sources,
+            question=question,
+            normalizer=_normalize_chart_spec, validator=_is_plausible_chart,
+            adapter=_normalise_inline_chart_spec, auto_type=_auto_chart_type,
+            stage="final-publication",
+        )
+        if _gate_meta["removedCharts"] or _gate_meta["prunedPoints"] or _gate_text != report_text:
+            log.warning(
+                "Report final chart gate removed %d chart(s) and %d point(s); %d retained; residual findings=%d",
+                _gate_meta["removedCharts"], _gate_meta["prunedPoints"], len(_gate_charts), _gate_meta["residualFindings"],
             )
-            if _gate_meta["removedCharts"] or _gate_meta["prunedPoints"]:
-                log.warning(
-                    "Report final chart gate removed %d unsupported chart(s) and %d point(s); %d chart(s) retained; remaining findings=%d",
-                    _gate_meta["removedCharts"], _gate_meta["prunedPoints"], len(_gate_charts), len(_gate_meta["remainingFindings"]),
-                )
-                report_text, charts = _gate_text, _gate_charts
-                _final_chart_gate_changed = True
-                source_manifest = ensure_cited_source_records(report_text, source_manifest)
-                audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
-                parsed["keyStats"], _ = _sanitize_report_key_stats(parsed.get("keyStats", []), audit_sources)
-            _final_chart_gate_findings = list(_gate_meta.get("remainingFindings") or [])
-        except Exception as _gate_exc:
-            log.warning("Report final chart gate failed safely: %s: %s", type(_gate_exc).__name__, str(_gate_exc)[:200])
+            report_text, charts = _gate_text, _gate_charts
+            _final_chart_gate_changed = True
+            source_manifest = ensure_cited_source_records(report_text, source_manifest)
+            audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+            parsed["keyStats"], _ = _sanitize_report_key_stats(parsed.get("keyStats", []), audit_sources)
+        _final_chart_gate_findings = list(_gate_meta.get("findings") or [])
 
         _chart_pipeline.record("final_chart_gate", charts, removed=_removed_chart_reasons(
             _charts_before_final_gate, charts, _final_chart_gate_findings,
@@ -22853,6 +24652,82 @@ async def generate_report(request: Request):
             _charts_before_registry, charts, None, "no visible [CHART_n] placeholder remained in the report text"))
         if _chart_registry_meta.get("changed"):
             _final_chart_gate_changed = True
+        report_text, _final_orphan_narration = reconcile_orphaned_chart_narration(report_text, charts)
+        if _final_orphan_narration.get("removedLines"):
+            _final_chart_gate_changed = True
+            log.warning("Final chart registry removed %d orphaned chart-description line(s)", _final_orphan_narration["removedLines"])
+
+        if _promoter_ledger_trusted:
+            _promoter_ledger_restore_needed = (
+                report_text != _promoter_ledger_rendered_report or bool(charts)
+            )
+            report_text = _promoter_ledger_rendered_report
+            charts = []
+            if _promoter_ledger_restore_needed:
+                _final_chart_gate_changed = True
+                source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                log.info("Restored the filing-derived promoter ledger before final audit")
+        else:
+            report_text, charts, _sector_heatmap_anchor_restored = _ensure_sector_heatmap_chart_anchor(
+                report_text, charts, question,
+            )
+            if _sector_heatmap_anchor_restored:
+                _final_chart_gate_changed = True
+                _chart_pipeline.record(
+                    "sector_heatmap_anchor_restored", charts,
+                    note={"restored": True},
+                )
+
+        # Sector charts can be inserted or restored after the earlier content
+        # cleanup. Re-run Markdown normalization once the final chart anchors
+        # are in place so the Executive Summary remains the first section in the
+        # report, contents list, browser preview and PDF.
+        report_text = normalize_report_markdown(report_text)
+
+        # Ensure each visible chart follows a matching explanation or caption.
+        # This only moves/removes chart markers and never rewrites report prose
+        # or the chart data selected from the prompt and evidence.
+        report_text, charts, _chart_context_meta = cohere_chart_placements(report_text, charts)
+        if any(_chart_context_meta.get(key) for key in ("movedCharts", "droppedCharts", "duplicateRefsRemoved")):
+            _final_chart_gate_changed = True
+            if _chart_context_meta.get("droppedCharts"):
+                report_text = ensure_requested_chart_disclosure(report_text, question, charts)
+            _chart_pipeline.record(
+                "chart_context_coherent",
+                charts,
+                removed=[{"title": title, "reason": "no matching prompt-relevant section and explanation"}
+                         for title in _chart_context_meta.get("droppedTitles", [])],
+                note={
+                    "moved": _chart_context_meta.get("movedCharts", 0),
+                    "dropped": _chart_context_meta.get("droppedCharts", 0),
+                    "duplicateRefsRemoved": _chart_context_meta.get("duplicateRefsRemoved", 0),
+                },
+            )
+            log.info(
+                "Report chart context gate: moved=%d dropped=%d duplicateRefsRemoved=%d",
+                _chart_context_meta.get("movedCharts", 0),
+                _chart_context_meta.get("droppedCharts", 0),
+                _chart_context_meta.get("duplicateRefsRemoved", 0),
+            )
+            report_text = normalize_report_markdown(report_text)
+
+        # Placement coherence can change marker order. Rebuild the registry so
+        # chart specs and [CHART_n] references remain paired in reading order.
+        report_text, charts, _chart_context_registry_meta = _canonicalize_chart_registry(
+            report_text, charts,
+        )
+        if _chart_context_registry_meta.get("changed"):
+            _final_chart_gate_changed = True
+            _chart_pipeline.record(
+                "chart_context_registry_canonicalized", charts,
+                note=_chart_context_registry_meta,
+            )
+
+        report_text, _numeric_consistency_repairs = repair_report_numeric_consistency(report_text, charts)
+        if any(_numeric_consistency_repairs.values()):
+            _final_chart_gate_changed = True
+            log.info("Report numerical consistency repairs: %s", _numeric_consistency_repairs)
 
         if _final_chart_gate_changed or report_text != _text_before_final_guard or repr(charts) != _charts_before_final_guard:
             # A final sanitizer may have dropped table rows or otherwise changed
@@ -22871,6 +24746,13 @@ async def generate_report(request: Request):
         # wrappers or unresolved numeric placeholder phrases. Decode first, then
         # normalize so neither can be reintroduced after the quality audit.
         report_text = normalize_report_markdown(strip_generation_markers(_decode_leaked_unicode_escapes(report_text)))
+        if not image_requested:
+            # Enforce prompt intent after all writer, repair, and page-band passes.
+            # A late retry must not reintroduce a decorative stock/AI image.
+            images = []
+            report_text = _WEB_IMG_PLACEHOLDER_RE.sub("", report_text)
+            report_text = re.sub(r"(?m)^[ \t]*[-*+][ \t]*$", "", report_text)
+            report_text = normalize_report_markdown(report_text)
         clean_title = _align_title_horizon(_sanitize_title(parsed.get("title", ""), report_topic), question)
         clean_theme = _resolve_theme(parsed.get("theme"), question)
         final_format = _resolve_recommended_format(recommended_format, clean_theme)
@@ -22899,8 +24781,25 @@ async def generate_report(request: Request):
                     "evidence": _final_chart_gate_findings[:5],
                     "recommended_fix": "Repair or remove the conflicting observation and rerun final validation.",
                 })
+        if _promoter_ledger_failed:
+            _publication = final_deterministic_audits.setdefault("publicationAudit", {}) if isinstance(final_deterministic_audits, dict) else {}
+            if isinstance(_publication, dict):
+                _publication["status"] = "FAIL"
+                _publication["blocking"] = True
+                _publication.setdefault("flags", []).append(
+                    "Promoter transaction extraction failed; the output is a safe coverage draft and is not publication-ready."
+                )
+                _publication.setdefault("findings", []).append({
+                    "severity": "critical", "category": "scope", "location": "Promoter transaction ledger",
+                    "issue": "The deterministic promoter-sale ledger could not be extracted safely.",
+                    "evidence": [],
+                    "recommended_fix": "Repair the extractor failure and rerun the promoter research pipeline.",
+                })
         # Client-excluded sections never leave the backend (see strip_excluded_report_sections).
         report_text = strip_excluded_report_sections(report_text)
+        report_text = sanitize_inline_citations(report_text, source_manifest)
+        parsed["summary"] = _sanitize_cover_summary_amounts(parsed.get("summary"), report_text)
+        parsed["summary"] = sanitize_inline_citations(parsed.get("summary"), source_manifest)
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
         _capture_path = finish_research_capture({
             "reportId": report_id,
@@ -22915,6 +24814,41 @@ async def generate_report(request: Request):
         }, status=("failed" if _capture_publication_status == "FAIL" else "completed"), token=_research_capture_token)
         if _capture_path:
             log.info("Research capture written to %s", _capture_path)
+        if file_only_report:
+            _workbook_page_target = {
+                "min": 1, "target": preflight_pages if preflight_pages is not None else 1,
+                "max": None, "mode": "evidence_driven",
+            }
+            _workbook_page_budget = {
+                "minimum": 1,
+                "target": preflight_pages if preflight_pages is not None else 1,
+                "maximum": None,
+                "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
+                "measured": preflight_pages is not None,
+                "minimumReached": preflight_pages is not None and preflight_pages >= 1,
+                "warning": "Pagination could not be measured by the export renderer." if preflight_pages is None else None,
+                "mode": "evidence_driven",
+            }
+        else:
+            _effective_target = requested_page_count or tier_spec.page_target.target
+            _effective_minimum = requested_page_count or tier_spec.page_target.minimum
+            _effective_maximum = max(tier_spec.page_target.maximum, requested_page_count or 0)
+            _workbook_page_target = {"min": _effective_minimum, "target": _effective_target, "max": _effective_maximum}
+            _workbook_page_budget = {
+                "minimum": _effective_minimum,
+                "target": _effective_target,
+                "maximum": _effective_maximum,
+                "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
+                "measured": preflight_pages is not None,
+                "minimumReached": (preflight_pages >= _effective_minimum if preflight_pages is not None and _effective_minimum is not None else None),
+                "warning": (
+                    "Pagination could not be measured by the export renderer." if preflight_pages is None else
+                    f"Rendered output has {preflight_pages} pages, below the {_effective_minimum}-page requested minimum (target {_effective_target}). Check source coverage and continuation logs."
+                    if _effective_minimum is not None and preflight_pages < _effective_minimum else
+                    f"Rendered output has {preflight_pages} pages, above the {_effective_maximum}-page maximum; distinct supported content was preserved."
+                    if preflight_pages > _effective_maximum else None
+                ),
+            }
         response_payload = _decode_leaked_unicode_escapes({
             "reportId":   report_id,
             "revision":   1,
@@ -22923,30 +24857,23 @@ async def generate_report(request: Request):
             "charts":     charts,
             "images":     images,  # validated {url, caption} pairs for PDF/UI embedding
             "keyStats":   parsed.get("keyStats", []),
-            "summary":    parsed.get("summary", ""),
+            "summary":    _clean_inline_source_markers_for_display(str(parsed.get("summary", "") or "")),
             "fileImages": embedded_file_images,  # extracted charts/images only — never full pages
             "recommendedFormat": final_format,
             "reportStyle": report_style,
             "kicker": str(parsed.get("kicker") or "")[:60],
             "reportTier": report_tier,
-            "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
+            "pageTarget": _workbook_page_target,
             "estimatedPages": preflight_pages,
             "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
-            "pageBudget": {
-                "minimum": tier_spec.page_target.minimum,
-                "target": tier_spec.page_target.target,
-                "maximum": tier_spec.page_target.maximum,
-                "renderedPages": preflight_pages if 'preflight_pages' in locals() else None,
-                "measured": preflight_pages is not None,
-                "minimumReached": (preflight_pages >= tier_spec.page_target.minimum if preflight_pages is not None and tier_spec.page_target.minimum is not None else None),
-                "warning": (
-                    "Pagination could not be measured by the export renderer." if preflight_pages is None else
-                    f"Rendered output has {preflight_pages} pages, below the {tier_spec.page_target.minimum}-page minimum (preferred target {tier_spec.page_target.target}). Check available source evidence and continuation logs."
-                    if tier_spec.page_target.minimum is not None and preflight_pages < tier_spec.page_target.minimum else
-                    f"Rendered output has {preflight_pages} pages, above the {tier_spec.page_target.maximum}-page maximum; distinct supported content was preserved."
-                    if preflight_pages > tier_spec.page_target.maximum else None
-                ),
-            },
+            "pageBudget": _workbook_page_budget,
+            "researchCoverage": (
+                audit_research_coverage(enriched, tier=report_tier, query_count=len(search_queries),
+                                        requested_pages=requested_page_count,
+                                        rendered_pages=preflight_pages if 'preflight_pages' in locals() else None,
+                                        question=question)
+                if not file_only_report else None
+            ),
             "theme":      clean_theme,
             "presentation": report_presentation,
             "sources":    source_manifest,
@@ -22962,9 +24889,16 @@ async def generate_report(request: Request):
         })
         # Final public-output boundary: the response decoder itself can reveal
         # escaped HTML. Always normalize after decoding, not before it.
-        response_payload["report"] = normalize_report_markdown(strip_generation_markers(
-            _decode_leaked_unicode_escapes(response_payload.get("report", ""))
-        ))
+        response_payload["report"] = sanitize_inline_citations(
+            normalize_report_markdown(_clean_inline_source_markers_for_display(
+                strip_generation_markers(_decode_leaked_unicode_escapes(response_payload.get("report", "")))
+            )),
+            source_manifest,
+        )
+        response_payload["summary"] = sanitize_inline_citations(
+            _clean_inline_source_markers_for_display(str(response_payload.get("summary") or "")),
+            source_manifest,
+        )
         # The model audit runs before final cleanup. Remove only its stale
         # placeholder-formatting finding when the exact published text no longer
         # contains the internal marker. Source-verification warnings are retained.
@@ -23035,13 +24969,16 @@ async def generate_report(request: Request):
             m = re.search(r'"report"\s*:\s*"((?:[^"\\]|\\.)*)', text)
             if m:
                 report_raw = m.group(1).replace("\\n", "\n").replace('\\"', '"')
-                # Only chop back to the last clean section boundary if the
-                # match actually ran off the end of the text without hitting
-                # a real closing quote (i.e. genuinely truncated output).
-                # Since "report" was already quote-repaired above, a match
-                # that stops well short of len(text) found a real closing
-                # delimiter — that's a complete field and shouldn't be cut.
-                genuinely_truncated = m.end(1) >= len(text) - 2
+                # A malformed outer JSON wrapper can contain an unescaped quote
+                # inside report prose. In that case this regex appears to find a
+                # closing quote before the end of the response, but the following
+                # character is ordinary prose rather than a JSON field delimiter.
+                # Only treat the field as complete when the quote is followed by
+                # a comma or closing brace after whitespace.
+                _quote_pos = m.end()
+                _after_quote = text[_quote_pos + 1:].lstrip() if _quote_pos < len(text) and text[_quote_pos] == '"' else ""
+                _has_json_delimiter = _after_quote.startswith((",", "}"))
+                genuinely_truncated = m.end(1) >= len(text) - 2 or not _has_json_delimiter
                 if genuinely_truncated:
                     for boundary in ["\n## ", "\n### ", "\n\n"]:
                         last = report_raw.rfind(boundary)
@@ -23111,7 +25048,7 @@ async def generate_report(request: Request):
             # model had actually generated good ones (or good table data) —
             # skipping this pipeline on the salvage path silently threw them away.
             _raw_charts = [
-                _normalize_chart_spec(_recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(_normalise_inline_chart_spec(c) or c)))
+                _safe_chart_chain(c)
                 for c in (salvaged.get("charts") or [])
             ]
             _valid_mask = [_is_plausible_chart(c) for c in _raw_charts]
@@ -23141,27 +25078,50 @@ async def generate_report(request: Request):
                     return JSONResponse({"error": "The report provider returned no usable report content after recovery.", "report": "", "charts": [], "images": [], "keyStats": [], "summary": ""}, status_code=502)
 
                 salvage_before = len(salvaged_report)
-                salvaged_report = await _expand_report_to_tier(
-                    report_text=salvaged_report, question=question, report_tier=report_tier,
-                    report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-                )
-                log.info("Report: salvage tier expansion chars: %d -> %d (tier=%s)", salvage_before, len(salvaged_report), report_tier)
-                salvaged_report, salvaged_pages = await _ensure_report_page_budget(
-                    report_text=salvaged_report, question=report_topic, report_tier=report_tier,
-                    report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
-                    title=str(salvaged.get("title") or report_topic), summary=str(salvaged.get("summary") or ""),
-                    key_stats=salvaged.get("keyStats", []) or [], charts=salvaged["charts"], sources=source_manifest,
-                    presentation=report_presentation, web_images=salvaged.get("images", []) or [],
-                    file_images=embedded_file_images, theme=_resolve_theme(salvaged.get("theme"), question),
-                )
-                log.info("Report: salvage pagination preflight=%s advisoryMaximum=%d tier=%s",
-                         salvaged_pages, tier_spec.page_target.maximum, report_tier)
+                if file_only_report:
+                    log.info("Workbook-only report salvage: skipped repeated tier/page expansion")
+                else:
+                    salvaged_report = await _expand_report_to_tier(
+                        report_text=salvaged_report, question=question, report_tier=report_tier,
+                        report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                    )
+                    log.info("Report: salvage tier expansion chars: %d -> %d (tier=%s)", salvage_before, len(salvaged_report), report_tier)
+                    salvaged_report, salvaged_pages = await _ensure_report_page_budget(
+                        report_text=salvaged_report, question=report_topic, report_tier=report_tier,
+                        report_plan=report_plan, evidence_text=src_text if not no_web_sources else file_section,
+                        title=str(salvaged.get("title") or report_topic), summary=str(salvaged.get("summary") or ""),
+                        key_stats=salvaged.get("keyStats", []) or [], charts=salvaged["charts"], sources=source_manifest,
+                        presentation=report_presentation, web_images=salvaged.get("images", []) or [],
+                        file_images=embedded_file_images, theme=_resolve_theme(salvaged.get("theme"), question),
+                        requested_pages=requested_page_count,
+                    )
+                    log.info("Report: salvage pagination preflight=%s advisoryMaximum=%d tier=%s",
+                             salvaged_pages, tier_spec.page_target.maximum, report_tier)
 
             # Keep recovery responses aligned with the happy path: remove only a
             # late duplicate bibliography from the report body; the same canonical
             # source manifest is rendered separately by both artifact renderers.
             salvaged["report"] = normalize_report_markdown(salvaged.get("report", ""))
             salvaged_report = normalize_report_markdown(salvaged_report)
+            if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+                try:
+                    _salvage_titles = {str(c.get("title") or "").casefold().strip() for c in (salvaged.get("charts") or []) if isinstance(c, dict)}
+                    _salvage_additions = []
+                    for _raw_chart in assign_workbook_source(workbook_analytics.get("charts") or [], workbook_source_id):
+                        _chart = _normalize_chart_spec(_raw_chart)
+                        _title = str(_chart.get("title") or "").casefold().strip()
+                        if _title in _salvage_titles or not _is_plausible_chart(_chart):
+                            continue
+                        _salvage_additions.append(_chart); _salvage_titles.add(_title)
+                    if _salvage_additions:
+                        _start = len(salvaged.get("charts") or []) + 1
+                        salvaged["charts"] = list(salvaged.get("charts") or []) + _salvage_additions
+                        salvaged_report += "\n\n" + f"Workbook-derived comparisons use reported values from the uploaded workbook. Source: [{workbook_source_id}]." + "\n\n" + workbook_charts_section(_salvage_additions, start_index=_start)
+                    if workbook_analytics.get("keyStats"):
+                        salvaged["keyStats"] = list(workbook_analytics["keyStats"])
+                    log.info("Workbook analytics salvage: deterministic charts added=%d", len(_salvage_additions))
+                except Exception as _salvage_chart_exc:
+                    log.warning("Workbook chart salvage failed safely: %s", type(_salvage_chart_exc).__name__)
             try:
                 from routes.html_report import _strip_redundant_model_source_appendix
                 salvaged["report"] = _strip_redundant_model_source_appendix(salvaged["report"])
@@ -23169,8 +25129,27 @@ async def generate_report(request: Request):
             except Exception as exc:
                 log.warning("Report: salvage source-appendix normalization skipped: %s", type(exc).__name__)
 
+            salvaged_report, salvaged["charts"], _salvage_period_meta = drop_charts_outside_requested_window(
+                salvaged_report, salvaged.get("charts", []), source_manifest, question,
+            )
+            if not _prompt_requests_report_images(question):
+                salvaged["images"] = []
+                salvaged_report = _WEB_IMG_PLACEHOLDER_RE.sub("", salvaged_report)
+            salvaged_report = normalize_report_markdown(salvaged_report)
+            salvaged_report, salvaged["charts"], _salvage_context_meta = cohere_chart_placements(
+                salvaged_report, salvaged.get("charts", []),
+            )
+            salvaged_report, salvaged["charts"], _salvage_registry_meta = _canonicalize_chart_registry(
+                salvaged_report, salvaged.get("charts", []),
+            )
             salvaged_report = reconcile_orphaned_chart_references(salvaged_report, salvaged.get("charts", []))
             salvaged_report = ensure_requested_chart_disclosure(salvaged_report, question, salvaged.get("charts", []))
+            salvaged_report, _salvage_numeric_repairs = repair_report_numeric_consistency(
+                salvaged_report, salvaged.get("charts", []),
+            )
+            salvaged_report = sanitize_inline_citations(salvaged_report, source_manifest)
+            salvaged["summary"] = _sanitize_cover_summary_amounts(salvaged.get("summary"), salvaged_report)
+            salvaged["summary"] = sanitize_inline_citations(salvaged.get("summary"), source_manifest)
             salvaged_audit, salvaged_deterministic = await _run_independent_report_audit(
                 title=_sanitize_title(salvaged.get("title", ""), question), question=question,
                 report_text=salvaged_report if report_tier in ("detailed", "in_depth") else salvaged.get("report", ""),
@@ -23178,6 +25157,23 @@ async def generate_report(request: Request):
                 images=salvaged.get("images", []), sources=source_manifest, timeout_seconds=18.0,
             )
             _salv_theme = _resolve_theme(salvaged.get("theme"), question)
+            if file_only_report:
+                _salvage_page_target = {"min": 1, "target": salvaged_pages if salvaged_pages is not None else 1, "max": None, "mode": "evidence_driven"}
+            else:
+                _salvage_minimum = requested_page_count or tier_spec.page_target.minimum
+                _salvage_target = requested_page_count or tier_spec.page_target.target
+                _salvage_maximum = max(tier_spec.page_target.maximum, requested_page_count or 0)
+                _salvage_page_target = {"min": _salvage_minimum, "target": _salvage_target, "max": _salvage_maximum}
+            salvaged_public_report = sanitize_inline_citations(
+                normalize_report_markdown(_clean_inline_source_markers_for_display(
+                    _decode_leaked_unicode_escapes(salvaged_report),
+                )),
+                source_manifest,
+            )
+            salvaged_public_summary = sanitize_inline_citations(
+                _clean_inline_source_markers_for_display(str(salvaged.get("summary") or "")),
+                source_manifest,
+            )
             return JSONResponse(_decode_leaked_unicode_escapes({
                 "reportId": report_id,
                 "revision": 1,
@@ -23185,11 +25181,11 @@ async def generate_report(request: Request):
                 # Always return the normalized, chart-reconciled body. Brief used
                 # to return the pre-normalized field here, leaving rejected-chart
                 # prose and raw markup visible only in the shortest tier.
-                "report":     salvaged_report,
+                "report":     salvaged_public_report,
                 "charts":     salvaged.get("charts", []),
                 "images":     salvaged.get("images", []),
                 "keyStats":   salvaged.get("keyStats", []),
-                "summary":    salvaged.get("summary", ""),
+                "summary":    salvaged_public_summary,
                 "fileImages": embedded_file_images,
                 "recommendedFormat": _resolve_recommended_format(recommended_format, _salv_theme),
                 "theme":      _salv_theme,
@@ -23198,7 +25194,13 @@ async def generate_report(request: Request):
                 "reportStyle": report_style,
                 "kicker": str(salvaged.get("kicker") or "")[:60],
                 "reportTier": report_tier,
-                "pageTarget": {"min": tier_spec.page_target.minimum, "target": tier_spec.page_target.target, "max": tier_spec.page_target.maximum},
+                "pageTarget": _salvage_page_target,
+                "researchCoverage": (
+                    audit_research_coverage(enriched, tier=report_tier, query_count=len(search_queries),
+                                            requested_pages=requested_page_count,
+                                            rendered_pages=salvaged_pages, question=question)
+                    if not file_only_report else None
+                ),
                 "estimatedPages": salvaged_pages if report_tier in ("detailed", "in_depth") else None,
                 "renderedPages": salvaged_pages if report_tier in ("detailed", "in_depth") else None,
                 "geminiAudit": salvaged_audit,
@@ -23225,9 +25227,9 @@ async def generate_report(request: Request):
             except Exception as e:
                 log.debug("Report repair: image validation failed, continuing without images (%s)", e)
             repaired_imgs, _ = _force_fallback_images(repaired_imgs, image_candidates, model_used)
-            repaired_imgs, _ = _top_up_images(repaired_imgs, image_candidates, model_used)
+            repaired_imgs, _ = ([], False) if file_only_report else _top_up_images(repaired_imgs, image_candidates, model_used)
             _raw_charts = [
-                _normalize_chart_spec(_recover_pseudo_trend_line_as_bar(_recover_thin_bar_as_pie(_normalise_inline_chart_spec(c) or c)))
+                _safe_chart_chain(c)
                 for c in (repaired_parsed.get("charts") or [])
             ]
             _valid_mask = [_is_plausible_chart(c) for c in _raw_charts]
@@ -23250,23 +25252,50 @@ async def generate_report(request: Request):
                 repaired_report = _strip_redundant_model_source_appendix(repaired_report)
             except Exception as exc:
                 log.warning("Report: repaired source-appendix normalization skipped: %s", type(exc).__name__)
+            if not _prompt_requests_report_images(question):
+                repaired_imgs = []
+                repaired_report = _WEB_IMG_PLACEHOLDER_RE.sub("", repaired_report)
+            repaired_report = normalize_report_markdown(repaired_report)
+            repaired_report, repaired_charts, _repair_period_meta = drop_charts_outside_requested_window(
+                repaired_report, repaired_charts, source_manifest, question,
+            )
+            repaired_report, repaired_charts, _repair_context_meta = cohere_chart_placements(
+                repaired_report, repaired_charts,
+            )
+            repaired_report, repaired_charts, _repair_registry_meta = _canonicalize_chart_registry(
+                repaired_report, repaired_charts,
+            )
             repaired_report = reconcile_orphaned_chart_references(repaired_report, repaired_charts)
             repaired_report = ensure_requested_chart_disclosure(repaired_report, question, repaired_charts)
+            repaired_report, _repair_numeric_repairs = repair_report_numeric_consistency(repaired_report, repaired_charts)
+            repaired_report = sanitize_inline_citations(repaired_report, source_manifest)
+            repaired_summary = _sanitize_cover_summary_amounts(repaired_parsed.get("summary"), repaired_report)
+            repaired_summary = sanitize_inline_citations(repaired_summary, source_manifest)
             repaired_audit, repaired_deterministic = await _run_independent_report_audit(
                 title=_sanitize_title(repaired_parsed.get("title", ""), question), question=question,
                 report_text=repaired_report, report_tier=report_tier, charts=repaired_charts,
                 images=repaired_imgs, sources=source_manifest, timeout_seconds=18.0,
             )
             _rep_theme = _resolve_theme(repaired_parsed.get("theme"), question)
+            repaired_public_report = sanitize_inline_citations(
+                normalize_report_markdown(_clean_inline_source_markers_for_display(
+                    _decode_leaked_unicode_escapes(repaired_report),
+                )),
+                source_manifest,
+            )
+            repaired_public_summary = sanitize_inline_citations(
+                _clean_inline_source_markers_for_display(str(repaired_summary or "")),
+                source_manifest,
+            )
             return JSONResponse(_decode_leaked_unicode_escapes({
                 "reportId": report_id,
                 "revision": 1,
                 "title":      _sanitize_title(repaired_parsed.get("title", ""), question),
-                "report":     repaired_report,
+                "report":     repaired_public_report,
                 "charts":     repaired_charts,
                 "images":     repaired_imgs,
                 "keyStats":   repaired_parsed.get("keyStats", []),
-                "summary":    repaired_parsed.get("summary", ""),
+                "summary":    repaired_public_summary,
                 "fileImages": embedded_file_images,
                 "recommendedFormat": _resolve_recommended_format(recommended_format, _rep_theme),
                 "theme":      _rep_theme,
@@ -23275,6 +25304,11 @@ async def generate_report(request: Request):
                 "reportStyle": report_style,
                 "kicker": str(repaired_parsed.get("kicker") or "")[:60],
                 "reportTier": report_tier,
+                "researchCoverage": (
+                    audit_research_coverage(enriched, tier=report_tier, query_count=len(search_queries),
+                                            requested_pages=requested_page_count, question=question)
+                    if not file_only_report else None
+                ),
                 "geminiAudit": repaired_audit,
                 "publicationStatus": _publication_status_from_audits(repaired_deterministic),
                 "qualityReview": repaired_deterministic,

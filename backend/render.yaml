@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: growth-gradual-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEYS
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: EXA_API_KEY_2
+        sync: false
+      - key: EXA_API_KEY_3
+        sync: false
+      - key: WEB_SEARCH_PROVIDER
+        value: exa
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LOGO_B64
+        sync: false   # optional: base64-encoded logo image bytes

@@ -14,9 +14,10 @@ Endpoints used:
 import asyncio
 import logging
 import os
-from typing import Any
 
 import httpx
+
+from utils.observability import get_trace_id, record_event
 
 log = logging.getLogger("rag_client")
 
@@ -81,27 +82,43 @@ async def _wake_rag_service(max_wait: float = 100.0, poll_interval: float = 5.0)
 
 
 async def rag_index(session_id: str, documents: list[dict]) -> dict:
-    """
-    Index documents in the RAG service for a session.
-    documents: [{ id, name, text, source_type?, file_type?, metadata? }]
-    """
-    await _wake_rag_service()
+    """Index extracted attachment text in RAG and record safe stage metadata."""
+    started = asyncio.get_running_loop().time()
+    input_chars = sum(len(str(doc.get("text") or "")) for doc in documents)
+    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
     try:
+        woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             res = await c.post(f"{RAG_URL}/index", json={
                 "session_id": session_id,
-                "documents":  documents,
-            })
+                "documents": documents,
+            }, headers=headers)
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
         if res.is_success:
             data = res.json()
-            log.info("RAG index: session=%s chunks_added=%s total=%s",
-                     session_id[:8], data.get("chunks_added"), data.get("total_chunks"))
+            diag = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
+            record_event("rag-client", "index", "ok" if (data.get("chunks_added", 0) or data.get("total_chunks", 0)) else "no_match", duration_ms=elapsed, details={
+                "documents": len(documents), "input_chars": input_chars,
+                "chunks_added": data.get("chunks_added", 0), "total_chunks": data.get("total_chunks", 0),
+                "cold_start_wake_ok": woke, "rag_stages": diag.get("stages", {}),
+                "persistence_status": (data.get("persistence") or {}).get("status"),
+            })
+            log.info("RAG index: session=%s docs=%d chunks_added=%s total=%s duration_ms=%.0f",
+                     session_id[:8], len(documents), data.get("chunks_added"), data.get("total_chunks"), elapsed)
             return data
+        record_event("rag-client", "index", "error", duration_ms=elapsed, details={
+            "documents": len(documents), "input_chars": input_chars,
+            "http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke,
+        })
         log.warning("RAG index HTTP %d: %s", res.status_code, res.text[:200])
-        return {"error": f"HTTP {res.status_code}", "chunks_added": 0}
+        return {"error": f"HTTP {res.status_code}", "chunks_added": 0, "http_status": res.status_code}
     except Exception as exc:
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        record_event("rag-client", "index", "error", duration_ms=elapsed, details={
+            "documents": len(documents), "input_chars": input_chars, "error_type": type(exc).__name__,
+        })
         log.warning("RAG index failed (non-critical): %s", _exc_str(exc))
-        return {"error": str(exc), "chunks_added": 0}
+        return {"error": _exc_str(exc), "chunks_added": 0, "error_type": type(exc).__name__}
 
 
 async def rag_query(
@@ -115,26 +132,44 @@ async def rag_query(
     Retrieve grounded context + system prompt for a chat question.
     Returns dict with: system_prompt, context, retrieved, source_files, has_content
     """
-    await _wake_rag_service()
+    started = asyncio.get_running_loop().time()
+    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
     try:
+        woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             res = await c.post(f"{RAG_URL}/query", json={
                 "session_id": session_id,
-                "question":   question,
-                "top_k":      top_k,
-                "min_score":  min_score,
+                "question": question,
+                "top_k": top_k,
+                "min_score": min_score,
                 "is_general": is_general,
-            })
+            }, headers=headers)
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
         if res.is_success:
             data = res.json()
-            log.info("RAG query: session=%s retrieved=%s has_content=%s",
-                     session_id[:8], data.get("retrieved"), data.get("has_content"))
+            diag = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
+            record_event("rag-client", "query", "ok" if data.get("has_content") else "no_match", duration_ms=elapsed, details={
+                "query_chars": len(question), "top_k": top_k, "min_score": min_score,
+                "retrieved": data.get("retrieved", 0), "source_count": len(data.get("source_files") or []),
+                "has_content": bool(data.get("has_content")), "reranker_ran": bool(data.get("reranker_ran")),
+                "cold_start_wake_ok": woke, "rag_stages": diag.get("stages", {}),
+                "candidate_count": diag.get("candidate_count"), "scope": diag.get("scope"),
+            })
+            log.info("RAG query: session=%s retrieved=%s has_content=%s duration_ms=%.0f",
+                     session_id[:8], data.get("retrieved"), data.get("has_content"), elapsed)
             return data
+        record_event("rag-client", "query", "error", duration_ms=elapsed, details={
+            "query_chars": len(question), "http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke,
+        })
         log.warning("RAG query HTTP %d: %s", res.status_code, res.text[:200])
-        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": []}
+        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": [], "http_status": res.status_code}
     except Exception as exc:
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        record_event("rag-client", "query", "error", duration_ms=elapsed, details={
+            "query_chars": len(question), "error_type": type(exc).__name__,
+        })
         log.warning("RAG query failed (non-critical): %s", _exc_str(exc))
-        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": []}
+        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": [], "error_type": type(exc).__name__}
 
 
 async def rag_report(
@@ -146,23 +181,35 @@ async def rag_report(
     Full-coverage retrieval for report generation.
     Returns dict with: system_prompt, context, retrieved, source_files, has_content
     """
-    await _wake_rag_service()
+    started = asyncio.get_running_loop().time()
+    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
     try:
+        woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             res = await c.post(f"{RAG_URL}/report", json={
-                "session_id":  session_id,
+                "session_id": session_id,
                 "report_spec": report_spec,
                 "report_type": report_type,
-            })
+            }, headers=headers)
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
         if res.is_success:
             data = res.json()
-            log.info("RAG report: session=%s retrieved=%s", session_id[:8], data.get("retrieved"))
+            diag = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
+            record_event("rag-client", "report_retrieval", "ok" if data.get("has_content") else "no_match", duration_ms=elapsed, details={
+                "retrieved": data.get("retrieved", 0), "source_count": len(data.get("source_files") or []),
+                "reranker_ran": bool(data.get("reranker_ran")), "cold_start_wake_ok": woke,
+                "rag_stages": diag.get("stages", {}), "candidate_count": diag.get("candidate_count"),
+            })
+            log.info("RAG report: session=%s retrieved=%s duration_ms=%.0f", session_id[:8], data.get("retrieved"), elapsed)
             return data
+        record_event("rag-client", "report_retrieval", "error", duration_ms=elapsed, details={"http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke})
         log.warning("RAG report HTTP %d: %s", res.status_code, res.text[:200])
-        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": []}
+        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": [], "http_status": res.status_code}
     except Exception as exc:
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        record_event("rag-client", "report_retrieval", "error", duration_ms=elapsed, details={"error_type": type(exc).__name__})
         log.warning("RAG report failed (non-critical): %s", _exc_str(exc))
-        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": []}
+        return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": [], "error_type": type(exc).__name__}
 
 
 async def rag_delete_session(session_id: str) -> None:
@@ -194,3 +241,16 @@ async def rag_health_details() -> dict:
         return {"reachable": True, **payload}
     except Exception as exc:
         return {"reachable": False, "ready": False, "status": "unreachable", "errorType": type(exc).__name__}
+
+
+async def rag_diagnostics() -> dict:
+    """Fetch recent RAG-service operational events without exposing its base URL."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8)) as c:
+            res = await c.get(f"{RAG_URL}/diagnostics")
+        if not res.is_success:
+            return {"reachable": True, "status": "http_error", "httpStatus": res.status_code, "recentEvents": []}
+        payload = res.json()
+        return payload if isinstance(payload, dict) else {"reachable": True, "status": "invalid_response", "recentEvents": []}
+    except Exception as exc:
+        return {"reachable": False, "status": "unreachable", "errorType": type(exc).__name__, "recentEvents": []}

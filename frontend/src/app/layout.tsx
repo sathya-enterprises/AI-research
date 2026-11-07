@@ -1,11 +1,11 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
-import MarketTickerPlacement from '@/components/MarketTickerPlacement';
+import TickerTape from '@/components/TickerTape';
 import NewsFAB from '@/components/NewsFAB';
+import { STOCKS } from '@/data';
 import { AuthProvider } from '@/contexts/AuthContext';
 import AuthGate from '@/components/AuthGate';
-import ThemeInitializer from '@/components/ThemeInitializer';
 
 export const metadata: Metadata = {
   title: 'Growth Gradual — Indian Financial Intelligence',
@@ -22,11 +22,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <head />
-      <body style={{ background: 'var(--cream)', minHeight: '100dvh', color: 'var(--text)' }}>
-        <ThemeInitializer />
+      <body style={{ background: '#F8FAFC', minHeight: '100dvh', color: '#0F172A' }}>
         <AuthProvider>
           <Navbar />
-          <MarketTickerPlacement />
+          <TickerTape stocks={STOCKS} />
           <main className="main-container">
             <AuthGate>
               {children}

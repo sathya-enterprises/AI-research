@@ -115,3 +115,58 @@ async def test_parallel_analysts_run_concurrently_and_merge_duplicate_findings(m
     assert result["findings"][0]["source_ids"] == ["S1"]
     assert max_active >= 2
     assert "secondary guidance" in report_mod._format_parallel_evidence_notes(result)
+
+
+@pytest.mark.asyncio
+async def test_parallel_groq_reviewer_compacts_once_after_http_413(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.is_success = status_code == 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"findings": [], "gaps": []}'}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            requests.append(json)
+            return FakeResponse(413 if len(requests) == 1 else 200)
+
+    source_blocks = [
+        f"- [S{i}] **Publisher evidence {i}**\n"
+        f"Source: https://publisher{i}.example.com/disclosure/{i}\n"
+        f"DIRECT PUBLISHER PAGE TEXT:\nThe verified promoter transaction value for quarter Q{i % 4 + 1} FY26 was {i * 100} crore. "
+        + ("Additional evidence text. " * 18)
+        for i in range(1, 31)
+    ]
+    prompt = (
+        "You are an independent source auditor. Preserve every source ID.\n\n"
+        "SOURCE EVIDENCE:\n" + "\n\n---\n\n".join(source_blocks)
+    )
+
+    monkeypatch.setattr(report_mod, "get_groq_keys", lambda: ["test-groq-key"])
+    monkeypatch.setattr(report_mod, "iter_reserved_groq_keys", lambda *_args, **_kwargs: iter(["test-groq-key"]))
+    monkeypatch.setattr(report_mod, "is_rate_limited", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(report_mod.httpx, "AsyncClient", FakeClient)
+
+    result, provider = await report_mod._parallel_groq_analyst("Question", "in_depth", prompt)
+
+    assert provider == "groq:openai/gpt-oss-120b"
+    assert result == '{"findings": [], "gaps": []}'
+    assert len(requests) == 2
+    assert len(requests[1]["messages"][1]["content"]) < len(requests[0]["messages"][1]["content"])
+    assert requests[0]["max_tokens"] == 3000
+    assert requests[1]["max_tokens"] == 1600
+    assert "[S1]" in requests[1]["messages"][1]["content"]
+    assert "[S30]" in requests[1]["messages"][1]["content"]

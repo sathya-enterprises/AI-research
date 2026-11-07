@@ -173,10 +173,10 @@ def test_report_provider_failover_uses_validated_models_and_key_pool():
     assert report_mod.GEMINI_MAX_TOTAL_ATTEMPTS >= 17
     assert report_mod.GEMINI_WAVE_SIZE >= 2
     assert report_mod.GEMINI_MODELS == [
-        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
-        "gemini-3-flash-preview",
+        "gemini-3.5-flash-lite",
     ]
     assert "gemini-2.5-flash" not in report_mod.GEMINI_MODELS
     assert report_mod._DEPTH_TIME_BUDGETS["detailed"] >= 120

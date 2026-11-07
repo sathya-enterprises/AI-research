@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 import logging
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from utils.evidence_provenance import is_trusted_calculated_sector_source
 from utils.source_identity import source_identity_key
 
 log = logging.getLogger("source_manifest")
@@ -18,6 +19,13 @@ _REGISTRY_MARKER = "_ggSourceRegistryVersion"
 _REGISTRY_VERSION = 1
 _HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _ID_RE = re.compile(r"^S\d+$", re.IGNORECASE)
+_SENSITIVE_QUERY_RE = re.compile(
+    r"^(?:(?:x[-_]?(?:goog|amz|ms)[-_])?(?:api[-_]?key|credential|security[-_]?token|signature|sig)|"
+    r"x[-_]?(?:goog[-_]?)?api[-_]?key|api[-_]?key|access[-_]?token|"
+    r"auth(?:orization)?|token|secret|client[-_]?secret|password|credentials?|"
+    r"signature|sig|bearer|key|awsaccesskeyid|googleaccessid|jwt)$",
+    re.IGNORECASE,
+)
 
 
 def _clean_text(value: object, limit: int = 300) -> str:
@@ -27,7 +35,7 @@ def _clean_text(value: object, limit: int = 300) -> str:
 
 
 def _safe_http_url(value: object) -> str:
-    """Keep an absolute clickable HTTP(S) URL and remove its fragment only."""
+    """Keep a clickable HTTP(S) URL while stripping embedded credentials."""
     raw = _clean_text(value, 2_000)
     if not _HTTP_URL_RE.match(raw):
         return ""
@@ -35,7 +43,14 @@ def _safe_http_url(value: object) -> str:
         parsed = urlparse(raw)
         if not parsed.netloc:
             return ""
-        return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.params, parsed.query, ""))
+        # User-info is never needed for a public citation and may contain a
+        # password or bearer-like credential.
+        netloc = parsed.netloc.rsplit("@", 1)[-1].lower()
+        query = [
+            (key, "REDACTED" if _SENSITIVE_QUERY_RE.match(key.strip()) else val)
+            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return urlunparse((parsed.scheme.lower(), netloc, parsed.path, parsed.params, urlencode(query, doseq=True), ""))
     except Exception:
         return ""
 
@@ -70,7 +85,7 @@ def _is_canonical_registry(sources: object) -> bool:
 
 def _display_entry(entry: dict, source_id: str) -> dict:
     title = _clean_text(entry.get("title") or entry.get("name"), 300)
-    url = _safe_http_url(entry.get("url") or entry.get("sourceUrl") or entry.get("source_url"))
+    url = _source_public_url(entry)
     kind = _clean_text(entry.get("kind") or entry.get("sourceType") or "Web source", 80)
     publisher = _publisher_for(url, entry.get("publisher") or kind)
     domain = _domain_for(url, entry.get("domain") or entry.get("host") or "")
@@ -79,7 +94,9 @@ def _display_entry(entry: dict, source_id: str) -> dict:
         entry.get("published_at") or entry.get("publishedAt") or entry.get("date"), 80,
     )
     publisher_page_title = _clean_text(entry.get("publisher_page_title") or entry.get("publisherPageTitle") or "", 300)
-    publisher_page_url = _safe_http_url(entry.get("publisher_page_url") or entry.get("publisherPageUrl") or "")
+    publisher_page_url = _safe_http_url(
+        entry.get("publisher_page_url") or entry.get("publisherPageUrl") or url
+    )
     publication_date_source = _clean_text(entry.get("publication_date_source") or entry.get("publicationDateSource") or "", 120)
     publisher_page_modified_at = _clean_text(entry.get("publisher_page_modified_at") or entry.get("publisherPageModifiedAt") or "", 120)
     source_type = _clean_text(entry.get("source_type") or entry.get("sourceType") or kind, 80)
@@ -228,6 +245,12 @@ def source_provenance_note(source: object) -> str:
     """
     if not isinstance(source, dict):
         return "Source evidence status unavailable; verify the claim against the publisher."
+    if is_trusted_calculated_sector_source(source):
+        return (
+            "Quarterly sector returns are calculated from observed daily market data. "
+            "The cited matrix preserves the quarter-end inputs and calculation provenance; "
+            "this is a derived dataset, not publisher-page text."
+        )
     status = str(source.get("page_fetch_status") or source.get("pageFetchStatus") or "unknown").casefold()
     origin = str(source.get("evidence_origin") or source.get("evidenceOrigin") or source.get("evidenceExcerptOrigin") or "").casefold()
     available = bool(source.get("evidence_available", source.get("evidenceAvailable", False)))
@@ -242,6 +265,8 @@ def source_provenance_note(source: object) -> str:
 
     if str(source.get("source_status") or source.get("sourceStatus") or "").casefold() == "unresolved":
         return "Source record missing; this citation is not verified."
+    if origin == "uploaded_workbook" and available and str(source.get("chartEvidenceExcerpt") or "").strip():
+        return "Evidence is derived from the user-uploaded workbook and is traceable to worksheet rows; it is not independently publisher-verified."
     if origin == "okf_retrieval" and available:
         if matched is True and missing_count == 0:
             return "Retrieved from the saved OKF document; the cited claim aligns with the available excerpt."
@@ -270,6 +295,60 @@ def source_provenance_note(source: object) -> str:
         return "No usable source text was retrieved for claim checking; the URL/title alone does not verify the claim."
     return "Source is listed, but claim-specific evidence alignment was not recorded. Review before relying on precise figures."
 
+_INTERNAL_SOURCE_DISPLAY = {
+    "verified-daily-ohlc": ("Daily index levels (open/high/low/close)", "Yahoo Finance via Growth Gradual market data"),
+    "verified-historical-index-quotes": ("Historical index closing levels", "Yahoo Finance via Growth Gradual market data"),
+    "verified-stock-fundamentals": ("Stock fundamentals snapshot", "Growth Gradual market data"),
+    "verified-sector-quarterly-returns": ("NSE sector returns by calendar quarter (calculated)", "Calculated from daily market data"),
+    "verified-index-quotes": ("Index quotes snapshot", "Growth Gradual market data"),
+    "verified-screener-fundamentals": ("Company fundamentals (Screener data)", "Screener.in via Growth Gradual"),
+    "verified-tax-calculation": ("Tax calculation", "Growth Gradual calculator"),
+}
+
+_INTERNAL_SOURCE_STABLE_IDS = {
+    "verified-historical-index-quotes": "S1",
+    "verified-sector-quarterly-returns": "S2",
+    "verified-index-quotes": "S3",
+}
+
+
+def _source_public_url(entry: dict) -> str:
+    """Keep the most specific supplied public URL for the appendix entry."""
+    candidates = []
+    for key in (
+        "publisher_page_url", "publisherPageUrl", "publisherPageURL",
+        "canonical_url", "canonicalUrl", "canonicalURL",
+        "pageFetchUrl", "pageFetchURL", "pageFetchFinalUrl", "pageFetchFinalURL",
+        "page_fetch_url", "page_fetch_final_url", "matchedEvidenceUrl",
+        "matchedEvidenceURL", "matched_evidence_url", "sourceUrl", "sourceURL",
+        "source_url", "sourcePageUrl", "sourcePageURL", "source_page_url",
+        "requestedUrl", "requestedURL", "requested_url", "finalUrl", "finalURL", "final_url", "url",
+    ):
+        candidate = _safe_http_url(entry.get(key))
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    if not candidates:
+        host = _clean_text(entry.get("domain") or entry.get("host") or "", 200).casefold().strip(".")
+        if re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host):
+            return _safe_http_url(f"https://{host}")
+        return ""
+
+    def specificity(url: str) -> tuple[int, int, int]:
+        parsed = urlparse(url)
+        path = (parsed.path or "").strip("/")
+        return (1 if path else 0, len(path), len(parsed.query))
+
+    return max(candidates, key=specificity)
+
+
+def _stable_internal_source_id(entry: dict) -> str:
+    raw_url = str(entry.get("url") or entry.get("sourceUrl") or entry.get("source_url") or "").strip().casefold()
+    if not raw_url.startswith("internal://"):
+        return ""
+    slug = raw_url.split("internal://", 1)[-1].strip("/").split("?", 1)[0]
+    return _INTERNAL_SOURCE_STABLE_IDS.get(slug, "")
+
+
 def normalise_source_manifest(sources: object, source_documents: object = None) -> list[dict]:
     """Build a manifest, preserving IDs if input is already canonical.
 
@@ -294,11 +373,37 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
             if identity:
                 seen.add(identity)
     else:
+        reserved_ids = {
+            stable_id
+            for entry in raw_sources if isinstance(entry, dict)
+            for stable_id in [_stable_internal_source_id(entry)] if stable_id
+        }
+        used_ids: set[str] = set()
+        next_number = 1
+
+        def next_fresh_id() -> str:
+            nonlocal next_number
+            while f"S{next_number}" in used_ids or f"S{next_number}" in reserved_ids:
+                next_number += 1
+            result_id = f"S{next_number}"
+            used_ids.add(result_id)
+            next_number += 1
+            return result_id
+
         def add(entry: object) -> None:
             if not isinstance(entry, dict):
                 return
             current = dict(entry)
+            stable_id = _stable_internal_source_id(current)
             if str(current.get("url") or "").lower().startswith("internal://"):
+                # The raw title of a verified-data block is an instruction to the
+                # writer ("authoritative ... do not invent ..."); never show it to readers.
+                _slug = str(current.get("url") or "").lower().split("internal://", 1)[-1].strip("/")
+                _display = _INTERNAL_SOURCE_DISPLAY.get(_slug)
+                if _display:
+                    current["promptTitle"] = current.get("title")
+                    current["title"] = _display[0]
+                    current.setdefault("publisher", _display[1])
                 current["url"] = ""
                 current["kind"] = current.get("kind") or "Verified data"
             identity = source_identity_key(current)
@@ -306,7 +411,12 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
                 return
             if identity:
                 seen.add(identity)
-            result.append(_display_entry(current, f"S{len(result) + 1}"))
+            if stable_id and stable_id not in used_ids:
+                assigned_id = stable_id
+                used_ids.add(assigned_id)
+            else:
+                assigned_id = next_fresh_id()
+            result.append(_display_entry(current, assigned_id))
 
         for entry in raw_sources:
             add(entry)
@@ -325,10 +435,34 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
         entry = {
             "title": name, "kind": "Uploaded document", "publisher": "User-provided", "url": "",
         }
+        # Retain bounded evidence excerpts for uploaded workbooks. This is a
+        # user-supplied evidence source, not a publisher-page verification; the
+        # chart audit handles that provenance explicitly. Do not copy extracted
+        # file text wholesale into the public source registry.
+        for key in (
+            "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
+            "page_fetch_status", "pageFetchStatus", "evidence_available",
+            "evidenceAvailable", "source_type", "sourceType",
+        ):
+            if document.get(key) is not None:
+                entry[key] = document.get(key)
         identity = source_identity_key(entry)
         # A canonical manifest is immutable. Appended records may be deduped
-        # against it, but must never cause existing IDs to be renumbered.
+        # against it, but uploaded-workbook evidence metadata still needs to be
+        # attached when the same file already entered through RAG retrieval.
         if identity and identity in seen:
+            if str(entry.get("evidence_origin") or entry.get("evidenceOrigin") or "").casefold() == "uploaded_workbook":
+                evidence_keys = (
+                    "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
+                    "page_fetch_status", "pageFetchStatus", "evidence_available",
+                    "evidenceAvailable", "source_type", "sourceType",
+                )
+                for current in result:
+                    if source_identity_key(current) == identity:
+                        for key in evidence_keys:
+                            if entry.get(key) is not None:
+                                current[key] = entry.get(key)
+                        break
             continue
         if identity:
             seen.add(identity)

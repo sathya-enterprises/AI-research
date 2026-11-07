@@ -718,6 +718,10 @@ def _metric_from_header(header: str) -> tuple[str, str, str]:
 
 def _metric_variant(key: str, label: str, kind: str, unit: str, growth_context: bool) -> tuple[str, str] | None:
     """Resolve level vs growth vs ratio variants from the observed unit."""
+    if key == "shares_transacted":
+        return "shares_sold", "Shares sold"
+    if key == "stake_percentage":
+        return "stake_sold_pct", "Stake sold (%)"
     if kind == "npa":
         if unit == "%":
             return f"{key}_ratio", f"{label} ratio"
@@ -747,7 +751,7 @@ def _metric_variant(key: str, label: str, kind: str, unit: str, growth_context: 
     if kind == "count":
         # Count observations may be reported in millions/billions (especially
         # UPI). Preserve the stated unit rather than silently dropping them.
-        return (key, label) if unit in {"", "count", "billion (as reported)", "million (as reported)"} else None
+        return (key, label) if unit in {"", "count", "shares", "billion (as reported)", "million (as reported)"} else None
     return key, label
 
 
@@ -1228,7 +1232,6 @@ class _Extractor:
             period_row_valid = len(period_columns) >= 4
             # Header rows must contain real bank groups and repeated period
             # labels, not a normal entity-versus-metric table.
-            groups = {entity_key(g) for g in group_names if g}
             known_bank_groups = {
                 "public sector banks", "private sector banks", "foreign banks",
                 "small finance banks", "payments banks", "scheduled commercial banks",
@@ -1495,9 +1498,43 @@ class _Extractor:
         return added > 0
 
     # ── prose ──────────────────────────────────────────────────────────────
+    def _transaction_events(self, text: str, source_id: str, evidence_origin: str, fallback_entity: str = "") -> None:
+        """Extract explicitly stated promoter-sale quantities without guessing."""
+        for sentence in re.split(r"(?<=[.!?])\s+", str(text or "")):
+            if not re.search(r"\b(?:sold|offloaded|divested|disposed|block deal|bulk deal)\b", sentence, re.I):
+                continue
+            mentions = self.resolver.mentions(sentence)
+            entity = mentions[0][1] if mentions else fallback_entity
+            if not entity:
+                continue
+            event_date = _date_in_text(sentence)
+            period = (event_date.isoformat(), float(event_date.toordinal()), "DATE") if event_date else None
+            resolved = (entity, self.resolver.display.get(entity, entity), True)
+            def emit(metric_key: str, label: str, kind: str, value: float, unit: str, currency: str, raw: str):
+                self.add(entity_name=resolved[1], metric_key=metric_key, metric_label=label, kind=kind,
+                         value=value, unit_token=unit, currency=currency, period=period, source_id=source_id,
+                         quote=sentence, raw=raw, origin="prose", evidence_origin=evidence_origin,
+                         growth_context=False, entity_resolved=resolved)
+
+            for match in re.finditer(r"(?<!\d)(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<scale>crore|cr|lakh)?\s+(?:equity\s+)?shares?\b", sentence, re.I):
+                value = _to_float(match.group("num"))
+                if value is None:
+                    continue
+                scale = (match.group("scale") or "").casefold()
+                multiplier = 10_000_000 if scale in {"crore", "cr"} else 100_000 if scale == "lakh" else 1
+                emit("shares_transacted", "Shares sold", "count", value * multiplier, "shares", "", match.group(0))
+
+            for match in re.finditer(r"(?<!\d)(?P<num>\d+(?:\.\d+)?)\s*(?:%|per\s+cent|percent)\s+(?:of\s+(?:the\s+)?)?(?:promoter\s+)?(?:stake|holding|shareholding)\b", sentence, re.I):
+                value = _to_float(match.group("num"))
+                if value is not None:
+                    emit("stake_percentage", "Stake sold / changed", "ratio", value, "%", "", match.group(0))
+
+            for match in re.finditer(r"\b(?:worth|for|valued\s+at|transaction\s+value\s+(?:of|to)|amounting\s+to)\s+(?P<currency>₹|â‚¹|Rs\.?|INR|US\$|USD|\$)?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>crore|cr|lakh|million|mn|billion|bn)\b", sentence, re.I):
+                value = _to_float(match.group("num"))
+                if value is not None:
+                    emit("transaction_value", "Transaction value", "money", value, match.group("unit"), match.group("currency") or "₹", match.group(0))
+
     def prose(self, text: str, source_id: str, evidence_origin: str, ref: date | None) -> None:
-        if not self.resolver.targets:
-            return
         # News/results articles normally report one period; carry the most
         # recent explicit period across paragraphs of the same source.
         source_period = None
@@ -1895,6 +1932,21 @@ def _flag_suspect_duplicates(observations: list[Observation]) -> None:
             obs.suspect = f"identical to {prior.entity}'s value in the same source table (probable source error)"
 
 
+def _transaction_subject_from_title(title: str) -> str:
+    """Infer a company only from an explicit company-before-promoter or 'stake in' title."""
+    text = re.sub(r"\s+", " ", str(title or "")).strip()
+    after_stake = re.search(r"\bstake\s+in\s+(?:the\s+)?([A-Z][A-Za-z0-9&().'-]*(?:\s+[A-Z][A-Za-z0-9&().'-]*){0,3})", text, re.I)
+    if after_stake:
+        return after_stake.group(1).strip(" .,:;-" )
+    before_promoter = re.match(r"^(.+?)\s+(?:(?:co[- ]?)?promoter|promoter(?:[- ]linked)?|promoter\s+group)\b", text, re.I)
+    if before_promoter:
+        candidate = before_promoter.group(1).strip(" .,:;-" )
+        candidate = re.sub(r"\s+India$", "", candidate, flags=re.I)
+        if len(candidate.split()) <= 5 and len(candidate) >= 3:
+            return candidate
+    return ""
+
+
 def build_evidence_dataset(sources: list[dict], question: str, targets: list[str] | None = None) -> EvidenceDataset:
     """Extract observations from source dicts.
 
@@ -1902,6 +1954,18 @@ def build_evidence_dataset(sources: list[dict], question: str, targets: list[str
     "published": iso-date?, "title": str?}
     """
     requested = list(targets or []) or extract_requested_entities(question)
+    transaction_question = bool(re.search(r"\b(?:promoter|pledge|stake\s+sale|stake\s+sales|bulk\s+deal|block\s+deal)\b", str(question or ""), re.I))
+    inferred_by_id = {}
+    if not requested and transaction_question:
+        for source in sources or []:
+            if not isinstance(source, dict):
+                continue
+            candidate = _transaction_subject_from_title(str(source.get("title") or ""))
+            sid = str(source.get("id") or "").strip().upper()
+            if candidate:
+                inferred_by_id[sid] = candidate
+                if candidate.casefold() not in {name.casefold() for name in requested}:
+                    requested.append(candidate)
     resolver = EntityResolver(requested)
     extractor = _Extractor(resolver)
     meta: dict[str, dict] = {}
@@ -1930,6 +1994,8 @@ def build_evidence_dataset(sources: list[dict], question: str, targets: list[str
         try:
             extractor.tables(text, sid, origin, ref)
             extractor.prose(text, sid, origin, ref)
+            if transaction_question:
+                extractor._transaction_events(text, sid, origin, inferred_by_id.get(sid, ""))
         except Exception:  # pragma: no cover - extraction is best effort per source
             continue
     _merge_entity_variants(extractor.observations)

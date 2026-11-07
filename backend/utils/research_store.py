@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,7 +157,7 @@ def initialise() -> None:
             with _connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(schema_sql)
-        except (psycopg2.errors.UndefinedColumn, psycopg2.errors.UndefinedTable, psycopg2.errors.DuplicateColumn, psycopg2.errors.DuplicateTable) as exc:
+        except (psycopg2.errors.UndefinedColumn, psycopg2.errors.UndefinedTable, psycopg2.errors.DuplicateColumn, psycopg2.errors.DuplicateTable):
             # The transaction is aborted after a DDL error; discard it before
             # performing the quarantine operation on a fresh connection.
             try:
@@ -423,7 +424,7 @@ def _web_content_chunks(text: str, chunk_size: int = 1800, overlap: int = 200) -
     return chunks
 
 
-def persist_web_search_results(
+def _persist_web_search_results_once(
     query: str,
     sources: list[dict] | None,
     *,
@@ -560,6 +561,33 @@ def persist_web_search_results(
     return {"sources": saved_sources, "versions": saved_versions, "chunks": saved_chunks, "events": saved_events}
 
 
+def persist_web_search_results(
+    query: str,
+    sources: list[dict] | None,
+    *,
+    provider: str = "exa",
+    research_run_id: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int]:
+    """Persist provider results, retrying PostgreSQL's transient lock failures."""
+    retries = max(1, min(8, int(os.getenv("RESEARCH_STORE_WRITE_RETRIES", "3"))))
+    transient_errors = (
+        psycopg2.errors.DeadlockDetected,
+        psycopg2.errors.SerializationFailure,
+        psycopg2.errors.LockNotAvailable,
+    )
+    for attempt in range(retries):
+        try:
+            return _persist_web_search_results_once(
+                query, sources, provider=provider, research_run_id=research_run_id, metadata=metadata,
+            )
+        except transient_errors:
+            if attempt + 1 >= retries:
+                raise
+            time.sleep(min(0.15 * (2 ** attempt), 1.2))
+    return {"sources": 0, "versions": 0, "chunks": 0, "events": 0}
+
+
 def retrieve_web_research(
     query: str, limit: int = 12, max_age_days: int | None = None,
     *, source_type: str | None = None, require_page_text: bool = False,
@@ -574,7 +602,6 @@ def retrieve_web_research(
     terms = [t for t in re.findall(r"[A-Za-z0-9]{3,}", str(query or "").lower()) if t not in {"the", "and", "for", "with", "from", "into", "through", "about"}]
     if not terms:
         return []
-    search_query = " ".join(terms[:32])
     ts_terms = [re.sub(r"[^a-z0-9_]+", "", t) for t in terms[:24]]
     ts_query = " | ".join(f"{t}:*" for t in ts_terms if t)
     freshness_clause = ""
@@ -968,4 +995,8 @@ def snapshot(run_id: str) -> dict:
     return counts
 
 
-initialise()
+# Importing the API must not require database credentials or network access.
+# Configured deployments retain eager schema setup; unit tests and offline tools
+# can import the package without opening a database connection.
+if any(os.getenv(name, "").strip() for name in ("RESEARCH_DATABASE_URL", "DATABASE_URL", "SUPABASE_DATABASE_URL")):
+    initialise()

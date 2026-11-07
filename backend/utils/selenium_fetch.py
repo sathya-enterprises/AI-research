@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from typing import Optional
 
 SELENIUM_ENABLED = os.getenv("ENABLE_SELENIUM_FETCH", "1").strip().lower() not in {"0", "false", "no", "off"}
 SELENIUM_TIMEOUT = float(os.getenv("SELENIUM_FETCH_TIMEOUT", "12"))

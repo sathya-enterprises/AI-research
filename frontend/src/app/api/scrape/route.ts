@@ -1,18 +1,3 @@
-
-// Added reliability patch
-const ALPHA_VANTAGE_KEYS = (process.env.ALPHA_VANTAGE_API_KEYS || "")
- .split(",")
- .map(v => v.trim())
- .filter(Boolean);
-
-let avKeyIndex = 0;
-function getAlphaVantageKey() {
-  if (!ALPHA_VANTAGE_KEYS.length) return "";
-  const key = ALPHA_VANTAGE_KEYS[avKeyIndex];
-  avKeyIndex = (avKeyIndex + 1) % ALPHA_VANTAGE_KEYS.length;
-  return key;
-}
-
 // All imports at the top — required for Next.js Edge/Node runtime
 import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
@@ -441,10 +426,6 @@ function xt(xml: string, tag: string): string {
   const p = xml.match(new RegExp(`<${tagPattern}\\b[^>]*>([\\s\\S]*?)<\\/${tagPattern}\\s*>`, 'i'));
   return p ? p[1].trim() : '';
 }
-function stripTags(s: string): string {
-  return s.replace(/<[^>]*>/g, '').trim();
-}
-
 function de(s: string): string {
   return s
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')

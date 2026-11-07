@@ -289,3 +289,54 @@ def test_markdown_pipe_table_is_not_misclassified_as_ascii_diagram():
     assert 'gg-table' in rendered
     assert 'gg-ascii-diagram' not in rendered
     assert '2018' in rendered and '2022' in rendered
+
+
+def test_pipe_table_after_ascii_diagram_is_not_absorbed_by_diagram_recovery():
+    from routes.html_report import _markdown_to_html
+
+    source = (
+        "## Agreement Review\n"
+        "+----------------+\n"
+        "| SIGNING RECORD |\n"
+        "+----------------+\n"
+        "| Official record | -> | Verified date |\n"
+        "+----------------+\n"
+        "| Agreement | Partner | Signature date | Official source |\n"
+        "| --- | --- | --- | --- |\n"
+        "| India-Oman FTA | Oman | December 18, 2025 | [S1] |\n"
+        "| India-New Zealand FTA | New Zealand | April 27, 2026 | [S2] |"
+    )
+
+    rendered = _markdown_to_html(source, [], [])
+
+    assert "gg-ascii-diagram" in rendered
+    assert "<table" in rendered
+    assert "Agreement" in rendered
+    assert "December 18, 2025" in rendered
+    assert "April 27, 2026" in rendered
+
+
+def test_pipe_table_inserted_inside_open_fenced_diagram_renders_as_table():
+    from routes.html_report import _markdown_to_html
+
+    source = (
+        "## Agreement Review\n"
+        "```text\n"
+        "+----------------+\n"
+        "| SIGNING RECORD |\n"
+        "+----------------+\n"
+        "| Official record | -> | Verified date |\n"
+        "+----------------+\n"
+        "| Agreement | Partner | Signature date | Official source |\n"
+        "| --- | --- | --- | --- |\n"
+        "| India-Oman FTA | Oman | December 18, 2025 | [S1] |\n"
+        "| India-New Zealand FTA | New Zealand | April 27, 2026 | [S2] |\n"
+        "```"
+    )
+
+    rendered = _markdown_to_html(source, [], [])
+
+    assert "<table" in rendered
+    assert "Agreement" in rendered
+    assert "December 18, 2025" in rendered
+    assert "April 27, 2026" in rendered

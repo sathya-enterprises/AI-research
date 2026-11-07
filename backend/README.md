@@ -1,6 +1,8 @@
 # Growth Gradual — Python FastAPI Backend
 
-Pure-Python backend replacing all Next.js API routes. No browser automation, no Node.js dependencies.
+See the repository-root [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the end-to-end request, chat, file ingestion, RAG, report, export, storage and diagnostics flows.
+
+Main Python/FastAPI business and orchestration API. The Next.js frontend still owns the browser-facing UI and thin API adapters; those adapters forward chat, report, RAG-indexing and export requests to this backend. The independently deployed RAG FastAPI application lives in `rag-service/`.
 
 ## Endpoints
 
@@ -46,8 +48,10 @@ See `screener_kb/README.md` for how to load the fundamentals knowledge base (Scr
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn main:app --reload --port 10000
+uvicorn main:app --port 10000
 ```
+
+On Windows, run without `--reload` so Uvicorn keeps subprocess support for Playwright. On macOS or Linux, `uvicorn main:app --reload --port 10000` is also available.
 
 ## Render Deployment
 
@@ -65,7 +69,7 @@ In your **frontend** Render service (or `.env.local`), set:
 BACKEND_URL=https://growth-gradual-backend.onrender.com
 ```
 
-The Next.js API routes (`/api/chat`, `/api/chat/report`, `/api/chat/report/pdf`, and `/api/chat/report/docx`) are thin proxies — they forward all requests to this backend unchanged.
+The Next.js API routes are thin adapters/proxies. The chat AI-SDK route translates the UI-message request and converts backend SSE to the client stream protocol; report and export routes forward the relevant payloads to this backend. The file-index route passes extracted text through `/api/rag/index` to the separate RAG service.
 
 ## PDF Notes
 

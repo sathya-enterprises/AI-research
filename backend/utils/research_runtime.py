@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Callable
 
 from utils.query_contract import TargetedRefreshTask, ResearchContract, adjudicate_claim_evidence, freshness_for, plan_targeted_refresh

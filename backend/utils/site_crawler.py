@@ -34,6 +34,23 @@ _SKIP_PATHS = re.compile(
     r"/(?:login|logout|signin|sign-in|signup|register|privacy|terms|cookie|cart|checkout|"
     r"wp-admin|wp-login|feed|rss|search|tag|category|author|page/\d+)(?:/|$)", re.I
 )
+# Utility, support and account pages carry no research evidence for any
+# question. A live sector-rotation run spent 12 of its 25 crawl fetches on
+# contact, complaints, podcast, help, portfolio and sign-up pages.
+_UTILITY_PATH_RE = re.compile(
+    r"/(?:contact(?:-us)?|complaints?|help|support|faq|careers?|jobs|about(?:-us)?|team|press|media-kit|"
+    r"advertis\w*|subscribe|newsletter|[\w-]*podcasts?[\w-]*|webinars?|events?|charitable[\w-]*|my-?portfolio|"
+    r"portfolio(?:-[a-z]+)?|portfolio-?tracker|pricing|plans|demo|case-studies|testimonials?|"
+    r"products?-services|private-bank-wm|international-banking|investing-?club|watchlist|account|profile|"
+    r"download-app|app|zendesk|hc)(?:/|\.html?|$)", re.I
+)
+_UTILITY_HOST_RE = re.compile(r"(?:^|\.)(?:zendesk\.com|help\.[a-z0-9.-]+)$", re.I)
+# These terms only make sense for investor / startup discovery questions; for
+# anything else they turned ordinary words ("investment", "capital", "contact",
+# "about") into positive link scores.
+_INVESTOR_DISCOVERY_RE = re.compile(
+    r"\b(?:investor|investors|venture|vc|angel|startup|startups|incubator|accelerator|funding|founder|founders)\b", re.I
+)
 _SKIP_QUERY_KEYS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "ref", "source"}
 _STOPWORDS = {
     "about", "after", "also", "and", "are", "around", "based", "before", "between", "from", "into", "near",
@@ -91,12 +108,22 @@ def _relevance_tokens(question: str) -> set[str]:
     }
 
 
-def _link_score(text: str, url: str, query_tokens: set[str]) -> int:
+def _is_utility_link(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return bool(_UTILITY_HOST_RE.search(host) or _UTILITY_PATH_RE.search(parts.path or ""))
+
+
+def _link_score(text: str, url: str, query_tokens: set[str], investor_discovery: bool = False) -> int:
+    if not investor_discovery and _is_utility_link(url):
+        return 0
     value = f"{text} {urlsplit(url).path.replace('-', ' ').replace('_', ' ')}".casefold()
     tokens = set(re.findall(r"[a-z0-9]{3,}", value))
-    score = 2 * len(tokens & query_tokens) + 3 * len(tokens & _HIGH_VALUE_LINK_TERMS)
-    if any(word in value for word in ("portfolio", "investor", "venture", "funding", "member-companies", "company-directory")):
-        score += 5
+    score = 2 * len(tokens & query_tokens)
+    if investor_discovery:
+        score += 3 * len(tokens & _HIGH_VALUE_LINK_TERMS)
+        if any(word in value for word in ("portfolio", "investor", "venture", "funding", "member-companies", "company-directory")):
+            score += 5
     return score
 
 
@@ -146,10 +173,6 @@ def _extract_html_page(raw_html: str, url: str, max_chars: int) -> tuple[str, st
                 continue
             links_seen.add(link)
             links.append((link, label))
-        description = ""
-        desc = soup.find("meta", attrs={"name": re.compile("description", re.I)})
-        if desc:
-            description = re.sub(r"\s+", " ", str(desc.get("content") or "")).strip()[:600]
         return title[:300], text, links, canonical_url
     except Exception:
         return "", "", [], url
@@ -173,7 +196,7 @@ async def _fetch_rendered_html_pages(urls: list[str], timeout_seconds: float = 9
         return {}
     output: dict[str, str] = {}
     timeout_ms = max(2500, min(int(float(timeout_seconds) * 1000), 10000))
-    try:
+    async def render_pages() -> dict[str, str]:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
             try:
@@ -199,9 +222,18 @@ async def _fetch_rendered_html_pages(urls: list[str], timeout_seconds: float = 9
                         except Exception:
                             pass
                 rows = await asyncio.gather(*(render_one(url) for url in safe_urls), return_exceptions=False)
-                output = {url: html for url, html in rows if html}
+                return {url: html for url, html in rows if html}
             finally:
                 await browser.close()
+
+    try:
+        if os.name == "nt":
+            # Uvicorn's reload loop can be a Windows SelectorEventLoop, which
+            # cannot create Playwright's driver subprocess. Run that short
+            # browser task on the existing Proactor worker-loop helper.
+            from utils.playwright_runtime import run_coroutine_in_worker
+            return await asyncio.to_thread(run_coroutine_in_worker, render_pages)
+        output = await render_pages()
     except Exception as exc:
         log.warning("Site crawl browser fallback failed type=%s", type(exc).__name__)
     return output
@@ -234,6 +266,7 @@ async def crawl_relevant_internal_pages(
     if page_limit <= 0 or not seeds:
         return [], stats
     query_tokens = _relevance_tokens(question)
+    investor_discovery = bool(_INVESTOR_DISCOVERY_RE.search(str(question or "")))
     seed_rows: list[dict] = []
     seed_hosts: set[str] = set()
     max_seeds = {"brief": 2, "detailed": 5, "in_depth": 8}.get(tier, 2)
@@ -268,7 +301,6 @@ async def crawl_relevant_internal_pages(
     visited: set[str] = set(row["url"] for row in seed_rows)
     queued: set[str] = set(visited)
     candidates: deque[tuple[str, str, str, int]] = deque()
-    discovered_order: list[tuple[str, str, str, int]] = []
     fetched_rows: list[dict] = []
     per_host_counts: dict[str, int] = {}
 
@@ -326,7 +358,7 @@ async def crawl_relevant_internal_pages(
             for link, label in links:
                 if link in queued or link in visited or not _same_site(link, seed["url"]):
                     continue
-                score = _link_score(label, link, query_tokens)
+                score = _link_score(label, link, query_tokens, investor_discovery)
                 if score <= 0:
                     continue
                 ranked.append((score, link, label, final_url, 1))
@@ -361,10 +393,12 @@ async def crawl_relevant_internal_pages(
                     continue
                 stats["pages_fetched"] += 1
                 candidate_tokens = set(re.findall(r"[a-z0-9]{3,}", (title + " " + anchor + " " + urlsplit(canonical).path).casefold()))
-                if query_tokens and not (candidate_tokens & query_tokens) and _link_score(anchor, canonical, query_tokens) <= 0:
+                if query_tokens and not (candidate_tokens & query_tokens) and _link_score(anchor, canonical, query_tokens, investor_discovery) <= 0:
                     # Keep investor/funding/member-profile pages if they are relevant to the use case.
-                    if not (candidate_tokens & _HIGH_VALUE_LINK_TERMS):
+                    if not (investor_discovery and (candidate_tokens & _HIGH_VALUE_LINK_TERMS)):
                         continue
+                if not investor_discovery and _is_utility_link(canonical):
+                    continue
                 fetched_rows.append({
                     "title": title or anchor or urlsplit(canonical).path.strip("/") or canonical,
                     "url": canonical,
@@ -394,7 +428,7 @@ async def crawl_relevant_internal_pages(
                     for link, label in links:
                         if link in queued or link in visited or not _same_site(link, seed_url):
                             continue
-                        score = _link_score(label, link, query_tokens)
+                        score = _link_score(label, link, query_tokens, investor_discovery)
                         if score > 0:
                             ranked.append((score, link, label, seed_url, depth + 1))
                     ranked.sort(key=lambda item: (-item[0], item[1]))

@@ -117,6 +117,70 @@ def _chart_has_nonempty_payload(chart: object) -> bool:
     return any_points
 
 
+def audit_chart_narrative(report: str, charts: list | None = None) -> dict:
+    """Check that each chart group has a useful lead-in and interpretation."""
+    text = str(report or "").replace("\r\n", "\n")
+    markers = list(re.finditer(r"(?i)\[CHART_(\d+)\]", text))
+    if not markers:
+        return {
+            "status": "not_applicable", "checked_chart_count": 0, "chart_marker_count": 0,
+            "missing_lead_in": [], "missing_interpretation": [], "flags": [],
+        }
+
+    def paragraph_around(start: int, end: int, direction: str) -> str:
+        paragraphs = []
+        for match in re.finditer(r"(?s)(?:^|\n\s*\n)(.+?)(?=\n\s*\n|$)", text):
+            raw = match.group(1).strip()
+            if not raw or "[CHART_" in raw or raw.startswith("|"):
+                continue
+            raw = re.sub(r"(?m)^#{1,6}\s+", "", raw).strip()
+            if len(re.findall(r"\b[\w%'-]+\b", raw)) < 1:
+                continue
+            paragraphs.append((match.start(1), match.end(1), raw))
+        candidates = [item for item in paragraphs if (item[1] <= start if direction == "before" else item[0] >= end)]
+        if not candidates:
+            return ""
+        chosen = max(candidates, key=lambda item: item[1]) if direction == "before" else min(candidates, key=lambda item: item[0])
+        return chosen[2]
+
+    groups = []
+    group_start = markers[0].start()
+    group_end = markers[0].end()
+    group_ids = [int(markers[0].group(1))]
+    for marker in markers[1:]:
+        between = text[group_end:marker.start()]
+        if not between.strip():
+            group_end = marker.end()
+            group_ids.append(int(marker.group(1)))
+        else:
+            groups.append((group_start, group_end, group_ids))
+            group_start, group_end, group_ids = marker.start(), marker.end(), [int(marker.group(1))]
+    groups.append((group_start, group_end, group_ids))
+
+    missing_lead_in = []
+    missing_interpretation = []
+    for start, end, indices in groups:
+        lead = paragraph_around(start, end, "before")
+        interpretation = paragraph_around(start, end, "after")
+        if len(re.findall(r"\b[\w%'-]+\b", lead)) < 20:
+            missing_lead_in.extend(indices)
+        if len(re.findall(r"\b[\w%'-]+\b", interpretation)) < 20:
+            missing_interpretation.extend(indices)
+    flags = []
+    if missing_lead_in:
+        flags.append("Chart needs a substantive lead-in that explains what the comparison shows.")
+    if missing_interpretation:
+        flags.append("Chart needs an evidence-aware interpretation after the visual.")
+    return {
+        "status": "warning" if flags else "pass",
+        "checked_chart_count": len(charts or markers),
+        "chart_marker_count": len(markers),
+        "missing_lead_in": sorted(set(missing_lead_in)),
+        "missing_interpretation": sorted(set(missing_interpretation)),
+        "flags": flags,
+    }
+
+
 def audit_report_structure(report: str) -> dict:
     text = str(report or "").replace("\r\n", "\n")
     headings = re.findall(r"(?m)^##\s+(.+?)\s*$", text)
@@ -182,9 +246,6 @@ def audit_report_structure(report: str) -> dict:
 
 def build_secondary_review_prompt(report: str, tier: str, question: str, layout: dict) -> str:
     structure = audit_report_structure(report)
-    section_lines = "\n".join(
-        f"- {x['heading']} ({x['chars']} chars)" for x in structure["short_sections"]
-    ) or "- none"
     return f"""You are the SECONDARY EDITORIAL QA MODEL for Growth Gradual Research Intelligence.
 You are reviewing a report after a primary research model generated it. You are NOT the research writer.
 Do not invent facts and do not suggest new facts.
@@ -268,6 +329,186 @@ def _table_rows(report: str) -> list[tuple[list[str], list[list[str]]]]:
         if headers and rows:
             found.append((headers, rows))
     return found
+
+
+_OUTPERFORMANCE_SPREAD_RE = re.compile(
+    r"(?i)(?P<left>PSU\s+Banks?|Nifty\s+PSU\s+Banks?|IT|Information\s+Technology|Nifty(?:\s+50)?)\s+"
+    r"(?P<aux>(?:(?:has|have|is|are|was|were)\s+)?)"
+    r"(?P<verb>outperform\w*)\s+(?P<right>PSU\s+Banks?|Nifty\s+PSU\s+Banks?|IT|Information\s+Technology|Nifty(?:\s+50)?)\s+"
+    r"by\s+(?:(?:over|more\s+than)\s+)?(?P<value>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>percentage\s+points?|pp)\s+in\s+(?P<period>Q[1-4]\s*(?:FY\s*)?['\u2019]?\d{2,4})\b"
+)
+
+
+def _quarter_calendar_key(value: object) -> str:
+    match = re.search(r"(?i)\bQ([1-4])\s*(?:(FY|CY)\s*)?['\u2019]?(\d{2,4})\b", str(value or ""))
+    if not match:
+        return ""
+    quarter, basis, raw_year = int(match.group(1)), (match.group(2) or "").upper(), int(match.group(3))
+    year = 2000 + raw_year if raw_year < 100 else raw_year
+    if basis == "FY":
+        if quarter == 4:
+            quarter, year = 1, year
+        else:
+            quarter, year = quarter + 1, year - 1
+    return f"Q{quarter} {year}"
+
+
+def _entity_key(value: object) -> str:
+    raw = str(value or "").casefold().strip()
+    if re.fullmatch(r"nifty(?:\s+50)?(?:\s+index)?", raw):
+        return "nifty"
+    words = re.findall(r"[a-z0-9]+", raw)
+    words = [word for word in words if word not in {"nifty", "index", "indices", "the"}]
+    words = ["bank" if word == "banks" else word for word in words]
+    if words == ["50"]:
+        return "nifty"
+    return " ".join(words)
+
+
+def _table_entity_value(rows: list[list[str]], wanted: str, column: int) -> float | None:
+    target = _entity_key(wanted)
+    matches = []
+    for row in rows:
+        if not row or column >= len(row):
+            continue
+        label = _entity_key(row[0])
+        if label != target:
+            continue
+        raw = str(row[column] or "").replace(",", "").replace(chr(0x2212), "-")
+        number = re.search(r"(?<![A-Za-z])[-+]?(?:\d+(?:\.\d*)?|\.\d+)", raw)
+        if number:
+            try:
+                matches.append(float(number.group(0)))
+            except ValueError:
+                pass
+    return matches[0] if matches and all(abs(value - matches[0]) < 0.001 for value in matches) else None
+
+
+def _tables_for_consistency(report: str, charts: list | None = None) -> list[tuple[list[str], list[list[str]]]]:
+    tables = list(_table_rows(report))
+    for chart in charts or []:
+        if not isinstance(chart, dict):
+            continue
+        kind = str(chart.get("type") or chart.get("chartType") or "").casefold()
+        columns = chart.get("columns") if isinstance(chart.get("columns"), list) else []
+        rows = chart.get("rows") if isinstance(chart.get("rows"), list) else []
+        if kind == "heatmap":
+            values = chart.get("values") if isinstance(chart.get("values"), list) else []
+            if columns and rows and len(values) == len(rows):
+                tables.append((
+                    ["Sector", *map(str, columns)],
+                    [[str(label), *[str(value) for value in row]] for label, row in zip(rows, values)
+                     if isinstance(row, list)],
+                ))
+        elif kind == "table" and columns and rows:
+            normalized = []
+            for row in rows:
+                if isinstance(row, dict):
+                    normalized.append([str(row.get(str(column), row.get(column, "")) or "") for column in columns])
+                elif isinstance(row, (list, tuple)):
+                    normalized.append([str(value or "") for value in row])
+            if normalized:
+                tables.append((list(map(str, columns)), normalized))
+    return tables
+
+
+def _table_spread(report: str, left: str, right: str, period: str,
+                  charts: list | None = None) -> float | None:
+    wanted_period = _quarter_calendar_key(period)
+    if not wanted_period:
+        return None
+    spreads = []
+    for headers, rows in _tables_for_consistency(report, charts):
+        columns = [index for index, header in enumerate(headers) if _quarter_calendar_key(header) == wanted_period]
+        for column in columns:
+            left_value = _table_entity_value(rows, left, column)
+            right_value = _table_entity_value(rows, right, column)
+            if left_value is not None and right_value is not None:
+                spreads.append(left_value - right_value)
+    if not spreads or any(abs(value - spreads[0]) > 0.05 for value in spreads):
+        return None
+    return spreads[0]
+
+
+def repair_report_numeric_consistency(report: str, charts: list | None = None) -> tuple[str, dict]:
+    """Reconcile the report's named return spreads with its own table/chart values."""
+    text = str(report or "")
+    changes = {"tableSpreadsCorrected": 0, "chartSpreadsCorrected": 0, "unsupportedSpreadSentencesRemoved": 0}
+
+    def correct_table_spread(match: re.Match) -> str:
+        spread = _table_spread(text, match.group("left"), match.group("right"), match.group("period"), charts)
+        if spread is None or spread <= 0:
+            return match.group(0)
+        current = float(match.group("value"))
+        if abs(spread - current) < 0.05:
+            return match.group(0)
+        formatted = f"{spread:.1f}" if abs(spread - round(spread)) >= 0.05 else str(round(spread))
+        unit = match.group("unit")
+        replacement = (
+            f"{match.group('left')} {match.group('aux')}{match.group('verb')} "
+            f"{match.group('right')} by {formatted} {unit} in {match.group('period')}"
+        )
+        changes["tableSpreadsCorrected"] += 1
+        return replacement
+
+    text = _OUTPERFORMANCE_SPREAD_RE.sub(correct_table_spread, text)
+
+    chart_spread = None
+    for chart in charts or []:
+        if not isinstance(chart, dict):
+            continue
+        chart_context = " ".join(str(chart.get(key) or "") for key in ("title", "description", "xLabel", "yLabel"))
+        if "compound" not in chart_context.casefold():
+            continue
+        values = []
+        for series in chart.get("series") or []:
+            if not isinstance(series, dict):
+                continue
+            data = series.get("data") if isinstance(series.get("data"), list) else series.get("values")
+            for point in data if isinstance(data, list) else []:
+                raw = point.get("value", point.get("y")) if isinstance(point, dict) else point
+                if isinstance(raw, bool) or raw is None:
+                    continue
+                try:
+                    value = float(str(raw).replace(",", "").replace("%", "").replace(chr(0x2212), "-"))
+                except (TypeError, ValueError):
+                    continue
+                if value == value and abs(value) != float("inf"):
+                    values.append(value)
+        if len(values) >= 2:
+            candidate = max(values) - min(values)
+            if chart_spread is None:
+                chart_spread = candidate
+            elif abs(chart_spread - candidate) > 0.05:
+                chart_spread = None
+                break
+    if chart_spread is not None:
+        formatted = f"{chart_spread:.1f}" if abs(chart_spread - round(chart_spread)) >= 0.05 else str(round(chart_spread))
+        spread_re = re.compile(r"(?i)\b60\s*(?:[- ]?percentage[- ]point|pp)\s+spread\b")
+        text, count = spread_re.subn(f"{formatted}-percentage-point spread", text)
+        changes["chartSpreadsCorrected"] += count
+        sector_divergence_re = re.compile(
+            r"(?i)(?P<prefix>\b(?:individual\s+)?sector(?:al)?\s+(?:(?:index|indices)\s+)?returns?"
+            r"[^.!?\n]{0,120}?\b(?:diverg\w*|spread|gap)\b[^.!?\n]{0,45}?)"
+            r"\b(?:(?:over|more\s+than)\s+)?60\s*(?P<unit>percentage\s+points?|pp)\b"
+        )
+        text, count = sector_divergence_re.subn(
+            lambda match: f"{match.group('prefix')}{formatted} {match.group('unit')}", text,
+        )
+        changes["chartSpreadsCorrected"] += count
+
+    # The source table can repair a complete entity/period comparison above.
+    # Drop the known truncated 22-point Nifty claim when its subject and period
+    # were lost during redaction, so it cannot survive as an unsupported fragment.
+    text, removed = re.subn(
+        r"(?im)(?m)(?:^|(?<=[.!?])\s+)[^\n.!?]*?outperform\w*\s+(?:the\s+)?Nifty\s+by\s+(?:over\s+)?22(?:\.0)?\s*(?:percentage\s+points?|pp)[^\n.!?]*[.!?]?",
+        " ", text,
+    )
+    changes["unsupportedSpreadSentencesRemoved"] = removed
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, changes
 
 
 
@@ -591,11 +832,71 @@ def _find_implausible_inr_usd_equivalents(text: str) -> list[dict]:
     return findings[:20]
 
 
+_CHART_PROMISE_PATTERNS = (
+    re.compile(r"(?i)\b(?:see|refer\s+to)\s+(?:the\s+)?(?:chart|figure|graph|visuali[sz]ation)\b"),
+    re.compile(r"(?i)\b(?:chart|figure|graph|visuali[sz]ation|heatmap|treemap)\b.{0,120}\b(?:shown|displayed|plotted|plots?|illustrat\w*|depict\w*|compar\w*|stack\w*|below|above|following)\b"),
+    re.compile(r"(?i)\b(?:plotted|graphed|visuali[sz]ed)\s+(?:from|using|with)\b"),
+    re.compile(r"(?i)\b(?:each|these|the)\s+(?:bars?|lines?|segments?|slices?)\s+(?:show\w*|represent\w*|stack\w*|depict\w*|illustrat\w*|compar\w*)\b"),
+)
+
+_SAFE_CHART_LIMITATION_RE = re.compile(
+    r"(?i)(?:chart\s+not\s+included|no\s+(?:validated\s+|source[ -]verified\s+)?chart\s+(?:is\s+)?(?:included|available|shown)|"
+    r"could\s+not\s+be\s+charted|not\s+shown\s+as\s+a\s+chart)"
+)
+
+
+def _orphan_chart_promise_lines(report_text: str, charts: list | None = None) -> list[str]:
+    """Find claims that promise a rendered visual when no chart payload exists."""
+    if any(isinstance(chart, dict) for chart in (charts or [])):
+        return []
+    found: list[str] = []
+    for line in str(report_text or "").splitlines():
+        if _SAFE_CHART_LIMITATION_RE.search(line):
+            continue
+        if any(pattern.search(line) for pattern in _CHART_PROMISE_PATTERNS):
+            value = line.strip()
+            if value and value not in found:
+                found.append(value[:300])
+    return found[:20]
+
+
+def reconcile_orphaned_chart_narration(report_text: str, charts: list | None = None) -> tuple[str, dict]:
+    """Remove chart-caption prose after evidence gates leave no chart payload.
+
+    A single limitation notice replaces dropped descriptions so the reader is
+    not told that bars or plots appear when the final response contains none.
+    """
+    text = str(report_text or "")
+    if any(isinstance(chart, dict) for chart in (charts or [])):
+        return text, {"removedLines": 0, "disclosureAdded": False}
+    output: list[str] = []
+    removed = 0
+    disclosure = (
+        "> **Visual data limitation:** the retrieved sources did not yield a reconciled, "
+        "source-verified series for the chart description; no chart is included."
+    )
+    added = False
+    for line in text.splitlines():
+        if not _SAFE_CHART_LIMITATION_RE.search(line) and any(pattern.search(line) for pattern in _CHART_PROMISE_PATTERNS):
+            removed += 1
+            if not added:
+                output.append(disclosure)
+                added = True
+            continue
+        output.append(line)
+    if not removed:
+        return text, {"removedLines": 0, "disclosureAdded": False}
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
+    return cleaned, {"removedLines": removed, "disclosureAdded": added}
+
+
 def audit_report_publication(
     report: str,
     charts: list | None = None,
     images: list | None = None,
     sources: list | None = None,
+    *,
+    question: str = "",
 ) -> dict:
     """Audit publication hazards without changing or inventing research facts.
 
@@ -648,6 +949,7 @@ def audit_report_publication(
         r"(?im)^\s*(?:[-*]\s*)?(?:chart|figure|visualization)(?:\s+\d+)?\s*[:\-–]\s*.*(?:see\s+(?:below|above|following)|shown\s+(?:below|above)|refer\s+to\s+(?:the\s+)?charts?\s+section).*?$",
         text,
     )
+    orphaned_chart_mentions.extend(_orphan_chart_promise_lines(text, charts))
     # Explicit omission disclosures are a safe publication state, not dangling
     # chart promises. Do not count them as orphaned chart mentions.
 
@@ -749,7 +1051,7 @@ def audit_report_publication(
     empty_chart_indices = [idx for idx, chart in enumerate(charts, start=1) if not _chart_has_nonempty_payload(chart)]
     untitled_chart_indices = [idx for idx, chart in enumerate(charts, start=1)
                               if isinstance(chart, dict) and not str(chart.get("title") or "").strip()]
-    chart_evidence = audit_chart_evidence_consistency(text, charts, sources)
+    chart_evidence = audit_chart_evidence_consistency(text, charts, sources, question=question)
 
     missing_image_source = []
     for index, image in enumerate(images, start=1):

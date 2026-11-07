@@ -49,8 +49,11 @@ async def test_gemini_audit_parses_structured_review(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gemini_audit_retries_rate_limit_and_falls_back(monkeypatch):
-    monkeypatch.setattr(report_mod, "get_gemini_keys", lambda: ["test-key"])
+    cooled = set()
+    monkeypatch.setattr(report_mod, "get_gemini_keys", lambda: ["test-key-a", "test-key-b"])
     monkeypatch.setattr(report_mod, "GEMINI_MODELS", ["model-a", "model-b"])
+    monkeypatch.setattr(report_mod, "mark_rate_limited", lambda key, _cooldown_ms: cooled.add(key))
+    monkeypatch.setattr(report_mod, "is_rate_limited", lambda key: key in cooled)
     calls = []
     class FakeResponse:
         def __init__(self, status): self.status_code = status; self.is_success = status == 200
@@ -61,7 +64,7 @@ async def test_gemini_audit_retries_rate_limit_and_falls_back(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *args): return False
         async def post(self, url, **kwargs):
-            calls.append(url)
+            calls.append((url, kwargs["headers"]["x-goog-api-key"]))
             return FakeResponse(429 if len(calls) == 1 else 200)
     monkeypatch.setattr(report_mod.httpx, "AsyncClient", FakeClient)
     result = await report_mod._gemini_independent_report_audit(
@@ -69,3 +72,4 @@ async def test_gemini_audit_retries_rate_limit_and_falls_back(monkeypatch):
         charts=[], images=[], sources=[])
     assert result["status"] == "PASS"
     assert len(calls) == 2
+    assert calls[0][1] != calls[1][1]

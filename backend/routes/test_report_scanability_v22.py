@@ -1,5 +1,3 @@
-import re
-
 import pytest
 import routes.report as report_module
 

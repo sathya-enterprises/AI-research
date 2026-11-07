@@ -1,5 +1,3 @@
-import pytest
-
 from routes import report as report_mod
 from utils.report_quality import audit_report_publication, reconcile_orphaned_chart_references, ensure_requested_chart_disclosure
 
@@ -16,14 +14,14 @@ def test_key_stats_accepts_expected_and_legacy_names_and_rejects_non_list():
     assert report_mod._normalise_report_key_stats(None) == []
 
 
-def test_orphan_chart_promise_is_replaced_after_chart_validation_drops_it():
+def test_orphan_chart_promise_is_replaced_and_disclosure_is_not_a_second_orphan():
     body = "## Digital Banking Evolution\n\nChart: Foreign Inflows (2025) as a proxy for digital banking impact — see below.\n\nThe sector is expected to continue digitising."
     result = reconcile_orphaned_chart_references(body, [])
     assert "see below" not in result.lower()
     assert "Chart not included" in result
     audit = audit_report_publication(result, charts=[], images=[], sources=[])
-    assert audit["orphanedChartMentions"]
-    assert "no matching validated structured chart" in " ".join(audit["flags"]).lower()
+    assert not audit["orphanedChartMentions"]
+    assert not any("chart references have no matching" in flag.lower() for flag in audit["flags"])
 
 
 def test_chart_reference_is_preserved_when_matching_structured_chart_exists():

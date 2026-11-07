@@ -7,8 +7,6 @@ Python path.
 from __future__ import annotations
 
 import json
-import hashlib
-import math
 import re
 import sys
 from pathlib import Path

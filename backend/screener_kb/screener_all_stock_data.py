@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import time
@@ -6,7 +5,6 @@ import random
 import logging
 import csv
 import shutil
-import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

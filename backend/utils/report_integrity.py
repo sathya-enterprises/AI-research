@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
 from urllib.parse import urlparse
 
 _NOTE_TABLE = (

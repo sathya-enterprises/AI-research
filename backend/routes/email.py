@@ -107,9 +107,9 @@ def _md_to_html(md: str) -> str:
     table_rows: list[list[str]] = []
 
     def flush_table():
-        nonlocal in_table, table_rows
+        nonlocal in_table
         if not table_rows: return ""
-        h = [f'<table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;">']
+        h = ['<table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;">']
         for ri, row in enumerate(table_rows):
             tag = "th" if ri == 0 else "td"
             bg  = NAVY if ri == 0 else ("#f8f9ff" if ri % 2 == 0 else "white")
@@ -145,7 +145,7 @@ def _md_to_html(md: str) -> str:
             in_table = True; table_rows.append([inline(c) for c in cells]); i += 1; continue
         if in_table: out.append(flush_table())
         if _re.match(r"^[-*_]{3,}$", s):
-            out.append(f'<hr style="border:none;border-top:1px solid #dde3f5;margin:16px 0;">'); i += 1; continue
+            out.append('<hr style="border:none;border-top:1px solid #dde3f5;margin:16px 0;">'); i += 1; continue
         m = _re.match(r"^(#{1,6})\s+(.*)", s)
         if m:
             if in_ul: out.append("</ul>"); in_ul = False

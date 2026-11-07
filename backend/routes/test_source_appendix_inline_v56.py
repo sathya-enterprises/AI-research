@@ -12,8 +12,9 @@ def test_sources_appendix_is_a_compact_numbered_link_list():
 
     assert 'class="gg-source-list"' in rendered
     assert 'id="source-S1"' in rendered and 'id="source-S2"' in rendered
-    assert '<span class="gg-source-title-text">First source title</span> (<a' in rendered
-    assert '<a class="gg-source-link" href="https://example.com/first"' in rendered
+    assert '<span class="gg-source-title-text">First source title</span> ' in rendered
+    assert '<a class="gg-source-link gg-source-url-only" href="https://example.com/first"' in rendered
+    assert 'https://example.com/first</a>' in rendered
     assert rendered.count('class="gg-source-line"') == 2
     assert "gg-source-provenance" not in rendered
     assert "verify the linked page" not in rendered.lower()

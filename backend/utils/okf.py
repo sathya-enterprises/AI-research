@@ -22,7 +22,7 @@ This module is used in two places:
                          OKF bundle (.zip) instead of a PDF.
   2. rag-service       — Paperly stores each indexed document (and a per-
                          session bundle manifest) as OKF concepts on disk,
-                         alongside the FAISS vector index, so the underlying
+                         alongside the pgvector store, so the underlying
                          file context is held in an open, inspectable format
                          rather than only living inside the vector store.
 """
@@ -245,7 +245,7 @@ def build_report_okf_bundle(
         dw = ch.get("datawrapper") or {}
         resource = dw.get("publicUrl") or dw.get("embedUrl") or dw.get("pngUrl") or ""
         series = ch.get("series") or []
-        body_lines = [f"[← Back to report](../report.md)", "", f"**Chart type:** {ch.get('type','')}"]
+        body_lines = ["[← Back to report](../report.md)", "", f"**Chart type:** {ch.get('type','')}"]
         if resource:
             body_lines.append(f"\n**Live chart:** [{resource}]({resource})")
         for s in series:
@@ -289,7 +289,7 @@ def build_report_okf_bundle(
         excerpt = (doc.get("text") or doc.get("extractedText") or "").strip()
         if len(excerpt) > 4000:
             excerpt = excerpt[:4000].rstrip() + "\n\n…[truncated — see original file]"
-        body_lines = [f"[← Back to report](../report.md)", ""]
+        body_lines = ["[← Back to report](../report.md)", ""]
         if doc.get("file_type"):
             body_lines.append(f"**File type:** {doc['file_type']}")
         if excerpt:

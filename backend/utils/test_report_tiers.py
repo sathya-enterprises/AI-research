@@ -1,28 +1,25 @@
 from utils.report_tiers import get_report_tier_spec, report_tier_contract
 
 
-def test_report_tiers_define_distinct_rendered_page_bands():
-    expected = {
-        "brief": (6, 8, 10),
-        "detailed": (25, 27, 30),
-        "in_depth": (70, 85, 100),
-    }
-    for tier, (minimum, target, maximum) in expected.items():
+def test_report_tiers_have_only_renderer_warning_caps_by_default():
+    expected_maxima = {"brief": 8, "detailed": 30, "in_depth": 100}
+    for tier, maximum in expected_maxima.items():
         page_target = get_report_tier_spec(tier).page_target
-        assert (page_target.minimum, page_target.target, page_target.maximum) == (minimum, target, maximum)
+        assert (page_target.minimum, page_target.target, page_target.maximum) == (None, None, maximum)
 
 
-def test_report_tier_contract_communicates_page_and_source_breadth():
+def test_report_tier_contract_communicates_pagination_policy_and_source_breadth():
     expected = {
-        "brief": ("6–10 pages", "8–12 distinct relevant sources"),
-        "detailed": ("25–30 pages", "20–30 distinct relevant sources"),
-        "in_depth": ("70–100 pages", "35–50 distinct relevant sources"),
+        "brief": ("8 pages", "8–12 distinct relevant sources"),
+        "detailed": ("30 pages", "20–30 distinct relevant sources"),
+        "in_depth": ("100 pages", "35–50 distinct relevant sources"),
     }
-    for tier, (page_band, source_band) in expected.items():
+    for tier, (warning_cap, source_band) in expected.items():
         contract = report_tier_contract(tier)
-        assert page_band in contract
+        assert warning_cap in contract
         assert source_band in contract
-        assert "page band" in contract.lower()
+        assert "warning threshold" in contract.lower()
+        assert "Do not target a page, word, or character count" in contract
 
 
 def test_report_tier_contract_is_authoritative():
@@ -40,7 +37,7 @@ def test_unknown_tier_defaults_to_detailed():
 def test_tier_contracts_keep_dynamic_structure_and_evidence_driven_visuals():
     for tier in ("brief", "detailed", "in_depth"):
         contract = report_tier_contract(tier)
-        assert "RENDERED PAGE BAND:" in contract
+        assert "RENDERED PAGE BAND:" not in contract
         assert "Structure: choose the actual headings" in contract
         assert "Visualizations: include when they communicate evidence more clearly" in contract
 
@@ -50,3 +47,13 @@ def test_chart_density_profiles_match_each_report_tier():
         contract = report_tier_contract(tier)
         assert f"CHART GUIDANCE: {label}" in contract
         assert "there is no minimum point count or visual quota" in contract
+
+
+def test_requested_report_page_count_detects_explicit_target_only():
+    from utils.report_tiers import requested_report_page_count
+
+    assert requested_report_page_count("Please prepare a 100 page report on FPI flows") == 100
+    assert requested_report_page_count("Make a report of approximately 70 pages") == 70
+    assert requested_report_page_count("Review the last 10 years of FPI flows") is None
+    assert requested_report_page_count("Write a report", 100) == 100
+    assert requested_report_page_count("Write a report", 101) is None

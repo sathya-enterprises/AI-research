@@ -242,7 +242,9 @@ def test_bullet_chart_print_svg_preserves_horizontal_value_scale_and_target_tick
     assert "Capacity (GW)" in bullet_svg
     assert "May 2026 Base" in bullet_svg and "2030 Accelerated Target" in bullet_svg
     assert "230.8 / 500 GW" in bullet_svg and "410 / 500 GW" in bullet_svg
-    assert "540</text>" in bullet_svg
+    # The SVG auto-picks readable tick intervals; it should fit the max input
+    # and visibly label the target instead of requiring a tick at exactly 540.
+    assert "500 / 500 GW" in bullet_svg
     assert "Scale</text>" not in bullet_svg  # hidden legend stays hidden in print
     assert bullet_svg.count('stroke="#243746"') == 3
 

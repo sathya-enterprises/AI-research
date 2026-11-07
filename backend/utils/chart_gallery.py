@@ -23,7 +23,7 @@ import os
 import re
 import statistics
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from utils.chart_catalog import CHART_TYPE_ALIASES, CHART_TYPES, normalize_chart_type
 from utils.evidence_dataset import EvidenceDataset, Observation, _metric_in, period_date_range
@@ -140,7 +140,7 @@ def mode_env_off() -> bool:
     return os.getenv("REPORT_CHART_GALLERY", "all").strip().casefold() in {"off", "0", "false", "none"}
 
 
-def gallery_types_for(question: str, report_tier: str = "detailed") -> list[str]:
+def gallery_types_for(question: str, report_tier: str = "detailed", planned_types: list[str] | None = None) -> list[str]:
     """Resolve which chart types to attempt.
 
     Explicit catalog requests can exercise all 50 types. Ordinary research
@@ -159,14 +159,27 @@ def gallery_types_for(question: str, report_tier: str = "detailed") -> list[str]
             return list(GALLERY_ORDER)
         if mode_env_off():
             return named
-        return list(dict.fromkeys(named + CORE_TYPES)) if named else list(GALLERY_ORDER)
+        return named if named else list(GALLERY_ORDER)
     mode = os.getenv("REPORT_CHART_GALLERY", "all").strip().casefold()
     if mode in {"off", "0", "false", "none"}:
         return named
+    # When the evidence planner has run, its needs are the complete candidate
+    # set for this request. Do not widen a one-chart plan into a generic domain
+    # gallery: builders can otherwise find unrelated historical rows in the
+    # same corpus and make them look like requested visuals.
+    if named:
+        return named
+    if planned_types is not None:
+        planned = list(dict.fromkeys(
+            normalized for value in planned_types
+            if (normalized := normalize_chart_type(value)) in GALLERY_ORDER
+        ))
+        return planned
     # Default chart selection is domain-aware. The full 50-type catalog remains
     # available when explicitly requested, but should not create fake violin,
     # funnel, network or KPI charts from unrelated numeric fields.
     q = str(question or "").casefold()
+    domain_branch = True
     if any(term in q for term in (
         "banking sector", "scheduled commercial bank", "bank credit", "deposit growth",
         "gross npa", "net npa", "digital banking", "indian banks", "credit growth",
@@ -184,14 +197,17 @@ def gallery_types_for(question: str, report_tier: str = "detailed") -> list[str]
         domain_types = ["bar", "horizontal_bar", "grouped_bar", "stacked_bar", "line", "area", "heatmap",
                         "scatter", "timeline"]
     elif mode in {"all", "full", "catalog", "catalogue"}:
+        domain_branch = False
         # Permit an explicit generic all-catalogue mode for catalogue/gallery
         # tests and deliberate inventory requests. Domain-specific branches above
         # remain narrowly scoped even when this mode is enabled.
         domain_types = list(GALLERY_ORDER)
     elif mode == "core":
+        domain_branch = False
         domain_types = CORE_TYPES
     else:
         # Unknown modes fall back to the stable core set.
+        domain_branch = False
         domain_types = CORE_TYPES
     return list(dict.fromkeys(named + domain_types))
 
@@ -730,6 +746,7 @@ class _Builder:
                               note="cell values are reported percentages" if basis == "reported" else "each column rescaled 0–100 across entities")
             chart["rows"] = [self.ds.entity_display(k) for k in entities]
             chart["columns"] = [self.label(m) for m in chosen]
+            chart["columnMetricKeys"] = list(chosen)
             chart["values"] = values
             if basis == "derived":
                 chart["derivedFrom"] = self.derived_inputs(obs_all)
@@ -1418,7 +1435,11 @@ def _tables_markdown(ds: EvidenceDataset, max_metrics: int = 40) -> str:
 def build_chart_gallery(ds: EvidenceDataset, question: str, *, types: list[str] | None = None,
                         validator: Callable[[dict], bool] | None = None,
                         normalizer: Callable[[dict], dict] | None = None,
-                        extra: dict | None = None) -> GalleryResult:
+                        extra: dict | None = None,
+                        report_tier: str | None = None) -> GalleryResult:
+    # The tier is accepted for call-site compatibility and future density
+    # tuning; extracted evidence and chart validation remain tier-independent.
+    del report_tier
     result = GalleryResult(observation_count=len(ds))
     wanted = [normalize_chart_type(t) for t in (types or GALLERY_ORDER)]
     wanted = [t for t in dict.fromkeys(wanted) if t in CHART_TYPES and t not in {"table", "arrow"}]
@@ -1459,6 +1480,47 @@ def build_chart_gallery(ds: EvidenceDataset, question: str, *, types: list[str] 
                 continue
         item.chart = chart
         built[ctype] = item
+    if re.search(r"\b(?:promoter|pledge|stake\s+sale|stake\s+sales|bulk\s+deal|block\s+deal)\b", str(question or ""), re.I):
+        # One-off disclosure events rarely share the same reporting period.
+        # Compare their explicitly dated observations as events instead of
+        # discarding them through the financial-series same-period gate.
+        event_metrics = (
+            ("transaction_value", "bar", "Promoter transaction value by company"),
+            ("shares_sold", "horizontal_bar", "Promoter shares sold by company"),
+            ("stake_sold_pct", "dot_plot", "Promoter stake sold by company"),
+        )
+        for metric, ctype, title in event_metrics:
+            if ctype not in wanted:
+                continue
+            observations = [o for o in ds.observations if o.metric == metric and o.unit and not o.suspect]
+            if len({o.entity_key for o in observations}) < 2:
+                continue
+            unit = ds.metric_unit(metric)
+            observations = [o for o in observations if o.unit == unit]
+            data = []
+            for obs in sorted(observations, key=lambda o: (o.period_sort, o.entity.casefold())):
+                label = f"{obs.entity} ({obs.period})" if obs.period else obs.entity
+                quoted_value = obs.value
+                if metric == "shares_sold":
+                    raw_number = re.search(r"\d[\d,]*(?:\.\d+)?", str(obs.raw_value or ""))
+                    if raw_number:
+                        quoted_value = float(raw_number.group(0).replace(",", ""))
+                data.append({
+                    "label": label, "value": obs.value,
+                    "evidenceSource": obs.source_id, "evidenceValue": quoted_value,
+                    "evidenceQuote": obs.quote,
+                })
+            if len(data) < 2:
+                continue
+            chart = {
+                "type": ctype, "title": title, "unit": unit,
+                "xLabel": "Company and transaction date", "yLabel": ds.metric_label(metric),
+                "source": sorted({obs.source_id for obs in observations}),
+                "series": [{"name": ds.metric_label(metric), "data": data}],
+                "evidenceBasis": "reported",
+                "basisNote": "Each point is an explicitly reported transaction observation; dates are kept with the company label.",
+            }
+            built[ctype] = GalleryChart(ctype, chart, chart["basisNote"], "reported")
     for _family, members in FAMILIES:
         for ctype in members:
             if ctype in built:
@@ -1530,7 +1592,26 @@ _REFERENCE_HEADING = re.compile(
 _LIMITS_HEADING = re.compile(r"\b(?:risks?|limitations?|caveats?)\b", re.I)
 _SUMMARY_HEADING = re.compile(r"\b(?:executive\s+summary|summary|overview|key\s+takeaways|highlights?)\b", re.I)
 _PROVENANCE_TYPES = {"gantt", "timeline", "sankey", "chord", "network", "tree", "flowchart", "venn"}
-_HEADLINE_TYPES = {"kpi", "gauge", "progress"}
+_ALIGNMENT_STOP_WORDS = {
+    "a", "an", "the", "this", "that", "and", "or", "of", "for", "from", "by", "vs", "versus",
+    "over", "in", "on", "to", "with", "across", "using", "show", "shown", "display", "displayed",
+    "chart", "graph", "figure", "data", "source", "sources", "reported", "selected", "completed",
+    "observation", "observations", "entity", "entities", "series", "value", "values", "metric", "metrics",
+    "indian", "india", "stock", "stocks", "market", "markets", "analysis", "analytical", "based",
+    "annual", "eight", "seven", "six", "five", "four", "three", "two", "one",
+}
+_ALIGNMENT_SYNONYMS = {
+    "sectoral": "sector", "sectors": "sector", "returns": "return", "returned": "return",
+    "performance": "return", "performances": "return", "indices": "index", "indexes": "index",
+    "quarterly": "quarter", "quarters": "quarter", "qtrs": "quarter", "monthly": "month",
+    "months": "month", "ranked": "rank", "rankings": "rank", "flows": "flow", "inflows": "flow",
+    "outflows": "flow", "investments": "investment", "institutional": "institution", "foreigners": "foreign",
+}
+_BROAD_ALIGNMENT_TERMS = {
+    "sector", "return", "index", "quarter", "month", "period", "year", "calendar", "complete",
+    "performance", "rank", "trend", "market", "stock", "data", "value", "observation", "series",
+    "nse", "nifty", "bse", "sensex",
+}
 # Topic vocabulary: a chart about one of these metrics belongs where the
 # report discusses the topic, even when the exact metric name is not repeated.
 _TOPIC_TERMS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
@@ -1542,20 +1623,63 @@ _TOPIC_TERMS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
     (("total assets", "asset", "branches"), ("total assets", "balance sheet", "scale", "size", "branch")),
     (("market cap", "p/e", "p/b", "price", "dividend", "valuation"), ("valuation", "market cap", "p/e", "multiple", "price", "dividend", "investor")),
     (("share", "promoter", "fii", "dii"), ("shareholding", "promoter", "institutional", "fii", "dii")),
+    (("fpi", "fii", "dii", "institutional flow", "net flow"), ("institution", "fpi", "fii", "dii", "flow", "investment", "liquidity")),
+    (("sector", "sectoral", "rotation"), ("sector", "rotation", "leadership", "industry")),
 ]
 
 
-def _chart_terms(chart: dict) -> set[str]:
-    parts = [str(chart.get("title") or ""), str(chart.get("xLabel") or ""), str(chart.get("yLabel") or "")]
-    for s in chart.get("series") or []:
-        if isinstance(s, dict):
-            parts.append(str(s.get("name") or ""))
-    parts += [str(c) for c in (chart.get("columns") or [])]
-    text = " ".join(parts).casefold()
+def _chart_text_parts(chart: dict) -> list[str]:
+    """Collect reader-facing chart labels without pulling in evidence prose."""
+    parts = [
+        str(chart.get(key) or "")
+        for key in ("title", "name", "xLabel", "yLabel", "unit", "metric", "metricLabel")
+    ]
+    for key in ("columns", "labels", "categories", "rowLabels", "columnLabels", "periods", "entities", "metrics"):
+        raw = chart.get(key)
+        if isinstance(raw, (list, tuple)):
+            parts.extend(str(item) for item in raw if isinstance(item, (str, int, float)))
+        elif isinstance(raw, str):
+            parts.append(raw)
+    for series in chart.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        parts.extend(str(series.get(key) or "") for key in ("name", "label", "metric", "entity"))
+        for point in series.get("data") or []:
+            if isinstance(point, dict):
+                parts.extend(str(point.get(key) or "") for key in ("label", "name", "entity", "metric", "period", "category"))
+            elif isinstance(point, (list, tuple)) and point:
+                parts.extend(str(item) for item in point[:-1] if isinstance(item, (str, int, float)))
+    for row in chart.get("rows") or []:
+        if isinstance(row, dict):
+            parts.extend(str(row.get(key) or "") for key in ("label", "name", "entity", "metric", "period", "category"))
+        elif isinstance(row, (list, tuple)):
+            parts.extend(str(item) for item in row if isinstance(item, str))
+    return [part for part in parts if part.strip()]
+
+
+def _alignment_terms(value: str) -> set[str]:
     terms: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
+        if token.isdigit() or token in _ALIGNMENT_STOP_WORDS:
+            continue
+        if len(token) < 3 and token not in {"it", "pe", "pb", "fpi", "fii", "dii", "npa"}:
+            continue
+        normalized = _ALIGNMENT_SYNONYMS.get(token, token)
+        terms.add(normalized)
+        if normalized.endswith("ies") and len(normalized) > 5:
+            terms.add(normalized[:-3] + "y")
+        elif normalized.endswith("s") and len(normalized) > 4:
+            terms.add(normalized[:-1])
+    return terms
+
+
+def _chart_terms(chart: dict) -> set[str]:
+    parts = _chart_text_parts(chart)
+    text = " ".join(parts).casefold()
+    terms = _alignment_terms(text)
     for triggers, vocab in _TOPIC_TERMS:
         if any(t in text for t in triggers):
-            terms.update(vocab)
+            terms.update(_alignment_terms(" ".join(vocab)))
     return terms
 
 
@@ -1638,20 +1762,151 @@ def _blocks(lines: list[str]) -> list[tuple[int, int, str]]:
     return out
 
 
+def _chart_section_alignment_score(chart: dict, heading: str, body: str, question: str = "") -> int:
+    """Score whether a section actually discusses this chart's measure/entities."""
+    chart_terms = _chart_terms(chart)
+    if not chart_terms:
+        return 0
+    heading_terms = _alignment_terms(heading)
+    body_terms = _alignment_terms(body)
+    section_terms = heading_terms | body_terms
+    heading_hits = chart_terms & heading_terms
+    body_hits = chart_terms & body_terms
+    specific_terms = chart_terms - _BROAD_ALIGNMENT_TERMS
+    specific_hits = specific_terms & section_terms
+    title_terms = _alignment_terms(str(chart.get("title") or chart.get("name") or ""))
+    title_overlap = len(title_terms & section_terms)
+
+    # Shared words such as "sector", "return" and "quarter" establish a
+    # broad topic. Require a second topic/entity cue or multiple title terms
+    # before placing a chart so generic vocabulary cannot scatter it randomly.
+    has_direct_match = bool(specific_hits) or title_overlap >= 2 or len(heading_hits) >= 3
+    if not has_direct_match:
+        return 0
+    score = (
+        7 * len(heading_hits)
+        + 2 * len(body_hits)
+        + 5 * len(specific_terms & heading_terms)
+        + 3 * len(specific_terms & body_terms)
+        + 3 * title_overlap
+    )
+    question_terms = _alignment_terms(question) - _BROAD_ALIGNMENT_TERMS
+    if question_terms:
+        score += 2 * min(3, len(chart_terms & question_terms))
+    return score
+
+
+def _gallery_takeaway(chart: dict, chart_type: str, caption: str) -> str:
+    """Give an inline evidence chart a concise, data-derived reading cue."""
+    current = str(chart.get("takeaway") or "").strip()
+    generic = "The figure makes the key comparison, trend, threshold, or distribution visible without relying on color alone."
+    if current and current != generic:
+        return current
+
+    unit = str(chart.get("unit") or "").strip()
+
+    def value_text(value: object) -> str:
+        try:
+            number = float(value)
+            rendered = f"{number:,.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            rendered = str(value)
+        if not unit:
+            return rendered
+        return f"{rendered}{unit}" if unit in {"%", "x", "bps"} else f"{rendered} {unit}"
+
+    series_rows = [row for row in (chart.get("series") or []) if isinstance(row, dict)]
+    if chart_type in {"bar", "horizontal_bar", "dot_plot", "lollipop", "grouped_bar", "stacked_bar"}:
+        observations = []
+        for series in series_rows:
+            name = str(series.get("name") or "")
+            data = series.get("data") or series.get("values") or []
+            for point in data:
+                if not isinstance(point, dict):
+                    continue
+                value = next((point[key] for key in ("value", "y", "amount") if key in point), None)
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                label = str(next((point[key] for key in ("label", "name", "category", "period") if point.get(key) is not None), "Observation"))
+                observations.append((numeric, label, name, value))
+        if len(observations) >= 2:
+            high = max(observations, key=lambda row: row[0])
+            low = min(observations, key=lambda row: row[0])
+            high_label = f"{high[1]} ({high[2]})" if high[2] and len(series_rows) > 1 else high[1]
+            low_label = f"{low[1]} ({low[2]})" if low[2] and len(series_rows) > 1 else low[1]
+            insight = (
+                f"{high_label} is highest among the displayed observations at {value_text(high[3])}; "
+                f"{low_label} is lowest at {value_text(low[3])}."
+            )
+            return f"{insight} {caption}".strip()
+
+    if chart_type in {"line", "area", "timeline"}:
+        for series in series_rows:
+            data = series.get("data") or series.get("values") or []
+            observations = []
+            for point in data:
+                if not isinstance(point, dict):
+                    continue
+                value = next((point[key] for key in ("value", "y", "amount") if key in point), None)
+                try:
+                    float(value)
+                except (TypeError, ValueError):
+                    continue
+                label = str(next((point[key] for key in ("label", "period", "date", "x") if point.get(key) is not None), ""))
+                observations.append((label, value))
+            if len(observations) >= 2:
+                first_label, first_value = observations[0]
+                last_label, last_value = observations[-1]
+                name = str(series.get("name") or "The series")
+                insight = (
+                    f"{name} moved from {value_text(first_value)}"
+                    f"{f' in {first_label}' if first_label else ''} to {value_text(last_value)}"
+                    f"{f' in {last_label}' if last_label else ''}."
+                )
+                return f"{insight} {caption}".strip()
+
+    if chart_type == "heatmap":
+        rows = chart.get("rows") if isinstance(chart.get("rows"), list) else []
+        columns = chart.get("columns") if isinstance(chart.get("columns"), list) else []
+        values = chart.get("values") if isinstance(chart.get("values"), list) else []
+        cells = []
+        for row_index, row in enumerate(values):
+            if not isinstance(row, list):
+                continue
+            for column_index, value in enumerate(row):
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                row_label = str(rows[row_index]) if row_index < len(rows) else "Entity"
+                column_label = str(columns[column_index]) if column_index < len(columns) else "Period"
+                cells.append((numeric, row_label, column_label, value))
+        if len(cells) >= 2:
+            high = max(cells, key=lambda row: row[0])
+            low = min(cells, key=lambda row: row[0])
+            insight = (
+                f"The strongest displayed cell is {high[1]} in {high[2]} at {value_text(high[3])}; "
+                f"the weakest is {low[1]} in {low[2]} at {value_text(low[3])}."
+            )
+            return f"{insight} {caption}".strip()
+
+    return caption or current
+
+
 def blend_gallery_into_report(report_text: str, result: GalleryResult, first_chart_index: int,
-                              max_per_section: int = 3) -> tuple[str, list[dict]]:
+                              max_per_section: int = 3, question: str = "") -> tuple[str, list[dict]]:
     """Place each gallery chart inside the section that discusses its metric.
 
     No standalone charts section is created. Analytical charts go after the
-    paragraph in the best-matching section; headline indicators join the
-    executive summary; evidence-provenance diagrams and the chart-coverage note
-    go to Methodology/Appendix (or the limitations section).
+    paragraph in the best-matching section; unmatched charts are omitted rather
+    than spread into an unrelated section.
     """
     text = str(report_text or "").rstrip()
     chunks = _split_chunks(text)
     kinds = [_chunk_kind(c) for c in chunks]
     analytic = [i for i, k in enumerate(kinds) if k == "analysis"]
-    summary = next((i for i, k in enumerate(kinds) if k == "summary"), None)
     reference = next((i for i, k in enumerate(kinds) if k == "reference" and re.search(r"methodology|appendix|notes?", chunks[i]["heading"], re.I)), None)
     limits = next((i for i, k in enumerate(kinds) if k == "limits"), None)
     if not analytic:
@@ -1660,14 +1915,16 @@ def blend_gallery_into_report(report_text: str, result: GalleryResult, first_cha
 
     placements: dict[int, list[tuple[GalleryChart, int]]] = {}
     load: dict[int, int] = {}
-    rr = 0
+    unmatched: list[str] = []
     for item in result.charts:
-        if item.type in _PROVENANCE_TYPES:
+        chart_title = str(item.chart.get("title") or item.chart.get("name") or "")
+        is_provenance = item.type in _PROVENANCE_TYPES and bool(re.search(
+            r"(?i)source coverage|evidence provenance|source provenance|retrieval coverage|data availability",
+            chart_title,
+        ))
+        if is_provenance:
             target = home_for_meta
-        elif item.type in _HEADLINE_TYPES and summary is not None:
-            target = summary
         else:
-            terms = _chart_terms(item.chart)
             scored = []
             topic_hint = _chart_topic_hint(item.chart)
             for idx in analytic:
@@ -1677,7 +1934,10 @@ def blend_gallery_into_report(report_text: str, result: GalleryResult, first_cha
                 # narrative paragraphs. Without this bias, a deposit/loan-ratio
                 # subsection can attract several deposit charts while the actual
                 # credit-growth subsection receives none.
-                score = sum(10 * min(1, heading.count(t)) + min(2, body.count(t)) for t in terms)
+                # Place by what the report actually discusses, not by a shared
+                # term in the user's question. Query overlap alone can make a
+                # chart look relevant to every section in a broad report.
+                score = _chart_section_alignment_score(item.chart, heading, body, "")
                 if topic_hint == "deposits":
                     if re.search(r"\b(?:deposit composition|deposit growth|deposit expansion|deposit dynamics|funding|liabilit)\w*\b", heading):
                         score += 24
@@ -1697,17 +1957,14 @@ def blend_gallery_into_report(report_text: str, result: GalleryResult, first_cha
                     score += 28
                 elif topic_hint == "capital" and re.search(r"capital adequacy|capital structure|capital buffer|crar|cet", heading):
                     score += 28
-                scored.append((score, -idx, idx))
+                load_penalty = 3 * max(0, load.get(idx, 0) - max_per_section + 1)
+                scored.append((score - load_penalty, score, -idx, idx))
             scored.sort(reverse=True)
-            target = None
-            for score, _neg, idx in scored:
-                if score > 0 and load.get(idx, 0) < max_per_section:
-                    target = idx
-                    break
-            if target is None:  # nothing topical: spread across analytic sections
-                ordered = sorted(analytic, key=lambda i: load.get(i, 0))
-                target = ordered[rr % len(ordered)] if ordered else analytic[0]
-                rr += 1
+            best = next((row for row in scored if row[1] >= 12), None)
+            if best is None:
+                unmatched.append(chart_title[:120] or item.type)
+                continue
+            target = best[3]
         load[target] = load.get(target, 0) + 1
         placements.setdefault(target, []).append((item, 0))
 
@@ -1722,17 +1979,38 @@ def blend_gallery_into_report(report_text: str, result: GalleryResult, first_cha
             inserts: dict[int, list[str]] = {}
             used: dict[int, int] = {}
             for item, _ in items:
-                terms = _chart_terms(item.chart)
-                anchor = len(lines)
-                if blocks:
-                    # Prefer the paragraph that discusses the metric, but spread
-                    # several charts over different paragraphs when possible.
-                    best = max(blocks, key=lambda b: (
-                        sum("\n".join(lines[b[0]:b[1]]).casefold().count(t) for t in terms) - 3 * used.get(b[1], 0), -b[0]))
-                    anchor = best[1]
-                    used[anchor] = used.get(anchor, 0) + 1
+                # A section can match because its keywords are scattered across
+                # several paragraphs. Require one nearby paragraph or table to
+                # discuss the chart before attaching it; otherwise it reads as
+                # a pasted-on visual and is omitted.
+                anchors = []
+                for block_start, block_end, _kind in blocks:
+                    # The chart needs a specific nearby explanation. Do not let
+                    # broad query terms make an unrelated paragraph pass this
+                    # final placement check.
+                    base_score = _chart_section_alignment_score(
+                        item.chart, "", "\n".join(lines[block_start:block_end]), "",
+                    )
+                    anchors.append((
+                        base_score - 3 * used.get(block_end, 0),
+                        base_score,
+                        -block_start,
+                        block_end,
+                    ))
+                anchors.sort(reverse=True)
+                best_anchor = next((row for row in anchors if row[1] >= 8), None)
+                if best_anchor is None:
+                    unmatched.append(str(item.chart.get("title") or item.type)[:120])
+                    load[ci] = max(0, load.get(ci, 1) - 1)
+                    continue
+                anchor = best_anchor[3]
+                used[anchor] = used.get(anchor, 0) + 1
+                if not item.chart.get("takeaway"):
+                    item.chart["takeaway"] = _gallery_takeaway(item.chart, item.type, item.caption)
+                elif item.chart.get("takeaway") == "The figure makes the key comparison, trend, threshold, or distribution visible without relying on color alone.":
+                    item.chart["takeaway"] = _gallery_takeaway(item.chart, item.type, item.caption)
                 charts.append(item.chart)
-                inserts.setdefault(anchor, []).extend(["", f"[CHART_{index}]", "", f"*{item.caption}*"])
+                inserts.setdefault(anchor, []).extend(["", f"[CHART_{index}]"])
                 index += 1
             rebuilt: list[str] = []
             for li, line in enumerate(lines + [""]):
@@ -1757,4 +2035,183 @@ def blend_gallery_into_report(report_text: str, result: GalleryResult, first_cha
 
     body = "\n".join("\n".join(lines) for lines in new_chunk_lines)
     body = re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"
+    if unmatched:
+        # These visuals remain absent from both the body and chart registry.
+        # A chart without a clear section and paragraph home would read as a
+        # pasted-on graphic.
+        import logging
+        logging.getLogger("report").info(
+            "Evidence chart gallery omitted %d chart(s) without a matching report section/paragraph: %s",
+            len(unmatched), unmatched[:8],
+        )
     return body, charts
+
+
+def cohere_chart_placements(
+    report_text: str,
+    charts: list | None,
+    *,
+    minimum_section_score: int = 12,
+    minimum_paragraph_score: int = 8,
+    minimum_global_paragraph_score: int = 14,
+) -> tuple[str, list[dict], dict]:
+    """Keep each chart beside prose that discusses its specific data.
+
+    This only moves or removes chart placeholders; it does not edit report
+    prose, headings, or chart data. A marker that precedes its matching caption
+    is moved below that caption. A chart with no matching section and paragraph
+    is omitted instead of being left under unrelated text.
+    """
+    text = str(report_text or "")
+    # The general Markdown normalizer puts visual tokens on their own lines,
+    # but compact provider output can still omit the blank separator that lets
+    # this module distinguish a chart block from its following caption.
+    text = re.sub(
+        r"(?m)^\s*(\[CHART_\d+\])\s*$",
+        lambda match: "\n" + match.group(1) + "\n",
+        text,
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    original_charts = list(charts or [])
+    if not original_charts:
+        return text, [], {"movedCharts": 0, "droppedCharts": 0, "movedTitles": [], "droppedTitles": []}
+
+    lines = text.splitlines()
+    chunks = _split_chunks(text)
+    chunk_by_line: dict[int, dict] = {}
+    for chunk in chunks:
+        for line_index in range(chunk["start"], chunk["start"] + len(chunk["lines"])):
+            chunk_by_line[line_index] = chunk
+
+    marker_line = re.compile(r"^\s*\[CHART_(\d+)\]\s*$", re.I)
+    occurrences: dict[int, list[int]] = {}
+    for line_index, line in enumerate(lines):
+        match = marker_line.match(line)
+        if match:
+            occurrences.setdefault(int(match.group(1)), []).append(line_index)
+
+    decisions: dict[int, tuple[str, int | None]] = {}
+    moved_titles: list[str] = []
+    dropped_titles: list[str] = []
+    duplicate_refs_removed = 0
+
+    for old_index, chart in enumerate(original_charts, start=1):
+        if not isinstance(chart, dict):
+            dropped_titles.append(f"Chart {old_index}")
+            continue
+        title = str(chart.get("title") or chart.get("name") or f"Chart {old_index}")
+        marker_positions = occurrences.get(old_index) or []
+        if not marker_positions:
+            dropped_titles.append(title[:120])
+            continue
+        duplicate_refs_removed += max(0, len(marker_positions) - 1)
+        marker_position = marker_positions[0]
+        current_chunk = chunk_by_line.get(marker_position)
+        target_after: int | None = None
+
+        if current_chunk is not None:
+            local_marker = marker_position - current_chunk["start"]
+            all_blocks = _blocks(current_chunk["lines"])
+            previous = next((block for block in reversed(all_blocks) if block[1] <= local_marker), None)
+            following = next((block for block in all_blocks if block[0] > local_marker), None)
+            section_score = _chart_section_alignment_score(chart, current_chunk["chain"], "", "")
+
+            def block_score(block: tuple[int, int, str] | None) -> int:
+                if block is None or block[2] not in {"para", "list", "table"}:
+                    return 0
+                body = "\n".join(current_chunk["lines"][block[0]:block[1]])
+                return _chart_section_alignment_score(chart, "", body, "")
+
+            previous_score = block_score(previous)
+            following_score = block_score(following)
+            if section_score >= minimum_section_score and previous_score >= minimum_paragraph_score:
+                decisions[old_index] = ("keep", marker_position)
+                continue
+            if section_score >= minimum_section_score and following_score >= minimum_paragraph_score and following is not None:
+                target_after = current_chunk["start"] + following[1] - 1
+
+        # If the marker is in the wrong section or has no nearby explanation,
+        # look for an existing section and paragraph that directly match it.
+        if target_after is None:
+            candidates: list[tuple[int, int, int, int, int]] = []
+            for chunk in chunks:
+                if _chunk_kind(chunk) == "reference":
+                    continue
+                section_score = _chart_section_alignment_score(chart, chunk["chain"], "", "")
+                if section_score < minimum_section_score:
+                    continue
+                for block in _blocks(chunk["lines"]):
+                    if block[2] not in {"para", "list", "table"}:
+                        continue
+                    body = "\n".join(chunk["lines"][block[0]:block[1]])
+                    paragraph_score = _chart_section_alignment_score(chart, "", body, "")
+                    if paragraph_score < minimum_global_paragraph_score:
+                        continue
+                    global_after = chunk["start"] + block[1] - 1
+                    # Prefer the strongest match, then the closest existing
+                    # context, keeping stable document order as the last tie-break.
+                    candidates.append((
+                        section_score + paragraph_score,
+                        section_score,
+                        paragraph_score,
+                        -abs(global_after - marker_position),
+                        -global_after,
+                    ))
+            if candidates:
+                candidates.sort(reverse=True)
+                best = candidates[0]
+                target_after = -best[4]
+
+        if target_after is None:
+            decisions[old_index] = ("drop", None)
+            dropped_titles.append(title[:120])
+            continue
+
+        if target_after == marker_position - 1:
+            decisions[old_index] = ("keep", marker_position)
+        else:
+            decisions[old_index] = ("move", target_after)
+            moved_titles.append(title[:120])
+
+    kept_old_indices = [
+        old_index for old_index in range(1, len(original_charts) + 1)
+        if decisions.get(old_index, ("drop", None))[0] != "drop"
+    ]
+    new_index_for_old = {old_index: new_index for new_index, old_index in enumerate(kept_old_indices, start=1)}
+    keep_at_line: dict[int, str] = {}
+    insert_after_line: dict[int, list[str]] = {}
+    for old_index, (action, position) in decisions.items():
+        if action == "drop" or position is None or old_index not in new_index_for_old:
+            continue
+        marker = f"[CHART_{new_index_for_old[old_index]}]"
+        if action == "keep":
+            keep_at_line[position] = marker
+        else:
+            insert_after_line.setdefault(position, []).append(marker)
+
+    output_lines: list[str] = []
+    for line_index, line in enumerate(lines):
+        match = marker_line.match(line)
+        if match:
+            # Repeated references are collapsed to their first occurrence.
+            if line_index in keep_at_line:
+                output_lines.append(keep_at_line.pop(line_index))
+            # Moved, dropped, duplicate, and dangling markers are reinserted
+            # from the location map below or omitted here.
+        else:
+            output_lines.append(line)
+        if line_index in insert_after_line:
+            if output_lines and output_lines[-1].strip():
+                output_lines.append("")
+            output_lines.extend(insert_after_line[line_index])
+            output_lines.append("")
+
+    kept_charts = [original_charts[index - 1] for index in kept_old_indices if isinstance(original_charts[index - 1], dict)]
+    updated_text = re.sub(r"\n{3,}", "\n\n", "\n".join(output_lines)).strip()
+    return updated_text, kept_charts, {
+        "movedCharts": len(moved_titles),
+        "droppedCharts": len(dropped_titles),
+        "duplicateRefsRemoved": duplicate_refs_removed,
+        "movedTitles": moved_titles[:12],
+        "droppedTitles": dropped_titles[:12],
+    }

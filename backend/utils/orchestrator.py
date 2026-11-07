@@ -123,7 +123,6 @@ async def _emit_progress(callback: ProgressCallback | None, event: dict[str, Any
 
 
 def _planner_status_message(backend: str, round_no: int) -> str:
-    provider = "AI planner" if backend == "groq" else "backup planner"
     return f"Deciding which sources to check (step {round_no})…"
 
 
@@ -216,12 +215,12 @@ async def _groq_plan(payload_messages: list[dict], schemas: list[dict]) -> dict 
                     retry_ms = int(float(res.headers.get("retry-after", "30")) * 1000)
                 except (TypeError, ValueError):
                     pass
-                log.warning("Planner: Groq 429 on key ...%s — backing off %dms", key[-4:], retry_ms)
+                log.warning("Planner: Groq 429 on key ...%s — backing off %dms", "[redacted]", retry_ms)
                 mark_rate_limited(key, retry_ms)
                 log.warning("Planner: Groq rate limit; switching to Gemini/heuristic rather than retrying same-org keys")
                 return None
             if res.status_code in (401, 403):
-                log.warning("Planner: Groq auth error on key ...%s — banning 24h", key[-4:])
+                log.warning("Planner: Groq auth error on key ...%s — banning 24h", "[redacted]")
                 mark_rate_limited(key, 24 * 60 * 60_000)
                 continue
             if not res.is_success:
@@ -238,7 +237,7 @@ async def _groq_plan(payload_messages: list[dict], schemas: list[dict]) -> dict 
                 continue
             return choices[0].get("message") or {}
         except Exception as exc:
-            log.warning("Planner: Groq call failed on key ...%s: %s", key[-4:], type(exc).__name__)
+            log.warning("Planner: Groq call failed on key ...%s: %s", "[redacted]", type(exc).__name__)
             if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
                 log.info("Planner: Groq network failure; stop serial retries and use backup/fallback planner")
                 return None
@@ -377,21 +376,22 @@ async def _gemini_plan(payload_messages: list[dict], schemas: list[dict]) -> dic
                     payload["system_instruction"] = {"parts": [{"text": system_text}]}
                 async with httpx.AsyncClient(timeout=PLANNER_TIMEOUT) as client:
                     res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                         json=payload,
                     )
                 if res.status_code == 429:
-                    log.warning("Planner: Gemini 429 on model=%s key=...%s", model, key[-4:])
+                    log.warning("Planner: Gemini 429 on model=%s key=...%s", model, "[redacted]")
                     mark_rate_limited(f"{key}:{model}", 60_000)
                     continue
                 if res.status_code in (401, 403):
-                    log.warning("Planner: Gemini auth error on key ...%s — banning 24h", key[-4:])
+                    log.warning("Planner: Gemini auth error on key ...%s — banning 24h", "[redacted]")
                     mark_rate_limited(key, 24 * 60 * 60_000)
                     break
                 if not res.is_success:
                     detail = res.text[:240] if res.status_code in (400, 413) else "provider request failed"
                     detail = re.sub(r"(?i)(api[_-]?key|token|authorization)\s*[:=]\s*[^,\s]+", r"\1=[REDACTED]", detail)
-                    log.warning("Planner: Gemini HTTP %d on model=%s key=...%s — %s", res.status_code, model, key[-4:], detail)
+                    log.warning("Planner: Gemini HTTP %d on model=%s key=...%s — %s", res.status_code, model, "[redacted]", detail)
                     if res.status_code in (400, 413):
                         # The same function-declaration payload is unlikely to work
                         # with another key. Let deterministic intent rules take over.
@@ -403,12 +403,12 @@ async def _gemini_plan(payload_messages: list[dict], schemas: list[dict]) -> dic
                 text = "".join(p.get("text", "") for p in parts if "text" in p)
                 log.info(
                     "Planner: Gemini plan succeeded model=%s key=...%s (%d tool call(s))",
-                    model, key[-4:], len(function_calls),
+                    model, "[redacted]", len(function_calls),
                 )
                 return {"content": text, "tool_calls": _gemini_tool_calls_to_openai(function_calls)}
             except Exception as exc:
                 log.warning("Planner: Gemini call failed on model=%s key=...%s: %s: %s",
-                            model, key[-4:], type(exc).__name__, exc)
+                            model, "[redacted]", type(exc).__name__, exc)
                 continue
     return None
 

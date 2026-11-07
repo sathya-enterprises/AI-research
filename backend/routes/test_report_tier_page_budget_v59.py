@@ -18,8 +18,8 @@ def test_json_wrapped_continuation_sections_are_recovered():
     )]
 
 
-def test_page_budget_expands_until_final_renderer_reaches_tier_target(monkeypatch):
-    measured_pages = iter([3, 12, 27])
+def test_page_budget_measures_default_tier_without_expansion_target(monkeypatch):
+    measured_pages = iter([3])
     expansion_calls = []
 
     def fake_preflight(*args, **kwargs):
@@ -39,6 +39,9 @@ def test_page_budget_expands_until_final_renderer_reaches_tier_target(monkeypatc
 
     monkeypatch.setattr(report, "_rendered_page_count_preflight", fake_preflight)
     monkeypatch.setattr(report, "_expand_report_to_tier", fake_expand)
+    # This test isolates renderer/page-budget iteration. Keep the separate
+    # novelty gate satisfied so synthetic filler is not treated as padding.
+    monkeypatch.setattr(report, "_expansion_novelty", lambda _before, _after: (1, {"S2", "S3"}))
     body = "## Findings\n\n" + ("The retrieved sources establish a relevant baseline and identify limitations. [S1] " * 55)
     evidence = "\n\n".join(f"[S{i}] Distinct relevant publisher evidence about the research question." for i in range(1, 25))
 
@@ -50,15 +53,15 @@ def test_page_budget_expands_until_final_renderer_reaches_tier_target(monkeypatc
         evidence_text=evidence,
         title="Research report",
         summary="Evidence-backed summary",
-        key_stats=[], charts=[], sources=[{"id": f"S{i}"} for i in range(1, 25)],
+        key_stats=[], charts=[], sources=[
+            {"id": f"S{i}", "pageFetchStatus": "ok"} for i in range(1, 25)
+        ],
         presentation={},
     ))
 
-    assert len(expansion_calls) == 2
-    assert pages == 27
-    assert len(final_body) > len(body) + 10_000
-    assert all(call["target_override"] > len(call["report_text"]) for call in expansion_calls)
-    assert all(call["time_budget_override"] > 0 for call in expansion_calls)
+    assert expansion_calls == []
+    assert pages == 3
+    assert final_body == body.strip()
 
 
 def test_page_budget_does_not_fabricate_content_when_evidence_is_insufficient(monkeypatch):
@@ -117,11 +120,11 @@ def test_semantic_completion_recovers_markerless_markdown(monkeypatch):
     assert "[[SECTION:" not in out
 
 
-def test_main_writer_system_prompt_does_not_contradict_tier_page_bands():
-    assert "Brief targets 6–10 pages" in report.SYSTEM_PROMPT
-    assert "In-Detail targets 25–30 pages" in report.SYSTEM_PROMPT
-    assert "Deep Research targets 70–100 pages" in report.SYSTEM_PROMPT
-    assert "Page count, word count, character count, section count and visual count are never goals." not in report.SYSTEM_PROMPT
+def test_main_writer_system_prompt_does_not_set_implicit_page_targets():
+    assert "not a fixed page, word, or character count" in report.SYSTEM_PROMPT
+    assert "Brief targets" not in report.SYSTEM_PROMPT
+    assert "In-Detail targets" not in report.SYSTEM_PROMPT
+    assert "Deep Research targets" not in report.SYSTEM_PROMPT
 
 
 def test_deep_research_crawler_budget_allows_more_pages_and_depth():

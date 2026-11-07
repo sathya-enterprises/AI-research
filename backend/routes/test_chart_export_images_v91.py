@@ -32,7 +32,9 @@ URL = "https://www.rbi.org.in/scripts/PublicationsView.aspx?id=23642"
 def _fixture():
     manifest = [{"id": "S4", "title": "Report on Trend and Progress", "url": URL, "_ggSourceRegistryVersion": 1}]
     enriched = [{
-        "title": "Report on Trend and Progress", "url": URL, "pageContent": RBI_TABLE, "pageFetchStatus": "ok",
+        "title": "Report on Trend and Progress", "url": URL,
+        "pageContent": "Indicators of scheduled commercial banks (SCBs). SCBs remained resilient.\n\n" + RBI_TABLE,
+        "pageFetchStatus": "ok",
         "pageFetchUrl": URL, "pageFetchRelevanceMatched": True, "evidenceOrigin": "publisher_page",
         "fullContent": "Indicators of scheduled commercial banks (SCBs). SCBs remained resilient.",
     }]
@@ -133,7 +135,7 @@ def _capture(name: str) -> str | None:
 
 @pytest.mark.skipif(_capture("research_capture_20261020_162905_*.json") is None, reason="16:29 capture not present")
 def test_replay_1629_brief_capture_requested_chart_types_on_topic_and_exportable():
-    cap = json.load(open(_capture("research_capture_20261020_162905_*.json")))
+    cap = json.loads(Path(_capture("research_capture_20261020_162905_*.json")).read_text(encoding="utf-8"))
     st = cap["stages"]
     enriched = st["sources_after_article_fetch"]["data"]["sources"]
     manifest = st["canonical_source_manifest"]["data"]["sources"]

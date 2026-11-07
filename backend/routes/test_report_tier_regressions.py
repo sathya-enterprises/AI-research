@@ -110,21 +110,12 @@ def test_legacy_character_floor_helper_does_not_pad_reports(monkeypatch):
     assert result == original
 
 
-def test_active_report_card_exposes_all_three_export_formats_independently():
+def test_active_report_card_exposes_the_supported_pdf_export():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     active = (root / "frontend" / "src" / "components" / "GrowthGradualChat.tsx").read_text(encoding="utf-8")
     assert 'onClick={downloadPdf}' in active
-    assert 'onClick={downloadHtml}' in active
-    assert 'onClick={downloadDocx}' in active
-    assert "onClick={wantsHtml ? downloadHtml : downloadPdf}" not in active
-
-    # The older duplicated frontend is not the active local app, but keep its
-    # HTML/PDF actions independent so its recommendation cannot hide a format.
-    duplicate = (root / "backend" / "frontend" / "src" / "components" / "GrowthGradualChat.tsx").read_text(encoding="utf-8")
-    assert 'onClick={downloadPdf}' in duplicate
-    assert 'onClick={downloadHtml}' in duplicate
-    assert "onClick={wantsHtml ? downloadHtml : downloadPdf}" not in duplicate
+    assert "fetch('/api/chat/report/pdf'" in active
 
 
 def test_automated_export_capture_intercepts_native_save_without_mutating_session():

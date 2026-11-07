@@ -43,6 +43,7 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const backend = getBackendBaseUrl();
+  const requestId = crypto.randomUUID();
 
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -116,7 +117,7 @@ export async function POST(request: NextRequest) {
       emit({ type: 'data-chat-status', data: { message: messages.length ? 'Connecting to the research engine…' : 'Preparing your response…' } });
 
       try {
-        const headers = new Headers({ 'content-type': 'application/json', 'accept': 'text/event-stream' });
+        const headers = new Headers({ 'content-type': 'application/json', 'accept': 'text/event-stream', 'x-request-id': requestId });
         const authorization = request.headers.get('authorization');
         if (authorization) headers.set('authorization', authorization);
         upstream = await fetch(`${backend}/api/chat`, {
@@ -165,6 +166,7 @@ export async function POST(request: NextRequest) {
       connection: 'keep-alive',
       'x-vercel-ai-ui-message-stream': 'v1',
       'x-accel-buffering': 'no',
+      'x-request-id': requestId,
     },
   });
 }

@@ -107,8 +107,8 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> str:
             try:
                 async with httpx.AsyncClient(timeout=60) as client:
                     res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                        headers={"Content-Type": "application/json"},
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"Content-Type": "application/json", "x-goog-api-key": key},
                         json={
                             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
                             "systemInstruction": {"parts": [{"text": system_prompt}]},

@@ -2,8 +2,6 @@
 import asyncio
 from pathlib import Path
 
-import pytest
-
 import routes.report as report_module
 
 
@@ -102,7 +100,7 @@ def test_action_research_store_persistence_handles_both_unique_keys_idempotently
 
 def test_action_research_persistence_sanitizes_nuls_in_query_and_source_content():
     source = (Path(__file__).parents[1] / "utils" / "research_store.py").read_text(encoding="utf-8")
-    persist = source.split("def persist_web_search_results(", 1)[1].split("def retrieve_web_research(", 1)[0]
+    persist = source.split("def _persist_web_search_results_once(", 1)[1].split("def persist_web_search_results(", 1)[0]
     assert 'query_text = _clean_pg_text(query or "")' in persist
     assert "title = _clean_pg_text" in persist
     assert "content = _clean_pg_text" in persist

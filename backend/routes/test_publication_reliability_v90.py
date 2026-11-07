@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import glob
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -325,7 +324,7 @@ def _capture_path() -> str | None:
 
 @pytest.mark.skipif(_capture_path() is None, reason="2026-10-20 15:02 research capture not present")
 def test_replay_2026_10_20_brief_banking_capture_now_passes_source_evidence_with_charts():
-    cap = json.load(open(_capture_path()))
+    cap = json.loads(Path(_capture_path()).read_text(encoding="utf-8"))
     st = cap["stages"]
     enriched = st["sources_after_article_fetch"]["data"]["sources"]
     manifest = st["canonical_source_manifest"]["data"]["sources"]

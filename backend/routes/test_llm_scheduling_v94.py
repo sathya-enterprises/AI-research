@@ -148,6 +148,7 @@ def _audit_payload(status: str) -> dict:
 def _patch_audit_http(monkeypatch, behaviour):
     """behaviour(call_index, model) -> (delay_seconds, status_code, verdict|None)."""
     calls: list[str] = []
+    request_meta: list[dict] = []
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -159,10 +160,11 @@ def _patch_audit_http(monkeypatch, behaviour):
         async def __aexit__(self, *exc):
             return False
 
-        async def post(self, url, json=None):
+        async def post(self, url, json=None, headers=None):
             model = url.split("/models/")[1].split(":")[0]
             idx = len(calls)
             calls.append(model)
+            request_meta.append({"url": url, "headers": dict(headers or {})})
             delay, code, verdict = behaviour(idx, model)
             await asyncio.sleep(delay)
             return _FakeResponse(code, _audit_payload(verdict) if verdict else {})
@@ -170,7 +172,7 @@ def _patch_audit_http(monkeypatch, behaviour):
     monkeypatch.setattr(R.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(R, "get_gemini_keys", lambda: ["AIzaKEY1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx1", "AIzaKEY2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx2", "AIzaKEY3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx3"])
     monkeypatch.setattr(R, "is_rate_limited", lambda *_a, **_k: False)
-    return calls
+    return calls, request_meta
 
 
 def _audit():
@@ -182,15 +184,17 @@ def _audit():
 
 def test_audit_sends_one_reviewer_when_it_answers(monkeypatch):
     monkeypatch.setenv("GG_AUDIT_STRATEGY", "hedged")
-    calls = _patch_audit_http(monkeypatch, lambda i, m: (0.01, 200, "WARNING"))
+    calls, request_meta = _patch_audit_http(monkeypatch, lambda i, m: (0.01, 200, "WARNING"))
     result = _audit()
     assert result["status"] == "WARNING" and len(calls) == 1
+    assert request_meta[0]["headers"].get("x-goog-api-key", "").startswith("AIzaKEY")
+    assert "?key=" not in request_meta[0]["url"]
 
 
 def test_audit_hedges_a_slow_reviewer_and_uses_first_valid_verdict(monkeypatch):
     monkeypatch.setenv("GG_AUDIT_STRATEGY", "hedged")
     monkeypatch.setenv("GG_AUDIT_HEDGE_SECONDS", "1")
-    calls = _patch_audit_http(monkeypatch, lambda i, m: (3.0, 200, "FAIL") if i == 0 else (0.05, 200, "PASS"))
+    calls, _request_meta = _patch_audit_http(monkeypatch, lambda i, m: (3.0, 200, "FAIL") if i == 0 else (0.05, 200, "PASS"))
     t0 = time.perf_counter()
     result = _audit()
     assert result["status"] == "PASS" and len(calls) == 2
@@ -201,7 +205,7 @@ def test_audit_hedges_a_slow_reviewer_and_uses_first_valid_verdict(monkeypatch):
 def test_audit_503_moves_to_next_model_immediately(monkeypatch):
     monkeypatch.setenv("GG_AUDIT_STRATEGY", "hedged")
     monkeypatch.setenv("GG_AUDIT_HEDGE_SECONDS", "20")
-    calls = _patch_audit_http(monkeypatch, lambda i, m: (0.01, 503, None) if i == 0 else (0.01, 200, "PASS"))
+    calls, _request_meta = _patch_audit_http(monkeypatch, lambda i, m: (0.01, 503, None) if i == 0 else (0.01, 200, "PASS"))
     t0 = time.perf_counter()
     result = _audit()
     assert result["status"] == "PASS" and len(calls) == 2 and time.perf_counter() - t0 < 1.0

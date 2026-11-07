@@ -33,15 +33,55 @@ def test_named_companies_with_corporate_suffix_still_resolve():
     assert _extract_company_candidates(q) == ["Reliance Industries", "Tata Motors"]
 
 
-def test_playwright_fetch_runs_sync_driver_in_worker_thread(monkeypatch):
+def test_playwright_fetch_uses_the_async_driver_without_blocking(monkeypatch):
     import asyncio
+    import sys
+    import types
     from utils import playwright_fetch
 
     calls = []
-    monkeypatch.setattr(playwright_fetch, "_fetch_page_worker", lambda url, max_chars, timeout_ms: calls.append((url, max_chars, timeout_ms)) or "rendered text")
+
+    class Page:
+        async def goto(self, url, **kwargs):
+            calls.append(("goto", url, kwargs.get("wait_until")))
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+        def locator(self, _selector):
+            return self
+
+        async def inner_text(self, **_kwargs):
+            return "rendered text"
+
+    class Browser:
+        async def new_page(self, **_kwargs):
+            return Page()
+
+        async def close(self):
+            return None
+
+    class Chromium:
+        async def launch(self, **_kwargs):
+            return Browser()
+
+    class PlaywrightContext:
+        chromium = Chromium()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    package = types.ModuleType("playwright")
+    api = types.ModuleType("playwright.async_api")
+    api.async_playwright = PlaywrightContext
+    monkeypatch.setitem(sys.modules, "playwright", package)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", api)
     result = asyncio.run(playwright_fetch.fetch_playwright_page("https://example.com", max_chars=1234))
     assert result == "rendered text"
-    assert calls and calls[0][0] == "https://example.com" and calls[0][1] == 1234
+    assert calls == [("goto", "https://example.com", "domcontentloaded")]
 
 
 def test_research_store_retries_deadlocks(monkeypatch):

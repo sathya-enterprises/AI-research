@@ -171,12 +171,11 @@ def test_source_appendix_uses_compact_single_line_numbered_entries():
         registry, placement="appendix", include_appendix=True,
         source_registry=registry, report_tier="brief", cited_source_ids={"S8"},
     )
-    # The source appendix is deliberately compact: one numbered list entry
-    # with the title and a short visible link label; no large source cards.
+    # The compact source row keeps the exact URL visible in HTML and print.
     assert '<span class="gg-source-id">[S8]</span>' in html
     assert '<ol' in html and '<li' in html
     assert 'href="https://example.org/icra-outlook"' in html
-    assert '>link</a>)</li>' in html
+    assert 'https://example.org/icra-outlook</a>' in html
     assert 'ICRA Banking Credit Outlook' in html
     assert '<div class="gg-source-content">' not in html
 

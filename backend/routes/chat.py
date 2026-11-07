@@ -31,9 +31,8 @@ log = logging.getLogger("chat")
 from datetime import datetime as _dt
 from datetime import timezone as _tz
 from email.utils import parsedate_to_datetime as _parse_rfc2822
-from utils.rag_client import rag_query as _rag_query
+from utils.observability import record_event, set_trace_id, reset_trace_id
 from utils.auth import get_user_id
-from utils.screener_kb import get_company_context_with_meta as _get_kb_context_with_meta
 from utils.orchestrator import orchestrate, OrchestrationResult
 
 # ─── Supabase persistence ──────────────────────────────────────────────────────
@@ -1792,7 +1791,7 @@ async def stream_groq(system_prompt: str, messages: list[dict]) -> AsyncGenerato
                         retry_after = int(res.headers.get("retry-after", "60"))
                         await res.aclose(); await client.aclose()
                         wait_ms = max(retry_after * 1000, 60_000)
-                        log.warning("Groq 429 model=%s key=...%s — RL for %ds", model, key[-4:], retry_after)
+                        log.warning("Groq 429 model=%s key=...%s — RL for %ds", model, "[redacted]", retry_after)
                         mark_rate_limited(combo, wait_ms)
                         mark_rate_limited(key, wait_ms)
                         key_429 = True
@@ -1803,24 +1802,24 @@ async def stream_groq(system_prompt: str, messages: list[dict]) -> AsyncGenerato
                         break
                     if res.status_code in (401, 403):
                         await res.aclose(); await client.aclose()
-                        log.warning("Groq %d key=...%s — invalid key", res.status_code, key[-4:])
+                        log.warning("Groq %d key=...%s — invalid key", res.status_code, "[redacted]")
                         mark_rate_limited(key, 24 * 60 * 60_000)
                         key_auth_failed = True
                         break
                     if res.status_code in (400, 404, 503):
                         body = await res.aread()
                         await res.aclose(); await client.aclose()
-                        log.warning("Groq HTTP %d model=%s key=...%s — %s", res.status_code, model, key[-4:], body.decode(errors="replace")[:220])
+                        log.warning("Groq HTTP %d model=%s key=...%s — %s", res.status_code, model, "[redacted]", body.decode(errors="replace")[:220])
                         if res.status_code in (404, 503):
                             mark_rate_limited(combo, 30_000)
                         break
                     if not res.is_success:
                         body = await res.aread()
                         await res.aclose(); await client.aclose()
-                        log.warning("Groq HTTP %d model=%s key=...%s — %s", res.status_code, model, key[-4:], body.decode(errors="replace")[:220])
+                        log.warning("Groq HTTP %d model=%s key=...%s — %s", res.status_code, model, "[redacted]", body.decode(errors="replace")[:220])
                         break
 
-                    log.info("Groq: streaming started model=%s key=...%s compact=%s", model, key[-4:], compact_attempt)
+                    log.info("Groq: streaming started model=%s key=...%s compact=%s", model, "[redacted]", compact_attempt)
 
                     async def _stream_and_close(
                         _res: httpx.Response,
@@ -1871,7 +1870,7 @@ async def stream_groq(system_prompt: str, messages: list[dict]) -> AsyncGenerato
                     break
                 except Exception as exc:
                     await client.aclose()
-                    log.warning("Groq exception model=%s key=...%s: %s", model, key[-4:], type(exc).__name__)
+                    log.warning("Groq exception model=%s key=...%s: %s", model, "[redacted]", type(exc).__name__)
                     break
             if rejected_after_compaction or key_429 or key_auth_failed:
                 break
@@ -2001,13 +2000,13 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
                 body = (await response.aread()).decode(errors="replace")[:160]
                 await response.aclose(); await client.aclose()
                 wait_ms = max(retry_after * 1000, 60_000)
-                log.warning("Gemini 429 model=%s key=...%s — RL for %ds %s", model, key[-4:], retry_after, body)
+                log.warning("Gemini 429 model=%s key=...%s — RL for %ds %s", model, "[redacted]", retry_after, body)
                 mark_rate_limited(combo, wait_ms); mark_rate_limited(key, wait_ms)
                 continue
             if response.status_code in (401, 403):
                 body = (await response.aread()).decode(errors="replace")[:160]
                 await response.aclose(); await client.aclose()
-                log.warning("Gemini %d key=...%s — invalid key: %s", response.status_code, key[-4:], body)
+                log.warning("Gemini %d key=...%s — invalid key: %s", response.status_code, "[redacted]", body)
                 mark_rate_limited(key, 24 * 60 * 60_000)
                 continue
             if response.status_code == 503:
@@ -2018,7 +2017,7 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
                     retry_pending_models.add(model)
                     log.warning(
                         "Gemini stream HTTP 503 model=%s key=...%s after %dms; retrying this model once after 500ms: %s",
-                        model, key[-4:], status_ms, body,
+                        model, "[redacted]", status_ms, body,
                     )
                     await asyncio.sleep(0.5)
                 else:
@@ -2034,7 +2033,7 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
             if response.status_code in (400, 404, 413):
                 body = (await response.aread()).decode(errors="replace")[:220]
                 await response.aclose(); await client.aclose()
-                log.warning("Gemini stream HTTP %d model=%s key=...%s — %s", response.status_code, model, key[-4:], body)
+                log.warning("Gemini stream HTTP %d model=%s key=...%s — %s", response.status_code, model, "[redacted]", body)
                 # The same request payload will fail the same way on another key.
                 dead_models.add(model)
                 if response.status_code == 404:
@@ -2043,10 +2042,10 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
             if not response.is_success:
                 body = (await response.aread()).decode(errors="replace")[:220]
                 await response.aclose(); await client.aclose()
-                log.warning("Gemini stream HTTP %d model=%s key=...%s — %s", response.status_code, model, key[-4:], body)
+                log.warning("Gemini stream HTTP %d model=%s key=...%s — %s", response.status_code, model, "[redacted]", body)
                 continue
 
-            log.info("Gemini stream started model=%s key=...%s", model, key[-4:])
+            log.info("Gemini stream started model=%s key=...%s", model, "[redacted]")
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -2078,7 +2077,7 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
                 log.info("Gemini stream complete model=%s in %dms", model, elapsed)
                 yield "data: [DONE]\n\n"
                 return
-            log.warning("Gemini stream returned no text model=%s key=...%s", model, key[-4:])
+            log.warning("Gemini stream returned no text model=%s key=...%s", model, "[redacted]")
         except Exception as exc:
             if response is not None:
                 try:
@@ -2089,7 +2088,7 @@ async def gemini_sse(system_prompt: str, messages: list[dict]) -> AsyncGenerator
                 await client.aclose()
             except Exception:
                 pass
-            log.warning("Gemini stream exception model=%s key=...%s: %s%s", model, key[-4:], type(exc).__name__, f": {exc}" if str(exc) else "")
+            log.warning("Gemini stream exception model=%s key=...%s: %s%s", model, "[redacted]", type(exc).__name__, f": {exc}" if str(exc) else "")
             if attempt_had_text:
                 # Never splice a second model's unrelated completion onto a partial
                 # response. End the partial stream cleanly; the caller will close SSE.
@@ -2484,6 +2483,7 @@ async def chat(request: Request):
     # research into the SSE generator. The browser now sees tool start/completion
     # events rather than only rotating, synthetic status text.
     research_progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+    selected_tools_for_trace: list[str] = []
 
     async def queue_research_progress(event: dict) -> None:
         await research_progress_queue.put(event)
@@ -2560,6 +2560,17 @@ async def chat(request: Request):
             "Chat: orchestrator planner=%s rounds=%d tools=%s sources=%d limitations=%d",
             orch.planner, orch.rounds, orch.tools_used or "none", len(orch.sources), len(orch.limitations),
         )
+        selected_tools_for_trace[:] = list(orch.tools_used or [])
+        rag_tool = orch.result_for("document_search")
+        rag_raw = rag_tool.raw if rag_tool and isinstance(rag_tool.raw, dict) else {}
+        rag_diag = rag_raw.get("diagnostics") if isinstance(rag_raw.get("diagnostics"), dict) else {}
+        record_event("orchestrator", "tool_selection_and_context", "ok" if not orch.limitations else "partial", details={
+            "planner": orch.planner, "rounds": orch.rounds, "tools": orch.tools_used,
+            "source_count": len(orch.sources), "limitations_count": len(orch.limitations),
+            "context_chars": len(orch.context()), "rag_retrieved": rag_raw.get("retrieved", 0),
+            "rag_reranker_ran": bool(rag_raw.get("reranker_ran")),
+            "rag_stages": rag_diag.get("stages", {}),
+        })
 
         # Persist the latest live research context for a short period so a report follow-up
         # can reuse it even if the frontend source metadata is missing from the request.
@@ -2674,19 +2685,17 @@ async def chat(request: Request):
 
         return system_prompt, meta_event
 
-    async def generate() -> AsyncGenerator[bytes, None]:
+    async def _generate_body() -> AsyncGenerator[bytes, None]:
         assistant_chunks: list[str] = []
         provider_used = "unknown"
         # Emit a first byte immediately, then forward genuine progress events
         # from query rewriting, tool start/completion, planning and source collection.
         yield ("data: " + json.dumps({"type": "status", "phase": "connecting", "message": "Connecting to the research engine…"}) + "\n\n").encode()
         prep_task = asyncio.create_task(prepare_context(), name="gg-chat-context-prep")
-        last_progress_at = time.monotonic()
         try:
             while not prep_task.done() or not research_progress_queue.empty():
                 try:
                     event = await asyncio.wait_for(research_progress_queue.get(), timeout=8.0)
-                    last_progress_at = time.monotonic()
                     yield ("data: " + json.dumps({"type": "status", **event}) + "\n\n").encode()
                 except asyncio.TimeoutError:
                     # Keep the stream alive honestly without pretending a source
@@ -2696,11 +2705,12 @@ async def chat(request: Request):
                             "type": "status", "phase": "heartbeat",
                             "message": "Research is still in progress…",
                         }) + "\n\n").encode()
-                        last_progress_at = time.monotonic()
             system_prompt, meta_event = await prep_task
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            record_event("orchestrator", "context_preparation", "error", duration_ms=int((time.perf_counter() - t0) * 1000),
+                         details={"error_type": type(exc).__name__})
             log.error("Chat context preparation failed: %s", type(exc).__name__)
             yield ("data: " + json.dumps({"error": "The chat could not prepare its research context. Please retry."}) + "\n\n").encode()
             yield b"data: [DONE]\n\n"
@@ -2712,6 +2722,8 @@ async def chat(request: Request):
 
         # ── Try Groq (all keys × models, round-robin) ─────────────────────────
         groq_gen = await stream_groq(system_prompt, messages)
+        if groq_gen is None:
+            record_event("llm", "provider_attempt", "error", details={"provider": "groq", "error_type": "provider_unavailable"})
         if groq_gen is not None:
             provider_used = "groq"
             try:
@@ -2719,6 +2731,9 @@ async def chat(request: Request):
                     yield out_bytes
                 yield b"data: [DONE]\n\n"
                 elapsed = int((time.perf_counter() - t0) * 1000)
+                record_event("llm", "answer_generation", "ok", duration_ms=elapsed,
+                             details={"provider": "groq", "output_chars": len("".join(assistant_chunks)),
+                                      "input_messages": len(messages), "tools_used": selected_tools_for_trace})
                 log.info("Chat complete via Groq in %dms", elapsed)
                 if session_id:
                     full_reply = "".join(assistant_chunks)
@@ -2727,6 +2742,7 @@ async def chat(request: Request):
                     )
                 return
             except Exception as exc:
+                record_event("llm", "provider_attempt", "error", details={"provider": "groq", "error_type": type(exc).__name__})
                 log.warning("Groq stream broke mid-way: %s — falling back to Gemini", exc)
 
         # ── Gemini fallback (all keys × models, round-robin) ──────────────────
@@ -2738,6 +2754,9 @@ async def chat(request: Request):
                     yield out_bytes
                 yield b"data: [DONE]\n\n"
                 elapsed = int((time.perf_counter() - t0) * 1000)
+                record_event("llm", "answer_generation", "ok", duration_ms=elapsed,
+                             details={"provider": "gemini", "output_chars": len("".join(assistant_chunks)),
+                                      "input_messages": len(messages), "tools_used": selected_tools_for_trace})
                 log.info("Chat complete via Gemini in %dms", elapsed)
                 if session_id:
                     full_reply = "".join(assistant_chunks)
@@ -2746,10 +2765,13 @@ async def chat(request: Request):
                     )
                 return
             except Exception as e:
+                record_event("llm", "provider_attempt", "error", details={"provider": "gemini", "error_type": type(e).__name__})
                 log.error("All LLM providers failed: %s", e)
 
         # ── All providers exhausted — tell user clearly ────────────────────────
         log.error("Chat: all providers rate-limited or failed")
+        record_event("llm", "answer_generation", "error", duration_ms=int((time.perf_counter() - t0) * 1000),
+                     details={"provider": "none", "error_type": "AllProvidersFailed", "input_messages": len(messages)})
         err_msg = (
             "⚠️ All AI providers are currently rate-limited. "
             "This is a temporary limit on the free tier — please wait 60 seconds and try again. "
@@ -2759,6 +2781,16 @@ async def chat(request: Request):
         yield f"data: {err_chunk}\n\n".encode()
         yield b"data: [DONE]\n\n"
         return
+
+    async def generate() -> AsyncGenerator[bytes, None]:
+        # StreamingResponse bodies are consumed after the route returns; bind the
+        # request trace id for the complete lifetime of the streamed response.
+        trace_token = set_trace_id(getattr(request.state, "trace_id", ""))
+        try:
+            async for chunk in _generate_body():
+                yield chunk
+        finally:
+            reset_trace_id(trace_token)
 
     return StreamingResponse(
         generate(),

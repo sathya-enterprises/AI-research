@@ -1,7 +1,6 @@
 """When a Groq-compatible model rejects JSON mode, retry once without the hint."""
 import asyncio
 import json
-from types import SimpleNamespace
 
 from utils import intent
 

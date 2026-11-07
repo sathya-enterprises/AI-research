@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
 from typing import Any
 
 _MONEY_RE = re.compile(r"(?<![\w.])(?:USD|US\$|INR|Rs\.?|₹|\$|€|£)\s*[-+]?\d[\d,]*(?:\.\d+)?\s*(?:bn|billion|mn|million|m|k|crore|cr|lakh|lakhs|%)?", re.I)
@@ -246,7 +245,6 @@ def extract_numeric_evidence(sources: list[dict[str, Any]]) -> list[dict[str, An
 
             cells, cell_index = _cell_location(line, rel_pos)
             table_like = len(cells) >= 3 and "|" in line
-            cell_text = cells[cell_index] if cell_index < len(cells) else ""
             preceding = [cell for cell in cells[:cell_index] if cell and not re.fullmatch(r"[-+\d,.%₹$€£ ]+", cell)] if table_like else []
             # Table row layouts vary: both ``metric | entity | value`` and
             # ``entity | metric | value`` occur in publisher tables. Choose the

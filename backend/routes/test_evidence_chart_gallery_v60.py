@@ -1,7 +1,6 @@
 """v60: evidence dataset extraction, full-catalog chart gallery and its audits."""
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from datetime import date

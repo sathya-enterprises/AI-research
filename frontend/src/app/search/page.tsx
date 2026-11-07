@@ -42,8 +42,8 @@ export default function DataSearchPage() {
   };
 
   return (
-    <div className="data-search-page" style={{ maxWidth: '980px', margin: '0 auto', padding: '28px 16px 60px' }}>
-      <div className="data-search-intro" style={{ marginBottom: '22px' }}>
+    <div style={{ maxWidth: '980px', margin: '0 auto', padding: '28px 16px 60px' }}>
+      <div style={{ marginBottom: '22px' }}>
         <p style={{
           fontSize: '10px', fontWeight: 700, color: 'var(--gold)', textTransform: 'uppercase',
           letterSpacing: '2px', fontFamily: "'DM Sans',sans-serif", marginBottom: '6px',
@@ -58,10 +58,8 @@ export default function DataSearchPage() {
         </p>
       </div>
 
-      <div className="data-search-form" style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
         <input
-          className="data-search-input"
-          aria-label="Describe the financial data to search for"
           value={query}
           onChange={e => setQuery(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && runSearch()}
@@ -73,7 +71,6 @@ export default function DataSearchPage() {
           }}
         />
         <button
-          className="data-search-submit"
           onClick={() => runSearch()}
           disabled={loading || !query.trim()}
           style={{
@@ -87,10 +84,9 @@ export default function DataSearchPage() {
       </div>
 
       {!result && !loading && (
-        <div className="data-search-examples" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '24px' }}>
           {EXAMPLES.map(ex => (
             <button
-              className="data-search-example"
               key={ex}
               onClick={() => runSearch(ex)}
               style={{
@@ -104,7 +100,7 @@ export default function DataSearchPage() {
       )}
 
       {loading && (
-        <div className="data-search-loading" style={{
+        <div style={{
           padding: '40px', textAlign: 'center', color: 'var(--muted)',
           fontFamily: "'DM Sans',sans-serif", fontSize: '13px',
         }}>
@@ -113,7 +109,7 @@ export default function DataSearchPage() {
       )}
 
       {error && !loading && (
-        <div className="data-search-error" role="alert" style={{
+        <div style={{
           padding: '16px 18px', background: '#fef2f2', border: '1px solid #fecaca',
           borderRadius: 'var(--radius-md)', color: '#991b1b', fontSize: '13px',
           fontFamily: "'DM Sans',sans-serif", marginBottom: '20px',

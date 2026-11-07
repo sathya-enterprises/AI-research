@@ -3,8 +3,8 @@ GET  /api/stocks/search?q=...   — search the fundamentals knowledge base by
                                    ticker/name (autocomplete-style)
 GET  /api/stocks/{company_id}   — full fundamentals snapshot for a company
 
-Backed by the Screener.in knowledge base (see backend/screener_kb/schema.sql
-and backend/screener_kb/load_screener_data.py) via utils/screener_kb.py.
+Backed by the pre-provisioned Screener.in Supabase knowledge base and its
+loader (`backend/screener_kb/load_screener_data.py`) via `utils/screener_kb.py`.
 """
 import logging
 import re

@@ -38,7 +38,7 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 log = logging.getLogger("tools")
 
@@ -253,7 +253,8 @@ async def _run_document_search(args: dict, ctx: ToolContext) -> ToolResult:
         error=None if has_content else "no relevant passages found",
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
         raw={"rag_system_prompt": res.get("system_prompt") or "", "retrieved": res.get("retrieved", 0),
-             "source_files": files},
+             "source_files": files, "diagnostics": res.get("diagnostics") or {},
+             "reranker_ran": bool(res.get("reranker_ran"))},
     )
 
 

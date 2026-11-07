@@ -184,3 +184,53 @@ def test_grouped_citation_still_blocks_a_numeric_value_unsupported_by_all_cited_
     audit = report_mod._source_evidence_quality_audit(attached)
     assert audit["blocking"] is True
     assert audit["mismatchedCitationGroups"]
+
+
+def test_table_citation_keeps_full_row_context_when_a_cell_contains_abbreviation():
+    manifest = [{"id": "S1", "title": "Exchange filing", "url": "https://www.nseindia.com/filings/a"}]
+    enriched = [{
+        "url": "https://www.nseindia.com/filings/a",
+        "title": "Exchange filing",
+        "pageFetchStatus": "ok",
+        "evidenceOrigin": "publisher_page",
+        "pageContent": (
+            "Acme Industries Limited sold 12,000 equity shares. "
+            "The sale represented 1.2% of its equity."
+        ),
+    }]
+    report = "\n".join([
+        "## Verified completed sale transactions with an exact event date",
+        "",
+        "| Event date | Quarter | Issuer | Promoter / seller | Shares reported | Stake reported | Full-exit status | Filing-stated reason | Evidence |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 13 Oct 2025 | Q3 FY26 | Acme Ltd. | Mr. Rao | 12,000 | 1.2% | Partial | Not stated | [S1] |",
+    ])
+    attached = report_mod._attach_audit_source_evidence(manifest, enriched, report)
+    audit = report_mod._source_evidence_quality_audit(attached)
+    assert audit["blocking"] is False
+    assert audit["mismatchedCitationGroups"] == []
+
+
+def test_atomic_table_row_does_not_hide_a_different_entity_mismatch():
+    manifest = [{"id": "S1", "title": "Exchange filing", "url": "https://www.nseindia.com/filings/a"}]
+    enriched = [{
+        "url": "https://www.nseindia.com/filings/a",
+        "title": "Exchange filing",
+        "pageFetchStatus": "ok",
+        "evidenceOrigin": "publisher_page",
+        "pageContent": (
+            "Beta Industries Limited sold 12,000 equity shares. "
+            "The sale represented 1.2% of its equity."
+        ),
+    }]
+    report = "\n".join([
+        "## Verified completed sale transactions with an exact event date",
+        "",
+        "| Event date | Quarter | Issuer | Promoter / seller | Shares reported | Stake reported | Full-exit status | Filing-stated reason | Evidence |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 13 Oct 2025 | Q3 FY26 | Acme Ltd. | Mr. Rao | 12,000 | 1.2% | Partial | Not stated | [S1] |",
+    ])
+    attached = report_mod._attach_audit_source_evidence(manifest, enriched, report)
+    audit = report_mod._source_evidence_quality_audit(attached)
+    assert audit["blocking"] is True
+    assert audit["mismatchedCitationGroups"]

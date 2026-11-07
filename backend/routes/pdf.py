@@ -36,7 +36,7 @@ from fastapi import APIRouter
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse, Response
 
-from utils.datawrapper import attach_datawrapper_charts, fetch_png
+
 from routes.source_manifest import normalise_source_manifest, ensure_cited_source_records
 from utils.chart_evidence_audit import (
     audit_chart_evidence_consistency, prune_unsupported_chart_points,
@@ -216,9 +216,28 @@ def _is_valid_chart(spec: dict) -> bool:
 
     # Heatmap carries no "series" at all — a rows×columns matrix instead.
     if chart_type == "heatmap":
-        rows, cols, values = spec.get("rows") or [], spec.get("columns") or [], spec.get("values") or []
-        return (len(rows) >= 2 and len(cols) >= 2 and len(values) == len(rows)
-                and all(isinstance(r, list) and len(r) == len(cols) for r in values))
+        rows, cols, values = spec.get("rows"), spec.get("columns"), spec.get("values")
+        shape_valid = (
+            isinstance(rows, list) and len(rows) >= 2
+            and isinstance(cols, list) and len(cols) >= 2
+            and isinstance(values, list) and len(values) == len(rows)
+            and all(isinstance(row, list) and len(row) == len(cols) for row in values)
+        )
+        if not shape_valid:
+            return False
+        numeric_count = 0
+        for row in values:
+            for raw in row:
+                if isinstance(raw, bool) or raw is None:
+                    continue
+                if isinstance(raw, str) and raw.strip().casefold() in {"", "n/a", "na", "null", "none", "-", "--", "?"}:
+                    continue
+                try:
+                    number = float(str(raw).replace(",", "").replace("%", "").strip())
+                except (TypeError, ValueError):
+                    continue
+                numeric_count += int(math.isfinite(number))
+        return numeric_count >= 2
 
     series = spec.get("series") or []
     if not series:
@@ -1032,7 +1051,6 @@ def _line(c, spec, x0, y0, w, h):
         return
     unit  = spec.get("unit", "")
     safe_unit = _safe_text(unit)
-    title = spec.get("title", "")
 
     # Collect all values across ALL series for unified Y scale
     all_v = [_coerce_value(d.get("value", 0)) for s in series for d in s.get("data", [])]
@@ -1085,13 +1103,13 @@ def _line(c, spec, x0, y0, w, h):
         for cx2, cy2 in coords[1:]:
             p.lineTo(cx2, cy2)
         c.drawPath(p, fill=0, stroke=1)
-        # Dots + value labels on key points
+        # Dots on every series; direct labels are reserved for a single-series
+        # line so a multi-series comparison does not stack numbers on itself.
         c.setFillColorRGB(*color)
         for j, (px2, py2) in enumerate(coords):
             show = (j % step == 0 or j == n - 1)
             c.circle(px2, py2, 2.8 if show else 1.8, fill=1, stroke=0)
-            if show and has_legend:
-                # Small value tooltip above dot
+            if show and not has_legend:
                 val = _coerce_value(pts[j].get("value", 0))
                 c.setFont("Helvetica-Bold", 5.5)
                 c.setFillColorRGB(*color)
@@ -3468,7 +3486,13 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                 'font-size:10pt;">Chart omitted: validated category labels and numeric values were unavailable.</div>'
             )
     theme = theme or {}
-    chart_palette = theme.get("chartColors") or [theme.get("accentColor") or "#c8860a", theme.get("primaryColor") or "#1a1f4e", "#6a8caf", "#b46a55", "#7c6f9f", "#2f7f75", "#a65d7a", "#6c7a89"]
+    chart_palette = list(theme.get("chartColors") or [
+        theme.get("accentColor") or "#c8860a", theme.get("primaryColor") or "#1a1f4e",
+        "#6a8caf", "#b46a55", "#7c6f9f", "#2f7f75", "#a65d7a", "#6c7a89",
+    ])
+    _extra_chart_colors = ["#4f8f62", "#d17743", "#287d8e", "#aa5f83", "#8b7a38", "#596a9d"]
+    while len(chart_palette) < len(datasets):
+        chart_palette.append(_extra_chart_colors[(len(chart_palette) - 8) % len(_extra_chart_colors)])
     scales = ((config.get("options") or {}).get("scales") or {})
     x_axis_cfg = scales.get("x") if isinstance(scales, dict) else {}
     y_axis_cfg = scales.get("y") if isinstance(scales, dict) else {}
@@ -3497,6 +3521,16 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
     if show_legend is None:
         show_legend = len(datasets) > 1
     margin_l, margin_r, margin_t, margin_b = (174, 116, 44, 74) if bullet_chart else (68, 28, 44, 62)
+    legend_area_width = max(1, width - margin_l - margin_r)
+    legend_columns = min(4, max(1, int(legend_area_width / 185)))
+    legend_rows = (
+        math.ceil(len(datasets) / legend_columns)
+        if show_legend and ctype not in ("doughnut", "pie") and datasets else 0
+    )
+    legend_extra_height = max(0, legend_rows - 1) * 18
+    if legend_extra_height:
+        margin_t += legend_extra_height
+        height += legend_extra_height
     # v93: generic axis names ("Category", "Period", "Value") restate what the
     # tick labels already say; drop them. Real titles (e.g. "CRAR (%)") stay.
     if _svg_axis_title_is_generic(x_axis_title):
@@ -3658,12 +3692,19 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
     colors = chart_palette
     legend_x = margin_l
     if show_legend and ctype not in ("doughnut", "pie"):
-        for ds_i, ds in enumerate(datasets[:8]):
-            name = _svg_escape(ds.get("label") or ds.get("name") or f"Series {ds_i + 1}")
-            lx = legend_x + ds_i * 150
-            if lx + 130 <= width - margin_r:
-                marks.append(f'<rect x="{lx}" y="12" width="10" height="10" rx="2" fill="{colors[ds_i%len(colors)]}"/>')
-                text.append(f'<text x="{lx+15}" y="21" font-size="10" fill="{_SVG_LABEL_INK}">{name}</text>')
+        legend_col_width = legend_area_width / max(1, legend_columns)
+        max_legend_chars = max(10, int((legend_col_width - 24) / 5.4))
+        for ds_i, ds in enumerate(datasets):
+            raw_name = str(ds.get("label") or ds.get("name") or f"Series {ds_i + 1}").strip()
+            if len(raw_name) > max_legend_chars:
+                raw_name = raw_name[:max_legend_chars - 1].rstrip() + "…"
+            name = _svg_escape(raw_name)
+            col = ds_i % legend_columns
+            row = ds_i // legend_columns
+            lx = legend_x + col * legend_col_width
+            ly = 7 + row * 18
+            marks.append(f'<rect x="{lx:.1f}" y="{ly}" width="10" height="10" rx="2" fill="{colors[ds_i%len(colors)]}"/>')
+            text.append(f'<text x="{lx+15:.1f}" y="{ly+9}" font-size="9.5" fill="{_SVG_LABEL_INK}">{name}</text>')
     if ctype not in ("doughnut", "pie") and not horizontal_bar:
         # Every point is plotted; with dense series only every n-th category
         # is labelled so the axis stays legible.
@@ -3791,7 +3832,10 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
             col=colors[ds_i%len(colors)]
             marks.append(f'<path d="{d}" fill="{col}" fill-opacity="0.12" stroke="{col}" stroke-width="2"/>')
     elif ctype == "line":
-        for ds_i, ds in enumerate(datasets[:8]):
+        _line_many_series = len(datasets) > 4
+        _line_marker_radius = 2.1 if _line_many_series else 3
+        _line_stroke_width = 1.8 if _line_many_series else 2.4
+        for ds_i, ds in enumerate(datasets):
             segments = []
             current = []
             for i, raw_value in enumerate(ds.get("data") or []):
@@ -3814,10 +3858,14 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
             for pts in segments:
                 if len(pts) >= 2:
                     d = " ".join(("M" if j == 0 else "L") + f" {x:.1f} {y:.1f}" for j, (x, y, _) in enumerate(pts))
-                    marks.append(f'<path d="{d}" fill="none" stroke="{colors[ds_i%len(colors)]}" stroke-width="2.4"/>')
+                    marks.append(f'<path d="{d}" fill="none" stroke="{colors[ds_i%len(colors)]}" stroke-width="{_line_stroke_width}"/>')
                 for pi, (x, y, val) in enumerate(pts):
-                    marks.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{colors[ds_i%len(colors)]}"/>')
-                    if len(pts) <= 12 or pi in (0, len(pts)-1):
+                    marks.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{_line_marker_radius}" fill="{colors[ds_i%len(colors)]}"/>')
+                    show_point_value = (
+                        (len(datasets) == 1 and len(pts) <= 12)
+                        or (len(datasets) <= 3 and len(pts) <= 4)
+                    )
+                    if show_point_value and (len(pts) <= 12 or pi in (0, len(pts)-1)):
                         text.append(f'<text x="{x:.1f}" y="{y-7:.1f}" text-anchor="middle" font-size="8.5" fill="{_SVG_VALUE_INK}">{val:,.1f}</text>')
     elif ctype == "bubble":
         all_pts=[]
@@ -3997,12 +4045,12 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
 
     title = (config.get("options") or {}).get("plugins", {}).get("title", {}).get("text") or ""
     return (
-        f'<div class="gg-pdf-chart-fallback" style="break-inside:avoid;max-width:100%;">'
+        '<div class="gg-pdf-chart-fallback" style="break-inside:avoid;max-width:100%;">'
         f'{f"<div style=\"font-weight:600;font-size:11pt;margin:0 0 5px;color:{_SVG_VALUE_INK};\">{_svg_escape(title)}</div>" if title else ""}'
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="chart" font-family="{_svg_escape(_SVG_FONT)}">'
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>'
         + "".join(grid + marks + text) +
-        f'</svg></div>'
+        '</svg></div>'
     )
 
 
@@ -4611,6 +4659,12 @@ h1, h2, h3, h4, .gg-section-heading, .gg-section-heading-copy,
 }
 .gg-section-heading { break-inside: avoid-page !important; page-break-inside: avoid !important; }
 .gg-section-heading + .gg-section-body { break-before: avoid-page !important; page-break-before: avoid !important; }
+.gg-list-intro, .gg-section-body > p:has(+ ul), .gg-section-body > p:has(+ ol) {
+  break-after: avoid-page !important; page-break-after: avoid !important;
+}
+.gg-list--keep, .gg-section-body > ul, .gg-section-body > ol {
+  break-inside: avoid-page !important; page-break-inside: avoid !important; orphans: 2; widows: 2;
+}
 .gg-section-heading + .gg-section-body > :first-child,
 .gg-section-h3 + p, .gg-section-h3 + ul, .gg-section-h3 + ol,
 .gg-section-h3 + .gg-table-wrap, .gg-section-h3 + .gg-chart-wrap,
@@ -5059,6 +5113,32 @@ def _normalized_numeric_observation_line(value: object) -> str:
     return re.sub(r"[^a-z0-9%₹$€£]+", " ", text.casefold()).strip()
 
 
+def _is_entity_label_without_numeric_observation(value: object) -> bool:
+    """Avoid treating the numeric prefix in the brand name '360 ONE' as data.
+
+    The PDF audit should still validate full lines that attach a measurable
+    observation (for example, a return percentage) to the company name.
+    """
+    text = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", str(value or ""), flags=re.I).strip()
+    text = re.sub(r"^\s*\d+(?:\.\d+)*[.)]\s+", "", text, count=1)
+    match = re.match(r"(?i)^360\s+ONE\s+Asset\s+Management\b(.*)$", text)
+    if not match:
+        return False
+    remainder = match.group(1).strip(" \t:,-–—")
+    # Company names may be repeated in titles, profiles and ranking labels. These
+    # are not numeric observations unless the trailing text states a metric/value.
+    metric_words = re.search(
+        r"(?i)\b(?:return(?:s)?|revenue|aum|assets under management|profit|growth|yield|"
+        r"margin|valuation|cagr|performance|investment|benchmark|value|amount|reported|was|at|of)\b",
+        remainder,
+    )
+    numeric_measure = re.search(r"(?:%|₹|[$€£]|\b(?:cr|crore|million|billion|bps|basis points?)\b)", remainder, re.I)
+    if metric_words or numeric_measure:
+        return False
+    # Allow a plain entity name and common descriptive parenthetical qualifiers.
+    return bool(not remainder or re.fullmatch(r"(?i)(?:\([^)]{0,100}\)?)?", remainder))
+
+
 def _remove_exact_duplicate_observation_lines(report: str, findings: list[dict]) -> tuple[str, int]:
     """Remove only exact duplicate numeric lines explicitly identified by the PDF audit.
 
@@ -5078,8 +5158,8 @@ def _remove_exact_duplicate_observation_lines(report: str, findings: list[dict])
     removed = 0
     metric_line = re.compile(
         r"(?i)\b(?:credit|deposits?|gross npa|net npa|gnpa|nnpa|non[- ]performing|liabilit(?:y|ies)|"
-        r"assets?|net profit|profitability|net interest margin|nim|repo rate|interest rate|upi|growth|ratio|capital adequacy|"
-        r"return on assets|return on equity|transactions?)\b"
+        r"total assets|net assets|assets under management|\baum\b|net profit|profitability|net interest margin|nim|repo rate|interest rate|upi|growth|ratio|capital adequacy|"
+        r"return on assets|return on equity|returns?|transactions?)\b"
     )
     for line in str(report or "").splitlines():
         norm = _normalized_numeric_observation_line(line)
@@ -5124,7 +5204,7 @@ def _repair_rendered_chart_audit(report: str, charts: list, findings: list[dict]
 
 
 def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
-                             charts: list, sources: list) -> dict:
+                             charts: list, sources: list, question: str = "") -> dict:
     """Validate the final rendered PDF artifact, not just its source Markdown.
 
     PyMuPDF is the preferred validator because it exposes the rendered PDF text
@@ -5211,9 +5291,9 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
     # that name a metric and include numeric evidence.
     metric_line = re.compile(
         r"(?i)\b(?:credit|deposits?|gross npa|net npa|gnpa|nnpa|non[- ]performing|"
-        r"liabilit(?:y|ies)|assets?|net profit|profitability|net interest margin|nim|"
+        r"liabilit(?:y|ies)|total assets|net assets|assets under management|\baum\b|net profit|profitability|net interest margin|nim|"
         r"repo rate|interest rate|upi|growth|ratio|capital adequacy|return on assets|"
-        r"return on equity|transactions?)\b"
+        r"return on equity|returns?|transactions?)\b"
     )
     seen_numeric_lines: dict[str, int] = {}
     duplicate_numeric_lines: list[dict] = []
@@ -5228,6 +5308,8 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
         # the normalized comparison too, so genuinely duplicated observations
         # still match even if they appear as differently numbered list items.
         observation_text = re.sub(r"^\s*\d+(?:\.\d+)*[.)]\s+", "", line, count=1)
+        if _is_entity_label_without_numeric_observation(observation_text):
+            continue
         if len(line) < 24 or not metric_line.search(observation_text) or not re.search(r"\d", observation_text):
             continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)
@@ -5256,6 +5338,7 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
         try:
             final_chart_audit = audit_chart_evidence_consistency(
                 rendered_text, charts, sources, require_publisher_verification=True,
+                question=question,
             )
             for item in (final_chart_audit.get("chartTableVerificationConflicts") or [])[:20]:
                 findings.append({"severity": "critical", "issue": "Final PDF contains a chart/table evidence conflict.", **item})
@@ -5656,7 +5739,7 @@ async def generate_pdf(request: Request):
 
     pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
     pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)
-    _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources)
+    _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources, question=question)
 
     if draft_export:
         structural = _pdf_audit_is_structural_failure(pdf_bytes, _rendered_pdf_audit)
@@ -5706,7 +5789,7 @@ async def generate_pdf(request: Request):
                 )
                 pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
                 pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)
-                _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources)
+                _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources, question=question)
                 log.info(
                     "PDF: rendered-PDF audit after bounded chart repair status=%s findings=%d",
                     _rendered_pdf_audit.get("status"), len(_rendered_pdf_audit.get("findings") or []),
@@ -5734,7 +5817,7 @@ async def generate_pdf(request: Request):
                 )
                 pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
                 pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)
-                _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources)
+                _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources, question=question)
                 log.info(
                     "PDF: rendered-PDF audit after duplicate-line repair status=%s findings=%d",
                     _rendered_pdf_audit.get("status"), len(_rendered_pdf_audit.get("findings") or []),

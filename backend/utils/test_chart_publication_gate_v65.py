@@ -21,6 +21,20 @@ def test_empty_table_is_pruned_not_kept():
     assert removed == [2] and len(kept) == 1
 
 
+def test_single_point_trend_chart_is_removed_but_single_value_gauge_is_valid():
+    trend = {"type": "line", "title": "Trend", "series": [{"name": "Value", "data": [{"label": "2026", "value": 10}]}]}
+    gauge = {"type": "gauge", "title": "Current value", "series": [{"name": "Value", "data": [{"label": "2026", "value": 10}]}]}
+    snapshot = {"type": "bar", "title": "Latest value", "series": [{"name": "Value", "data": [{"label": "2026", "value": 10}]}]}
+
+    kept_trend, removed_trend, _ = prune_unsupported_chart_points([trend], {})
+    kept_gauge, removed_gauge, _ = prune_unsupported_chart_points([gauge], {})
+    kept_snapshot, removed_snapshot, _ = prune_unsupported_chart_points([snapshot], {})
+
+    assert kept_trend == [] and removed_trend == [1]
+    assert kept_gauge == [gauge] and removed_gauge == []
+    assert kept_snapshot == [snapshot] and removed_snapshot == []
+
+
 def test_unsupported_points_removed_and_export_audit_is_clean():
     report = "Intro\n[CHART_1]\nMiddle\n[CHART_2]\nEnd [CHART_3]"
     charts = [

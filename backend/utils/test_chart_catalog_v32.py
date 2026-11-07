@@ -1,5 +1,5 @@
 from utils.chart_catalog import (
-    CHART_TYPES, CHART_TYPE_ALIASES, chart_density_assessment,
+    CHART_TYPES, chart_density_assessment,
     chart_density_contract, chart_point_band, count_chart_points,
     normalize_chart_type,
 )

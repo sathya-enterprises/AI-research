@@ -20,7 +20,7 @@ def test_capture_records_raw_exa_and_normalized_results_without_keys(monkeypatch
     token = rc.begin_research_capture("renewable energy data", "brief")
     rc.record_exa_raw_response(
         "renewable energy data",
-        {"query": "renewable energy data", "type": "auto", "api_key": "never-save-this"},
+        {"query": "renewable energy data", "type": "auto", "api_key": "never-save-this", "key_suffix": "1234"},
         [{
             "title": "Official capacity report",
             "url": "https://example.org/report?utm_source=test&api_key=SECRET",
@@ -38,7 +38,7 @@ def test_capture_records_raw_exa_and_normalized_results_without_keys(monkeypatch
         max_results=10,
     )
     rc.record_research_stage("sources_after_article_fetch", {
-        "sources": [{"title": "Official capacity report", "url": "https://example.org/report", "pageFetchStatus": "ok", "pageContent": "Installed capacity reached 100 GW."}]
+        "sources": [{"title": "Official capacity report", "url": "https://example.org/report", "publisher_page_url": "https://example.org/fetched?x-goog-api-key=SECRET_FOUR", "pageFetchStatus": "ok", "pageContent": "Installed capacity reached 100 GW."}]
     })
     path = rc.finish_research_capture({"report": "Capacity reached 100 GW [S1]."}, token=token)
     assert path is not None
@@ -48,6 +48,9 @@ def test_capture_records_raw_exa_and_normalized_results_without_keys(monkeypatch
     assert data["searchCalls"][0]["perQuery"][0]["resultCount"] == 1
     assert "never-save-this" not in open(path, encoding="utf-8").read()
     assert "SECRET" not in open(path, encoding="utf-8").read()
+    assert "SECRET_FOUR" not in open(path, encoding="utf-8").read()
+    assert "keySuffixOnly" not in data["rawExaResponses"][0]
+    assert '"1234"' not in open(path, encoding="utf-8").read()
     assert "REDACTED" in data["rawExaResponses"][0]["results"][0]["url"]
 
 
@@ -64,6 +67,31 @@ def test_capture_omits_uploaded_document_text(monkeypatch, tmp_path):
     serialized = json.dumps(data)
     assert "This private content must not be captured" not in serialized
     assert "omitted from diagnostic capture" in serialized
+
+
+def test_capture_preserves_chart_point_shape_and_redacts_embedded_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("GG_RESEARCH_CAPTURE", "1")
+    monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setenv("GEMINI_API_KEY_9", "AIza_capture_secret_123456")
+    token = rc.begin_research_capture("chart capture safety", "in_depth")
+    rc.record_research_stage("final_output", {"data": {"charts": [{
+        "title": "Quarterly return",
+        "series": [{"name": "Sector", "data": [{"label": "Q1 2026", "value": 12.5}]}],
+    }], "details": {
+        "error": "request failed with key=AIza_capture_secret_123456",
+        "signedUrl": "https://user:pass@example.org/data?X-Amz-Credential=aws-secret&X-Amz-Signature=sign-secret&x-goog-api-key=google-secret",
+    }}})
+    path = rc.finish_research_capture(status="completed", token=token)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    payload = data["stages"]["final_output"]["data"]
+    point = payload["data"]["charts"][0]["series"][0]["data"][0]
+
+    assert point == {"label": "Q1 2026", "value": 12.5}
+    serialized = json.dumps(data)
+    assert "AIza_capture_secret_123456" not in serialized
+    assert "aws-secret" not in serialized and "sign-secret" not in serialized and "google-secret" not in serialized
+    assert "user:pass@" not in serialized
+    assert "REDACTED" in serialized and "[redacted]" in serialized
 
 
 def test_exa_multi_search_records_each_query_separately(monkeypatch, tmp_path):

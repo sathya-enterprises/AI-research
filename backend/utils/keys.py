@@ -14,10 +14,11 @@ Short transient throttles (429/503 backoffs of 30s/60s/120s) are NOT
 persisted — they're cheap to rediscover and don't need to survive a restart;
 persisting them would just spam Supabase with writes on every rate limit.
 
-Requires a Supabase table (see supabase_key_bans.sql in this directory).
-If SUPABASE_URL/SUPABASE_ANON_KEY aren't set, or the table doesn't exist,
-every persistence call is a silent no-op — behavior degrades to the old
-in-memory-only behavior, it doesn't break.
+Requires the already-provisioned Supabase table `gg_key_bans`.
+The one-time SQL migration is intentionally not included in this cleaned source
+bundle because the project owner confirmed that it has already been applied.
+If SUPABASE_URL/SUPABASE_ANON_KEY aren't set, or the table is unavailable,
+persistence is skipped and key-ban tracking degrades to in-memory behavior.
 """
 import asyncio
 import hashlib
@@ -147,7 +148,7 @@ async def _persist_ban(key: str, until_epoch: float) -> None:
             if r.status_code in (401, 403, 404):
                 log.debug(
                     "Supabase gg_key_bans: insert blocked/table missing (%d) — "
-                    "run supabase_key_bans.sql, or bans stay in-memory only",
+                    "verify the existing gg_key_bans table/migration; bans stay in-memory only",
                     r.status_code,
                 )
     except Exception as exc:

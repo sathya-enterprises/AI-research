@@ -96,19 +96,24 @@ def test_search_extract_only_gallery_source_is_not_marked_publisher_verified():
 
 def test_merge_source_evidence_statuses_marks_only_current_publisher_gallery_quote():
     quote = "| Scheduled commercial banks | FY2024 | 12.4% |"
-    report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_IDS.set({"S1"})
-    report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_LINES.set({"S1": [quote]})
-    report_mod._CHART_EVIDENCE_LINES.set({"S1": [quote]})
+    ids_token = report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_IDS.set({"S1"})
+    publisher_token = report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_LINES.set({"S1": [quote]})
+    chart_token = report_mod._CHART_EVIDENCE_LINES.set({"S1": [quote]})
     manifest = [{"id": "S1", "title": "Banking statistics", "url": "https://rbi.org.in/example"}]
     audited = [{
         "id": "S1", "url": "https://rbi.org.in/example",
         "pageFetchStatus": "ok", "evidenceExcerptOrigin": "publisher_page_and_search_extract",
         "publisherChartEvidenceExcerpt": quote,
     }]
-    merged = report_mod._merge_source_evidence_statuses(manifest, audited)
-    assert merged[0]["publisher_gallery_chart_evidence_verified"] is True
-    assert quote in merged[0]["publisherChartEvidenceExcerpt"]
-    assert "search_extract_chart_evidence_verified" not in merged[0]
+    try:
+        merged = report_mod._merge_source_evidence_statuses(manifest, audited)
+        assert merged[0]["publisher_gallery_chart_evidence_verified"] is True
+        assert quote in merged[0]["publisherChartEvidenceExcerpt"]
+        assert "search_extract_chart_evidence_verified" not in merged[0]
+    finally:
+        report_mod._CHART_EVIDENCE_LINES.reset(chart_token)
+        report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_LINES.reset(publisher_token)
+        report_mod._PUBLISHER_GALLERY_CHART_EVIDENCE_IDS.reset(ids_token)
 
 
 def test_chart_row_quote_matches_publisher_text_when_only_outer_markdown_pipes_differ():

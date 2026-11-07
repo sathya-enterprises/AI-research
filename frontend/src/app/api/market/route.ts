@@ -11,7 +11,6 @@ export const dynamic = 'force-dynamic';
 // ── Persistent disk cache (survives server restarts) ──────────────────────
 const DISK_CACHE_PATH = path.join(process.cwd(), 'market_cache.json');
 const MEM_TTL_MS  =  60_000; // 60s in-memory cache (serves hot repeat requests)
-const DISK_TTL_MS = 300_000; // 5min disk cache (serves cold starts + API failures)
 const STALE_OK_MS = 3_600_000; // 1hr — still serve stale data rather than nothing
 
 let memCache: { data: MarketData; fetchedAt: number } | null = null;

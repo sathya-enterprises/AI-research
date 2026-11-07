@@ -1,9 +1,6 @@
 """Regression tests for continuation stability and Deep Research PDF opening layout."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 
 from routes.report import _dedupe_repeated_subsections, _select_expansion_evidence

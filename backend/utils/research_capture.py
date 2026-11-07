@@ -25,8 +25,32 @@ _CURRENT_CAPTURE: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "gg_research_capture", default=None
 )
 
-_SENSITIVE_KEY_RE = re.compile(r"(?:api[_-]?key|access[_-]?token|authorization|password|secret|client[_-]?secret|bearer)", re.I)
-_SENSITIVE_QUERY_RE = re.compile(r"^(?:key|api_key|apikey|token|access_token|auth|authorization|secret|signature)$", re.I)
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?:api[_-]?key|(?:^|[_-])keys?(?:$|[_-])|key[_-]?suffix|credential[_-]?fingerprint|"
+    r"access[_-]?token|authorization|password|secret|client[_-]?secret|bearer)",
+    re.I,
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r"^(?:(?:x[-_]?(?:goog|amz|ms)[-_])?(?:key|api[-_]?key|credential|security[-_]?token|"
+    r"token|access[-_]?token|auth|authorization|secret|client[-_]?secret|password|credentials?|signature|sig|bearer)|"
+    r"awsaccesskeyid|googleaccessid|jwt)$",
+    re.I,
+)
+_INLINE_SECRET_QUERY_RE = re.compile(
+    r"(?i)([?&](?:(?:x[-_]?(?:goog|amz|ms)[-_])?(?:key|api[-_]?key|credential|security[-_]?token|"
+    r"token|access[-_]?token|auth|authorization|secret|client[-_]?secret|password|credentials?|signature|sig|bearer)|"
+    r"awsaccesskeyid|googleaccessid|jwt)=)[^&#\s\"']+"
+)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:x[-_]?(?:goog|amz|ms)[-_](?:api[-_]?key|security[-_]?token)|"
+    r"api[_-]?key|access[_-]?token|token|secret|password|authorization)\b\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^,\s&]+)"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_SENSITIVE_ENV_NAME_RE = re.compile(
+    r"(?i)(?:^|_)(?:API[_-]?KEYS?|KEYS?|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|TOKEN|SECRET|PASSWORD|CREDENTIALS?)(?:_?\d+)?$"
+    r"|(?:^|_)(?:DATABASE|DB|SUPABASE)_?(?:URL|URI)$|(?:^|_)DSN$"
+)
 
 
 def capture_enabled() -> bool:
@@ -43,13 +67,38 @@ def _redact_url(value: str) -> str:
         if not parts.scheme or not parts.netloc:
             return value[:2000]
         query = [(k, "REDACTED" if _SENSITIVE_QUERY_RE.match(k) else v) for k, v in parse_qsl(parts.query, keep_blank_values=True)]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), ""))[:2000]
+        # User-info is not needed for a public citation and can contain a
+        # password or embedded bearer credential.
+        netloc = parts.netloc.rsplit("@", 1)[-1]
+        safe = urlunsplit((parts.scheme, netloc, parts.path, urlencode(query, doseq=True), ""))
+        return _redact_text(safe)[:2000]
     except Exception:
         return str(value)[:2000]
 
 
+def _configured_secret_values() -> list[str]:
+    values = set()
+    for name, raw_value in os.environ.items():
+        if not _SENSITIVE_ENV_NAME_RE.search(name):
+            continue
+        for candidate in re.split(r"[,;\r\n]+", str(raw_value or "")):
+            value = candidate.strip().strip("\"'").strip()
+            if len(value) >= 6:
+                values.add(value)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_text(value: str) -> str:
+    safe = _INLINE_SECRET_QUERY_RE.sub(r"\1REDACTED", str(value or ""))
+    safe = _BEARER_TOKEN_RE.sub("Bearer REDACTED", safe)
+    safe = _CREDENTIAL_ASSIGNMENT_RE.sub(r"\1REDACTED", safe)
+    for secret in _configured_secret_values():
+        safe = safe.replace(secret, "[redacted]")
+    return safe
+
+
 def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
-    if depth > 8:
+    if depth > 12:
         return "[depth-limited]"
     if _SENSITIVE_KEY_RE.search(field_name):
         return "[redacted]"
@@ -57,12 +106,14 @@ def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
         return value
     if isinstance(value, str):
         name = field_name.lower()
-        if name in {"url", "sourceurl", "source_url", "pagefetchurl", "pagefetchfinalurl", "requested_url", "final_url"}:
+        if name.endswith(("url", "uri")) or name in {"requested_url", "final_url"}:
             return _redact_url(value)
         if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt", "snippet", "report", "finalreport", "writerprompt"}:
             cap = 9000 if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt"} else 15000
-            return value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
-        return value[:4000] + (f"…[truncated original chars={len(value)}]" if len(value) > 4000 else "")
+            clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
+            return _redact_text(clipped)
+        clipped = value[:4000] + (f"…[truncated original chars={len(value)}]" if len(value) > 4000 else "")
+        return _redact_text(clipped)
     if isinstance(value, dict):
         result = {}
         source_kind = " ".join(str(value.get(k) or "") for k in ("source_type", "sourceType", "kind", "type")).casefold()
@@ -212,7 +263,9 @@ def record_exa_raw_response(query: str, params: dict, results: list | None, *, t
     ctx["rawExaResponses"].append({
         "capturedAt": _now(), "transport": transport, "query": str(query or "")[:400],
         "requestId": str(request_id or "")[:100],
-        "keySuffixOnly": str(key_suffix or "")[-4:], "requestParameters": params,
+        # Keep the legacy key_suffix argument for callers that still pass it,
+        # but never persist credential fingerprints in diagnostic captures.
+        "requestParameters": params,
         "resultCount": len(results or []), "results": rows,
     })
 

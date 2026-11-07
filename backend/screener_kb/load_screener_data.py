@@ -1,10 +1,10 @@
 """
 Load screener.in company workbooks (produced by screener_all_stock_data.py)
-into the Postgres/Supabase schema defined in schema.sql.
+into the already-provisioned Postgres/Supabase Screener knowledge-base schema.
 
 Setup
 -----
-1. In the Supabase SQL editor, run schema.sql once.
+1. Confirm the pre-provisioned Screener tables exist in the configured Supabase project.
 2. pip install psycopg2-binary pandas openpyxl
 3. Set DATABASE_URL to your Supabase Postgres connection string
    (Supabase dashboard -> Settings -> Database -> Connection string -> URI,

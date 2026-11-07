@@ -1,5 +1,3 @@
-import io
-
 import pypdf
 from routes import pdf
 from routes.report import _rendered_page_count_preflight

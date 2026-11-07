@@ -1,6 +1,6 @@
 from routes import report as report_mod
 from utils.chart_evidence_audit import (
-    _chart_source_text, _publisher_evidence_verified, audit_chart_evidence_consistency,
+    _chart_source_text, _publisher_evidence_verified,
 )
 
 

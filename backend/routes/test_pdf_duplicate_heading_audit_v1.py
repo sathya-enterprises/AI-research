@@ -59,3 +59,54 @@ def test_real_duplicate_numeric_observation_still_fails_when_ordinals_differ():
         "repeats the same numeric observation" in str(item.get("issue", ""))
         for item in result["findings"]
     )
+
+
+def test_company_name_360_one_asset_management_is_not_misread_as_asset_metric():
+    lines = [
+        "360 ONE Asset Management (Multicap PMS strategy) is listed in the workbook.",
+        "360 ONE Asset Management (Multicap PMS strategy) is listed in the workbook.",
+        "The report includes supporting context, source references and a clearly explained comparison.",
+    ]
+    result = _audit_rendered_pdf_bytes(
+        _text_pdf(lines), "\n".join(lines), "PMS report", charts=[], sources=[]
+    )
+    assert not any(
+        "repeats the same numeric observation" in str(item.get("issue", ""))
+        for item in result["findings"]
+    )
+
+
+def test_360_one_company_name_repeated_in_report_titles_does_not_trigger_numeric_duplicate():
+    lines = [
+        "360 ONE Asset Management",
+        "360 ONE Asset Management",
+        "360 ONE Asset Management (Multicap PMS strategy)",
+        "360 ONE Asset Management (Multicap PMS strategy)",
+        "This report includes supporting analysis and enough text to validate a non-empty PDF.",
+    ]
+    result = _audit_rendered_pdf_bytes(
+        _text_pdf(lines), "\n".join(lines), "PMS report", charts=[], sources=[]
+    )
+    assert not any(
+        "repeats the same numeric observation" in str(item.get("issue", ""))
+        for item in result["findings"]
+    )
+
+
+def test_360_one_company_line_with_numeric_return_remains_auditable():
+    observation = "360 ONE Asset Management reported a 22.5% return over one year"
+    lines = [
+        observation + " [S1]",
+        observation + " [S2]",
+        "This report includes supporting analysis and enough text to validate a non-empty PDF.",
+    ]
+    result = _audit_rendered_pdf_bytes(
+        _text_pdf(lines), "\n".join(lines), "PMS report", charts=[], sources=[
+            {"id": "S1", "title": "Workbook evidence", "url": ""},
+            {"id": "S2", "title": "Workbook evidence duplicate", "url": ""},
+        ]
+    )
+    assert any(
+        "repeats the same numeric observation" in str(item.get("issue", ""))
+        for item in result["findings"]
+    )

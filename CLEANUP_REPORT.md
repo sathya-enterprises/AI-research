@@ -1,0 +1,65 @@
+# Cleanup report — source handoff
+
+## Summary
+
+This archive was cleaned from the uploaded `ai-research(1).zip`. The cleaned project keeps the canonical current frontend, backend, RAG service, tests, operational scripts, fixtures and dependencies manifests while removing the clearly redundant/ephemeral or inactive material verified in the source.
+
+- Original extracted source: approximately 255 MB, 726 files.
+- Cleaned source tree: approximately 11 MB, 435 files.
+- The clean ZIP retains the top-level `ai-research/` folder and all relative paths beneath it.
+
+## Removed
+
+### Duplicate / retired application code
+
+- Removed the older nested duplicate `frontend/frontend/`; the root `frontend/` is the canonical Next.js app. The root app has newer versions and includes current diagnostic/microservices UI paths not present in the nested copy.
+- Removed the five legacy Paperly Node service source trees: `backend/api-gateway/`, `backend/session-service/`, `backend/file-service/`, `backend/extraction-service/`, and `backend/llm-service/`. The backend's `/api/diagnostics/overview` explicitly marks these as `not_in_active_chat_path`.
+- Removed `frontend/src/app/api/upload/`, the old Next.js upload bridge that called the retired Paperly gateway. The current frontend parses files in the browser and indexes extracted text via `/api/rag/index`.
+- Removed the obsolete root-level `backend/checking_apikeys.py` one-model probe and byte-identical duplicate `backend/test_gemini_keys_models.py`; retained the consolidated multi-model diagnostic `backend/scripts/check_gemini_keys.py`.
+
+**Deployment caution:** removing these folders from this source ZIP does not stop or delete separately deployed services on Render or any external host. Review external deployments/environment variables separately before deleting those services.
+
+### Generated data and caches
+
+- Removed saved research-capture JSON files from `backend/diagnostics/` and `backend/diagnostics/research-captures/`.
+- Removed rendered PDF page inspection PNGs from `backend/diagnostics/pdf_inspect/`.
+- Removed frontend runtime caches `frontend/growth_gradual_cache.json` and `frontend/market_cache.json`.
+- Removed Python bytecode/cache directories and common OS residue if present.
+
+Test fixtures under `backend/routes/fixtures/` were retained because test modules explicitly load them. They are fixtures, not live runtime caches.
+
+### Already-applied SQL scripts
+
+Removed the one-time setup/cleanup/diagnostic SQL files the owner confirmed were already run in Supabase:
+
+- `backend/supabase_key_bans.sql`
+- `backend/supabase_sessions_user_id.sql`
+- `backend/rag-service/supabase_pgvector.sql`
+- `backend/screener_kb/schema.sql`
+- `backend/screener_kb/cleanup_blank_values.sql`
+- `backend/screener_kb/diagnose_blank_values.sql`
+
+Kept `backend/supabase_research_store.sql` because `backend/utils/research_store.py` reads and applies it during backend startup. Removing that file without changing the startup/bootstrap code would break the research-store setup path.
+
+Documentation and error messages were updated so they refer to already-provisioned Supabase tables/RPCs instead of deleted migration filenames. No database object was changed by this cleanup; this only changes the source archive.
+
+## Deliberately retained
+
+- Frontend and backend source, package manifests/lockfiles, requirements, deployment definitions and environment-variable documentation.
+- RAG code, `pgvector_store.py`, `okf_store.py`, and the one runtime-applied research-store schema.
+- Backend/route/utility/RAG tests and their referenced fixtures.
+- Current diagnostics APIs and safe operational instrumentation; only captured output artifacts were removed.
+- Screener data loaders and clients; the live Supabase tables are still used.
+
+## Function-level dead-code note
+
+The cleanup removes whole obsolete service trees and their unused upload entry point. It does **not** mass-delete individual helper functions from the active Python/TypeScript modules based only on text-search counts. This app uses FastAPI decorators, import-time router registration, dynamic tool registries, callbacks and dynamically selected helper paths; simple “one textual reference” checks can incorrectly label live code as unused. A reliable function-level prune requires running the full backend/frontend test suites and a dedicated dead-code analyzer in the dependency-complete project environment. Those checks were not available as a complete runtime here, so active helpers were preserved rather than risking a broken build.
+
+## Validation performed
+
+- Confirmed only `backend/supabase_research_store.sql` remains among project SQL files.
+- Confirmed old Paperly service directory and `/api/upload` source references are absent from the clean source tree.
+- Confirmed no `.env`, `.env.*`, PEM/key/certificate, or service-account credential files were present in the supplied archive scan.
+- `python -m compileall -q backend` passed before generated bytecode was removed from the bundle.
+- Focused offline tests passed: `backend/rag-service/test_pgvector_store.py` (7 passed) and `backend/routes/test_report_chart_evidence_v50.py` (15 passed).
+- A full dependency install, frontend production build and complete backend suite were not run. The package manager/build suite should be run in the deployment environment after dependencies are installed.

@@ -2,7 +2,7 @@
 Screener.in fundamentals knowledge base client.
 
 Reads the Postgres/Supabase schema populated by load_screener_data.py
-(see backend/screener_kb/schema.sql and backend/screener_kb/load_screener_data.py)
+(see backend/screener_kb/load_screener_data.py; the Supabase schema is pre-provisioned)
 via Supabase's PostgREST API — the same access pattern already used
 elsewhere in this backend (utils/keys.py, routes/chat.py _sb_headers).
 

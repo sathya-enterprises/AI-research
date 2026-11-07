@@ -5,16 +5,18 @@ growth CAGR, shareholding pattern, peers, pros/cons, filing links) loaded
 from Screener.in export workbooks into Postgres/Supabase, and wired into
 Growth Gradual's chat + API layer.
 
-## One-time setup
+## Load / refresh data
 
-1. Run `schema.sql` once in the Supabase SQL editor (same project as the
-   rest of the app, unless you set `SCREENER_SUPABASE_URL` /
-   `SCREENER_SUPABASE_ANON_KEY` to point elsewhere).
-2. `pip install psycopg2-binary pandas openpyxl`
-3. `export DATABASE_URL="postgresql://postgres:PASSWORD@HOST:5432/postgres"`
-   (Supabase dashboard → Settings → Database → Connection string → URI —
-   the direct Postgres string, not the REST/anon key.)
-4. `python load_screener_data.py /path/to/companies_folder`
+The Supabase Screener schema has already been provisioned. Its one-time SQL
+migration is intentionally not included in this cleaned source bundle. Use the
+same Supabase project as the rest of the app, unless you set
+`SCREENER_SUPABASE_URL` / `SCREENER_SUPABASE_ANON_KEY` to point elsewhere.
+
+1. Confirm the existing Screener tables are present in the configured database.
+2. Install the loader dependencies: `pip install psycopg2-binary pandas openpyxl`.
+3. Set `DATABASE_URL` to the Postgres connection string (Supabase dashboard →
+   Settings → Database → Connection string → URI; use a server-side secret).
+4. Run `python load_screener_data.py /path/to/companies_folder`.
 
 Re-running is safe — companies upsert on `ticker`, every other table
 upserts on its own primary key.

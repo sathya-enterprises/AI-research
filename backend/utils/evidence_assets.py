@@ -92,16 +92,12 @@ def _score(text: str, question: str, section_titles: list[str], source_title: st
         score = min(score, 0.08)
     score = round(min(score, 0.99), 2)
     if score >= 0.72:
-        role = "directly relevant evidence"
         reason = f"Direct question/entity overlap ({', '.join(entity_hits[:5]) or 'context'}) with nearby source text."
     elif score >= 0.42:
-        role = "supporting evidence"
         reason = f"Supports adjacent topic via {', '.join((entity_hits + section_hits)[:5]) or 'source context'}."
     elif _DECORATIVE.search(text):
-        role = "decorative"
         reason = "Promotional or decorative language without analytical support."
     else:
-        role = "contextual" if score >= 0.2 else "irrelevant"
         reason = "Contextual source-page visual; does not directly support a research claim."
     return score, reason, entity_hits, section_hits
 

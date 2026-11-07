@@ -37,7 +37,7 @@ try:
         SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle,
         Image, KeepTogether
     )
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 except ImportError as e:
     raise ImportError(f"ReportLab required for pdf_enhanced: {e}")
 
@@ -211,16 +211,6 @@ def build_pdf_enhanced(
         fontSize=28,
         textColor=title_color,
         spaceAfter=6,
-        fontName='Helvetica-Bold',
-        alignment=TA_CENTER
-    )
-    
-    subtitle_style = ParagraphStyle(
-        'CustomSubtitle',
-        parent=styles['Normal'],
-        fontSize=14,
-        textColor=accent_color,
-        spaceAfter=12,
         fontName='Helvetica-Bold',
         alignment=TA_CENTER
     )

@@ -18,12 +18,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from docx import Document
-from docx.enum.section import WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.opc.part import Part
-from docx.opc.packuri import PackURI
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -34,7 +32,7 @@ from fastapi.responses import JSONResponse, Response
 from routes.source_manifest import normalise_source_manifest
 from utils.chart_catalog import fold_slice_tail_for_display
 from utils.markdown_normalizer import strip_excluded_report_sections
-from utils.chart_evidence_audit import audit_chart_evidence_consistency, sanitize_charts_for_publication
+from utils.chart_evidence_audit import sanitize_charts_for_publication
 
 router = APIRouter()
 log = logging.getLogger("docx")
@@ -952,7 +950,7 @@ async def generate_docx(request: Request):
             file_images=body.get("fileImages") if isinstance(body.get("fileImages"), list) else [],
             report_tier=str(body.get("reportTier") or "detailed"),
         )
-    except Exception as exc:
+    except Exception:
         log.exception("DOCX: build failed")
         return JSONResponse({"error": "Word document export failed. Please retry or check the backend logs."}, status_code=500)
     filename_date = datetime.now().astimezone().strftime("%Y-%m-%d")

@@ -12,6 +12,7 @@ const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'http://127.0.0.1:7860').replace
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const requestId = req.headers.get('x-request-id') || crypto.randomUUID();
 
     // Fire ping and index in PARALLEL — don't wait for ping before indexing.
     // The ping wakes the HF Space; the index call will also wake it naturally.
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest) {
 
     const indexPromise = fetch(`${BACKEND}/api/rag/index`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(270_000), // 4.5 min — generous for cold HF Space
     });
@@ -31,8 +32,8 @@ export async function POST(req: NextRequest) {
     // We only need the index result; let ping finish in background
     const [res] = await Promise.all([indexPromise, pingPromise]);
     const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
-  } catch (err) {
+    return NextResponse.json(data, { status: res.status, headers: { 'X-Request-ID': requestId } });
+  } catch {
     return NextResponse.json({ error: 'RAG index proxy failed', chunks_added: 0 }, { status: 502 });
   }
 }

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from client_readiness_audit import OPENING_HEADINGS, REPORTS, ROOT
 

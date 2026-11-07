@@ -45,10 +45,10 @@ from routes.house_styles import (
     transform_section_html,
 )
 from utils.chart_catalog import CHART_TYPES, MAX_DISPLAY_SLICES, fold_slice_tail_for_display, normalize_chart_type
-from utils.markdown_normalizer import normalize_report_markdown, strip_excluded_report_sections
+from utils.markdown_normalizer import normalize_report_markdown, sanitize_inline_citations, strip_excluded_report_sections
 from utils.report_scanability import strip_generation_markers
 from routes.source_manifest import build_source_registry, normalise_source_manifest, ensure_cited_source_records
-from utils.chart_evidence_audit import audit_chart_evidence_consistency, sanitize_charts_for_publication
+from utils.chart_evidence_audit import sanitize_charts_for_publication
 from routes.report_design import BODY_CLASS as _EDITORIAL_BODY_CLASS, editorial_css as _editorial_css, editorial_render_theme as _editorial_render_theme, font_face_css as _editorial_font_faces
 
 router = APIRouter()
@@ -1154,7 +1154,7 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         return f"""
 <div class="gg-reveal gg-chart-wrap" data-reveal>
   {f'<div class="gg-chart-title">{title}</div>' if title else ''}
-  <div class="gg-chart-canvas-box"><canvas id="{canvas_id}"></canvas></div>
+  <div class="gg-chart-canvas-box" style="height:{_chart_canvas_height(chart)}px"><canvas id="{canvas_id}"></canvas></div>
 </div>
 <script>
 window.__ggCharts = window.__ggCharts || [];
@@ -1206,7 +1206,7 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         return f"""
 <div class="gg-reveal gg-chart-wrap" data-reveal>
   {f'<div class="gg-chart-title">{title}</div>' if title else ''}
-  <div class="gg-chart-canvas-box"><canvas id="{canvas_id}"></canvas></div>
+  <div class="gg-chart-canvas-box" style="height:{_chart_canvas_height(chart)}px"><canvas id="{canvas_id}"></canvas></div>
 </div>
 <script>
 window.__ggCharts = window.__ggCharts || [];
@@ -1650,13 +1650,17 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         values = [by_label.get(label) for label in labels]
         color = palette[s_i % len(palette)]
         is_line = ctype in {"line", "area", "stacked_area", "step_line", "spline"}
+        crowded_line = (is_line or ctype == "combo") and len(series) > 4
         bg = color if not is_line else f"{color}33" if ctype in {"area", "stacked_area"} else "transparent"
         ds = {
             "label": s.get("name", f"Series {s_i+1}"),
             "data": values,
             "backgroundColor": bg,
             "borderColor": color,
-            "borderWidth": 2,
+            "borderWidth": 1.5 if crowded_line else 2,
+            "pointRadius": 1.5 if crowded_line else 3,
+            "pointHoverRadius": 4,
+            "pointHitRadius": 10,
             "fill": ctype in {"area", "stacked_area"},
             "tension": 0 if ctype == "step_line" else 0.32,
         }
@@ -1777,8 +1781,12 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
                         _y_axis.pop(_key, None)
                 except (TypeError, ValueError):
                     _y_axis.pop(_key, None)
-    if ctype == "horizontal_bar":
+    dense_categories = len(labels) >= 12
+    long_categories = any(len(str(label)) >= 24 for label in labels)
+    if ctype == "horizontal_bar" or (ctype == "bar" and (dense_categories or long_categories)):
         chart_config["options"]["indexAxis"] = "y"
+        if ctype == "bar":
+            chart_config["options"].setdefault("scales", {}).setdefault("y", {}).setdefault("ticks", {})["font"] = {"size": 11}
         numeric_values = [_to_num(value) for dataset in datasets for value in (dataset.get("data") or [])]
         if not _log_axis_active and numeric_values and all(value >= 0 for value in numeric_values):
             chart_config["options"].setdefault("scales", {}).setdefault("x", {})["beginAtZero"] = True
@@ -1811,7 +1819,7 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
     return f"""
 <div class="gg-reveal gg-chart-wrap" data-reveal>
   {f'<div class="gg-chart-title">{title}</div>' if title else ''}
-  <div class="gg-chart-canvas-box"><canvas id="{canvas_id}"></canvas></div>
+  <div class="gg-chart-canvas-box" style="height:{_chart_canvas_height(chart)}px"><canvas id="{canvas_id}"></canvas></div>
 </div>
 <script>
 window.__ggCharts = window.__ggCharts || [];
@@ -1840,11 +1848,11 @@ def _render_chart_block(
         return rendered
     inline_gallery = bool(chart.get("gallery"))
     if inline_gallery:
-        # Evidence-gallery charts are blended into the narrative with their own
-        # caption, so they render compact and without the Context/Takeaway boxes.
+        # Keep evidence-gallery charts compact, but retain the data-derived
+        # takeaway so the visual does not appear without a reading cue.
         rendered = rendered.replace("gg-chart-wrap", "gg-chart-wrap gg-chart-wrap--inline", 1)
     rationale = "" if inline_gallery else html.escape(str(chart.get("rationale") or "").strip())
-    takeaway = "" if inline_gallery else html.escape(str(chart.get("takeaway") or "").strip())
+    takeaway = html.escape(str(chart.get("takeaway") or "").strip())
     source_value = source_override if source_override is not None else (
         chart.get("source") or chart.get("sourceNote") or chart.get("sources") or chart.get("sourceIds")
     )
@@ -2272,7 +2280,6 @@ def _render_ascii_diagram_svg(labels: list[str], *, title: str = "Structured flo
     width = 860
     node_w = 650
     left = (width - node_w) / 2
-    pad_x = 22
     node_h = 58
     gap = 22
     top = 18
@@ -2326,6 +2333,18 @@ def _render_ascii_diagram_svg(labels: list[str], *, title: str = "Structured flo
     return "".join(parts)
 
 
+def _is_markdown_pipe_table_start(lines: list[str], start: int) -> bool:
+    """Recognize a pipe table before broad ASCII-art recovery consumes its rows."""
+    if start + 1 >= len(lines):
+        return False
+    first = lines[start].strip()
+    second = lines[start + 1].strip()
+    markdown_separator = re.match(
+        r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$", second,
+    )
+    return first.startswith("|") and first.endswith("|") and markdown_separator is not None
+
+
 def _ascii_art_block_at(lines: list[str], start: int) -> tuple[str, int] | None:
     """Recover ASCII/box-drawing flow diagrams into one atomic SVG visual.
 
@@ -2341,26 +2360,37 @@ def _ascii_art_block_at(lines: list[str], start: int) -> tuple[str, int] | None:
     # (rows contain multiple pipes and the separator contains dashes). Give the
     # native table parser precedence so financial/benchmark tables never turn
     # into flow diagrams simply because they follow a heading without a blank.
-    if start + 1 < len(lines):
-        first = lines[start].strip()
-        second = lines[start + 1].strip()
-        markdown_separator = re.match(
-            r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$", second
-        )
-        if first.startswith("|") and first.endswith("|") and markdown_separator:
-            return None
+    if _is_markdown_pipe_table_start(lines, start):
+        return None
 
     fenced = bool(re.fullmatch(r"```(?:text|plaintext|diagram|flowchart)?", lines[start].strip(), flags=re.IGNORECASE))
     if fenced:
         closing = next((j for j in range(start + 1, len(lines)) if re.fullmatch(r"```\s*", lines[j].strip())), None)
         if closing is None:
             return None
-        candidate_lines = lines[start + 1:closing]
-        end = closing + 1
+        table_start = next(
+            (j for j in range(start + 1, closing) if _is_markdown_pipe_table_start(lines, j)),
+            None,
+        )
+        if table_start is not None:
+            # A deterministic evidence table can be inserted into a writer's
+            # still-open fenced diagram. Close the diagram at the table header;
+            # the renderer will then emit the table natively and skip the
+            # original closing fence after the table rows.
+            candidate_lines = lines[start + 1:table_start]
+            end = table_start
+        else:
+            candidate_lines = lines[start + 1:closing]
+            end = closing + 1
     else:
         candidate_lines = []
         end = start
         while end < len(lines) and end - start < 60:
+            # A diagram can be followed immediately by a pipe table with no
+            # blank line. Stop the broad diagram scan before that table so the
+            # outer renderer can emit it as a real, accessible HTML table.
+            if _is_markdown_pipe_table_start(lines, end):
+                break
             st = lines[end].strip()
             if not st:
                 break
@@ -2428,7 +2458,9 @@ def _markdown_to_html(
             if text:
                 for paragraph in _split_long_paragraph(text):
                     reveal_counter += 1
-                    out.append(f'<p class="gg-reveal" data-reveal style="--d:{(reveal_counter % 4) * 60}ms">{_inline_md(paragraph, source_registry)}</p>')
+                    plain = re.sub(r"[\s*_`~]+$", "", paragraph).rstrip()
+                    intro_class = " gg-list-intro" if plain.endswith(":") else ""
+                    out.append(f'<p class="gg-reveal{intro_class}" data-reveal style="--d:{(reveal_counter % 4) * 60}ms">{_inline_md(paragraph, source_registry)}</p>')
                 remember_source_ids(text)
             para_buf = []
 
@@ -2439,10 +2471,7 @@ def _markdown_to_html(
             list_mode = None
 
     def is_table_start(i: int) -> bool:
-        if i + 1 >= len(lines):
-            return False
-        a = lines[i].strip(); b = lines[i + 1].strip()
-        return a.startswith("|") and a.endswith("|") and re.match(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$", b) is not None
+        return _is_markdown_pipe_table_start(lines, i)
 
     def local_source_lines(start: int) -> tuple[str, str, int]:
         source_text = ""
@@ -2609,14 +2638,6 @@ def _markdown_to_html(
         # bordered text, but pipe-delimited rows carry a clear tabular schema
         # and must reach the editable table renderer instead of being flattened
         # into a diagram or discarded.
-        ascii_art = _ascii_art_block_at(lines, i)
-        if ascii_art:
-            flush_para(); close_list()
-            art_html, next_i = ascii_art
-            out.append(art_html)
-            i = next_i
-            continue
-
         if is_table_start(i):
             flush_para(); close_list()
             rows = []
@@ -2644,6 +2665,14 @@ def _markdown_to_html(
             if rendered_table:
                 out.append(rendered_table)
             remember_source_ids(table_text + " " + table_source)
+            continue
+
+        ascii_art = _ascii_art_block_at(lines, i)
+        if ascii_art:
+            flush_para(); close_list()
+            art_html, next_i = ascii_art
+            out.append(art_html)
+            i = next_i
             continue
 
         if not stripped:
@@ -2683,11 +2712,11 @@ def _markdown_to_html(
         numbered_m = re.match(r"^\d+[.)]\s+(.*)$", stripped)
         if bullet_m:
             flush_para()
-            if list_mode != "ul": close_list(); out.append('<ul class="gg-reveal gg-list" data-reveal>'); list_mode = "ul"
+            if list_mode != "ul": close_list(); out.append('<ul class="gg-reveal gg-list gg-list--keep" data-reveal>'); list_mode = "ul"
             out.append(f"<li>{_inline_md(bullet_m.group(1), source_registry)}</li>"); i += 1; continue
         if numbered_m:
             flush_para()
-            if list_mode != "ol": close_list(); out.append('<ol class="gg-reveal gg-list" data-reveal>'); list_mode = "ol"
+            if list_mode != "ol": close_list(); out.append('<ol class="gg-reveal gg-list gg-list--keep" data-reveal>'); list_mode = "ol"
             out.append(f"<li>{_inline_md(numbered_m.group(1), source_registry)}</li>"); i += 1; continue
 
         close_list(); para_buf.append(stripped); i += 1
@@ -2749,7 +2778,6 @@ def _render_key_stats(
         if m:
             numeric_str = m.group(0).replace(",", "")
             prefix = html.escape(value[: m.start()])
-            suffix = html.escape(value[m.end():])
             try:
                 target = float(numeric_str)
                 is_float = "." in numeric_str
@@ -3088,6 +3116,8 @@ main {{ width: min(var(--content-max), calc(100% - 40px)); margin: 0 auto; paddi
 .gg-block--emphasis-high {{ border-left: 3px solid var(--accent); padding-left: 18px; }}
 .gg-block--emphasis-critical {{ border-left: 4px solid var(--negative); padding-left: 18px; }}
 .gg-list {{ font-size: 16px; color: var(--ink-soft); padding-left: 24px; }}
+.gg-list-intro, .gg-section-body > p:has(+ ul), .gg-section-body > p:has(+ ol) {{ break-after: avoid-page !important; page-break-after: avoid !important; }}
+.gg-list--keep {{ break-inside: avoid-page !important; page-break-inside: avoid !important; orphans: 2; widows: 2; }}
 .gg-list li {{ margin: 6px 0; }}
 .gg-pullquote {{ border-left: 3px solid var(--accent); margin: 26px 0; padding: 6px 0 6px 20px; font-style: italic; font-size: 19px; color: var(--ink); }}
 .gg-divider {{ border: 0; border-top: 1px solid var(--rule); margin: 36px 0; }}
@@ -3894,6 +3924,11 @@ document.addEventListener('DOMContentLoaded', function () {
         var type = chart.config.type;
         var ctx = chart.ctx;
         var labels = (chart.data && chart.data.labels) || [];
+        var datasets = (chart.data && chart.data.datasets) || [];
+        // Many-period, multi-series lines are already dense. Their legend and
+        // hover tooltips carry the exact values; drawing a label at every point
+        // creates an unreadable wall of overlapping numbers in the report.
+        if (type === 'line' && datasets.length > 1) return;
         var maxPoints = type === 'line' ? 12 : 14;
         if (type === 'doughnut' || type === 'pie') {
           var meta = chart.getDatasetMeta(0);
@@ -3911,7 +3946,7 @@ document.addEventListener('DOMContentLoaded', function () {
           });
           return;
         }
-        (chart.data.datasets || []).forEach(function(ds, di){
+        datasets.forEach(function(ds, di){
           // A bullet chart's target is a narrow floating range, not a data
           // value. Labelling its width produces misleading values such as
           // "6.5" beside a 500-GW target tick.
@@ -4539,6 +4574,76 @@ def _chart_size_class(chart: dict) -> str:
     return "standard"
 
 
+def _chart_canvas_height(chart: dict) -> int:
+    """Choose enough vertical space for dense categorical charts."""
+    labels = []
+    for item in chart.get("series") or []:
+        if not isinstance(item, dict):
+            continue
+        for point in item.get("data") or item.get("values") or []:
+            label = str(point.get("label") or point.get("name") or point.get("category") or point.get("period") or "") if isinstance(point, dict) else str(point or "")
+            if label and label not in labels:
+                labels.append(label)
+    return min(640, max(480, 32 * len(labels) + 32)) if len(labels) >= 12 else (360 if len(labels) > 5 else 300)
+
+
+def _clean_report_visual_payloads(report_text: str, charts: list, key_stats: list) -> tuple[str, list, list]:
+    """Remove invalid/duplicate visual payloads while preserving chart indices."""
+    text = re.sub(r"(?is)```(?:json)?\s*\{.*?\}\s*```", "", str(report_text or ""))
+    cleaned = []
+    signatures = set()
+    invalid_labels = set()
+    valid_indices = set()
+    for index, raw in enumerate(charts or [], start=1):
+        chart = raw if isinstance(raw, dict) else {}
+        ctype = normalize_chart_type(chart.get("type") or chart.get("chartType") or "bar") if chart else ""
+        title = str(chart.get("title") or "").strip()
+        generic_kpi = ctype in {"kpi", "gauge", "progress"} and (not title or re.match(r"(?i)^(?:kpi|metric|indicator)\b", title))
+        valid = bool(chart and not generic_kpi and _chart_has_renderable_payload(chart))
+        signature = None
+        if valid:
+            points = []
+            for series in chart.get("series") or []:
+                if not isinstance(series, dict):
+                    continue
+                for point in series.get("data") or []:
+                    if isinstance(point, dict):
+                        points.append((str(point.get("label") or "").casefold(), str(point.get("value", point.get("y", point.get("count"))))))
+            if ctype == "heatmap":
+                matrix_rows = tuple(str(value) for value in (chart.get("rows") or []))
+                matrix_columns = tuple(str(value) for value in (chart.get("columns") or []))
+                matrix_values = tuple(
+                    tuple(repr(value) for value in row)
+                    for row in (chart.get("values") or []) if isinstance(row, list)
+                )
+                signature = (ctype, matrix_rows, matrix_columns, matrix_values)
+            else:
+                signature = (ctype, tuple(sorted(points)))
+            if signature in signatures:
+                valid = False
+            else:
+                signatures.add(signature)
+        if not valid:
+            for series in chart.get("series") or []:
+                if isinstance(series, dict):
+                    invalid_labels.update(str(point.get("label") or "").casefold() for point in series.get("data") or [] if isinstance(point, dict))
+            cleaned.append({})
+        else:
+            cleaned.append(chart)
+            valid_indices.add(index)
+    seen_markers = set()
+    def keep_marker(match):
+        index = int(match.group(1))
+        if index not in valid_indices or index in seen_markers:
+            return ""
+        seen_markers.add(index)
+        return f"[CHART_{index}]"
+    text = re.sub(r"(?i)\[CHART_(\d+)\]", keep_marker, text)
+    stats = [item for item in (key_stats or []) if not (isinstance(item, dict) and str(item.get("label") or "").casefold() in invalid_labels)]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text, cleaned, stats
+
+
 def _chart_has_renderable_payload(chart: object) -> bool:
     """Return whether a structured chart contains real data to draw.
 
@@ -4551,6 +4656,24 @@ def _chart_has_renderable_payload(chart: object) -> bool:
     chart_type = normalize_chart_type(chart.get("type") or chart.get("chartType") or "bar")
     if chart_type == "table":
         return len(chart.get("columns") or []) >= 2 and len(chart.get("rows") or []) >= 2
+    if chart_type == "heatmap":
+        rows = chart.get("rows")
+        columns = chart.get("columns")
+        values = chart.get("values")
+        if (
+            not isinstance(rows, list) or len(rows) < 2
+            or not isinstance(columns, list) or len(columns) < 2
+            or not isinstance(values, list) or len(values) != len(rows)
+            or any(not isinstance(row, list) or len(row) != len(columns) for row in values)
+        ):
+            return False
+        numeric_count = sum(
+            1
+            for row in values
+            for value in row
+            if (number := _strict_chart_number(value)) is not None and math.isfinite(number)
+        )
+        return numeric_count >= 2
     series = chart.get("series") or []
     point_values: list[float] = []
     total_points = 0
@@ -4667,7 +4790,11 @@ def _render_sources_appendix(
                 f'target="_blank" rel="noopener noreferrer">{safe_url}</a>'
             )
         else:
-            link_markup = '<span class="gg-source-unavailable">(No public URL supplied)</span>'
+            unresolved = str(source.get("source_status") or source.get("sourceStatus") or "").casefold() == "unresolved"
+            missing_url = "(Source URL unavailable)" if unresolved else "(No public URL supplied)"
+            link_markup = f'<span class="gg-source-unavailable">{missing_url}</span>'
+            if unresolved:
+                link_markup += '<span class="gg-source-status">this citation has not been verified</span>'
         # Keep client-facing source lists compact. Per-source retrieval failures
         # are retained in backend diagnostics and publication-audit metadata, not
         # repeated verbatim beside every citation in the exported report.
@@ -4997,6 +5124,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # the HTML and PDF export paths, including saved/action-edited reports.
     report = strip_excluded_report_sections(strip_generation_markers(normalize_report_markdown(report)))
     report = re.sub(r"\[IMAGE_(\d+)\]", r"[WEB_IMG_\1]", str(report or ""), flags=re.IGNORECASE)
+    report, charts, key_stats = _clean_report_visual_payloads(report, charts or [], key_stats or [])
     report = _recover_chart_placeholders_from_titles(report, charts or [])
     report = _strip_redundant_model_source_appendix(report)
     report = _strip_duplicate_title_heading(report, title)
@@ -5161,6 +5289,10 @@ def build_html_report(report: str, title: str, question: str, summary: str,
             )
         evidence_asset_html[asset_id] = '<div class="gg-evidence-asset-wrap">' + rendered_asset + '</div>'
 
+    # Normalize empty/mixed citation artifacts before linking. The helper keeps
+    # valid canonical IDs and removes invalid aliases such as [S19, Tamb35].
+    report = sanitize_inline_citations(report, source_registry)
+    summary = sanitize_inline_citations(summary, source_registry)
     # Final citation guard: only primary/canonical S# citations are valid.
     report = _remove_orphan_citations(report, source_registry)
     force_source_notes = bool(source_registry)

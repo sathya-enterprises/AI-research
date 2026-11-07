@@ -1,6 +1,6 @@
 """Build compact before/after review sheets for the three scoped reports."""
 from pathlib import Path
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageDraw
 
 ROOT = Path("artifacts")
 CASES = {

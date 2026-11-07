@@ -6,7 +6,7 @@ def test_report_parser_initializes_images_before_processing_provider_images():
     source = Path(__file__).resolve().parents[0].joinpath("report.py").read_text(encoding="utf-8")
     parse_start = source.index("# Initialize every optional envelope field immediately.")
     image_init = source.index("images: list = []", parse_start)
-    image_selection = source.index("original_images_list = parsed.get(\"images\") or []", parse_start)
+    image_selection = source.index("original_images_list = [] if file_only_report else (parsed.get(\"images\") or [])", parse_start)
     assert image_init < image_selection
     assert "if len(images) > 4:" not in source[parse_start:image_selection]
 

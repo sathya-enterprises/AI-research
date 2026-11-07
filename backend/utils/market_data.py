@@ -56,6 +56,34 @@ SECTOR_INDEX_SYMBOLS = [
 ]
 
 
+# Quarterly sector-return matrix universe. NIFTY BANK and NIFTY IT are the two
+# heaviest Nifty 50 sectors, so a sector-rotation matrix without them cannot
+# describe the IT-vs-financials story. They are kept out of
+# SECTOR_INDEX_SYMBOLS because the headline index series already carries them.
+SECTOR_QUARTERLY_SYMBOLS = SECTOR_INDEX_SYMBOLS + [
+    ("^NSEBANK", "NIFTY BANK"),
+    ("^CNXIT", "NIFTY IT"),
+]
+
+# Yahoo tickers for several NSE sector indices 404 or return bars that do not
+# reach the quarter ends. These are tried in order, after the primary ticker,
+# and only to fill months that are still missing. A ticker that returns nothing
+# is simply skipped, so an alias that does not exist costs one request.
+SECTOR_YAHOO_ALIASES: dict[str, list[str]] = {
+    "NIFTY FINANCIAL SERVICES": ["^CNXFIN", "NIFTY_FIN_SERVICE.NS"],
+    "NIFTY PRIVATE BANK": ["NIFTY_PVT_BANK.NS"],
+    "NIFTY HEALTHCARE": ["NIFTY_HEALTHCARE.NS"],
+    "NIFTY CONSUMER DURABLES": ["NIFTY_CONSR_DURBL.NS"],
+    "NIFTY MEDIA": ["NIFTY_MEDIA.NS"],
+}
+
+# Name the official Nifty Indices endpoint expects when it differs from our label.
+NIFTYINDICES_NAME_ALIASES: dict[str, str] = {
+    "NIFTY HEALTHCARE": "NIFTY HEALTHCARE INDEX",
+}
+_NIFTYINDICES_HISTORY_PAGE = "https://www.niftyindices.com/reports/historical-data"
+
+
 async def _yf_chart_quote(client: httpx.AsyncClient, yf_symbol: str) -> Optional[dict]:
     """Yahoo Finance v8 chart endpoint — no crumb/cookie needed."""
     try:
@@ -560,6 +588,34 @@ def format_stock_fundamentals_as_source(stocks: list[dict]) -> Optional[dict]:
 
 
 
+async def _niftyindices_warm_session(client: httpx.AsyncClient) -> None:
+    """Load the Nifty Indices report page once so its session cookie is on the client."""
+    if getattr(client, "_gg_nifty_warmed", False):
+        return
+    lock = getattr(client, "_gg_nifty_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        try:
+            client._gg_nifty_lock = lock  # type: ignore[attr-defined]
+        except Exception:
+            return
+    async with lock:
+        if getattr(client, "_gg_nifty_warmed", False):
+            return
+        try:
+            await client.get(
+                _NIFTYINDICES_HISTORY_PAGE,
+                headers={"User-Agent": YF_HEADERS["User-Agent"], "Accept": "text/html,*/*;q=0.8"},
+                timeout=12.0, follow_redirects=True,
+            )
+        except Exception as exc:
+            log.warning("market_data: Nifty Indices session warm-up failed: %s", type(exc).__name__)
+        try:
+            client._gg_nifty_warmed = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 async def _niftyindices_month_end_closes(
     client: httpx.AsyncClient, index_name: str, start_month: tuple[int, int], end_month: tuple[int, int],
 ) -> dict[tuple[int, int], float]:
@@ -574,6 +630,8 @@ async def _niftyindices_month_end_closes(
     import json
 
     base_url = "https://www.niftyindices.com/Backpage.aspx/getHistoricaldatatabletoString"
+    index_name = NIFTYINDICES_NAME_ALIASES.get(index_name, index_name)
+    await _niftyindices_warm_session(client)
     month_start = date(start_month[0], start_month[1], 1)
     month_end = date(end_month[0], end_month[1], monthrange(end_month[0], end_month[1])[1])
     start_date = month_start
@@ -593,8 +651,15 @@ async def _niftyindices_month_end_closes(
             + index_name.replace("'", "") + "'}"
         )
         try:
-            response = await client.post(base_url, json={"cinfo": cinfo}, headers=headers, timeout=15.0)
-            if response.status_code == 200:
+            # The endpoint answers 302 to clients without the session cookie
+            # issued by its own report page (seen for every index in a live
+            # run), so the session is warmed first and redirects are followed.
+            response = await client.post(
+                base_url, json={"cinfo": cinfo}, headers=headers, timeout=15.0, follow_redirects=True,
+            )
+            if response.status_code == 200 and "json" not in str(response.headers.get("content-type", "")).casefold():
+                log.warning("market_data: Nifty Indices historical fallback returned non-JSON content for %s", index_name)
+            elif response.status_code == 200:
                 body = response.json()
                 payload = body.get("d") if isinstance(body, dict) else None
                 if isinstance(payload, str):
@@ -642,7 +707,6 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
     month-end bars explicitly; we never interpolate or invent missing values.
     """
     from datetime import datetime, timezone
-    from collections import defaultdict
 
     now = datetime.now(timezone.utc)
     current_q = (now.month - 1) // 3
@@ -664,22 +728,17 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
     quarter_labels = [f"Q{((month - 1) // 3) + 1} {year}" for year, month in ends]
 
     semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+    nifty_semaphore = asyncio.Semaphore(3)
+    # Cookie-carrying client of its own: the official endpoint needs the session
+    # cookie from its report page and must not share cookies with Yahoo calls.
+    nifty_client = httpx.AsyncClient(follow_redirects=True)
     async with httpx.AsyncClient() as client:
         async def fetch_one(symbol: str, label: str):
-            async with semaphore:
-                points = await _yf_chart_history(client, symbol, "5y", "1mo")
-            history_sources = ["Yahoo Finance monthly bars"] if points else []
-            official_recovered = 0
-            if not points:
-                log.warning("market_data: no monthly history for sector %s (%s); trying official Nifty Indices history", label, symbol)
-                month_closes: dict[tuple[int, int], float] = {}
-            else:
-                month_closes = {}
-
-            # The Yahoo timestamp identifies the month represented by the bar;
-            # its close is the last available trading close for that month.
-            if points:
-                for point in points:
+            def month_map(points) -> dict[tuple[int, int], float]:
+                # The Yahoo timestamp identifies the month represented by the bar;
+                # its close is the last available trading close for that month.
+                out_map: dict[tuple[int, int], float] = {}
+                for point in points or []:
                     raw_date = str(point.get("date") or "").strip()
                     parsed = None
                     for fmt in ("%b %Y", "%Y-%m-%d", "%B %Y"):
@@ -691,15 +750,40 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                     if parsed is None:
                         continue
                     try:
-                        month_closes[(parsed.year, parsed.month)] = float(point["close"])
+                        out_map[(parsed.year, parsed.month)] = float(point["close"])
                     except (TypeError, ValueError, KeyError):
                         continue
+                return out_map
+
+            month_closes: dict[tuple[int, int], float] = {}
+            history_sources: list[str] = []
+            # Primary ticker first, then aliases, each only filling months that
+            # are still missing; stop as soon as every quarter end is covered.
+            for candidate in [symbol] + SECTOR_YAHOO_ALIASES.get(label, []):
+                if all(key in month_closes for key in ends):
+                    break
+                async with semaphore:
+                    points = await _yf_chart_history(client, candidate, "5y", "1mo")
+                found = month_map(points)
+                filled = [key for key in ends if key in found and key not in month_closes]
+                if not filled:
+                    continue
+                for key in filled:
+                    month_closes[key] = found[key]
+                history_sources.append(
+                    "Yahoo Finance monthly bars" if candidate == symbol
+                    else f"Yahoo Finance monthly bars (alias {candidate})"
+                )
+            official_recovered = 0
+            if not month_closes:
+                log.warning("market_data: no monthly history for sector %s (%s); trying official Nifty Indices history", label, symbol)
 
             missing_months = [(year, month) for year, month in ends if (year, month) not in month_closes]
             if missing_months:
-                official_closes = await _niftyindices_month_end_closes(
-                    client, label, ends[0], ends[-1],
-                )
+                async with nifty_semaphore:
+                    official_closes = await _niftyindices_month_end_closes(
+                        nifty_client, label, ends[0], ends[-1],
+                    )
                 recovered = 0
                 for key in missing_months:
                     if key in official_closes:
@@ -728,13 +812,16 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                 "official_quarter_end_closes_recovered": official_recovered,
             }
 
-        results = await asyncio.gather(*[
-            fetch_one(symbol, label) for symbol, label in SECTOR_INDEX_SYMBOLS
-        ], return_exceptions=True)
+        try:
+            results = await asyncio.gather(*[
+                fetch_one(symbol, label) for symbol, label in SECTOR_QUARTERLY_SYMBOLS
+            ], return_exceptions=True)
+        finally:
+            await nifty_client.aclose()
     out = [row for row in results if isinstance(row, dict)]
     log.info(
         "market_data: calculated completed-quarter returns for %d/%d sector indices (%d quarters) using month-end bars",
-        len(out), len(SECTOR_INDEX_SYMBOLS), quarters,
+        len(out), len(SECTOR_QUARTERLY_SYMBOLS), quarters,
     )
     return out
 
@@ -786,11 +873,13 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
     return {
         "title": "CALCULATED NSE SECTOR RETURNS — EIGHT COMPLETED CALENDAR QUARTERS",
         "url": "internal://verified-sector-quarterly-returns",
+        "kind": "Verified data",
+        "publisher": "Calculated from daily market data",
         "snippet": " | ".join(lines[:5])[:2000],
         "fullContent": evidence_text,
         "chartEvidenceExcerpt": evidence_text[:16000],
         "evidenceOrigin": "calculated_from_daily_market_data",
-        "pageFetchStatus": "ok",
+        "pageFetchStatus": "not_applicable",
         "evidenceAvailable": True,
     }
 

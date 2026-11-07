@@ -12,6 +12,66 @@ import html as _html
 
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_INLINE_SOURCE_ID_RE = re.compile(r"\b(?:S|SRC)\s*[-#]?\s*(\d+)\b", re.IGNORECASE)
+
+
+def sanitize_inline_citations(value: object, sources: object = None) -> str:
+    """Keep only canonical source IDs in citation-like brackets.
+
+    Model output can leave empty ``[]`` markers or mix a valid source ID with
+    invented aliases (for example ``[S19, Tamb35]``). Preserve ordinary
+    bracketed report text, but normalize citation groups against the report's
+    canonical source manifest before either preview or PDF rendering.
+    """
+    text = str(value or "")
+    known_ids: set[str] | None = None
+    if sources is not None:
+        known_ids = set()
+        rows = sources if isinstance(sources, (list, tuple, set)) else [sources]
+        for source in rows:
+            raw_id = source.get("id") if isinstance(source, dict) else source
+            match = re.fullmatch(r"\s*S\s*[-#]?\s*(\d+)\s*", str(raw_id or ""), re.IGNORECASE)
+            if match:
+                known_ids.add(f"S{match.group(1)}")
+
+    def clean_group(inner: str, opening: str = "[", closing: str = "]") -> str:
+        content = str(inner or "").strip()
+        if not content or re.fullmatch(r"[,;|\s]+", content):
+            return ""
+        matches = list(_INLINE_SOURCE_ID_RE.finditer(content))
+        if matches:
+            ids = list(dict.fromkeys(f"S{match.group(1)}" for match in matches))
+            if known_ids is not None:
+                ids = [source_id for source_id in ids if source_id in known_ids]
+            return f"[{', '.join(ids)}]" if ids else ""
+
+        # Providers sometimes emit noncanonical citation aliases such as
+        # [Tamb35] or [my27]. Do not mistake ordinary period labels/entities
+        # such as [Q3], [FY25], or [Nifty50] for citation IDs.
+        tokens = [part.strip() for part in re.split(r"[,;|]", content)]
+        def source_like(token: str) -> bool:
+            if re.fullmatch(r"(?i)Q[1-4]|(?:FY|CY|H[1-2])\s*['’]?\s*\d{1,4}|(?:NIFTY|SENSEX|NSE|BSE)\s*\d{1,4}", token):
+                return False
+            return bool(re.fullmatch(r"(?i)(?:SRC|S)\s*[-#]?\s*\d+|[A-Za-z]{2,12}\d{1,4}", token))
+        if tokens and all(source_like(token) for token in tokens):
+            return ""
+        return f"{opening}{inner}{closing}"
+
+    nested = re.compile(r"\[\[([^\[\]\n]{0,160})\]\]")
+    text = nested.sub(lambda match: clean_group(match.group(1), "[[", "]]"), text)
+    square = re.compile(r"\[([^\[\]\n]{0,160})\]")
+    text = square.sub(lambda match: clean_group(match.group(1)), text)
+    parens = re.compile(r"(?<![\w])\(([^()\n]{1,160})\)(?![\w])")
+    text = parens.sub(
+        lambda match: clean_group(match.group(1), "(", ")")
+        if _INLINE_SOURCE_ID_RE.search(match.group(1)) else match.group(0),
+        text,
+    )
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", text)
+    text = re.sub(r"(?m)^[ \t]*[.,;:!?]+[ \t]*$", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _cells(line: str) -> list[str] | None:
@@ -73,6 +133,7 @@ _UNVERIFIED_METRIC_PLACEHOLDER_RE = re.compile(
     r"|\bnot\s+verified(?:\s+(?:y[\s\-]*o[\s\-]*y|year[\s\-]*over[\s\-]*year|by\s+source|in\s+(?:the\s+)?cited\s+sources?))?\b",
     flags=re.IGNORECASE,
 )
+_NOT_VERIFIED_CELL = "__GG_NOT_VERIFIED_TABLE_CELL__"
 
 
 def _html_table_to_markdown(match: re.Match) -> str:
@@ -169,7 +230,7 @@ def _remove_unverified_metric_placeholders(text: str) -> str:
                     safe_lines.append(line)
                     continue
                 cells = line.strip().strip("|").split("|")
-                cells = ["—" if _UNVERIFIED_METRIC_PLACEHOLDER_RE.search(cell) else cell.strip() for cell in cells]
+                cells = [_NOT_VERIFIED_CELL if _UNVERIFIED_METRIC_PLACEHOLDER_RE.search(cell) else cell.strip() for cell in cells]
                 safe_lines.append("| " + " | ".join(cells) + " |")
             output.append("\n".join(safe_lines))
             continue
@@ -201,7 +262,8 @@ def _remove_unverified_metric_placeholders(text: str) -> str:
     value = _UNVERIFIED_METRIC_PLACEHOLDER_RE.sub("—", value)
     # Normalize blank lines while preserving ordinary block structure.
     value = re.sub(r"(?m)^\s*(?:[-*+]\s*)?$", "", value)
-    return re.sub(r"\n{3,}", "\n\n", value).strip()
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    return value.replace(_NOT_VERIFIED_CELL, "Not verified")
 
 
 def normalize_report_markdown(value: object) -> str:
@@ -238,6 +300,15 @@ def normalize_report_markdown(value: object) -> str:
     text = re.sub(r"(?<!\\)\\r\\n", "\n", text)
     text = re.sub(r"(?<!\\)\\n", "\n", text)
     text = re.sub(r"(?<!\\)\\r", "\n", text)
+    # A source sentence and an ordered-list item occasionally arrive joined
+    # without whitespace (for example, "... [S31].3. **The next section...").
+    # Restore the structural line break before table/layout cleanup so the list
+    # renders correctly and its ordinal cannot be mistaken for a factual value.
+    text = re.sub(
+        r"(?<=[.!?])(?=(?:\(?\d{1,3}[.)]|\(\d{1,3}\))[ \t]+(?:[*_#>]+[ \t]*)?\S)",
+        "\n\n",
+        text,
+    )
 
     lines = text.split("\n")
     out: list[str] = []
@@ -309,13 +380,60 @@ def normalize_report_markdown(value: object) -> str:
     normalized = re.sub(r"\]\s+([.,;:!?])", r"]\1", normalized)
     normalized = _strip_generation_control_markers(normalized)
     normalized = _put_visual_placeholders_on_own_lines(normalized)
+    normalized = _clean_ascii_diagram_frames(normalized)
     normalized = _dedupe_repeated_markdown_blocks(normalized)
     normalized = _remove_unverified_metric_placeholders(normalized)
     # A final guard: no common HTML presentation tags or unverified-metric
     # placeholders should leak into the browser preview or the exported PDF.
     normalized = _normalize_html_fragments(normalized)
     normalized = _remove_unverified_metric_placeholders(normalized)
+    normalized = _remove_dangling_markdown_lead_ins(normalized)
+    normalized = _remove_empty_markdown_headings(normalized)
+    normalized = _reorder_executive_summary_first(normalized)
+    normalized = _remove_empty_markdown_headings(normalized)
+    normalized = _dedupe_repeated_markdown_blocks(normalized)
     return re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+
+def _clean_ascii_diagram_frames(text: str) -> str:
+    """Remove broken ASCII box lines while retaining their readable labels."""
+    source_lines = str(text or "").splitlines()
+    markdown_table_lines: set[int] = set()
+    cursor = 0
+    while cursor + 1 < len(source_lines):
+        if "|" not in source_lines[cursor] or not _TABLE_SEP_RE.match(source_lines[cursor + 1]):
+            cursor += 1
+            continue
+        table_end = cursor + 1
+        while table_end + 1 < len(source_lines) and "|" in source_lines[table_end + 1] and source_lines[table_end + 1].strip():
+            table_end += 1
+        markdown_table_lines.update(range(cursor, table_end + 1))
+        cursor = table_end + 1
+    lines = []
+    for index, line in enumerate(source_lines):
+        if index in markdown_table_lines:
+            lines.append(line)
+            continue
+        cleaned = re.sub(r"(?<!\w)[=|+_-]{4,}(?!\w)", " ", line)
+        if cleaned.strip().startswith("|") and cleaned.strip().endswith("|") and cleaned.count("|") >= 2:
+            cleaned = re.sub(r"^\s*\|\s*|\s*\|\s*$", "", cleaned)
+            cleaned = re.sub(r"\s*\|\s*", " — ", cleaned).strip(" —")
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+        lines.append(cleaned)
+    value = "\n".join(lines)
+    value = re.sub(
+        r"(?im)^([^\n]*\bForeign\s+Portfolio\s+Investors?)\s*\n\s*"
+        r"\((FIIs?)\)\s+(Domestic\s+Institutional\s+Investors?\s*\(DIIs?\))[^\n]*$",
+        r"\1 (\2) and \3",
+        value,
+    )
+    value = re.sub(
+        r"(?i)\b(Foreign\s+Portfolio\s+Investors?\s*(?:\(FIIs?\))?)\s*/\s*"
+        r"(Domestic\s+Institutional\s+Investors?\s*(?:\(DIIs?\))?)\b",
+        r"\1 and \2",
+        value,
+    )
+    return re.sub(r"\n{3,}", "\n\n", value)
 
 
 def _strip_generation_control_markers(text: str) -> str:
@@ -471,7 +589,9 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
     seen_tables: set[str] = set()
     seen_long_blocks: set[str] = set()
     seen_lists: set[tuple[str, str]] = set()
+    seen_callouts: set[str] = set()
     seen_subheads: dict[str, set[str]] = {}
+    seen_sentences: dict[str, set[str]] = {}
     current_h2 = "__preamble__"
     kept: list[str] = []
 
@@ -497,6 +617,7 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
         if h2:
             current_h2 = canon(h2.group(1))
             seen_subheads.setdefault(current_h2, set())
+            seen_sentences.setdefault(current_h2, set())
 
         lines = stripped.splitlines()
         table_like = (
@@ -530,6 +651,13 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
             i += 2
             continue
 
+        if stripped.startswith(">"):
+            signature = canon(stripped)
+            if signature in seen_callouts:
+                i += 2
+                continue
+            seen_callouts.add(signature)
+
         # Drop exact repeated subsection labels only inside the same H2.
         # H1/H2 architecture is retained; this primarily catches repeated
         # continuation labels such as "1. Pricing Mix Evolution".
@@ -554,12 +682,126 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
                 continue
             seen_long_blocks.add(signature)
 
+        if not table_like and not is_list and not headingish and not stripped.startswith(("#", ">", "[CHART_", "[WEB_IMG_", "[FILE_IMG_", "[PAGE_IMG_", "http://", "https://", "```")) and "|" not in stripped:
+            sentence_rows = re.split(r"(?<=[.!?])\s+", stripped)
+            kept_sentences = []
+            sentence_scope = seen_sentences.setdefault(current_h2, set())
+            for sentence in sentence_rows:
+                signature = canon(sentence)
+                if signature and signature in sentence_scope:
+                    continue
+                if signature:
+                    sentence_scope.add(signature)
+                kept_sentences.append(sentence)
+            if not kept_sentences:
+                i += 2
+                continue
+            if len(kept_sentences) != len(sentence_rows):
+                stripped = " ".join(kept_sentences)
+                block = stripped
+
         kept.append(block)
         if sep:
             kept.append(sep)
         i += 2
 
     return re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+
+
+def _remove_empty_markdown_headings(text: str) -> str:
+    """Remove headings whose section contains no visible prose or visual block."""
+    lines = str(text or "").splitlines()
+    heading_rows = []
+    for index, line in enumerate(lines):
+        match = _HEADING_LINE_RE.match(line.strip())
+        if match:
+            heading_rows.append((index, len(match.group(1))))
+    remove: set[int] = set()
+    for heading_index, level in heading_rows:
+        end = next((index for index, next_level in heading_rows
+                    if index > heading_index and next_level <= level), len(lines))
+        body = lines[heading_index + 1:end]
+        payload = False
+        for line in body:
+            candidate = line.strip()
+            if not candidate or _HEADING_LINE_RE.match(candidate):
+                continue
+            if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,}|[*_`~]+)", candidate):
+                continue
+            if re.fullmatch(r"(?:\[\[SECTION TO COMPLETE\]\]|\[S\d+(?:\s*[,;]\s*S\d+)*\])", candidate, re.I):
+                continue
+            payload = True
+            break
+        if not payload:
+            remove.add(heading_index)
+    if not remove:
+        return str(text or "")
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line for i, line in enumerate(lines) if i not in remove)).strip()
+
+
+def _remove_dangling_markdown_lead_ins(text: str) -> str:
+    """Remove redaction orphans such as a colon lead-in followed by no list."""
+    lines = str(text or "").splitlines()
+    remove: set[int] = set()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or _HEADING_LINE_RE.match(stripped) or stripped.startswith(("|", ">", "[CHART_", "[WEB_IMG_", "[FILE_IMG_", "[PAGE_IMG_")):
+            continue
+        plain = re.sub(r"[\s*_`~]+$", "", stripped)
+        if not plain.endswith(":"):
+            continue
+        next_index = next((i for i in range(index + 1, len(lines)) if lines[i].strip()), None)
+        if next_index is None:
+            remove.add(index)
+            continue
+        following = lines[next_index].strip()
+        if re.match(r"^(?:[-*+]|\d+[.)])\s+", following) or following.startswith(("|", "[CHART_", "[WEB_IMG_", "[FILE_IMG_", "[PAGE_IMG_")):
+            continue
+        remove.add(index)
+    if not remove:
+        return str(text or "")
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line for i, line in enumerate(lines) if i not in remove)).strip()
+
+
+def _reorder_executive_summary_first(text: str) -> str:
+    """Move the Executive Summary section ahead of the report's other H2s."""
+    lines = str(text or "").splitlines()
+    starts = [index for index, line in enumerate(lines) if re.match(r"^\s*##(?!#)\s+", line)]
+    if len(starts) < 2:
+        return str(text or "")
+
+    def title_at(index: int) -> str:
+        return re.sub(r"^\s*##\s+", "", lines[index]).strip().rstrip("# ")
+
+    def semantic_title(value: str) -> str:
+        cleaned = re.sub(r"(?i)^\s*(?:section\s+)?\d{1,2}\s*(?:[.)|:\-\u2013\u2014]+\s*|\s+)", "", value)
+        return re.sub(r"[*_`]", "", cleaned).strip().casefold()
+
+    summary_index = next((i for i, start in enumerate(starts)
+                          if re.match(r"(?i)^executive\s+summary\b", semantic_title(title_at(start)))), None)
+    if summary_index is None or summary_index == 0:
+        return str(text or "")
+
+    section_blocks = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        section_blocks.append(lines[start:end])
+    preamble = lines[:starts[0]]
+    section_blocks.insert(0, section_blocks.pop(summary_index))
+
+    number_re = re.compile(r"^(##\s+)(?P<section>Section\s+)?(?P<number>\d{1,2})(?P<separator>\s*(?:[.)|:\-\u2013\u2014]\s*|\s+))(?P<title>.+?)\s*$", re.I)
+    numbered = [number_re.match(block[0].strip()) for block in section_blocks]
+    if any(numbered):
+        next_number = 0
+        for block, match in zip(section_blocks, numbered):
+            if match is None:
+                continue
+            next_number += 1
+            separator = match.group("separator")
+            prefix = "Section " if match.group("section") else ""
+            block[0] = f"## {prefix}{next_number:02d}{separator}{match.group('title')}"
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(preamble + [line for block in section_blocks for line in block])).strip()
 
 
 # Sections the client does not want in any report or export. Older reports and

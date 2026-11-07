@@ -47,11 +47,9 @@ def load_keys():
 # MASK KEY
 # ============================================================
 
-def masked(key):
-    if len(key) <= 8:
-        return "..." + key[-4:]
-
-    return key[:4] + "..." + key[-4:]
+def masked(_key):
+    """Never display key fragments in command-line diagnostics."""
+    return "[configured key]"
 
 
 # ============================================================

@@ -16,7 +16,7 @@ def test_automatic_tier_expansion_is_evidence_driven_not_page_or_character_targe
     assert _TIER_EXPANSION_PASSES["detailed"] > 0
     assert _TIER_EXPANSION_PASSES["in_depth"] > _TIER_EXPANSION_PASSES["detailed"]
     source = (Path(__file__).with_name("report.py")).read_text(encoding="utf-8")
-    assert "This is not a request to reach a page count, word count, or character count" in source
+    assert "Do not target a page, word, character, section, statistic, table, or visualization count." in source
     text = (ROOT / "backend" / "routes" / "report.py").read_text(encoding="utf-8")
     assert "_TIER_CONTENT_CHARS" not in text
     assert "Do not target a page, word, or character count." in text
@@ -42,7 +42,7 @@ def test_frontend_has_persistent_pre_send_tier_selector():
 
 def test_frontend_explicit_report_uses_selected_tier():
     text = TSX.read_text(encoding="utf-8")
-    block_start = text.index("if (_REPORT_INTENT_RE.test(q))")
+    block_start = text.index("if (reportModeEnabled)")
     block_end = text.index("return;", block_start)
     block = text[block_start:block_end]
     assert "generateReport(" in block
@@ -102,9 +102,37 @@ def test_pdf_css_avoids_known_weasyprint_incompatible_features():
 
 
 def test_picker_tier_is_authoritative_over_prompt_wording():
-    source = __import__('pathlib').Path(__file__).with_name('report.py').read_text(encoding='utf-8')
-    assert 'The frontend report-depth picker is authoritative' in source
-    assert 'explicit request depth overrides picker' not in source
+    text = TSX.read_text(encoding="utf-8")
+    assert 'The report-depth picker is authoritative.' in text
+    assert 'must never silently change the user\'s selected tier' in text
+
+
+def test_semantic_tier_completion_recovers_once_from_provider_failure(monkeypatch):
+    import routes.report as report_mod
+
+    monkeypatch.setitem(report_mod._TIER_EXPANSION_PASSES, "detailed", 2)
+    prompts = []
+
+    async def fake_continuation(prompt: str, tier: str):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return "", ""
+        body = "A distinct source-grounded risk analysis with a verified implication [S1]. " * 18
+        return f"[[SECTION: Risks]]\n{body}\n[[END SECTION]]", "mock-provider"
+
+    monkeypatch.setattr(report_mod, "_call_gemini_plain_continuation", fake_continuation)
+    evidence = "[S1] Verified source evidence with the relevant mechanism and reported limitations. " * 20
+    result = asyncio.run(report_mod._expand_report_semantically(
+        "## Summary\n\nExisting evidence-backed summary [S1].",
+        "Assess the risks",
+        "detailed",
+        {"sections": [{"heading": "Summary"}, {"heading": "Risks"}]},
+        evidence,
+    ))
+
+    assert len(prompts) == 2
+    assert "RECOVERY ATTEMPT" in prompts[1]
+    assert "## Risks" in result
 
 
 def test_longer_tiers_use_distinct_research_breadth_without_expansion_quotas():
@@ -125,4 +153,4 @@ def test_frontend_longer_tiers_use_background_jobs_without_changing_picker():
     assert "label: 'Brief'" in text and "label: 'In-Detail'" in text and "label: 'Deep Research'" in text
     assert "/api/chat/report/start" in text
     assert "/api/chat/report/status/" in text
-    assert "const useBackgroundReportJob = ['brief', 'detailed', 'in_depth'].includes(reportTier)" in text
+    assert "const useBackgroundReportJob = ['brief', 'detailed', 'in_depth'].includes(effectiveReportTier)" in text

@@ -2,8 +2,6 @@
 import asyncio
 import json
 
-import pytest
-
 import routes.report as report_module
 from routes.report import (
     _action_extract_targets,

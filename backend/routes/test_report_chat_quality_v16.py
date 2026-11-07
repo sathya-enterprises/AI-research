@@ -7,7 +7,6 @@ from routes.report import (
     _align_title_horizon,
     _sanitize_unverified_financial_claims,
 )
-from utils.chart_evidence_audit import audit_chart_evidence_consistency
 
 
 def _publisher_source(evidence: str) -> dict:

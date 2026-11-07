@@ -12,7 +12,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
 import httpx

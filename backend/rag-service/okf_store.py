@@ -3,7 +3,7 @@ OKF (Open Knowledge Format) storage layer for Paperly — Supabase Storage backe
 
 Paperly's rag-service runs on Hugging Face Spaces, which has NO durable disk
 by default (the container filesystem resets on every restart/redeploy). The
-FAISS vector index is already in-memory-only and accepted as session-scoped,
+pgvector embeddings are durable and session-scoped,
 but OKF concept files are meant to be a durable, inspectable record of what
 was indexed — so they're written to Supabase Storage (the same project/bucket
 already used elsewhere in this codebase for uploaded chat images) instead of
@@ -54,7 +54,7 @@ def _configured() -> bool:
     if not _warned_unconfigured:
         log.warning(
             "OKF: SUPABASE_URL/SUPABASE_ANON_KEY not set — OKF bundle "
-            "persistence disabled (FAISS indexing/retrieval still works)."
+            "persistence disabled (pgvector indexing/retrieval still works)."
         )
         _warned_unconfigured = True
     return False
@@ -267,7 +267,7 @@ async def write_document_concept(session_id: str, doc: Dict[str, Any]) -> Option
 
     Returns the relative path (within the session's OKF folder) of the
     written concept, or None if the doc had no usable text or the upload
-    failed (callers should treat this as non-fatal — FAISS indexing
+    failed (callers should treat this as non-fatal — pgvector indexing
     already succeeded by the time this is called).
     """
     doc_id = str(doc.get("id", "")).strip()
@@ -484,7 +484,7 @@ async def get_session_bundle_files(session_id: str) -> List[Tuple[str, bytes]]:
 
 async def delete_session_bundle(session_id: str) -> None:
     """Remove all OKF concept files for a session from Supabase Storage
-    (mirrors FAISS index deletion on session cleanup)."""
+    (mirrors pgvector row deletion on session cleanup)."""
     prefix = f"{_PREFIX}/{session_id}"
     # This helper is intentionally explicit and is not called by normal chat
     # cleanup. Persisted knowledge is not deleted when an in-memory session ends.

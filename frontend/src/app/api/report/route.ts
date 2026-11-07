@@ -17,7 +17,7 @@
  * Requires: DATAWRAPPER_API_TOKEN (optional — degrades gracefully without it)
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 
@@ -886,7 +886,7 @@ async function buildHtml(
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   let articles: CachedArticle[] = [];
   let fetchedAt = Date.now();
   let sources: string[] = [];

@@ -168,11 +168,11 @@ class SerperProvider(WebSearchProvider):
                         )
                         if res.status_code == 429:
                             mark_rate_limited(key, 60_000)
-                            log.warning("Serper rate limit on key ...%s", key[-4:])
+                            log.warning("Serper rate limit on key ...%s", "[redacted]")
                             continue
                         if res.status_code in (401, 403):
                             mark_rate_limited(key, 24 * 60 * 60_000)
-                            log.warning("Serper authentication error HTTP %d on key ...%s", res.status_code, key[-4:])
+                            log.warning("Serper authentication error HTTP %d on key ...%s", res.status_code, "[redacted]")
                             continue
                         if not res.is_success:
                             log.warning("Serper HTTP %d for %r", res.status_code, q[:60])
@@ -263,11 +263,11 @@ class SerpAPIProvider(WebSearchProvider):
                         res = await client.get(self.ENDPOINT, params=params)
                         if res.status_code == 429:
                             mark_rate_limited(key, 60_000)
-                            log.warning("SerpAPI 429 on key ...%s", key[-4:])
+                            log.warning("SerpAPI 429 on key ...%s", "[redacted]")
                             continue
                         if res.status_code in (401, 403):
                             mark_rate_limited(key, 24 * 60 * 60_000)
-                            log.warning("SerpAPI auth error HTTP %d on key ...%s", res.status_code, key[-4:])
+                            log.warning("SerpAPI auth error HTTP %d on key ...%s", res.status_code, "[redacted]")
                             continue
                         if not res.is_success:
                             log.warning("SerpAPI HTTP %d for %r", res.status_code, q[:60])

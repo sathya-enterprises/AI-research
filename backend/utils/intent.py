@@ -542,7 +542,7 @@ async def resolve_request_intent(
                                 json=retry_payload,
                             )
                 if res.status_code == 429:
-                    log.warning("Intent-resolution Groq HTTP 429 model=%s key=...%s; cooling down key/model", _INTENT_MODEL, key[-4:])
+                    log.warning("Intent-resolution Groq HTTP 429 model=%s key=...%s; cooling down key/model", _INTENT_MODEL, "[redacted]")
                     mark_rate_limited(f"{key}:{_INTENT_MODEL}", 60_000)
                     continue
                 if not res.is_success:
@@ -559,7 +559,7 @@ async def resolve_request_intent(
                     detail = re.sub(r"(?i)Bearer\s+\S+", "Bearer [redacted]", detail)
                     detail = re.sub(r"gsk_[A-Za-z0-9_-]+", "[redacted-key]", detail)[:220]
                     log.warning("Intent-resolution Groq HTTP %d model=%s key=...%s detail=%s",
-                                res.status_code, _INTENT_MODEL, key[-4:], detail or "no provider error detail")
+                                res.status_code, _INTENT_MODEL, "[redacted]", detail or "no provider error detail")
                     if res.status_code in (401, 403):
                         mark_rate_limited(f"{key}:{_INTENT_MODEL}", 24 * 60 * 60_000)
                     continue
@@ -573,7 +573,7 @@ async def resolve_request_intent(
                     )
                     return intent
             except Exception as exc:
-                log.debug("Intent-resolution Groq call failed on key ...%s: %s", key[-4:], exc)
+                log.debug("Intent-resolution Groq call failed on key ...%s: %s", "[redacted]", exc)
                 continue
 
     log.info("Intent resolution: LLM unavailable/exhausted — using heuristic fallback")

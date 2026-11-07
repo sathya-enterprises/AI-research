@@ -51,8 +51,8 @@ BRAND_CHART_PALETTE = ("#16734A", "#56635B", "#929B93", "#B98532", "#A94B43")
 # Public, renderer-neutral token registry.  Keep this stable: renderers may
 # map these tokens to CSS/PDF primitives, but reports must not invent tokens.
 BRAND_TOKENS: Dict[str, Any] = {
-    "typography_family": FONT_STACK if "FONT_STACK" in globals() else "system-ui, sans-serif",
-    "heading_family": FONT_STACK_HEADING if "FONT_STACK_HEADING" in globals() else "system-ui, sans-serif",
+    "typography_family": "system-ui, sans-serif",
+    "heading_family": "system-ui, sans-serif",
     "text": BRAND_INK,
     "text_muted": BRAND_MUTED,
     "navy": BRAND_NAVY,
@@ -63,7 +63,7 @@ BRAND_TOKENS: Dict[str, Any] = {
     "spacing": {"xs": "4px", "sm": "8px", "md": "14px", "lg": "22px", "xl": "32px"},
     "radius": {"sharp": "0px", "soft": "8px", "rounded": "16px"},
     "footer": "Growth Gradual | page counter",
-    "print": {"page_size": PAGE_SIZE if "PAGE_SIZE" in globals() else "A4", "margin": PAGE_MARGIN_MM if "PAGE_MARGIN_MM" in globals() else "13mm 12mm 17mm 12mm"},
+    "print": {"page_size": "A4", "margin": "13mm 12mm 17mm 12mm"},
 }
 
 # Print-safe brand typography. System stacks keep Chromium rendering identical
@@ -287,7 +287,6 @@ def _composition_for(s: _Structure, semantic: Dict[str, Any]) -> str:
     if requested and requested != "narrative_led":
         return requested
     text = f"{s.question} {s.title}".lower()
-    section_types = set(s.section_types)
     comparison_words = ("compare", "versus", " vs ", "peer", "benchmark", "historical")
     capital_words = ("project economics", "project returns", "financing", "wacc", "return on capital", "storage", "transmission")
     cycle_words = ("cycle", "cyclical", "inventory", "turning point", "supply changes")

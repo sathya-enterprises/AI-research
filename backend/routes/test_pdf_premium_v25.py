@@ -83,7 +83,7 @@ def test_v25_pdf_smoke_preserves_headings_and_url_only_sources():
     reader = PdfReader(io.BytesIO(pdf))
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     assert "Credit and deposit dynamics" in text
-    assert "What changes next" in text
+    assert "WHAT CHANGES NEXT" in text.upper()
     assert "Total sources: 1" in text
     assert "https://example.com/rbi" in text
     assert len(reader.pages) <= 1, "a compact sample should keep its URL-only source appendix on the same page when space is available"

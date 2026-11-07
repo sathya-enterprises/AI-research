@@ -221,7 +221,6 @@ def plan_query(query: str) -> ResearchContract:
 
 def evaluate_completeness(contract: ResearchContract, evidence_by_dimension: dict[str, list[dict[str, Any]]], claims: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
     """Evaluate required dimensions only, with explicit relationship checks."""
-    claim_map = {str(c.get("claim_id")): c for c in claims}
     rows = []
     for dim in contract.required_dimensions:
         evidence = evidence_by_dimension.get(dim.dimension_id, [])
