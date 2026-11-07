@@ -105,3 +105,38 @@ def test_calls_are_captured_with_full_prompt_and_redaction(monkeypatch, tmp_path
     assert len(call["llmPrompt"]) > 20000 and len(call["llmResponse"]) > 20000  # not clipped to 4,000 chars
     assert "AIzaSECRETVALUE123" not in call["llmPrompt"]
     assert call["tokensIn"] == 120 and call["tokensOut"] == 40
+
+
+def test_keys_rotate_across_calls(monkeypatch):
+    used = []
+
+    def handler(request):
+        used.append(request.headers["x-goog-api-key"])
+        return _ok("x")
+
+    _patch_http(monkeypatch, handler)
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=10, capture=False)
+    for _ in range(4):
+        asyncio.run(gw.generate(purpose="section", prompt="p"))
+    assert used == ["AIzaKEY1", "AIzaKEY2", "AIzaKEY1", "AIzaKEY2"]
+
+
+def test_capture_is_on_disk_after_each_call_even_if_the_run_never_finishes(monkeypatch, tmp_path):
+    monkeypatch.setenv("GG_RESEARCH_CAPTURE", "1")
+    monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
+    _patch_http(monkeypatch, lambda request: _ok("section text"))
+
+    async def run_then_die():
+        RC.begin_research_capture("q", "in_depth")
+        gw = G.LLMGateway(_runtime(), "in_depth", budget=5)
+        await gw.generate(purpose="outline", prompt="p1")
+        await gw.generate(purpose="section", section_id="sec-1#1", prompt="p2")
+        raise RuntimeError("provider outage mid-run")  # finish_research_capture is never called
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_then_die())
+    files = list(tmp_path.glob("research_capture_*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    assert [c["purpose"] for c in data["llmCalls"]] == ["outline", "section"]
+    assert data["status"] in {"in_progress", "failed", "error"}

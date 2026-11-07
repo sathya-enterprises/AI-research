@@ -93,6 +93,7 @@ class LLMGateway:
         self.semaphore = asyncio.Semaphore(max(1, concurrency or _env_int("GG_V2_SECTION_CONCURRENCY", 3)))
         self.capture = capture
         self.stats = GatewayStats()
+        self._key_cursor = 0  # rotates keys across calls so one key's rate limit is not hit by a long run
 
     # ── public ────────────────────────────────────────────────────────────────
     async def generate(self, *, purpose: str, prompt: str, system: str = "", section_id: str = "",
@@ -154,7 +155,8 @@ class LLMGateway:
             healthy = [k for k in rt._gemini_candidate_keys(ring, model, len(ring))
                        if not rt.is_rate_limited(k) and (model, k) not in tried]
             if healthy:
-                plan.append((model, healthy[0]))
+                plan.append((model, healthy[self._key_cursor % len(healthy)]))
+        self._key_cursor += 1
         return plan
 
     async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried) -> LLMResult:
