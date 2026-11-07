@@ -23978,10 +23978,17 @@ async def generate_report(request: Request):
         # Publication guard: remove invalid or unsupported financial numbers before
         # the independent audit and before the UI receives KPI/chart payloads.
         # The PDF/HTML/DOCX export audits remain enabled as a second line of defence.
+        _guard_chars_before = len(report_text or "")
         report_text, charts, _unverified_metric_redactions = _sanitize_report_financial_claims_for_publication(
             report_text, charts, audit_sources,
             deterministic_report=_promoter_ledger_rendered_report if _promoter_ledger_trusted else "",
         )
+        # Eval instrumentation (scripts/eval_report.py): how much the guard removed.
+        record_research_stage("evidence_guard", {
+            "redactedValues": int(_unverified_metric_redactions or 0),
+            "charsBefore": _guard_chars_before,
+            "charsAfter": len(report_text or ""),
+        })
         # Do this before the publication audit: unsupported financial figures
         # are removed or neutralized, invalid table rows are dropped, and model-
         # emitted HTML wrappers are normalized before either renderer sees them.

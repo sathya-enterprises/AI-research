@@ -63,3 +63,6 @@ desktop.ini
 *.docx
 !backend/routes/fixtures/*.pdf
 *.tsbuildinfo
+
+# Local eval run artefacts (captures, PDFs, logs) for scripts/eval_report.py
+backend/diagnostics/eval_runs/
