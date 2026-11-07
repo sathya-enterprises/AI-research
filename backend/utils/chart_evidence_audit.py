@@ -688,8 +688,10 @@ def _quote_supports(value: object, evidence_value: object, quote: object, source
             # decimal fraction (0.248) or a display string (24.8%). Strip the
             # display suffix for numeric comparison; the chart unit and explicit
             # workbook evidence still govern whether the scale is acceptable.
-            plotted_text = str(value).replace(",", "").strip().rstrip("% ")
-            evidence_text = str(evidence_value).replace(",", "").strip().rstrip("% ")
+            # Publishers often print a typographic minus (U+2212) or en dash;
+            # float() rejects both, which silently failed every negative point.
+            plotted_text = str(value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% ")
+            evidence_text = str(evidence_value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% ")
             plotted = abs(float(plotted_text))
             quoted = abs(float(evidence_text))
         except ValueError:
@@ -708,7 +710,10 @@ def _source_ids(chart: dict) -> list[str]:
 
 
 def _number_is_in(value: object, evidence: str) -> bool:
-    parsed = _NUMBER.fullmatch(str(value or "").strip())
+    # Typographic minus (U+2212) / en dash: treat as "-" on both sides.
+    value = str(value or "").replace("−", "-").replace("–", "-")
+    evidence = str(evidence or "").replace("−", "-").replace("–", "-")
+    parsed = _NUMBER.fullmatch(value.strip())
     if not parsed:
         return False
     try:
