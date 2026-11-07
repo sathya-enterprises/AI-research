@@ -97,6 +97,9 @@ def _citation_html(source_id: str, registry: dict[str, dict]) -> str:
     publisher home/page directly.
     """
     canonical_id = str(source_id or "").strip().upper()
+    from utils.citation_display import inline_citations_enabled
+    if not inline_citations_enabled():
+        return ""  # reader-facing report: no inline [S#] markers (Data Sources lists every cited source)
     label = f"[{canonical_id}]"
     source = registry.get(canonical_id)
     if not source:
@@ -286,7 +289,7 @@ def _render_source_note(
             for sid in ids:
                 source = registry.get(sid) or {}
                 publisher = html.escape(str(source.get("publisher") or source.get("title") or "Source"))
-                labels.append(f'{publisher} {_citation_html(sid, registry)}')
+                labels.append(f'{publisher} {_citation_html(sid, registry)}'.strip())
             source_html = " · ".join(labels)
         elif raw_url:
             # Prefer the canonical source title/publisher when this URL is
@@ -311,8 +314,9 @@ def _render_source_note(
         for sid in ids:
             source = registry.get(sid) or {}
             publisher = html.escape(str(source.get("publisher") or source.get("title") or "Source"))
-            labels.append(f'{publisher} {_citation_html(sid, registry)}')
-        source_html = " · ".join(labels)
+            labels.append(f'{publisher} {_citation_html(sid, registry)}'.strip())
+        # One name per publisher (several IDs can share one publisher).
+        source_html = " · ".join(dict.fromkeys(labels))
     elif force:
         # Never expose renderer-internal provenance gaps as client-facing prose.
         # If no source can be resolved, omit the note rather than printing
@@ -334,6 +338,10 @@ def _render_source_note(
 def _inline_md(text: str, source_registry: list[dict] | None = None) -> str:
     """Bold/italic only — headings/lists/blockquotes are handled per-line
     by the block-level parser below, not here."""
+    from utils.citation_display import inline_citations_enabled, strip_citation_markers
+    if not inline_citations_enabled():
+        # Final render step: every check has already run on the cited text.
+        text = strip_citation_markers(str(text or ""))
     text = html.escape(text)
     text = _BOLD_RE.sub(r"<strong>\1</strong>", text)
     text = _ITALIC_RE.sub(r"<em>\1</em>", text)
@@ -2442,6 +2450,9 @@ def _markdown_to_html(
             text = " ".join(para_buf).strip()
             if text:
                 for paragraph in _split_long_paragraph(text):
+                    from utils.citation_display import inline_citations_enabled, only_citations
+                    if not inline_citations_enabled() and only_citations(paragraph):
+                        continue  # a paragraph that was only a citation
                     reveal_counter += 1
                     plain = re.sub(r"[\s*_`~]+$", "", paragraph).rstrip()
                     intro_class = " gg-list-intro" if plain.endswith(":") else ""
@@ -5309,6 +5320,15 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         heading_html = "" if generic_wrapper else (
             f'<div class="gg-section-heading" data-section-number="{visible_section_no:02d}"><span class="gg-section-index" aria-hidden="true">{visible_section_no:02d}</span><div class="gg-section-heading-copy"><div class="gg-section-kicker">{html.escape(section_kicker)}</div><h2>{html.escape(section_title)}</h2></div></div>'
         )
+        from utils.citation_display import inline_citations_enabled, section_source_names
+        if not inline_citations_enabled():
+            # Inline markers are not shown: each section ends with one "Sources:" line
+            # (existing source-note style) naming the publishers it cites.
+            _section_ids = [sid for sid in _source_ids(body_raw) if sid in _source_registry_map(source_registry)]
+            _names = section_source_names(_section_ids, _source_registry_map(source_registry))
+            if _names:
+                body_html += ('<div class="gg-source-note"><span class="gg-source-note-label">Sources:</span> '
+                              + " · ".join(html.escape(n) for n in _names) + '</div>')
         body_html = transform_section_html(house_style, body_html)
         if (house_style == "market_currents" and key_stats and not body_sections and not dashboard_html
                 and "gg-stats-grid" not in body_html and "gg-metric" not in body_html):

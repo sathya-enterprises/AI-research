@@ -19,7 +19,9 @@ def test_recovered_report_drops_leaked_presentation_json_tail():
     assert len(cleaned) < len(leaked)
 
 
-def test_parenthesized_source_citations_are_clickable():
+def test_parenthesized_source_citations_are_clickable(monkeypatch):
+    # Stage E: inline [S#] links are the audit-copy mode (REPORT_INLINE_CITATIONS=1); this test checks that mode.
+    monkeypatch.setenv("REPORT_INLINE_CITATIONS", "1")
     sources = [{"id": "S1", "title": "Test source", "url": "https://example.com"}]
     rendered = _link_source_citations("Supported by (S1) and [S1].", sources)
     assert rendered.count('data-source-id="S1"') == 2

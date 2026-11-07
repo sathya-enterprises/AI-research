@@ -18,7 +18,9 @@ def test_action_accepts_single_existing_table_with_real_entities():
     assert ok, problems
 
 
-def test_open_source_label_resolves_to_canonical_source():
+def test_open_source_label_resolves_to_canonical_source(monkeypatch):
+    # Stage E: inline [S#] links are the audit-copy mode (REPORT_INLINE_CITATIONS=1); this test checks that mode.
+    monkeypatch.setenv("REPORT_INLINE_CITATIONS", "1")
     html = _render_source_note(
         "Open source ↗",
         [{"id": "S4", "title": "Canonical Market Report", "publisher": "Example Research", "url": "https://example.com/report"}],

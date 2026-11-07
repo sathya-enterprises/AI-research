@@ -72,7 +72,9 @@ def test_source_appendix_is_last_and_starts_after_report_content():
     assert 'data-source-placement="end_of_report"' in html
 
 
-def test_orphan_citation_is_preserved_with_an_explicit_unresolved_source_record():
+def test_orphan_citation_is_preserved_with_an_explicit_unresolved_source_record(monkeypatch):
+    # Stage E: inline [S#] links are the audit-copy mode (REPORT_INLINE_CITATIONS=1); this test checks that mode.
+    monkeypatch.setenv("REPORT_INLINE_CITATIONS", "1")
     report = "## Outlook\n\nThis claim has no resolvable source [S27]."
     html = build_html_report(
         report, "Brief", "Topic", "Summary", [], [], [],
@@ -85,7 +87,9 @@ def test_orphan_citation_is_preserved_with_an_explicit_unresolved_source_record(
     assert "this citation has not been verified" in html
 
 
-def test_duplicate_sources_do_not_create_orphan_citation_ids():
+def test_duplicate_sources_do_not_create_orphan_citation_ids(monkeypatch):
+    # Stage E: inline [S#] links are the audit-copy mode (REPORT_INLINE_CITATIONS=1); this test checks that mode.
+    monkeypatch.setenv("REPORT_INLINE_CITATIONS", "1")
     report = "## Market Outlook\n\nThe market expands from $100B in 2025 to $180B in 2030 [S2]."
     sources = [
         {"title": "Same source", "url": "https://example.com/same"},

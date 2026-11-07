@@ -21,7 +21,9 @@ def test_external_image_uses_direct_source_link_not_s_id():
     assert "data-source-id=\"S3\"" not in html
 
 
-def test_visual_source_does_not_create_or_validate_model_s27_citation():
+def test_visual_source_does_not_create_or_validate_model_s27_citation(monkeypatch):
+    # Stage E: inline [S#] links are the audit-copy mode (REPORT_INLINE_CITATIONS=1); this test checks that mode.
+    monkeypatch.setenv("REPORT_INLINE_CITATIONS", "1")
     report = "## Findings\nEvidence [S1] and bad visual citation [S27].\n\n[WEB_IMG_1]"
     images = [{
         "url": "https://cdn.example.com/figure.png",
