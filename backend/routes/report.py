@@ -22256,12 +22256,12 @@ async def generate_report(request: Request):
                     record_research_stage("entity_search", _v2_entity_stats)
                 record_research_stage("entity_tiers", _tier_summary(_v2_tiers))
 
-            def _v2_chart_preverify(specs: list[dict]) -> list[str]:
-                """Same evidence check the report-time/PDF chart gates apply, run before writing."""
+            def _v2_chart_preverify(specs: list[dict], report_text: str = "") -> list[str]:
+                """Same evidence check the report-time/PDF chart gates apply (before writing, and on the assembled text)."""
                 _register_v2_chart_evidence(specs, evidence_store)
-                _audited = _attach_audit_source_evidence(source_manifest, enriched, "")
+                _audited = _attach_audit_source_evidence(source_manifest, enriched, report_text)
                 _public = _merge_source_evidence_statuses(source_manifest, _audited)
-                _result = audit_chart_evidence_consistency("", specs, _public, question=question)
+                _result = audit_chart_evidence_consistency(report_text, specs, _public, question=question)
                 reasons = [""] * len(specs)
                 for failure in list(_result.get("chartEvidenceFailures") or []) + list(_result.get("chartTableVerificationConflicts") or []):
                     index = int(failure.get("chartIndex") or 0) - 1
@@ -24476,7 +24476,7 @@ async def generate_report(request: Request):
                 page_target={"maximum": tier_spec.page_target.maximum, "renderedPages": preflight_pages},
             )
             if _repair_text and _repair_text != report_text:
-                _repair_text = _dedupe_redundant_report_content(_repair_text)
+                _repair_text = _repair_text if _v2_used else _dedupe_redundant_report_content(_repair_text)
                 _repair_text = normalize_report_markdown(_repair_text)
                 _repair_text, _repair_numeric_fragment_repairs = repair_incomplete_numeric_fragments(_repair_text)
                 # Treat the repair result as untrusted new model output: a repair
@@ -24818,7 +24818,7 @@ async def generate_report(request: Request):
             report_text, charts, _v2_figures = finalize_figures(report_text, charts)
             record_research_stage("pipeline_v2_figures", _v2_figures)
             if _v2_figures.get("danglingRefsNeutralized"):
-                log.info("Report: pipeline v2 neutralised %d reference(s) to figures removed by later gates",
+                log.info("Report: pipeline v2 rewrote %d reference(s) to figures removed by later gates",
                          _v2_figures["danglingRefsNeutralized"])
         clean_title = _align_title_horizon(_sanitize_title(parsed.get("title", ""), report_topic), question)
         clean_theme = _resolve_theme(parsed.get("theme"), question)
