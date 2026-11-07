@@ -70,11 +70,19 @@ def duplicate_headings(headings: list[tuple[int, str]]) -> list[tuple[str, str]]
     """Pairs of headings that cover the same topic (token Jaccard >= 0.5, >=2 shared tokens)."""
     pairs = []
     norm = [(lvl, h, _norm_heading(h)) for lvl, h in headings]
+
+    def prefix(heading: str) -> str:
+        match = re.match(r"^\s*([^:]{2,40}):\s+\S", heading)
+        return match.group(1).strip().casefold() if match else ""
+
     for i in range(len(norm)):
         for j in range(i + 1, len(norm)):
             a, b = norm[i][2], norm[j][2]
             if not a or not b:
                 continue
+            pa, pb = prefix(norm[i][1]), prefix(norm[j][1])
+            if pa and pb and pa != pb:
+                continue  # "Bank: Performance" vs "IT: Performance" are different entity sections
             shared = a & b
             if len(shared) >= 2 and len(shared) / len(a | b) >= 0.5:
                 pairs.append((norm[i][1], norm[j][1]))
@@ -396,13 +404,49 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     store = store_from_passages(passages)
     manifest = (((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources")) or []
     gateway = ReplayGateway(capture)
-    result = asyncio.run(run_pipeline_v2(runtime=None, question=str(capture.get("question") or ""),
+    manifest_rows = [m for m in manifest if isinstance(m, dict)]
+    enriched_rows = [r for r in (((stages.get("sources_after_article_fetch") or {}).get("data") or {}).get("sources") or [])
+                     if isinstance(r, dict)]
+    question = str(capture.get("question") or "")
+
+    def chart_verifier(specs, report_text=""):
+        """Offline twin of report.py's _v2_chart_preverify (same audit functions, captured evidence)."""
+        from routes import report as R
+        R._register_v2_chart_evidence(specs, store)
+        public = R._merge_source_evidence_statuses(manifest_rows, R._attach_audit_source_evidence(manifest_rows, enriched_rows, report_text))
+        res = R.audit_chart_evidence_consistency(report_text, specs, public, question=question)
+        reasons = [""] * len(specs)
+        for failure in list(res.get("chartEvidenceFailures") or []) + list(res.get("chartTableVerificationConflicts") or []):
+            index = int(failure.get("chartIndex") or 0) - 1
+            if 0 <= index < len(specs) and not reasons[index]:
+                reasons[index] = str(failure.get("reason") or "failed")[:200]
+        return reasons
+
+    result = asyncio.run(run_pipeline_v2(runtime=None, question=question,
                                          tier=str(capture.get("reportTier") or "detailed"), store=store,
-                                         manifest=[m for m in manifest if isinstance(m, dict)],
-                                         today=str(capture.get("startedAt") or "")[:10], gateway=gateway))
+                                         manifest=manifest_rows,
+                                         today=str(capture.get("startedAt") or "")[:10], gateway=gateway,
+                                         chart_verifier=chart_verifier))
     out = json.loads(result["raw"])
     # The PDF route resolves [S#] citations against the source manifest.
-    out.setdefault("sources", [m for m in manifest if isinstance(m, dict)])
+    # The PDF route resolves [S#] citations and re-checks charts against the manifest;
+    # attach each chart's source rows the way report.py registers them live.
+    sources = [dict(m) for m in manifest if isinstance(m, dict)]
+    by_id = {str(m.get("id") or "").upper(): m for m in sources}
+    for chart in out.get("charts") or []:
+        for pid in chart.get("evidencePassages") or []:
+            passage = store.get(pid)
+            if passage is None or passage.source_id not in by_id:
+                continue
+            rows = "\n".join(ln.strip() for ln in passage.text.splitlines() if " | " in ln)
+            entry = by_id[passage.source_id]
+            entry["chartEvidenceExcerpt"] = (str(entry.get("chartEvidenceExcerpt") or "") + "\n" + rows).strip()[-16000:]
+            if passage.kind == "table":
+                entry["publisher_table_chart_evidence_verified"] = True
+    out.setdefault("sources", sources)
+    # Replayed V2 output has not been through report.py's publication checks; render it
+    # as a labelled draft, like a live run whose checks found open issues.
+    out.setdefault("publicationOutcome", "draft")
     out.setdefault("reportTier", str(capture.get("reportTier") or "detailed"))
     (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
     report = out.get("report") or ""
@@ -414,6 +458,8 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
         "v2replay_prompts_changed": len(gateway.prompt_changed),
         "v2replay_words": len(WORD_RE.findall(CITE_RE.sub(" ", MARKER_RE.sub(" ", report)))),
         "v2replay_charts": len(charts),
+        "v2replay_charts_dropped_after_assembly": len(result["meta"].get("charts", {}).get("droppedAfterAssembly") or []),
+        "v2replay_sections_ok": sum(1 for x in result["meta"].get("sections") or [] if x.get("ok")),
         "v2replay_pct_charts_explained": round(100 * explained / len(charts), 1) if charts else None,
         "v2replay_unsupported_numbers": result["meta"].get("unsupportedNumbers"),
         "v2replay_husk_callouts": len(husk_blocks(report)),
