@@ -108,6 +108,15 @@ def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
         name = field_name.lower()
         if name.endswith(("url", "uri")) or name in {"requested_url", "final_url"}:
             return _redact_url(value)
+        if name in {"llmprompt", "llmresponse", "llmsystem"}:
+            # Full writer prompts/responses so later stages can be replayed
+            # offline (scripts/eval_report.py). Still secret-redacted.
+            try:
+                cap = max(10_000, int(os.getenv("GG_RESEARCH_CAPTURE_LLM_CHARS", "400000")))
+            except ValueError:
+                cap = 400_000
+            clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
+            return _redact_text(clipped)
         if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt", "snippet", "report", "finalreport", "writerprompt"}:
             cap = 9000 if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt"} else 15000
             clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
@@ -215,6 +224,7 @@ def begin_research_capture(question: str, tier: str):
         "question": str(question or "")[:1200],
         "searchCalls": [],
         "rawExaResponses": [],
+        "llmCalls": [],
         "stages": {},
     }
     token = _CURRENT_CAPTURE.set(ctx)
@@ -292,6 +302,23 @@ def record_search_call(queries: list[str], result_lists: list[list[dict]], *, ma
     ctx["searchCalls"].append({
         "capturedAt": _now(), "provider": "exa", "maxResultsPerQuery": max_results,
         "queryCount": len(queries or []), "perQuery": per_query,
+    })
+    _flush(ctx)
+
+
+def record_llm_call(*, purpose: str, section_id: str = "", model: str = "", system: str = "", prompt: str = "",
+                    response: str = "", ok: bool = True, error: str = "", tokens_in: int | None = None,
+                    tokens_out: int | None = None, elapsed_ms: int = 0, attempt: int = 1, params: dict | None = None) -> None:
+    """Record one LLM call (full prompt/response, redacted) for offline replay."""
+    ctx = _CURRENT_CAPTURE.get()
+    if ctx is None:
+        return
+    calls = ctx.setdefault("llmCalls", [])
+    calls.append({
+        "seq": len(calls) + 1, "capturedAt": _now(), "purpose": str(purpose)[:60], "sectionId": str(section_id)[:80],
+        "model": str(model)[:80], "ok": bool(ok), "error": str(error)[:300], "attempt": int(attempt),
+        "tokensIn": tokens_in, "tokensOut": tokens_out, "elapsedMs": int(elapsed_ms), "params": params or {},
+        "llmSystem": system, "llmPrompt": prompt, "llmResponse": response,
     })
     _flush(ctx)
 
