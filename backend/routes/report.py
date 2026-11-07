@@ -21182,6 +21182,23 @@ async def generate_report(request: Request):
             if str((row or {}).get("pageFetchStatus") or "") == "ok" or i not in _failed_idx:
                 enriched_raw[i] = row
         log.info("Report: fetch retry recovered %d of %d pages", _recovered, len(_failed_idx))
+    # JS-rendered or bot-blocked publisher pages come back empty from the HTTP
+    # fetcher. Render a bounded number of them in a browser; each page must
+    # pass the same relevance check as an HTTP-fetched page.
+    try:
+        from utils.browser_fallback import apply_browser_fallback
+        _browser_stats = await apply_browser_fallback(
+            [row for row in enriched_raw if isinstance(row, dict)],
+            report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+            matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent),
+        )
+        if _browser_stats.get("attempted"):
+            log.info("Report: browser fallback attempted=%d recovered=%d rejected_by_relevance=%d failed=%d in %.1fs",
+                     _browser_stats["attempted"], _browser_stats["recovered"], _browser_stats["rejected_by_relevance"],
+                     _browser_stats["failed"], _browser_stats["seconds"])
+        record_research_stage("browser_fetch_fallback", _browser_stats)
+    except Exception as _browser_exc:
+        log.warning("Report: browser fallback skipped: %s", type(_browser_exc).__name__)
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",
