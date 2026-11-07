@@ -1,21 +1,10 @@
 """
-POST /api/chat/report/html — Generate an animated, interactive HTML report.
+HTML composition for the PDF renderer.
 
-Body: { report, title, question, summary, keyStats, charts, images, logoB64 }
-(identical shape to /api/chat/report/pdf's body — this is a second renderer
-for the SAME structured report data, not a second report-generation step.)
-
-Why this exists as a separate route rather than an option on the PDF one:
-PDF export uses the same presentation-driven HTML/CSS composition but converts the chart
-specifications to static SVG before print rendering. This route keeps the full interactive
-Chart.js version with hover/tooltips and scroll-aware animation. Both paths consume the
-same report/title/charts/keyStats/images payload; there is no second report-generation step.
-
-Nothing about the report-generation step (routes/report.py) changes: the
-LLM still writes the same markdown with the same [CHART_n]/[WEB_IMG_n]
-placeholders and the same charts/keyStats/images arrays it always has. This
-file only changes what those get turned INTO — same data, different (and in
-this one dimension, genuinely more capable) renderer.
+build_html_report() turns the structured report payload (report markdown,
+title, charts, keyStats, images, sources, presentation) into the HTML/CSS
+document that routes/pdf.py prints to PDF. It is an internal rendering step:
+PDF is the only user-facing report format, so this module exposes no endpoint.
 """
 import html
 import difflib
@@ -28,9 +17,6 @@ from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
-from fastapi import APIRouter
-from fastapi.requests import Request
-from fastapi.responses import JSONResponse, Response
 
 # Re-validate theme here rather than trusting the client's echoed-back copy
 # as-is: this route is the one place customCss gets concatenated into a real
@@ -51,7 +37,6 @@ from routes.source_manifest import build_source_registry, normalise_source_manif
 from utils.chart_evidence_audit import sanitize_charts_for_publication
 from routes.report_design import BODY_CLASS as _EDITORIAL_BODY_CLASS, editorial_css as _editorial_css, editorial_render_theme as _editorial_render_theme, font_face_css as _editorial_font_faces
 
-router = APIRouter()
 log = logging.getLogger("html_report")
 
 # Same "known failure sentinel" guard as routes/pdf.py — don't build a
@@ -5472,95 +5457,3 @@ def build_html_report(report: str, title: str, question: str, summary: str,
 <script>{_JS}</script>
 </body>
 </html>"""
-
-@router.post("")
-async def generate_html_report(request: Request):
-    t0 = time.perf_counter()
-    try:
-        body = await request.json()
-    except Exception:
-        log.warning("HTML report: invalid request body")
-        return JSONResponse({"error": "Invalid request body"}, status_code=400)
-
-    report: str = body.get("report", "")
-    if not report:
-        log.warning("HTML report: no report content in request")
-        return JSONResponse({"error": "No report content"}, status_code=400)
-
-    if report.strip() in _KNOWN_FAILURE_MESSAGES or report.strip().startswith("## Report Generation Error"):
-        log.warning("HTML report: refusing to render known report-generation-failure sentinel")
-        return JSONResponse(
-            {"error": "The report failed to generate, so there's nothing to export yet. Please try generating the report again."},
-            status_code=422,
-        )
-
-    title: str = body.get("title", "")
-    question: str = body.get("question", "Research Report")
-    summary: str = body.get("summary", "")
-    key_stats: list = body.get("keyStats", [])
-    charts: list = body.get("charts", [])
-    images: list = body.get("images", [])
-    theme: dict | None = _sanitize_theme(body.get("theme"))
-    sources = normalise_source_manifest(body.get("sources", []))
-    presentation = body.get("presentation")
-    report_tier = str(body.get("reportTier") or "detailed").strip().lower()
-    if report_tier not in ("detailed", "in_depth"):
-        report_tier = "detailed"
-
-    # Same unwrap-double-encoded-JSON safety net as routes/pdf.py.
-    stripped = report.strip()
-    if stripped.startswith("{") and '"report"' in stripped:
-        try:
-            inner = json.loads(stripped, strict=False)
-            if isinstance(inner.get("report"), str) and len(inner["report"]) > 100:
-                report = inner["report"]
-                title = title or inner.get("title", "")
-                summary = summary or inner.get("summary", "")
-                key_stats = key_stats or inner.get("keyStats", [])
-                charts = charts or inner.get("charts", [])
-                theme = theme or _sanitize_theme(inner.get("theme"))
-                presentation = presentation or inner.get("presentation")
-        except Exception as e:
-            log.debug("HTML report: report field is not double-encoded JSON, using as-is (%s)", e)
-
-    if "\\n" in report:
-        report = report.replace("\\n", "\n")
-    report = re.sub(r"^```(?:json|markdown)?\s*", "", report.strip())
-    report = re.sub(r"```\s*$", "", report).strip()
-
-    report, charts, _chart_heal = sanitize_charts_for_publication(
-        report, charts, sources, question=question, require_publisher_verification=True,
-    )
-    if _chart_heal["removedCharts"] or _chart_heal["prunedPoints"]:
-        log.warning("HTML report: export gate removed %d unsupported chart(s) and %d chart point(s) instead of failing; %d chart(s) kept",
-                    _chart_heal["removedCharts"], _chart_heal["prunedPoints"], len(charts))
-    chart_findings = _chart_heal["remainingFindings"]
-    if chart_findings:
-        return JSONResponse({
-            "error": "This report contains chart values that conflict with verification status or lack supporting source evidence. Resolve the findings before export.",
-            "publicationStatus": "FAIL", "findings": chart_findings[:20], "exported": False,
-        }, status_code=422)
-
-    try:
-        html_doc = build_html_report(
-            report, title, question, summary, key_stats, charts, images,
-            theme, sources, presentation, report_tier,
-            report_style=normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE),
-            kicker=str(body.get("kicker") or "")[:60],
-        )
-    except Exception as e:
-        log.error("HTML report: build_html_report failed: %s", e)
-        return JSONResponse({"error": f"Failed to generate HTML report: {e}"}, status_code=500)
-
-    elapsed = (time.perf_counter() - t0) * 1000
-    log.info("HTML report: done — %.1f KB in %.0fms", len(html_doc) / 1024, elapsed)
-
-    date_filename = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return Response(
-        content=html_doc,
-        media_type="text/html",
-        headers={
-            "Content-Disposition": f'inline; filename="growth-gradual-report-{date_filename}.html"',
-            "Cache-Control": "no-store",
-        },
-    )

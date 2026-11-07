@@ -2512,18 +2512,6 @@ def _resolve_theme(raw_theme, question: str) -> dict:
     return _sanitize_theme(raw_theme) or _derive_report_theme(question)
 
 
-def _resolve_recommended_format(base_format: str, theme: dict | None) -> str:
-    """Upgrade the keyword-based "html" recommendation (see
-    _WANTS_INTERACTIVE_RE) with the model's own per-request theme decision:
-    when it set richStyleNeeded (the requested visual style needs fonts/
-    decorative CSS a flat two-color PDF re-theme structurally can't give),
-    the HTML renderer should be the one offered regardless of what keywords
-    the question itself used. Never downgrades an existing "html" call."""
-    if theme and theme.get("richStyleNeeded"):
-        return "html"
-    return base_format
-
-
 def _sanitize_title(title: str, question: str) -> str:
     """Post-process LLM-generated title: strip conversational openers,
     fall back to a clean noun-phrase from the question."""
@@ -20381,7 +20369,7 @@ async def generate_report(request: Request):
                 "keyStats": [],
                 "summary": f"{len(articles)} market headlines gathered via {source_label} as of {today_label}.",
                 "fileImages": [],
-                "recommendedFormat": "html",
+                "recommendedFormat": "pdf",
                 "sources": normalise_source_manifest([
                     {"title": article.get("title", ""), "url": article.get("url", ""),
                      "publisher": article.get("source", ""), "kind": "News article"}
@@ -21076,21 +21064,8 @@ async def generate_report(request: Request):
         except Exception as e:
             log.warning("Report: tax calculation failed, continuing without it: %s", e)
 
-    # Format hint for the frontend: does this request actually ask for
-    # something a static PDF cannot do (animation, interactivity, motion,
-    # a "creative"/custom UI)? This does NOT change report generation at
-    # all — same LLM call, same markdown/charts/keyStats/images shape — it
-    # only tells the client which renderer to call afterwards:
-    # /report/pdf (ReportLab, static) or /report/html (animated/interactive,
-    # see routes/html_report.py). Defaults to "pdf" so existing behavior for
-    # every request that doesn't mention this is completely unchanged.
-    _WANTS_INTERACTIVE_RE = re.compile(
-        r"\b(animat(?:ed|ion)|interactive|creative\s+ui|motion|"
-        r"scroll(?:ing)?\s+animat|dynamic\s+(?:report|ui|dashboard)|"
-        r"web\s*page|webpage|micro-?interactions?|hover\s+effects?)\b",
-        re.IGNORECASE,
-    )
-    recommended_format = "html" if _WANTS_INTERACTIVE_RE.search(question) else "pdf"
+    # PDF is the only report output format.
+    recommended_format = "pdf"
 
     # Prioritize sources that actually mention the named entities/topics in the
     # request. This does not delete provenance; it only determines which results
@@ -21563,7 +21538,7 @@ async def generate_report(request: Request):
             "auditSummary": {"status": status, "searchQueries": locals().get("search_queries", []), "discoveredSources": len(audit_rows), "relevantSources": relevant_count, "rejectedSources": rejected_count, "storedSourcesReused": sum(1 for row in audit_rows if row["origin"] == "stored knowledge base"), "publisherPagesFetched": sum(1 for row in audit_rows if row["fetch_status"] == "ok")},
             "searchAudit": audit_rows, "sources": source_manifest, "charts": [], "images": [], "keyStats": [],
             "summary": f"Search audit only; {relevant_count} relevant source(s) retained. No report synthesis was performed.",
-            "recommendedFormat": "html",
+            "recommendedFormat": "pdf",
         }
         log.info("Search audit complete: queries=%d discovered=%d relevant=%d rejected=%d; writer skipped", len(locals().get("search_queries", [])), len(audit_rows), relevant_count, rejected_count)
         finish_research_capture({"searchAuditStatus": status, "searchAuditSourceCount": len(audit_rows), "reportGenerated": False})
@@ -21595,7 +21570,7 @@ async def generate_report(request: Request):
                 "charts": [], "images": [], "keyStats": [],
                 "publicationStatus": "FAIL",
                 "qualityReview": {"status": "FAIL", "blocking": True, "findings": ["Fewer than three relevant sources passed the evidence gate."]},
-                "recommendedFormat": "html",
+                "recommendedFormat": "pdf",
             }, status_code=200)
 
     # Evidence-first chart plan, step 2: with the final canonical IDs fixed, bind
@@ -24634,7 +24609,7 @@ async def generate_report(request: Request):
             report_text = normalize_report_markdown(report_text)
         clean_title = _align_title_horizon(_sanitize_title(parsed.get("title", ""), report_topic), question)
         clean_theme = _resolve_theme(parsed.get("theme"), question)
-        final_format = _resolve_recommended_format(recommended_format, clean_theme)
+        final_format = recommended_format
         elapsed = (time.perf_counter() - t0) * 1000
         report_chars = len(report_text)
         report_words = len(re.findall(r"\S+", report_text))
@@ -25066,7 +25041,7 @@ async def generate_report(request: Request):
                 "keyStats":   salvaged.get("keyStats", []),
                 "summary":    salvaged_public_summary,
                 "fileImages": embedded_file_images,
-                "recommendedFormat": _resolve_recommended_format(recommended_format, _salv_theme),
+                "recommendedFormat": recommended_format,
                 "theme":      _salv_theme,
                 "presentation": report_presentation,
                 "sources":    source_manifest,
@@ -25176,7 +25151,7 @@ async def generate_report(request: Request):
                 "keyStats":   repaired_parsed.get("keyStats", []),
                 "summary":    repaired_public_summary,
                 "fileImages": embedded_file_images,
-                "recommendedFormat": _resolve_recommended_format(recommended_format, _rep_theme),
+                "recommendedFormat": recommended_format,
                 "theme":      _rep_theme,
                 "presentation": report_presentation,
                 "sources":    source_manifest,
