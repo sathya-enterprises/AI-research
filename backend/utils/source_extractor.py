@@ -205,6 +205,11 @@ def _extract_html(raw_html: str, max_chars: int, include_script_data: bool) -> s
         for node in soup.find_all(["script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "form", "button", "iframe", "canvas"]):
             node.decompose()
         for node in soup.find_all(True):
+            # A node inside an already-decomposed ancestor has attrs=None;
+            # touching it raised AttributeError and the whole page was
+            # discarded as an "empty_extraction".
+            if getattr(node, "attrs", None) is None or getattr(node, "decomposed", False):
+                continue
             marker = " ".join((
                 str(node.get("id") or ""),
                 " ".join(str(item) for item in (node.get("class") or [])),
