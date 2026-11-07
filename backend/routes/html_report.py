@@ -4901,6 +4901,9 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # of a section. Lift it above the sections (text kept verbatim) so it does
     # not create an untitled "Report" section.
     report, _leading_status = _extract_leading_status_banner(report)
+    # Provider/planner wrappers occasionally leak a standalone "Report" label into
+    # the markdown body; it is not content and leaves an orphan line under a heading.
+    report = re.sub(r"(?im)^\s*(?:#{1,4}\s*)?(?:\*\*|__)?Report(?:\*\*|__)?\s*$", "", str(report or ""))
     report_tier = str(report_tier or "detailed").strip().lower()
     if report_tier not in ("detailed", "in_depth"):
         report_tier = "detailed"

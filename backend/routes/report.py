@@ -22015,6 +22015,7 @@ async def generate_report(request: Request):
     except Exception:
         _v2_requested = False
     _v2_used = False
+    _v2_unsupported_after_policy: list = []
     _report_progress("planning", "Planning sections around the question and retrieved evidence…", 61)
     report_plan = None if _v2_requested else await _plan_report_structure(
         question=question,
@@ -22278,6 +22279,7 @@ async def generate_report(request: Request):
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
+            _v2_unsupported_after_policy = list((_v2_result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or [])
             record_research_stage("pipeline_v2", _v2_result["meta"])
             _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
             log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
@@ -24995,6 +24997,18 @@ async def generate_report(request: Request):
             final_deterministic_audits, response_payload.get("report", ""),
             (gemini_audit or {}).get("findings") if isinstance(gemini_audit, dict) else None,
         )
+        if _v2_used and _v2_unsupported_after_policy and _outcome["outcome"] == "published":
+            # V2 number policy: "published" only when every number is supported. Values the
+            # policy could not resolve (table cells it cannot rewrite) keep the report a
+            # labelled draft; the flag is shown, never hidden.
+            _outcome = {**_outcome, "outcome": "draft", "failedStage": "number_support",
+                        "blockingCategories": ["number_support"],
+                        "failureSummary": [{"stage": "number_support",
+                                            "issue": "Numbers not found in the cited evidence: "
+                                                     + ", ".join(str(v) for v in _v2_unsupported_after_policy[:8])}]}
+            response_payload["failedStage"] = _outcome["failedStage"]
+            response_payload["failureSummary"] = _outcome["failureSummary"]
+            response_payload["draftAvailable"] = True
         response_payload["publicationOutcome"] = _outcome["outcome"]
         if response_payload.get("publicationStatus") == "FAIL":
             # Do not present a deterministic publication failure as a successful
