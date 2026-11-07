@@ -330,9 +330,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     parts = []
     if exec_body:
         parts.append(f"## {exec_section.title}\n\n{exec_body}")
+    entity_of = {s.section_id: (s.entity if getattr(s, "role", "") == "deep_dive" else "") for s in analysis}
     for d in drafts:
         if d.ok:
-            parts.append(f"## {d.title}\n\n{_renumber_figures(d.body, mapping)}")
+            body = _renumber_figures(d.body, mapping)
+            entity = entity_of.get(d.section_id) or ""
+            if entity:
+                # "Performance and momentum" repeats in every sector deep-dive; name the sector.
+                body = re.sub(r"(?m)^(###\s+)(?!.*" + re.escape(entity) + r")(.+)$", lambda m: f"{m.group(1)}{entity}: {m.group(2)}", body)
+            parts.append(f"## {d.title}\n\n{body}")
     method = methodology_markdown(store=store, manifest=manifest, outline=outline, charts=candidates, drafts=good,
                                   gateway_stats=gateway.stats.to_dict(), question=question, window_note=window_note, failed=failed)
     parts.append(f"## Methodology and Evidence Base\n\n{method}")
@@ -345,6 +351,28 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)
     report_md = _source_level(report_md)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
+    # Some chart checks depend on the finished text (e.g. a report table that marks
+    # an entity/period unavailable). Run the verifier again on the assembled report
+    # and drop failing charts here, rewriting their references, so later gates do
+    # not remove charts the prose depends on.
+    dropped_after_assembly = []
+    if chart_verifier and charts_out:
+        try:
+            reasons = chart_verifier(charts_out, report_md)
+        except TypeError:
+            reasons = [""] * len(charts_out)
+        except Exception as exc:
+            log.warning("V2 post-assembly chart verification failed: %s", type(exc).__name__)
+            reasons = [""] * len(charts_out)
+        failing = {i + 1 for i, reason in enumerate(reasons) if reason}
+        if failing:
+            dropped_after_assembly = [{"title": charts_out[i - 1].get("title"), "reason": reasons[i - 1]} for i in sorted(failing)]
+            keep = [i for i in range(1, len(charts_out) + 1) if i not in failing]
+            remap = {old: new for new, old in enumerate(keep, 1)}
+            report_md = re.sub(r"\[CHART_(\d+)\]", lambda m: f"[CHART_§{remap[int(m.group(1))]}]" if int(m.group(1)) in remap else "", report_md).replace("§", "")
+            charts_out = [charts_out[i - 1] for i in keep]
+            report_md, charts_out, _ = finalize_figures(report_md, charts_out)
+            report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
 
     words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", report_md)))
     est_pages = estimate_pages(sum(d.words for d in good), len(exec_body.split()), len(charts_out),
@@ -362,6 +390,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "charts": {"candidates": len(candidates) + len(chart_drops), "droppedBeforeWriting": chart_drops,
                    "planned": len(planned), "used": len(charts_out),
                    "droppedAfterWriting": [{"title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"],
+                   "droppedAfterAssembly": dropped_after_assembly,
                    "claims": [{"figure": c.figure_number, "claim": c.claim, "passages": c.passage_ids} for c in used]},
         "citations": {"passagesProvided": len({pid for s in analysis for pid in s.passage_ids} | {pid for s in analysis for l in s.leaves() for pid in l.passage_ids}),
                       "passagesCited": len(cited_passages), "sourcesCited": len(cited_sources), "citedPassageIds": cited_passages},

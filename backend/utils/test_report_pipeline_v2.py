@@ -319,3 +319,27 @@ def test_code_fences_become_tables_lists_or_text():
     assert "```" not in listed and "- MARKET HEALTH INDEX" in listed and "- Micro - GDP" in listed
     assert unfence("```\nsingle line\n```").strip() == "single line"
     assert "```" not in unfence("text\n```\nunclosed")
+
+
+def test_charts_failing_on_the_assembled_text_are_dropped_and_references_rewritten():
+    store, manifest = _store()
+    calls = []
+
+    def verifier(specs, report_text=""):
+        calls.append(bool(report_text))
+        # Before writing everything passes; on the assembled text the first chart fails.
+        return [("table marks it unverified" if report_text and i == 0 else "") for i in range(len(specs))]
+
+    result = asyncio.run(run_pipeline_v2(runtime=None, question="Sector rotation", tier="in_depth", store=store,
+                                         manifest=manifest, today="2026-11-07", gateway=FakeGateway(OUTLINE),
+                                         chart_verifier=verifier))
+    out = json.loads(result["raw"])
+    meta = result["meta"]["charts"]
+    assert calls[0] is False and calls[-1] is True  # pre-writing and post-assembly
+    assert len(meta["droppedAfterAssembly"]) == 1 and meta["droppedAfterAssembly"][0]["reason"] == "table marks it unverified"
+    report = out["report"]
+    assert all(c["title"].startswith(f"Figure {i}:") for i, c in enumerate(out["charts"], 1))
+    for i in range(1, len(out["charts"]) + 1):
+        assert f"[CHART_{i}]" in report
+    assert f"[CHART_{len(out['charts']) + 1}]" not in report
+    assert "underlying data" not in report
