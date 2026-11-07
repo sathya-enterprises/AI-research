@@ -112,7 +112,9 @@ REPORT THESIS: {thesis}
 
 SECTION TO WRITE: {title}
 SECTION GOAL: {goal}
-LENGTH: about {word_budget} words in total (write less if the evidence runs out; never pad).
+LENGTH: target {word_budget} words (acceptable range {int(word_budget * 0.85)}-{int(word_budget * 1.1)}). The budget was
+sized from the evidence below: work through every relevant passage (comparisons, mechanisms, what the numbers imply).
+Only stop short if the passages genuinely run out; never pad or repeat.
 SUBSECTIONS (use these H3 headings, in this order):
 {sub_text}
 
@@ -248,6 +250,41 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             draft.invalid_citations += part.invalid_citations
             draft.unsupported_numbers += part.unsupported_numbers
             draft.figures_referenced += part.figures_referenced
+    # Evidence-driven extension: a short section that left several of its own
+    # passages uncited gets ONE more call with only those unused passages. More
+    # words come only from evidence not yet used, so this cannot become padding.
+    body_so_far = "\n\n".join(bodies).strip()
+    words_so_far = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", body_so_far)))
+    cited_so_far = {t.strip().upper() for g in CITE_RE.findall(body_so_far) for t in re.split(r"\s*[,;]\s*", g)}
+    unused = [p for p in passages if p.passage_id not in cited_so_far]
+    if body_so_far and words_so_far < 0.7 * section.word_budget and len(unused) >= 3:
+        remaining = max(250, section.word_budget - words_so_far)
+        prompt = (
+            f"REPORT QUESTION: {question}\nREPORT THESIS: {thesis}\n\nSECTION: {section.title}\nSECTION GOAL: {section.goal}\n\n"
+            f"The section so far is below. Extend it by about {remaining} words using ONLY the UNUSED EVIDENCE PASSAGES: "
+            "add analysis the section does not yet contain (further comparisons, mechanisms, exceptions, implications). "
+            "Do not restate existing paragraphs. Output only new markdown to append (paragraphs and, if useful, one or two "
+            "new H3 subsections), then <<<SUMMARY>>> and 1-2 sentences on what the addition established. If the unused "
+            "passages add nothing material, output only <<<SUMMARY>>> followed by NONE.\n\n"
+            f"SECTION SO FAR:\n{body_so_far[-9000:]}\n\nALREADY COVERED by earlier sections:\n"
+            + "\n".join(f"- {c}" for c in already_covered) + "\n\nUNUSED EVIDENCE PASSAGES (cite by id):\n\n"
+            + "\n\n".join(f"[{p.passage_id}] {p.publisher or p.title[:60]} | {p.published or 'undated'} | {p.authority_tier} | "
+                          f"reliability {p.reliability:.2f}\n{p.text}" for p in unused)
+        )
+        result = await gateway.generate(purpose="section_extend", section_id=f"{section.section_id}#ext", system=SYSTEM,
+                                        prompt=prompt, max_tokens=min(12288, int(remaining * 2.2) + 800),
+                                        temperature=0.25, timeout=150, retries=1)
+        draft.calls += 1
+        if result.ok and not re.match(r"^\s*<<<SUMMARY>>>\s*NONE", result.text.strip()):
+            extra = SectionDraft(section_id=draft.section_id, title=draft.title)
+            postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
+                        allowed_numbers=allowed_numbers, figures=[], min_words=40)
+            if extra.ok:
+                bodies.append(extra.body)
+                if extra.summary:
+                    summaries.append(extra.summary)
+                draft.invalid_citations += extra.invalid_citations
+                draft.unsupported_numbers += extra.unsupported_numbers
     # Figures never referenced in any part are dropped.
     for fig in figures:
         if fig.status != "referenced":

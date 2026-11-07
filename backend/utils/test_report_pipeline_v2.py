@@ -234,3 +234,35 @@ def test_chart_unit_comes_from_the_plotted_column_and_old_periods_are_dropped():
     assert charts[0].spec["unit"] == "" and "Index Level" in charts[0].spec["title"]  # not '%' from the other column
     reasons = " | ".join(d["reason"] for d in dropped)
     assert "outside the requested window" in reasons and "reliability 0.30 below 0.50" in reasons
+
+
+def test_short_section_is_extended_only_from_its_unused_passages():
+    from utils.report_outline import Section
+    from utils.section_writer import write_section
+
+    store, _ = _store()
+    ids = [p.passage_id for p in store.passages if p.kind == "narrative"][:6]
+    section = Section("sec-9", "Flows", goal="flows", queries=["flows"], passage_ids=ids, word_budget=900)
+    seen = {}
+
+    class Gw(FakeGateway):
+        async def generate(self, *, purpose, prompt, system="", section_id="", **kwargs):
+            seen[purpose] = prompt
+            if purpose == "section":  # cites only the first passage, ~80 words
+                return LLMResult(ok=True, text=f"### A\n" + f"Foreign investors sold financials heavily [{ids[0]}]. " * 16
+                                 + f"\n<<<SUMMARY>>>\nSold [{ids[0]}].", model="fake")
+            return LLMResult(ok=True, text="Domestic SIP inflows offset the selling across the quarter "
+                             f"[{ids[1]}]. " * 8 + f"\n<<<SUMMARY>>>\nSIP offset [{ids[1]}].", model="fake")
+
+    draft = asyncio.run(write_section(Gw(OUTLINE), store, section, [], question="q", thesis="t",
+                                      already_covered=[], other_sections=[]))
+    assert "section_extend" in seen
+    extend_prompt = seen["section_extend"]
+    unused_block = extend_prompt.split("UNUSED EVIDENCE PASSAGES (cite by id):")[1]
+    assert f"[{ids[0]}]" not in unused_block and f"[{ids[1]}]" in unused_block
+    assert draft.calls == 2 and ids[1] in draft.cited_passages and "Domestic SIP inflows" in draft.body
+
+    full = Section("sec-10", "Flows", goal="flows", queries=["flows"], passage_ids=ids, word_budget=60)
+    seen.clear()
+    asyncio.run(write_section(Gw(OUTLINE), store, full, [], question="q", thesis="t", already_covered=[], other_sections=[]))
+    assert "section_extend" not in seen  # met its budget: no extension call
