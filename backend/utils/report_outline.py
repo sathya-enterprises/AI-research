@@ -35,6 +35,15 @@ TIER_RULES = {
     "in_depth": {"sections": "12-20", "subsections": True, "leaf_cap": 950, "leaf_floor": 330, "total_cap": 34000,
                  "k_leaf": 14, "exec_words": 900},
 }
+MIN_ANALYSIS_SECTIONS = {"detailed": 5, "in_depth": 12}
+DEEP_DIVE_WORDS = 1900      # ~5 pages; a deep-dive is 3-5 pages
+COMPACT_WORDS_PER_ENTITY = 220
+DEEP_DIVE_SUBSECTIONS = (
+    ("Performance and momentum", "returns by quarter, relative strength and how leadership changed"),
+    ("Flows and ownership", "FPI/DII and fund flows into the sector and what they signal"),
+    ("Valuation and earnings", "valuation multiples versus history and the earnings trajectory"),
+    ("Drivers, risks and outlook", "the drivers behind the moves, the main risks and what to watch"),
+)
 MIN_LEAF_PASSAGES = 3
 MIN_LEAF_SOURCES = 2
 MIN_ENTITY_PASSAGES = 2
@@ -49,6 +58,8 @@ class Section:
     entities: list[str] = field(default_factory=list)
     subsections: list["Section"] = field(default_factory=list)
     kind: str = "analysis"   # analysis | executive_summary | methodology | appendix_sources | appendix_data
+    role: str = "cross_cutting"  # cross_cutting | deep_dive | compact
+    entity: str = ""
     passage_ids: list[str] = field(default_factory=list)
     word_budget: int = 0
     status: str = "keep"
@@ -59,7 +70,8 @@ class Section:
 
     def to_dict(self) -> dict:
         return {"id": self.section_id, "title": self.title, "goal": self.goal, "queries": self.queries,
-                "entities": self.entities, "kind": self.kind, "passages": len(self.passage_ids),
+                "entities": self.entities, "kind": self.kind, "role": self.role, "entity": self.entity,
+                "passages": len(self.passage_ids),
                 "wordBudget": self.word_budget, "status": self.status, "note": self.note,
                 "subsections": [s.to_dict() for s in self.subsections]}
 
@@ -105,7 +117,18 @@ def evidence_overview(store, *, max_sources: int = 60, max_tables: int = 40) -> 
     return "\n".join(lines)
 
 
-def outline_prompt(question: str, tier: str, overview: str, today: str, window_note: str) -> tuple[str, str]:
+def tiers_block(tiers: dict | None) -> str:
+    if not tiers:
+        return ""
+    deep = [e.name for e in tiers.get("deep_dive", [])]
+    compact = [e.name for e in tiers.get("compact", [])]
+    return ("\nENTITY EVIDENCE TIERS (computed from the evidence; follow them):\n"
+            f"- DEEP-DIVE entities (substantive text from 3+ good sources): {', '.join(deep) or 'none'}\n"
+            f"- COMPACT entities (data tables, thin text): {', '.join(compact) or 'none'}\n")
+
+
+def outline_prompt(question: str, tier: str, overview: str, today: str, window_note: str,
+                   tiers: dict | None = None, rejection: str = "") -> tuple[str, str]:
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     system = (
         "You are the research director planning an evidence-grounded investment research report. "
@@ -118,9 +141,14 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "1. First list every natural ENTITY this topic is made of and that the sources actually cover (for example each "
             "sector index, each company, each region). Use the names as they appear in the sources; give aliases.\n"
             "2. List the DIMENSIONS the entities are compared on (e.g. quarterly returns, FPI/DII flows, valuation, earnings, drivers).\n"
-            f"3. Plan {rules['sections']} analysis sections: cross-cutting dimension sections (one per material dimension), "
-            "entity deep-dive sections that GROUP related entities with one subsection per entity, then risks/scenarios and outlook. "
-            "Every section has 2-5 subsections. Each subsection must be answerable from the sources listed."
+            f"3. Plan {rules['sections']} analysis sections (at least {MIN_ANALYSIS_SECTIONS['in_depth']}):\n"
+            "   a. ONE section per DEEP-DIVE entity listed below (role \"deep_dive\", \"entity\" set, title starting with the "
+            "entity name) with 3-4 subsections: performance and momentum; flows and ownership; valuation and earnings; "
+            "drivers, risks and outlook.\n"
+            "   b. 1-3 COMPACT comparison sections (role \"compact\") that together name EVERY compact entity in \"entities\".\n"
+            "   c. At least 4 cross-cutting sections (role \"cross_cutting\"): the market regime, flows, valuation/earnings, "
+            "macro drivers, risks/scenarios and outlook. Every cross-cutting section has 2-5 subsections."
+            + tiers_block(tiers)
         )
     else:
         structure = (
@@ -134,7 +162,7 @@ REPORT TIER: {tier}
 
 {structure}
 
-Do NOT include an executive summary, methodology, sources or appendix sections; those are added automatically.
+{rejection}Do NOT include an executive summary, methodology, sources or appendix sections; those are added automatically.
 Sections must not overlap: give each a distinct goal. The thesis is the report's single central claim, phrased so the
 evidence can support or qualify it.
 For every section and subsection give 2-4 search queries made of words likely to appear in the sources (index names,
@@ -148,7 +176,8 @@ Return JSON:
   "thesis": "<1-2 sentences>",
   "entities": [{{"name": "...", "type": "...", "aliases": ["..."]}}],
   "dimensions": ["..."],
-  "sections": [{{"title": "...", "goal": "<what this section must establish>", "queries": ["..."], "entities": ["..."],
+  "sections": [{{"title": "...", "role": "cross_cutting|deep_dive|compact", "entity": "<deep-dive entity or empty>",
+                 "goal": "<what this section must establish>", "queries": ["..."], "entities": ["..."],
                  "subsections": [{{"title": "...", "goal": "...", "queries": ["..."], "entities": ["..."]}}]}}]}}"""
     return system, prompt
 
@@ -172,8 +201,11 @@ def _sections_from_json(data: dict, tier: str) -> list[Section]:
     for i, raw in enumerate(data.get("sections") or [], 1):
         if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
             continue
+        role = str(raw.get("role") or "cross_cutting").strip().lower()
         sec = Section(section_id=f"sec-{i}", title=str(raw["title"]).strip()[:140], goal=str(raw.get("goal") or "")[:400],
-                      queries=_clean_list(raw.get("queries"), 4) or [str(raw["title"])], entities=_clean_list(raw.get("entities"), 12))
+                      queries=_clean_list(raw.get("queries"), 4) or [str(raw["title"])], entities=_clean_list(raw.get("entities"), 40),
+                      role=role if role in {"cross_cutting", "deep_dive", "compact"} else "cross_cutting",
+                      entity=str(raw.get("entity") or "").strip()[:80])
         if TIER_RULES.get(tier, {}).get("subsections") or raw.get("subsections"):
             for j, sub in enumerate(raw.get("subsections") or [], 1):
                 if isinstance(sub, dict) and str(sub.get("title") or "").strip():
@@ -246,7 +278,7 @@ def resolve_thin_evidence(store, sections: list[Section], decisions: list[str]) 
     live = [s for s in sections if s.status == "keep"]
     for sec in list(live):
         weight, n_sources = _evidence_strength(store, sec.passage_ids)
-        if not _is_thin(store, sec.passage_ids):
+        if not _is_thin(store, sec.passage_ids) or sec.role in {"deep_dive", "compact"}:
             continue
         others = [o for o in live if o is not sec and o.status == "keep"]
         best = max(others, key=lambda o: len(_terms(o.title + " " + " ".join(o.queries)) & _terms(sec.title + " " + " ".join(sec.queries))), default=None)
@@ -274,7 +306,17 @@ def size_budgets(store, sections: list[Section], tier: str, meta: dict) -> None:
         weight, _ = _evidence_strength(store, leaf.passage_ids)
         leaf.word_budget = max(rules["leaf_floor"], min(rules["leaf_cap"], 95 * weight))
     for sec in sections:
-        if sec.status == "keep" and sec.subsections:
+        if sec.status != "keep":
+            continue
+        cap = DEEP_DIVE_WORDS if sec.role == "deep_dive" else (
+            min(1800, max(600, COMPACT_WORDS_PER_ENTITY * max(1, len(sec.entities)))) if sec.role == "compact" else None)
+        if cap:
+            leaves_here = sec.leaves()
+            planned = sum(leaf.word_budget for leaf in leaves_here)
+            if planned > cap or sec.role == "compact":
+                for leaf in leaves_here:
+                    leaf.word_budget = max(200, int(cap * leaf.word_budget / max(1, planned)))
+        if sec.subsections:
             sec.word_budget = sum(s.word_budget for s in sec.leaves()) + 120
     total = sum(s.word_budget for s in sections if s.status == "keep")
     evidence_words = total
@@ -318,19 +360,119 @@ def entity_coverage(store, entities: list[dict], dimensions: list[str]) -> list[
     return rows
 
 
-async def build_outline(store, gateway, *, question: str, tier: str, today: str, window_note: str = "") -> Outline:
+def _mentions(section: Section, entity) -> bool:
+    names = {entity.name.casefold(), *[a.casefold() for a in entity.aliases]}
+    hay = " ".join([section.title, section.entity, *section.entities,
+                    *[f"{x.title} {' '.join(x.entities)}" for x in section.subsections]]).casefold()
+    return any(re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", hay) for n in names if len(n) >= 2)
+
+
+def validate_outline(sections: list[Section], tier: str, tiers: dict | None) -> list[str]:
+    """Structural rules the outline must meet (rejected outlines get one retry)."""
+    errors = []
+    minimum = MIN_ANALYSIS_SECTIONS.get(tier, 5)
+    if len(sections) < minimum:
+        errors.append(f"only {len(sections)} analysis sections; at least {minimum} are required")
+    if tiers and tier == "in_depth":
+        for entity in tiers.get("deep_dive", []):
+            if not any(s.role == "deep_dive" and _mentions(s, entity) for s in sections):
+                errors.append(f"deep-dive entity '{entity.name}' has no section of its own")
+        missing = [e.name for e in tiers.get("compact", []) if not any(_mentions(s, e) for s in sections)]
+        if missing:
+            errors.append(f"compact entities not covered by any section: {', '.join(missing)}")
+    return errors
+
+
+def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decisions: list[str]) -> list[Section]:
+    """Deterministically add what the LLM outline still omitted after its retry (each addition logged)."""
+    if not tiers or tier != "in_depth":
+        return sections
+    next_id = len(sections) + 1
+    for entity in tiers.get("deep_dive", []):
+        if any(s.role == "deep_dive" and _mentions(s, entity) for s in sections):
+            continue
+        sec = Section(section_id=f"sec-{next_id}", title=f"{entity.name}: Sector Deep-Dive", role="deep_dive",
+                      entity=entity.name, entities=[entity.name], goal=f"Full analysis of {entity.name} over the window",
+                      queries=[f"{entity.name} sector", f"Nifty {entity.name} returns"])
+        for j, (sub_title, sub_goal) in enumerate(DEEP_DIVE_SUBSECTIONS, 1):
+            sec.subsections.append(Section(section_id=f"{sec.section_id}.{j}", title=sub_title, goal=sub_goal,
+                                           queries=[f"{entity.name} {sub_title.lower()}"], entities=[entity.name]))
+        sections.append(sec)
+        next_id += 1
+        decisions.append(f"Added deep-dive section for '{entity.name}' (validator: the outline omitted it).")
+    missing = [e for e in tiers.get("compact", []) if not any(_mentions(s, e) for s in sections)]
+    if missing:
+        sections.append(Section(section_id=f"sec-{next_id}", title="Other Sectors: Compact Comparison", role="compact",
+                                entities=[e.name for e in missing], goal="Compare the sectors with data but thin commentary",
+                                queries=[" ".join(e.name for e in missing[:8]), "sector returns comparison"]))
+        decisions.append(f"Added compact comparison section for {len(missing)} entities the outline omitted.")
+    return sections
+
+
+def seed_entity_evidence(store, sections: list[Section], tiers: dict | None) -> None:
+    """Entity sections get their entity's own evidence, not only what lexical search finds."""
+    if not tiers:
+        return
+    by_name = {e.name: e for group in tiers.values() for e in group}
+    for sec in sections:
+        if sec.role == "deep_dive":
+            entity = by_name.get(sec.entity) or next((e for e in by_name.values() if _mentions(sec, e)), None)
+            if not entity:
+                continue
+            text = sorted((store.get(pid) for pid in entity.text_passages), key=lambda p: -(p.reliability if p else 0))
+            extra = [p.passage_id for p in text if p and p.source_id in entity.good_text_sources][:10]
+            extra += sorted(entity.table_passages)[:4]
+            target = sec.leaves()
+            for i, pid in enumerate(extra):  # spread across subsections
+                leaf = target[i % len(target)]
+                if pid not in leaf.passage_ids:
+                    leaf.passage_ids.append(pid)
+            if sec.subsections:
+                sec.passage_ids = list(dict.fromkeys(sec.passage_ids + [pid for leaf in sec.leaves() for pid in leaf.passage_ids]))
+        elif sec.role == "compact":
+            for entity in (e for e in tiers.get("compact", []) if _mentions(sec, e)):
+                for pid in sorted(entity.table_passages)[:2] + sorted(entity.text_passages)[:1]:
+                    leaf = sec.leaves()[0]
+                    if pid not in leaf.passage_ids:
+                        leaf.passage_ids.append(pid)
+            if sec.subsections:
+                sec.passage_ids = list(dict.fromkeys(sec.passage_ids + [pid for leaf in sec.leaves() for pid in leaf.passage_ids]))
+
+
+async def build_outline(store, gateway, *, question: str, tier: str, today: str, window_note: str = "",
+                        tiers: dict | None = None) -> Outline:
     overview = evidence_overview(store)
-    system, prompt = outline_prompt(question, tier, overview, today, window_note)
-    result = await gateway.generate(purpose="outline", section_id="outline", system=system, prompt=prompt,
-                                    max_tokens=8192, temperature=0.2, json_mode=True, timeout=120, retries=1)
-    data = result.json() if result.ok else None
-    if not isinstance(data, dict):
-        raise OutlineError(f"outline call failed: {result.error or 'invalid JSON'}")
-    sections = _sections_from_json(data, tier)
-    if len(sections) < 3:
-        raise OutlineError(f"outline returned {len(sections)} usable sections")
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     decisions: list[str] = []
+    attempts, rejection, data, result, sections = [], "", None, None, []
+    for attempt in (1, 2):
+        system, prompt = outline_prompt(question, tier, overview, today, window_note, tiers=tiers, rejection=rejection)
+        result = await gateway.generate(purpose="outline", section_id=f"outline#{attempt}" if attempt > 1 else "outline",
+                                        system=system, prompt=prompt, max_tokens=12288, temperature=0.2, json_mode=True,
+                                        timeout=150, retries=1)
+        candidate = result.json() if result.ok else None
+        if not isinstance(candidate, dict):
+            attempts.append({"attempt": attempt, "errors": [result.error or "invalid JSON"]})
+            if data is None and attempt == 2:
+                raise OutlineError(f"outline call failed: {result.error or 'invalid JSON'}")
+            continue
+        candidate_sections = _sections_from_json(candidate, tier)
+        errors = validate_outline(candidate_sections, tier, tiers)
+        attempts.append({"attempt": attempt, "sections": len(candidate_sections), "errors": errors})
+        if data is None or len(candidate_sections) >= len(sections):
+            data, sections = candidate, candidate_sections
+        if not errors:
+            break
+        log.warning("V2 outline attempt %d rejected: %s", attempt, "; ".join(errors)[:400])
+        rejection = ("YOUR PREVIOUS OUTLINE WAS REJECTED for these reasons - fix every one:\n"
+                     + "\n".join(f"- {e}" for e in errors) + "\n\n")
+    if len(sections) < 3:
+        raise OutlineError(f"outline returned {len(sections)} usable sections")
+    remaining = validate_outline(sections, tier, tiers)
+    if remaining:
+        sections = repair_outline(sections, tier, tiers, decisions)
+        for error in validate_outline(sections, tier, tiers):
+            decisions.append(f"Outline still below the structural minimum after repair: {error}.")
     entities = [e for e in (data.get("entities") or []) if isinstance(e, dict)][:40]
     dimensions = _clean_list(data.get("dimensions"), 10)
     coverage = entity_coverage(store, entities, dimensions)
@@ -338,8 +480,12 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         if row["status"] != "covered":
             decisions.append(f"Entity '{row['entity']}' has insufficient evidence ({row['passages']} passages) - no dedicated coverage.")
     assign_passages(store, sections, rules["k_leaf"])
+    seed_entity_evidence(store, sections, tiers)
     resolve_thin_evidence(store, sections, decisions)
-    meta: dict = {"tier": tier, "outlineModel": result.model}
+    meta: dict = {"tier": tier, "outlineModel": result.model if result else "", "outlineAttempts": attempts}
+    if tiers:
+        meta["entityTiers"] = {k: [e.name for e in v] for k, v in tiers.items()}
+        meta["tierCounts"] = {k: len(v) for k, v in tiers.items()}
     size_budgets(store, sections, tier, meta)
     outline = Outline(title=str(data.get("title") or "")[:160], thesis=str(data.get("thesis") or "")[:600],
                       sections=sections, entities=entities, dimensions=dimensions, entity_coverage=coverage,
