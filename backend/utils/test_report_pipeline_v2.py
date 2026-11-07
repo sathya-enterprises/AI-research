@@ -275,3 +275,28 @@ def test_chart_claim_has_no_marker_and_uses_the_final_figure_number():
     postprocess(SectionDraft("s", "t"), raw, allowed_passages={"S2.1"}, allowed_numbers={"14.08"}, figures=figs, min_words=5)
     assert figs[0].claim == "Figure 3 shows telecom leading at 14.08%."
     assert _renumber_figures(figs[0].claim, {3: 1}).startswith("Figure 1 shows")
+
+
+def test_citation_repair_points_numbers_at_the_passage_that_holds_them():
+    from utils.section_writer import repair_citations
+    numbers = {"S6.1": {"12.5"}, "S14.2": {"10915", "883"}}
+    body = ("IT absorbed 10,915 crore of FPI inflows [S6.1]. Pharma rose 12.5% [S6.1]. "
+            "A figure found nowhere: 77.7% [S6.1].")
+    fixed, repaired = repair_citations(body, numbers)
+    assert repaired == 1
+    assert "10,915 crore of FPI inflows [S6.1, S14.2]." in fixed
+    assert "Pharma rose 12.5% [S6.1]." in fixed and "77.7% [S6.1]." in fixed  # unchanged
+
+
+def test_finalize_figures_renumbers_survivors_and_neutralises_removed_refs():
+    from utils.report_pipeline_v2 import finalize_figures
+    text = ("Figure 3 shows the ranking [S1].\n\n[CHART_1]\n\nFigure 6 shows flows (removed later) [S2].\n\n"
+            "Figure 9 shows OI build-up [S3].\n\n[CHART_2]")
+    charts = [{"title": "Figure 3: Ranking", "takeaway": "Figure 3 shows the ranking."},
+              {"title": "Figure 9: OI build-up", "takeaway": "Figure 9 shows OI build-up."}]
+    out, charts_out, stats = finalize_figures(text, charts)
+    assert [c["title"] for c in charts_out] == ["Figure 1: Ranking", "Figure 2: OI build-up"]
+    assert "Figure 1 shows the ranking" in out and "Figure 2 shows OI build-up" in out
+    assert "Figure 6" not in out and "the underlying data shows flows" in out
+    assert charts_out[1]["takeaway"] == "Figure 2 shows OI build-up."
+    assert stats == {"figures": 2, "danglingRefsNeutralized": 1, "mapping": {"3": 1, "9": 2}}

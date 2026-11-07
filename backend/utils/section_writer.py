@@ -57,6 +57,7 @@ class SectionDraft:
     error: str = ""
     cited_passages: list[str] = field(default_factory=list)
     invalid_citations: int = 0
+    repaired_citations: int = 0
     unsupported_numbers: list[str] = field(default_factory=list)
     figures_referenced: list[int] = field(default_factory=list)
     figures_dropped: list[int] = field(default_factory=list)
@@ -131,8 +132,57 @@ EVIDENCE PASSAGES (cite by id):
 {ev}"""
 
 
+def _sentence_numbers(sentence: str) -> list[str]:
+    """Factual numbers in a sentence (no citations, figure refs, years, quarter labels, small ordinals)."""
+    text = CITE_RE.sub(" ", sentence)
+    text = FIGURE_MARKER_RE.sub(" ", FIGURE_REF_RE.sub(" ", text))
+    text = re.sub(r"\b(?:Q[1-4]|H[12])\s*(?:FY|CY)?\s*'?\d{2,4}\b|\bFY\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\b", " ", text, flags=re.I)
+    out = []
+    for token in _NUM_RE.findall(text):
+        plain = _normalize_number(token).lstrip("-")
+        if re.fullmatch(r"(?:19|20)\d{2}", plain) or plain in {"0", "1", "2", "3", "4", "5"}:
+            continue
+        out.append(plain)
+    return out
+
+
+def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[str, int]:
+    """Re-point citations to the passage that actually holds each number.
+
+    The writer sometimes cites [S6.2] for a figure that is in [S14.1]. When a
+    sentence's number is absent from every passage it cites but present in
+    another passage given to this section, that passage is added to the
+    sentence's citation. Numbers found in no passage are left for the
+    unsupported-number count (Stage C rewrites them).
+    """
+    if not passage_numbers:
+        return body, 0
+    repaired = 0
+    pieces = re.split(r"(?<=[.!?])(\s+)", body)
+    for i, sentence in enumerate(pieces):
+        matches = list(CITE_RE.finditer(sentence))
+        if not matches:
+            continue
+        cited = [t.strip().upper() for m in matches for t in re.split(r"\s*[,;]\s*", m.group(1))]
+        have = set().union(*(passage_numbers.get(c, set()) for c in cited))
+        additions = []
+        for number in _sentence_numbers(sentence):
+            if number in have:
+                continue
+            holder = next((pid for pid, nums in passage_numbers.items() if number in nums and pid not in cited), None)
+            if holder and holder not in additions:
+                additions.append(holder)
+                have |= passage_numbers.get(holder, set())
+        if additions:
+            last = matches[-1]
+            merged = ", ".join(dict.fromkeys([*[t.strip().upper() for t in re.split(r"\s*[,;]\s*", last.group(1))], *additions]))
+            pieces[i] = sentence[:last.start()] + f"[{merged}]" + sentence[last.end():]
+            repaired += len(additions)
+    return "".join(pieces), repaired
+
+
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
-                figures: list, min_words: int = 60) -> SectionDraft:
+                figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None) -> SectionDraft:
     text = str(raw or "").strip()
     if SUMMARY_MARKER in text:
         body, summary = text.split(SUMMARY_MARKER, 1)
@@ -154,6 +204,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         return f"[{', '.join(dict.fromkeys(kept))}]" if kept else ""
 
     body = CITE_RE.sub(fix, body)
+    body, draft.repaired_citations = repair_citations(body, passage_numbers or {})
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}
@@ -218,6 +269,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         draft.error = "no evidence passages assigned"
         return draft
     allowed_passages = {p.passage_id for p in passages}
+    passage_numbers = {p.passage_id: _number_set([p.text]) for p in passages}
     allowed_numbers = _number_set(p.text for p in passages) | _number_set(
         f"{v:g}" for f in figures for _, _, v in f.points)
     subs = [s for s in section.subsections if s.status == "keep"]
@@ -244,13 +296,14 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             continue
         part = SectionDraft(section_id=draft.section_id, title=draft.title)
         postprocess(part, result.text, allowed_passages=allowed_passages, allowed_numbers=allowed_numbers,
-                    figures=[f for f in group_figures if f.status != "referenced"])
+                    figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers)
         if not part.ok:
             draft.error = (f"{draft.error}; " if draft.error else "") + f"part {gi + 1}: {part.error}"
         if part.ok:
             bodies.append(part.body)
             summaries.append(part.summary)
             draft.invalid_citations += part.invalid_citations
+            draft.repaired_citations += part.repaired_citations
             draft.unsupported_numbers += part.unsupported_numbers
             draft.figures_referenced += part.figures_referenced
     # Evidence-driven extension: a short section that left several of its own
@@ -281,12 +334,13 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         if result.ok and not re.match(r"^\s*<<<SUMMARY>>>\s*NONE", result.text.strip()):
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)
             postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
-                        allowed_numbers=allowed_numbers, figures=[], min_words=40)
+                        allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers)
             if extra.ok:
                 bodies.append(extra.body)
                 if extra.summary:
                     summaries.append(extra.summary)
                 draft.invalid_citations += extra.invalid_citations
+                draft.repaired_citations += extra.repaired_citations
                 draft.unsupported_numbers += extra.unsupported_numbers
     # Figures never referenced in any part are dropped.
     for fig in figures:

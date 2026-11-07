@@ -58,6 +58,48 @@ def _renumber_figures(body: str, mapping: dict[int, int]) -> str:
     return body.replace("§", "")
 
 
+_TITLE_FIGURE_RE = re.compile(r"^\s*Figure\s+(\d+)\s*:\s*")
+
+
+def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
+    """Renumber V2 figures after all later gates, in document order.
+
+    Later gates (e.g. the requested-window chart gate) can remove charts and the
+    chart registry is re-canonicalised so [CHART_k] refers to charts[k-1]. Chart
+    titles carry the pipeline's "Figure N:" prefix and the prose says "Figure N";
+    both are renumbered to the surviving order. References to removed figures
+    become neutral wording (Stage C rewrites those sentences properly).
+    """
+    text = str(report_text or "")
+    present = {int(n) for n in re.findall(r"\[CHART_(\d+)\]", text)}
+    mapping: dict[int, int] = {}
+    out = []
+    for index, chart in enumerate(charts or [], 1):
+        if not isinstance(chart, dict):
+            out.append(chart)
+            continue
+        chart = dict(chart)
+        match = _TITLE_FIGURE_RE.match(str(chart.get("title") or ""))
+        if match:
+            rest = str(chart["title"])[match.end():]
+            if index in present:
+                mapping[int(match.group(1))] = index
+                chart["title"] = f"Figure {index}: {rest}"
+            else:
+                chart["title"] = rest
+        out.append(chart)
+    refs = [int(n) for n in FIGURE_REF_RE.findall(text)]
+    dangling = sum(1 for n in refs if n not in mapping)
+    text = _renumber_figures(text, mapping)
+    for chart in out:
+        if isinstance(chart, dict):
+            for key in ("takeaway", "rationale"):
+                if chart.get(key):
+                    chart[key] = _renumber_figures(str(chart[key]), mapping)
+    return text, out, {"figures": len(mapping), "danglingRefsNeutralized": dangling,
+                       "mapping": {str(k): v for k, v in mapping.items()}}
+
+
 def _source_level(body: str) -> str:
     def repl(match: re.Match) -> str:
         ids = []
@@ -255,6 +297,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "outline": outline.to_dict(), "llm": gateway.stats.to_dict(),
         "sections": [{"id": d.section_id, "title": d.title, "ok": d.ok, "error": d.error, "words": d.words, "calls": d.calls,
                       "citedPassages": len(d.cited_passages), "invalidCitations": d.invalid_citations,
+                      "repairedCitations": d.repaired_citations,
                       "unsupportedNumbers": d.unsupported_numbers[:30], "figuresReferenced": d.figures_referenced,
                       "figuresDropped": d.figures_dropped} for d in drafts],
         "executiveSummary": {"ok": exec_result.ok, "words": len(exec_body.split()), "unsupportedNumbers": exec_unsupported[:30]},
