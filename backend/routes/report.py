@@ -17203,6 +17203,11 @@ async def _extend_report_to_floor(report_text: str, question: str, target_chars:
     return normalize_report_markdown(strip_generation_markers(report_text or ""))
 
 
+async def _v2_skip_scanability(report_text: str) -> tuple[str, dict]:
+    """Pipeline v2 sections are grounded per passage; a format rewrite would break citations."""
+    return report_text, {"skipped": "pipeline_v2"}
+
+
 async def _apply_report_scanability_pass(report_text: str, question: str, report_tier: str) -> tuple[str, dict]:
     """Reformat a few prose-heavy modules without changing research evidence.
 
@@ -21969,8 +21974,16 @@ async def generate_report(request: Request):
     # writer generates any prose. See PLANNING_SYSTEM_PROMPT / _plan_report_structure
     # above. Failure here is non-fatal — falls back to the writer's existing
     # implicit planning (REPORT STRUCTURE rules in SYSTEM_PROMPT), unchanged.
+    # Section-by-section pipeline (REPORT_PIPELINE_V2=1). The old single-call
+    # writer remains the fallback if V2 fails for any reason.
+    try:
+        from utils.report_pipeline_v2 import enabled as _v2_enabled
+        _v2_requested = bool(_v2_enabled() and not file_only_report and not no_web_sources and evidence_store is not None)
+    except Exception:
+        _v2_requested = False
+    _v2_used = False
     _report_progress("planning", "Planning sections around the question and retrieved evidence…", 61)
-    report_plan = await _plan_report_structure(
+    report_plan = None if _v2_requested else await _plan_report_structure(
         question=question,
         enriched_sources=enriched,
         file_section=file_section,
@@ -22135,8 +22148,9 @@ async def generate_report(request: Request):
     # but the original evidence blocks and final publication gates remain authoritative.
     _report_progress("parallel_analysis", "Running parallel evidence analysts…", 63)
     _parallel_analysis_result = {"enabled": not file_only_report, "findings": [], "gaps": [], "analysts": 0}
-    if file_only_report:
-        log.info("Workbook-only report: skipped parallel external-evidence analyst stage")
+    if file_only_report or _v2_requested:
+        log.info("Report: skipped parallel analyst stage (%s)",
+                 "workbook-only" if file_only_report else "pipeline v2 writes from its own evidence store")
     else:
         try:
             _parallel_analysis_result = await run_parallel_evidence_analysis(
@@ -22161,9 +22175,29 @@ async def generate_report(request: Request):
         "elapsedMs": int(_parallel_analysis_result.get("elapsed_ms") or 0),
     })
     _report_progress("writing", "Drafting evidence-backed report sections…", 67)
-    raw, model_used = await call_report_writer(
-        user_prompt, report_tier, report_plan=report_plan, fallback_sources=enriched
-    )
+    raw, model_used = "", ""
+    if _v2_requested:
+        try:
+            from datetime import date as _v2_date
+            from utils.report_pipeline_v2 import run_pipeline_v2
+            _v2_today = _v2_date.today()
+            _v2_result = await run_pipeline_v2(
+                runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
+                manifest=source_manifest, today=_v2_today.isoformat(),
+                window_note=_past_n_quarters_anchor(question, _v2_today).strip(),
+                progress=lambda message: _report_progress("writing", message, 70),
+            )
+            raw, model_used = _v2_result["raw"], _v2_result["model"]
+            _v2_used = True
+            record_research_stage("pipeline_v2", _v2_result["meta"])
+        except Exception as _v2_exc:
+            log.warning("Report: pipeline v2 failed, falling back to the single-call writer: %s: %s",
+                        type(_v2_exc).__name__, str(_v2_exc)[:300])
+            record_research_stage("pipeline_v2", {"error": f"{type(_v2_exc).__name__}: {str(_v2_exc)[:500]}", "fallback": True})
+    if not _v2_used:
+        raw, model_used = await call_report_writer(
+            user_prompt, report_tier, report_plan=report_plan, fallback_sources=enriched
+        )
     if not raw:
         log.error("Report: report writer returned no content after provider fallback")
         return JSONResponse(
@@ -23561,8 +23595,9 @@ async def generate_report(request: Request):
         # remove repeated table visuals before page-budget expansion. Otherwise
         # duplicate tables can inflate the preflight page count and trigger more
         # continuation prose that repeats the same facts again.
-        report_text, charts = _extract_markdown_tables(report_text, charts)
-        report_text, charts = _dedupe_semantically_duplicate_table_charts(report_text, charts)
+        if not _v2_used:
+            report_text, charts = _extract_markdown_tables(report_text, charts)
+            report_text, charts = _dedupe_semantically_duplicate_table_charts(report_text, charts)
 
         for _attempt in range(2):
             stripped = report_text.strip()
@@ -23599,8 +23634,9 @@ async def generate_report(request: Request):
         pre_expand_chars = len(report_text)
         if report_tier == "in_depth":
             log.info("[IN_DEPTH] initial report chars: %d", pre_expand_chars)
-        if file_only_report:
-            log.info("Workbook-only report: skipped semantic/page-band expansion to prevent repetitive padding")
+        if file_only_report or _v2_used:
+            log.info("Report: skipped semantic/page-band expansion (%s)",
+                     "workbook-only" if file_only_report else "pipeline v2 sized sections from the evidence")
         else:
             report_text = await _expand_report_to_tier(
                 report_text=report_text,
@@ -23634,8 +23670,9 @@ async def generate_report(request: Request):
         # The modular expansion writer may add fresh Markdown tables after the
         # first extraction pass. Convert those too before chart creation and page
         # measurement, while deduplicating against the tables already represented.
-        report_text, charts = _extract_markdown_tables(report_text, charts)
-        report_text, charts = _dedupe_semantically_duplicate_table_charts(report_text, charts)
+        if not _v2_used:
+            report_text, charts = _extract_markdown_tables(report_text, charts)
+            report_text, charts = _dedupe_semantically_duplicate_table_charts(report_text, charts)
 
         # Add evidence-backed numeric comparison charts before pagination so the
         # page-band controller measures the actual chart-inclusive document. This
@@ -23644,7 +23681,7 @@ async def generate_report(request: Request):
         try:
             _early_chart_manifest = ensure_cited_source_records(report_text, source_manifest)
             _early_chart_sources = _attach_audit_source_evidence(_early_chart_manifest, enriched, report_text)
-            report_text, charts, _early_verified_charts = _add_verified_numeric_charts_from_tables(
+            report_text, charts, _early_verified_charts = (report_text, charts, 0) if _v2_used else _add_verified_numeric_charts_from_tables(
                 report_text, charts, _early_chart_sources, report_tier,
                 normalizer=_normalize_chart_spec, validator=_is_plausible_chart,
             )
@@ -23705,7 +23742,7 @@ async def generate_report(request: Request):
         try:
             before_scanability = len(report_text)
             report_text, scanability_result = await asyncio.wait_for(
-                _apply_report_scanability_pass(report_text, report_topic, report_tier),
+                _v2_skip_scanability(report_text) if _v2_used else _apply_report_scanability_pass(report_text, report_topic, report_tier),
                 timeout=58.0 if report_tier == "in_depth" else 40.0,
             )
             if len(report_text) != before_scanability or scanability_result.get("before", {}).get("marker_leak_count", 0):
@@ -23954,7 +23991,7 @@ async def generate_report(request: Request):
 
         # Sector-rotation report: force the actual calculated matrix and chart
         # into the final artifact before the last validation pass.
-        if sector_rotation_request:
+        if sector_rotation_request and not _v2_used:
             report_text = _insert_sector_quarterly_return_matrix(
                 report_text, quarterly_rows, source_manifest,
             )
@@ -24067,7 +24104,7 @@ async def generate_report(request: Request):
         # cited publisher evidence supports a real comparison. Add plotted charts
         # strictly from sanitized table values; the subsequent independent chart
         # evidence gate can still reject any unsupported observation.
-        if _promoter_ledger_trusted:
+        if _promoter_ledger_trusted or _v2_used:
             _verified_table_charts_added = 0
         else:
             report_text, charts, _verified_table_charts_added = _add_verified_numeric_charts_from_tables(
@@ -24206,7 +24243,9 @@ async def generate_report(request: Request):
         # source lines (not from the writer's prose, which the evidence gates
         # above may have pruned). Inserted after the chart evidence gate; its
         # charts carry per-point quotes that the final audits verify.
-        if promoter_exit_request:
+        if _v2_used:
+            _gallery_meta = {"charts": 0, "coverageStatus": "pipeline_v2_planned_charts"}
+        elif promoter_exit_request:
             _gallery_meta = {
                 "charts": 0,
                 "coverageStatus": "partial_research_sample",
