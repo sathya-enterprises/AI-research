@@ -145,15 +145,23 @@ def stat_strip(tables: list[Table], entity: str, preferred: set[str], *, qtd=Non
 
 
 # ── key takeaways / what to watch ────────────────────────────────────────────
+_FIGURE_MENTION_RE = re.compile(r"\b(?:Figure|Fig\.)\s*\d+", re.I)
+
+
 def takeaways(summary: str, max_sentences: int = 3) -> str:
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(summary or "")) if len(s.strip()) > 30]
+    # A takeaway box stands apart from the figures: a sentence that points at "Figure N" (whose
+    # number may belong to another section) is left out.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(summary or ""))
+                 if len(s.strip()) > 30 and not _FIGURE_MENTION_RE.search(s)]
     if len(sentences) < 2:
         return ""
     return "> [!TAKEAWAYS] " + " ".join(sentences[:max_sentences])
 
 
 _WATCH_HEADING_RE = re.compile(r"(?i)\b(?:risks?|outlook|watch|catalysts?|scenarios?|what could change)\b")
-_WATCH_SENTENCE_RE = re.compile(r"(?i)\b(?:risk|could|may|might|would|watch|monitor|if |unless|downside|upside|catalyst|key to|depends?)\b")
+_WATCH_SENTENCE_RE = re.compile(
+    r"(?i)\b(?:risks?|could|may|might|would|watch|monitor|if |unless|downside|upside|catalysts?|key to|depends?|"
+    r"headwinds?|pressures?|uncertain\w*|threats?|vulnerab\w*|caution\w*|slowdown|weigh\w*)\b")
 
 
 def move_watch_items(body: str, max_items: int = 3) -> tuple[str, str]:
@@ -191,7 +199,7 @@ def move_watch_items(body: str, max_items: int = 3) -> tuple[str, str]:
         parts[i + 1] = ("\n\n" + "\n\n".join(paragraphs_out) + "\n\n") if paragraphs_out else "\n\n"
         if not paragraphs_out:
             parts[i] = ""
-    if len(moved) < 2:
+    if not moved:
         return body, ""
     new_body = re.sub(r"\n{3,}", "\n\n", "".join(parts)).strip()
     return new_body, "> [!WATCH] " + " ".join(moved)
@@ -241,7 +249,27 @@ class Column:
     values: dict[str, str] = field(default_factory=dict)
 
 
-def entity_columns(tables: list[Table], entities: list[str], *, qtd=None) -> list[Column]:
+def entities_mentioned(text: str) -> list[str]:
+    """Known sectors a section's text discusses, in order of first mention."""
+    from utils.chart_titles import _SECTOR_ALIAS_RE
+
+    found = []
+    for canon, pattern in _SECTOR_ALIAS_RE.items():
+        match = pattern.search(CITE_RE.sub(" ", text or ""))
+        if match:
+            found.append((match.start(), canon))
+    return [name for _pos, name in sorted(found)]
+
+
+def insert_after_first_paragraph(body: str, block: str) -> str:
+    """Put a block after the section's opening paragraph (or at the top when it opens with a heading)."""
+    parts = re.split(r"\n\s*\n", body, maxsplit=1)
+    if len(parts) == 2 and not parts[0].lstrip().startswith(("#", "|", ">", "[CHART")):
+        return f"{parts[0]}\n\n{block}\n\n{parts[1]}"
+    return f"{block}\n\n{body}"
+
+
+def entity_columns(tables: list[Table], entities: list[str], *, qtd=None, preferred: set[str] | None = None) -> list[Column]:
     wanted = set(entities)
     columns = []
     for table in tables:
@@ -259,7 +287,8 @@ def entity_columns(tables: list[Table], entities: list[str], *, qtd=None) -> lis
             values = {e: _value_with_unit(table, col, r[col]) for e, r in mapped.items() if _numeric(r[col])}
             if len(values) >= 3:
                 columns.append(Column(table, col, label, values))
-    columns.sort(key=lambda c: (-len(c.values), c.table.kind != "calculated", -c.table.reliability))
+    columns.sort(key=lambda c: (c.table.passage_id not in (preferred or set()), -len(c.values),
+                                c.table.kind != "calculated", -c.table.reliability))
     chosen, seen = [], set()
 
     def number(cell: str) -> float | None:

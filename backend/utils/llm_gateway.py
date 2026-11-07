@@ -94,6 +94,11 @@ class LLMGateway:
         self.capture = capture
         self.stats = GatewayStats()
         self._key_cursor = 0  # rotates keys across calls so one key's rate limit is not hit by a long run
+        # model -> {key: time of its last 429}; two keys throttled on one model within a minute means the
+        # MODEL is rate-limited (a per-project quota), so the model is cooled instead of being retried first
+        # by every following call.
+        self._model_429: dict[str, dict[str, float]] = {}
+        self.stats_rate_limited_models = 0
 
     # ── public ────────────────────────────────────────────────────────────────
     async def generate(self, *, purpose: str, prompt: str, system: str = "", section_id: str = "",
@@ -200,6 +205,14 @@ class LLMGateway:
             if status == 429:
                 rt.mark_rate_limited(key, rt.GEMINI_KEY_COOLDOWN_MS)
                 rt.mark_rate_limited(f"report:gemini:{key}:{model}", rt.GEMINI_KEY_COOLDOWN_MS)
+                now = time.monotonic()
+                recent = {k: t for k, t in self._model_429.get(model, {}).items() if now - t < 60}
+                recent[key] = now
+                self._model_429[model] = recent
+                if len(recent) >= 2:
+                    rt.mark_rate_limited(f"gemini:model:{model}", _env_int("GG_V2_MODEL_429_COOLDOWN_MS", 60_000))
+                    self.stats_rate_limited_models += 1
+                    log.info("V2 gateway: %s rate-limited on %d keys within 60s; model cooled", model, len(recent))
                 last_error = f"http_429 model={model}"
                 continue
             if status == 503:
