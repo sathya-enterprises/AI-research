@@ -72,3 +72,10 @@ def test_disabled_by_env(monkeypatch):
     monkeypatch.setenv("ENABLE_PLAYWRIGHT_FETCH", "0")
     stats = asyncio.run(BF.apply_browser_fallback(_rows(), report_tier="detailed", max_chars=1000, matches_source=lambda t, r: True))
     assert stats["attempted"] == 0
+
+
+def test_report_fallback_has_its_own_switch(monkeypatch):
+    monkeypatch.setenv("GG_BROWSER_FALLBACK", "0")
+    assert BF.enabled() is False
+    monkeypatch.setenv("GG_BROWSER_FALLBACK", "1")
+    assert BF.enabled() is True

@@ -9,7 +9,8 @@ path, so boilerplate removal and date/title handling stay identical.
 
 Every rendered page still has to pass the caller's relevance check before it
 becomes evidence. Budget and toggles:
-  ENABLE_PLAYWRIGHT_FETCH=0           disable entirely
+  ENABLE_PLAYWRIGHT_FETCH=0           disable all Playwright fetching
+  GG_BROWSER_FALLBACK=0               disable only this report fallback
   GG_BROWSER_FALLBACK_LIMIT=6,12       pages per run (detailed,in_depth)
   GG_BROWSER_FALLBACK_TIMEOUT=15       seconds per page
 """
@@ -29,7 +30,9 @@ _DEFAULT_LIMITS = {"detailed": 6, "in_depth": 12}
 
 
 def enabled() -> bool:
-    return os.getenv("ENABLE_PLAYWRIGHT_FETCH", "1").strip().lower() not in {"0", "false", "no", "off"}
+    off = {"0", "false", "no", "off"}
+    return (os.getenv("ENABLE_PLAYWRIGHT_FETCH", "1").strip().lower() not in off
+            and os.getenv("GG_BROWSER_FALLBACK", "1").strip().lower() not in off)
 
 
 def page_limit(report_tier: str) -> int:

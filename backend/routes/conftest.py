@@ -9,7 +9,7 @@ import routes.report as report
 @pytest.fixture(autouse=True)
 def no_real_browser_fetch(monkeypatch):
     """Endpoint tests mock page fetches; never launch a real browser from them."""
-    monkeypatch.setenv("ENABLE_PLAYWRIGHT_FETCH", "0")
+    monkeypatch.setenv("GG_BROWSER_FALLBACK", "0")
 
 
 @pytest.fixture(autouse=True)
