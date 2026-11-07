@@ -15,6 +15,10 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from types import SimpleNamespace
+
+from utils.chart_titles import (clean_label, data_title, header_is_data, homogeneous_rows, label_entities,
+                                non_comparable_metric, period_of)
 
 _NUM_CELL_RE = re.compile(r"^\(?([+\-−–]?)\s*(?:₹|\$|rs\.?\s*)?([\d,]*\.?\d+)\s*(%|x|pts|bps|cr|crore|bn|mn)?\)?$", re.I)
 _PERIOD_RE = re.compile(
@@ -37,6 +41,7 @@ class PlannedChart:
     status: str = "planned"                       # planned | referenced | dropped
     drop_reason: str = ""
     match_text: str = ""
+    heading: str = ""                             # page heading above the table (period context only)
 
     def brief(self) -> str:
         """Compact data listing for the section writer."""
@@ -82,6 +87,11 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
     rows = [r for r in rows if len(r) == len(header) and r[0]]
     if len(rows) < 2 or len(header) < 2:
         return []
+    if any(header_is_data(h) for h in header[1:]):
+        return []  # the first row is data, not a header: metric names are unknown
+    rows, _mixed_note = homogeneous_rows(rows)
+    if len(rows) < 2:
+        return []
     numeric_cols, col_units = [], {}
     for col in range(1, len(header)):
         parsed = [_parse_number(r[col]) for r in rows]
@@ -108,19 +118,24 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
     if len(period_cols) >= 2:
         unit = unit_of(period_cols) or ""
     else:
-        single = next((c for c in numeric_cols if unit_of([c]) is not None), None)
+        # Price / index-level columns of different instruments are not comparable: plot the first comparable column.
+        single = next((c for c in numeric_cols if unit_of([c]) is not None and not non_comparable_metric(header[c])), None)
         if single is None:
             return []
         numeric_cols = [single] + [c for c in numeric_cols if c != single]
         unit = unit_of([single]) or ""
-    # FAQ-style or very long headings make poor chart titles.
-    if len(heading) >= 6 and not heading.rstrip().endswith("?") and len(heading) <= 90:
-        title = heading
+    # The title comes from the chart's own data (metric, entities, period), never
+    # from the page heading, which can name a different subject than the table.
+    labels = [r[0] for r in rows]
+    if len(period_cols) >= 2:
+        metric_header = header[0] if header[0] and not re.fullmatch(
+            r"(?i)sectors?|index|indices|name|company|stock|item|particulars|industry", header[0]) else ""
+        title = data_title(metric=metric_header or (f"Values ({unit})" if unit else "Values"),
+                           labels=labels[:MAX_LINE_SERIES], periods=[header[c] for c in period_cols])
     else:
-        first = period_cols[0] if len(period_cols) >= 2 else numeric_cols[0]
-        title = f"{'Values' if len(period_cols) >= 2 else header[first]} by {header[0] or 'item'}"
-        if passage.publisher:
-            title += f" ({passage.publisher})"
+        metric = header[numeric_cols[0]]
+        title = data_title(metric=metric, labels=labels[:MAX_BAR_POINTS],
+                           period=period_of([metric], heading, labels), unit=unit)
     evidence_rows = {r[0]: " | ".join(r) for r in rows}
 
     def point(label: str, col_label: str, value: float, raw: str, row_label: str) -> dict:
@@ -158,17 +173,52 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
         for r in rows[:MAX_BAR_POINTS]:
             parsed = _parse_number(r[col])
             if parsed:
-                data.append(point(r[0], r[0], parsed[0], r[col], r[0]))
-                points.append((header[col], r[0], parsed[0]))
-        spec = {"type": "bar", "title": f"{title} — {header[col]}" if header[col] and header[col] not in title else title, "xLabel": header[0] or "Item",
+                data.append(point(clean_label(r[0]), clean_label(r[0]), parsed[0], r[col], r[0]))
+                points.append((header[col], clean_label(r[0]), parsed[0]))
+        spec = {"type": "bar", "title": title, "xLabel": header[0] or "Item",
                 "yLabel": header[col] or unit or "Value", "unit": unit, "series": [{"name": header[col] or "Value", "data": data}]}
     spec.update({"source": [passage.source_id], "sourceIds": [passage.source_id], "evidenceBasis":
                  "calculated" if passage.kind == "calculated" else "reported",
                  "basisNote": f"Values copied from evidence passage {passage.passage_id}."})
-    chart = PlannedChart(chart_id=f"c{chart_index}", spec=spec, passage_ids=[passage.passage_id],
+    passage_ids = list(getattr(passage, "merged_ids", None) or [passage.passage_id])
+    if len(passage_ids) > 1:
+        spec["basisNote"] = f"Values copied from evidence passages {', '.join(passage_ids)}."
+    chart = PlannedChart(chart_id=f"c{chart_index}", spec=spec, passage_ids=passage_ids,
                          source_ids=[passage.source_id], points=points,
-                         match_text=" ".join([title, header[0], *[r[0] for r in rows[:20]], *header[1:]]))
+                         # Placement uses the data only: the page heading can be about something else.
+                         match_text=" ".join([title, header[0], *[r[0] for r in rows[:20]], *header[1:]]),
+                         heading=heading)
     return [chart]
+
+
+def _table_header(passage) -> str:
+    lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
+    return lines[0].strip() if lines else ""
+
+
+def merge_continuations(passages: list) -> list:
+    """Join consecutive table passages of one source that share a header row.
+
+    Long tables are split across passages ("TABLE 5 (continued)"); charting each
+    piece gives several near-identical charts with the same title. The merged
+    passage keeps every piece's id as evidence.
+    """
+    out: list = []
+    for passage in passages:
+        header = _table_header(passage)
+        prev = out[-1] if out else None
+        if (prev is not None and header and passage.kind == prev.kind and passage.source_id == prev.source_id
+                and _table_header(prev) == header):
+            rows = [ln for ln in str(passage.text).splitlines() if " | " in ln][1:]
+            merged = SimpleNamespace(
+                passage_id=prev.passage_id, source_id=prev.source_id, kind=prev.kind,
+                text=str(prev.text).rstrip() + "\n" + "\n".join(rows), reliability=prev.reliability,
+                publisher=getattr(prev, "publisher", ""),
+                merged_ids=list(getattr(prev, "merged_ids", None) or [prev.passage_id]) + [passage.passage_id])
+            out[-1] = merged
+            continue
+        out.append(passage)
+    return out
 
 
 def verify_chart(chart: PlannedChart, passage_text: str) -> str:
@@ -193,7 +243,10 @@ def verify_chart(chart: PlannedChart, passage_text: str) -> str:
 def _outside_window(chart: PlannedChart, min_year: int | None) -> str:
     if not min_year:
         return ""
-    labels = " ".join([str(chart.spec.get("title") or ""), *[str(a) for a, _, _ in chart.points], *[str(b) for _, b, _ in chart.points]])
+    # The page heading ("Sectoral Indices performance in April, 2024") dates a table whose
+    # data title no longer carries the year.
+    labels = " ".join([str(chart.spec.get("title") or ""), chart.heading, *[str(a) for a, _, _ in chart.points],
+                       *[str(b) for _, b, _ in chart.points]])
     years = {int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", labels)}
     years |= {2000 + int(y) for y in re.findall(r"\bFY\s*'?(\d{2})\b", labels, flags=re.I)}
     if years and max(years) < min_year:
@@ -208,10 +261,8 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
     Dropped before writing: unverifiable data, periods entirely before the
     requested window, and data from sources below ``min_reliability``.
     """
-    charts, dropped, seen = [], [], set()
-    for passage in store.passages:
-        if passage.kind not in {"table", "calculated"}:
-            continue
+    charts, dropped, seen, titles = [], [], set(), set()
+    for passage in merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"}]):
         for chart in charts_from_passage(passage, len(charts) + len(dropped) + 1):
             signature = tuple(sorted((a, b, round(v, 4)) for a, b, v in chart.points))
             if signature in seen:
@@ -220,11 +271,14 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
             reason = verify_chart(chart, passage.text) or _outside_window(chart, min_year)
             if not reason and passage.kind != "calculated" and passage.reliability < min_reliability:
                 reason = f"source reliability {passage.reliability:.2f} below {min_reliability:.2f}"
+            if not reason and str(chart.spec.get("title") or "").casefold() in titles:
+                reason = "same title as an earlier chart (duplicate view)"
             if reason:
                 chart.status, chart.drop_reason = "dropped", reason
                 dropped.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": passage.passage_id, "reason": reason})
                 continue
             charts.append(chart)
+            titles.add(str(chart.spec.get("title") or "").casefold())
             if len(charts) >= max_charts:
                 return charts, dropped
     return charts, dropped
@@ -240,7 +294,12 @@ def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: in
     ranked = []
     for chart in charts:
         best = None
+        plotted = label_entities([a for a, _, _ in chart.points] + [b for _, b, _ in chart.points])
         for section in sections:
+            # A sector deep-dive only takes charts that plot that sector.
+            if (getattr(section, "role", "") == "deep_dive" and getattr(section, "entity", "")
+                    and section.entity not in plotted):
+                continue
             score = 3.0 * len(set(chart.passage_ids) & set(section.passage_ids))
             score += len(_terms(chart.match_text) & _terms(" ".join([section.title, section.goal, *section.queries])))
             if best is None or score > best[0]:

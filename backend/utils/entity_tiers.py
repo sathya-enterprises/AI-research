@@ -35,6 +35,10 @@ _GENERIC_LABELS = {
     "eps", "debt", "assets", "liabilities", "equity", "cash", "margin", "margins", "capex", "receivables",
     "payables", "dividend", "book value", "income", "expenses", "interest", "borrowings", "reserves",
     "cost of inputs", "employees", "full-time employees", "headcount", "raw materials", "power and fuel",
+    # valuation metrics are dimensions, not entities
+    "p/e ratio", "pe ratio", "p/e", "pe", "p/b ratio", "pb ratio", "p/b", "pb", "dividend yield", "earnings yield",
+    "roe", "roce", "market cap", "market capitalisation", "market capitalization", "ev/ebitda", "price to earnings",
+    "price to book", "beta value", "free float",
 }
 _PERIOD_LABEL_RE = re.compile(
     r"^(?:\d+\s*(?:years?|yrs?|y|months?|mths?|m|weeks?|w|days?|d)|ytd|mtd|qtd|since inception|inception"
@@ -189,3 +193,16 @@ def entity_tiers(store, *, tier: str = "in_depth") -> dict[str, list[EntityEvide
 def tier_summary(tiers: dict[str, list[EntityEvidence]]) -> dict:
     return {"counts": {k: len(v) for k, v in tiers.items()},
             "entities": {k: [e.to_dict() for e in v] for k, v in tiers.items()}}
+
+
+def tiers_from_summary(store, summary: dict) -> dict[str, list[EntityEvidence]]:
+    """Rebuild the tiers a run recorded (tier_summary output) against a store, for faithful offline replay."""
+    found = {e.name: e for e in discover_entities(store, max_entities=200)}
+    tiers: dict[str, list[EntityEvidence]] = {"deep_dive": [], "compact": [], "coverage_note": []}
+    for tier, rows in (summary.get("entities") or {}).items():
+        for row in rows or []:
+            name = str(row.get("entity") or "")
+            entity = found.get(name) or EntityEvidence(name=name)
+            entity.tier = tier
+            tiers.setdefault(tier, []).append(entity)
+    return tiers
