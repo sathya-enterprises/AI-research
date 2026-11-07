@@ -401,6 +401,9 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
                                          manifest=[m for m in manifest if isinstance(m, dict)],
                                          today=str(capture.get("startedAt") or "")[:10], gateway=gateway))
     out = json.loads(result["raw"])
+    # The PDF route resolves [S#] citations against the source manifest.
+    out.setdefault("sources", [m for m in manifest if isinstance(m, dict)])
+    out.setdefault("reportTier", str(capture.get("reportTier") or "detailed"))
     (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
     report = out.get("report") or ""
     headings = [(len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(report)]
