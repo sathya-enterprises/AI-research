@@ -59,12 +59,15 @@ def test_pdf_svg_labels_dense_axis_without_dropping_points():
 
 
 def test_tier_limits_env_override(monkeypatch):
-    defaults = {"brief": 1, "detailed": 2, "in_depth": 3}
+    defaults = {"detailed": 2, "in_depth": 3}
     monkeypatch.delenv("GG_TEST_TIER", raising=False)
     assert _tier_limits("GG_TEST_TIER", defaults) == defaults
+    monkeypatch.setenv("GG_TEST_TIER", "50, 500")
+    assert _tier_limits("GG_TEST_TIER", defaults) == {"detailed": 50, "in_depth": 500}
+    # Legacy brief,detailed,in_depth values: the removed brief value is ignored.
     monkeypatch.setenv("GG_TEST_TIER", "5, 50, 500")
-    assert _tier_limits("GG_TEST_TIER", defaults) == {"brief": 5, "detailed": 50, "in_depth": 500}
-    for bad in ("5,50", "a,b,c"):
+    assert _tier_limits("GG_TEST_TIER", defaults) == {"detailed": 50, "in_depth": 500}
+    for bad in ("5", "a,b", "1,2,3,4"):
         monkeypatch.setenv("GG_TEST_TIER", bad)
         assert _tier_limits("GG_TEST_TIER", defaults) == defaults
 

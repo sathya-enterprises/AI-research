@@ -21,10 +21,6 @@ def test_sector_rotation_question_plans_sector_matrix_first():
     assert {n.key for n in needs} >= {"fpi_sector_flows", "fpi_net_flow_series"}
 
 
-def test_brief_tier_bounds_the_plan():
-    assert len(plan_chart_needs("sector rotation and FPI flows", "brief")) <= 3
-
-
 def test_unknown_topic_gets_generic_plan_not_domain_charts():
     needs = plan_chart_needs("Summarise the electric vehicle market", "detailed")
     assert {n.key for n in needs} == {"peer_comparison", "headline_trend"}

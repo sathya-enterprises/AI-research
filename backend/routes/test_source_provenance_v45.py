@@ -185,7 +185,7 @@ def test_html_appendix_keeps_missing_citation_visible_when_extra_attribution_is_
         "Installed capacity was 500 GW [S9].\n\nSource: Energy Ministry",
         "Test report", "test", "", [], [], [],
         sources=[{"title": "Official target", "url": "https://example.gov/target"}],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert "Source record missing" in html
     assert "S9" in html
@@ -244,7 +244,7 @@ def test_html_appendix_keeps_source_link_but_omits_verbose_fetch_diagnostics():
             "claimEvidenceMatched": False,
             "unmatchedNumericClaims": ["capacity_gw:500"],
         }],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert "publisher.example/market" in html
     assert "HTTP 403" not in html

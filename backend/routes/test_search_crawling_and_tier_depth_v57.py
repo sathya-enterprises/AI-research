@@ -30,12 +30,11 @@ def test_local_investor_fallback_plan_scales_by_selected_tier():
         intent_label="investor discovery",
     )
     counts = {}
-    for tier in ("brief", "detailed", "in_depth"):
+    for tier in ("detailed", "in_depth"):
         plan = report._fallback_report_plan("give as a report", intent=intent, report_tier=tier)
         counts[tier] = len(plan["sections"])
         assert all(section["heading"] for section in plan["sections"])
         assert plan["tier"] == tier
-    assert counts["brief"] == 2
     assert counts["detailed"] == 5
     assert counts["in_depth"] == 7
 

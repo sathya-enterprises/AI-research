@@ -98,7 +98,7 @@ def test_short_but_legitimate_capacity_series_is_not_treated_as_density_failure(
         ]}],
     }
     for chart in (milestones, additions):
-        assessment = chart_density_assessment(chart, "brief")
+        assessment = chart_density_assessment(chart, "detailed")
         assert assessment["applicable"] is True
         assert assessment["minimum"] is None
         assert assessment["within_band"] is None

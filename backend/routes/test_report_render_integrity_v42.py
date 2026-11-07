@@ -44,7 +44,7 @@ def test_html_report_renders_chart_from_stranded_title_and_no_raw_markdown():
         charts=[chart],
         images=[],
         sources=[],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert "![" not in rendered
     assert "[CHART_1]" not in rendered
@@ -64,7 +64,7 @@ def test_html_report_appends_valid_unreferenced_chart_after_section_edits():
         charts=[chart],
         images=[],
         sources=[],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert 'data-chart-recovered="true"' in rendered
     assert "Market Size Projection (2025–2031)" in rendered
@@ -87,7 +87,7 @@ def test_html_report_does_not_append_empty_unreferenced_chart():
         charts=[empty],
         images=[],
         sources=[],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert "Empty Market Split" not in rendered
     assert 'data-chart-recovered="true"' not in rendered

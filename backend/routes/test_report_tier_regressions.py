@@ -1,16 +1,10 @@
-from routes.report import _explicit_report_tier_from_question, _expand_report_to_tier
+from routes.report import _expand_report_to_tier
 from utils.intent import _extract_research_topic
-
-
-def test_explicit_report_tier_from_question():
-    assert _explicit_report_tier_from_question("Create a Brief research report on the GLP-1 market") == "brief"
-    assert _explicit_report_tier_from_question("Create an In-Detail research report on the GLP-1 market") == "detailed"
-    assert _explicit_report_tier_from_question("Create an in-depth institutional report on the GLP-1 market") == "in_depth"
 
 
 def test_depth_words_do_not_become_research_topic():
     topic = _extract_research_topic("Create a Brief research report on the global GLP-1 obesity and diabetes drug market.")
-    assert "brief" not in topic.lower()
+    assert "detailed" not in topic.lower()
     assert "report" not in topic.lower()
     assert "glp-1" in topic.lower()
 
@@ -18,38 +12,9 @@ def test_depth_words_do_not_become_research_topic():
 def test_automatic_generation_does_not_expand_to_a_length_quota_for_any_tier():
     original = "## Market view\n\nA concise evidence-backed draft."
     import asyncio
-    for tier in ("brief", "detailed", "in_depth"):
+    for tier in ("detailed", "in_depth"):
         result = asyncio.run(_expand_report_to_tier(original, "GLP-1 market", tier, None, "evidence"))
         assert " ".join(result.split()) == " ".join(original.split())
-
-
-def test_brief_page_budget_can_request_one_evidence_backed_completion_pass(monkeypatch):
-    import asyncio
-    from routes import report as report_mod
-
-    original = "## Market view\n\nA concise evidence-backed brief about the current market."
-    calls = []
-
-    async def continuation(prompt, tier):
-        calls.append((prompt, tier))
-        detail = " ".join(
-            f"Evidence lens {i} explains a distinct driver, transmission channel, data limitation, source-grounded implication, and decision consequence for this market."
-            for i in range(1, 16)
-        )
-        return f"[[SECTION: Market view]]\n### Additional evidence and sensitivities\n{detail}\n[[END SECTION]]", "test-model"
-
-    monkeypatch.setattr(report_mod, "_call_gemini_plain_continuation", continuation)
-    result = asyncio.run(report_mod._expand_report_to_tier(
-        original, "Analyze this market", "brief", None,
-        "Verified evidence: annual market data and a regulatory outlook.",
-        target_override=len(original) + 900,
-        max_passes_override=1,
-    ))
-    assert calls and calls[0][1] == "brief"
-    assert "Additional evidence and sensitivities" in result
-    assert "[[SECTION:" not in result
-    assert len(result) > len(original) + 500
-    assert len(result) <= len(original) + 900  # continuation must respect the remaining character budget
 
 
 def test_page_budget_measures_without_expanding_under_a_former_page_floor(monkeypatch):
@@ -65,7 +30,7 @@ def test_page_budget_measures_without_expanding_under_a_former_page_floor(monkey
     monkeypatch.setattr(report_mod, "_expand_report_to_tier", expand)
     original = "## Market View\n\n" + ("Source-grounded analysis of distinct market drivers. " * 50)
     body, pages = asyncio.run(report_mod._ensure_report_page_budget(
-        report_text=original, question="Analyze the market", report_tier="brief",
+        report_text=original, question="Analyze the market", report_tier="detailed",
         report_plan={"sections": [{"heading": "Market View"}]}, evidence_text="Verified sources",
         title="Test", summary="Summary", key_stats=[], charts=[], sources=[], presentation={},
     ))

@@ -26,7 +26,7 @@ def test_successful_action_keeps_report_id_and_advances_revision(monkeypatch):
             "report": "# Outlook\n\nOriginal supported text [S1].",
             "reportId": "report-original",
             "revision": 3,
-            "reportTier": "brief",
+            "reportTier": "detailed",
         },
     ))
 
@@ -135,7 +135,7 @@ def test_action_audit_uses_private_okf_excerpt_without_returning_full_text():
         candidate_report=report_text.replace("Energy note", "Energy evidence note"),
         title="Energy note",
         original_charts=[], candidate_charts=[], original_images=[], candidate_images=[],
-        original_sources=[source], candidate_sources=[source], report_tier="brief",
+        original_sources=[source], candidate_sources=[source], report_tier="detailed",
     ))
 
     assert new_blockers == []

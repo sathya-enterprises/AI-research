@@ -31,7 +31,7 @@ def test_requested_human_chart_names_normalize_to_supported_ids():
 
 
 def test_chart_density_contract_has_no_observation_quota():
-    for tier in ("brief", "detailed", "in_depth"):
+    for tier in ("detailed", "in_depth"):
         contract = chart_density_contract(tier)
         assert "there is no minimum point count or visual quota" in contract
         assert "Do not create repeated labels, fake dates, padded bins, or synthetic records." in contract
@@ -52,11 +52,11 @@ def test_density_assessment_accepts_a_supported_two_period_comparison():
     assert assessment["maximum"] is None
 
 def test_density_assessment_counts_observations_and_keeps_compact_types_exempt():
-    brief_chart = {"type": "line", "series": [{"name": "Value", "data": [
+    compact_chart = {"type": "line", "series": [{"name": "Value", "data": [
         {"label": str(2020 + i), "value": i + 1} for i in range(6)
     ]}]}
-    assert count_chart_points(brief_chart) == 6
-    assert chart_density_assessment(brief_chart, "brief")["within_band"] is None
+    assert count_chart_points(compact_chart) == 6
+    assert chart_density_assessment(compact_chart, "detailed")["within_band"] is None
     deep_chart = {"type": "line", "series": [{"name": "Value", "data": [
         {"label": str(2020 + i), "value": i + 1} for i in range(72)
     ]}]}

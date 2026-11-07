@@ -7,7 +7,7 @@ from utils import research_capture as rc
 def test_capture_disabled_by_default(monkeypatch, tmp_path):
     monkeypatch.delenv("GG_RESEARCH_CAPTURE", raising=False)
     monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
-    token = rc.begin_research_capture("public test question", "brief")
+    token = rc.begin_research_capture("public test question", "detailed")
     assert token is None
     rc.record_research_stage("should_not_write", {"x": 1})
     assert list(tmp_path.glob("*.json")) == []
@@ -17,7 +17,7 @@ def test_capture_disabled_by_default(monkeypatch, tmp_path):
 def test_capture_records_raw_exa_and_normalized_results_without_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("GG_RESEARCH_CAPTURE", "1")
     monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
-    token = rc.begin_research_capture("renewable energy data", "brief")
+    token = rc.begin_research_capture("renewable energy data", "detailed")
     rc.record_exa_raw_response(
         "renewable energy data",
         {"query": "renewable energy data", "type": "auto", "api_key": "never-save-this", "key_suffix": "1234"},
@@ -57,7 +57,7 @@ def test_capture_records_raw_exa_and_normalized_results_without_keys(monkeypatch
 def test_capture_omits_uploaded_document_text(monkeypatch, tmp_path):
     monkeypatch.setenv("GG_RESEARCH_CAPTURE", "1")
     monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
-    token = rc.begin_research_capture("summarize attached doc", "brief")
+    token = rc.begin_research_capture("summarize attached doc", "detailed")
     rc.record_research_stage("sources", {"sources": [{
         "title": "Private uploaded report", "url": "internal://uploaded/file1",
         "source_type": "Uploaded document", "pageContent": "This private content must not be captured.",
@@ -100,7 +100,7 @@ def test_exa_multi_search_records_each_query_separately(monkeypatch, tmp_path):
 
     monkeypatch.setenv("GG_RESEARCH_CAPTURE", "1")
     monkeypatch.setenv("GG_RESEARCH_CAPTURE_DIR", str(tmp_path))
-    token = rc.begin_research_capture("two-angle research", "brief")
+    token = rc.begin_research_capture("two-angle research", "detailed")
 
     async def fake_search(query, max_results=20, min_results=10, images_out=None,
                           historical_intent=False, max_keys_per_query=None, topic=None, region=None,

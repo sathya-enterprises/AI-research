@@ -105,7 +105,6 @@ def test_explicit_100_page_target_is_resolved_without_mistaking_years_for_pages(
 
 
 def test_deep_search_fanout_is_bounded_per_angle(monkeypatch):
-    assert _report_search_results_per_query("brief") == 8
     assert _report_search_results_per_query("detailed") == 12
     assert _report_search_results_per_query("in_depth") == 18
     assert _report_search_min_results(18) <= 6

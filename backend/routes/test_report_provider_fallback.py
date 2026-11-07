@@ -26,7 +26,7 @@ async def test_report_writer_tries_gemini_then_groq_then_openrouter(monkeypatch)
     monkeypatch.setattr(report_mod, "_call_groq_report_fallback", no_groq)
     monkeypatch.setattr(report_mod, "_call_openrouter_report_fallback", openrouter)
 
-    raw, model = await report_mod.call_report_writer("Research a current market question", "brief")
+    raw, model = await report_mod.call_report_writer("Research a current market question", "detailed")
 
     assert calls == ["gemini", "groq", "openrouter"]
     assert "evidence-backed report" in raw
@@ -49,7 +49,7 @@ async def test_all_provider_failures_use_supplied_evidence_fallback(monkeypatch)
 
     raw, model = await report_mod.call_report_writer(
         "Research India's renewable capacity outlook",
-        "brief",
+        "detailed",
         report_plan={"sections": [{"heading": "Capacity outlook", "purpose": "Summarize source evidence."}]},
         fallback_sources=[source],
     )

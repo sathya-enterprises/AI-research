@@ -30,7 +30,7 @@ def _run_wave(monkeypatch, plan, hedge="0.2", budget=5.0):
     monkeypatch.setattr(R, "_gemini_one_attempt", _fake_attempts(plan, calls))
     monkeypatch.setenv("GEMINI_REPORT_HEDGE_DELAY_SECONDS", hedge)
     started = time.perf_counter()
-    result = asyncio.run(R._run_gemini_wave("p", "brief", "m", list(plan), started, started + budget, launched))
+    result = asyncio.run(R._run_gemini_wave("p", "detailed", "m", list(plan), started, started + budget, launched))
     return result, calls, launched, time.perf_counter() - started
 
 
@@ -177,7 +177,7 @@ def _patch_audit_http(monkeypatch, behaviour):
 
 def _audit():
     return asyncio.run(R._gemini_independent_report_audit(
-        title="t", question="q", report_text="## A\nText [S1].", report_tier="brief",
+        title="t", question="q", report_text="## A\nText [S1].", report_tier="detailed",
         charts=[], images=[], sources=[{"id": "S1", "title": "x", "url": "https://e.org"}],
     ))
 

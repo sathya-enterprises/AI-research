@@ -25,7 +25,7 @@ def test_only_validated_gemini_models_are_enabled():
     ]
 
 
-@pytest.mark.parametrize("tier", ["brief", "detailed", "in_depth"])
+@pytest.mark.parametrize("tier", ["detailed", "in_depth"])
 def test_each_report_tier_starts_and_can_be_polled(monkeypatch, tier):
     async def fake_generate(request):
         await asyncio.sleep(0.001)

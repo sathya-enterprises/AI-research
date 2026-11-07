@@ -14,7 +14,7 @@ Some analytical text.
 |---|---|
 | 1 | 2 |
 """
-    doc = build_report_document(report, "T", "Q", "", tier="brief", charts=[{}, {}], images=[], sources=[])
+    doc = build_report_document(report, "T", "Q", "", tier="detailed", charts=[{}, {}], images=[], sources=[])
     assert [s.title for s in doc.sections] == ["Unusual Section"]
     assert doc.sections[0].chart_count == 2
     assert doc.sections[0].table_count == 1
@@ -24,7 +24,7 @@ def test_auto_layout_is_evidence_driven():
     doc = build_report_document("## One\n[CHART_1]\n[CHART_2]\nShort text.", "T", "Q", "", charts=[{}, {}])
     sec = doc.sections[0]
     plan = {"layout": "auto", "title": "One"}
-    assert _adaptive_layout_for_section(plan, {"body": sec.body, "title": sec.title}, sec, "brief") == "grid"
+    assert _adaptive_layout_for_section(plan, {"body": sec.body, "title": sec.title}, sec, "detailed") == "grid"
 
 
 def test_render_has_tier_and_adaptive_hooks():
@@ -45,6 +45,6 @@ def test_render_has_tier_and_adaptive_hooks():
 
 def test_fixed_section_template_is_not_injected():
     report = "## Transaction Lens\nRelevant analysis only."
-    html = build_html_report(report, "Test", "Q", "", [], [], [], sources=[], report_tier="brief")
+    html = build_html_report(report, "Test", "Q", "", [], [], [], sources=[], report_tier="detailed")
     assert "Transaction Lens" in html
     assert "Market Overview" not in html

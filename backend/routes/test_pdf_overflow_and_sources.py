@@ -54,18 +54,12 @@ Methodology stays.
 
 def test_html_source_appendix_starts_cleanly_in_print():
     text = Path(__file__).with_name("html_report.py").read_text(encoding="utf-8")
-    assert "body:not(.gg-tier--brief) .gg-sources {{ break-before: page; page-break-before: always; }}" in text
+    assert "body .gg-sources {{ break-before: page; page-break-before: always; }}" in text
 
 
 def test_html_sections_use_dynamic_pagination_not_forced_fresh_pages():
     text = Path(__file__).with_name("html_report.py").read_text(encoding="utf-8")
     assert ".gg-section + .gg-section {{ break-before: page;" not in text
-
-
-def test_brief_pdf_source_appendix_uses_a_compact_two_column_grid():
-    text = Path(__file__).with_name("pdf.py").read_text(encoding="utf-8")
-    assert "body.gg-tier--brief .gg-sources-grid { display: grid !important;" in text
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr)) !important;" in text
 
 
 def test_cover_does_not_repeat_the_title_band_in_long_reports():

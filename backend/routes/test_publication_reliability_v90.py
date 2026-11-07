@@ -265,7 +265,7 @@ def _run_job_with(monkeypatch, status_code: int, payload: dict) -> dict:
 
     monkeypatch.setattr(R, "generate_report", fake_generate)
     job_id = "job-" + str(status_code) + "-" + str(len(R._REPORT_JOBS))
-    R._REPORT_JOBS[job_id] = {"status": "queued", "createdAt": 0, "reportTier": "brief"}
+    R._REPORT_JOBS[job_id] = {"status": "queued", "createdAt": 0, "reportTier": "detailed"}
     asyncio.run(R._run_report_job_async(job_id, {}))
     return R._REPORT_JOBS[job_id]
 
@@ -296,7 +296,7 @@ def test_duplicate_report_start_reuses_the_running_job(monkeypatch):
     submitted = []
     monkeypatch.setattr(R, "_submit_report_job", lambda job_id, body: submitted.append(job_id))
     monkeypatch.setattr(R, "_REPORT_JOBS", {})
-    body = {"reportTier": "brief", "question": "q", "clientRequestId": "msg-1:brief:1:7"}
+    body = {"reportTier": "detailed", "question": "q", "clientRequestId": "msg-1:detailed:1:7"}
     first = json.loads(asyncio.run(R.start_report_job(_post(body))).body)
     second_response = asyncio.run(R.start_report_job(_post(body)))
     second = json.loads(second_response.body)
@@ -336,7 +336,7 @@ def test_replay_2026_10_20_brief_banking_capture_now_passes_source_evidence_with
         # gallery's context variables so they cannot leak into other tests.
         text, charts, _meta = R._append_evidence_chart_gallery(
             report_text=report, charts=[], question=cap["question"], enriched=enriched,
-            source_manifest=manifest, report_tier=cap.get("reportTier", "brief"),
+            source_manifest=manifest, report_tier=cap.get("reportTier", "detailed"),
         )
         manifest2 = R.ensure_cited_source_records(text, manifest)
         return charts, R._source_evidence_quality_audit(R._attach_audit_source_evidence(manifest2, enriched, text))

@@ -144,7 +144,7 @@ def test_html_source_appendix_shows_publisher_date_without_internal_fetch_diagno
             "page_fetch_status": "http_403", "page_fetch_http_status": 403,
             "evidence_origin": "search_extract_only", "evidence_available": True,
             "claim_evidence_matched": False, "unmatched_numeric_claims_count": 2,
-        }], report_tier="brief",
+        }], report_tier="detailed",
     )
     assert "Published: 2026-10-12" in html
     assert "publisher.example/banking-outlook" in html

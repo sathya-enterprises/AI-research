@@ -65,7 +65,7 @@ async def test_parallel_analyst_retries_with_spare_key_after_transient_connect_t
 
     result = await report_mod.run_parallel_evidence_analysis(
         question="Assess deposit growth outlook.",
-        report_tier="brief",
+        report_tier="detailed",
         source_text=SOURCE_TEXT,
         report_plan={"sections": []},
     )

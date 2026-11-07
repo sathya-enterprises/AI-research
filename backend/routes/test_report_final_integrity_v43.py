@@ -109,7 +109,7 @@ def test_table_rows_are_not_miscounted_as_chart_density_misses():
         "type": "table",
         "columns": ["Metric", "Value"],
         "rows": [["Credit growth", "11.4%"], ["Deposit growth", "12.1%"]],
-    }, "brief")
+    }, "detailed")
     assert result["applicable"] is False
     assert result["within_band"] is None
     assert result["minimum"] is None
@@ -182,7 +182,7 @@ def test_html_render_after_final_chart_gate_has_chart_and_readable_source_append
         sources=[{
             "id": "S1", "title": "India Banking Market Outlook", "url": "https://example.com/banking-outlook",
         }],
-        report_tier="brief",
+        report_tier="detailed",
     )
     assert "![" not in html
     assert "[CHART_1]" not in html

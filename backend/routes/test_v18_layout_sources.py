@@ -8,7 +8,7 @@ def test_sources_appendix_maps_canonical_ids_to_publisher_links():
         sources=[{
             "id": "S1", "title": "A Long Source Title", "publisher": "Publisher",
             "url": "https://example.com/report", "domain": "example.com", "source_type": "web"
-        }], report_tier="brief"
+        }], report_tier="detailed"
     )
     appendix = html.split('id="data-sources"', 1)[1]
     assert "A Long Source Title" in appendix
@@ -37,7 +37,7 @@ def test_sources_appendix_shows_total_count_under_heading():
             {"id": "S1", "title": "One", "url": "https://example.com/one"},
             {"id": "S2", "title": "Two", "url": "https://example.com/two"},
             {"id": "S3", "title": "Duplicate URL", "url": "https://example.com/one/"},
-        ], report_tier="brief"
+        ], report_tier="detailed"
     )
     appendix = html.split('id="data-sources"', 1)[1]
     assert "Total sources: 2" in appendix
@@ -60,7 +60,7 @@ def test_unattributed_web_images_are_not_rendered():
         "## Outlook\n\n[WEB_IMG_1]",
         title="Test", question="Test", summary="Summary", key_stats=[], charts=[],
         images=[{"url": "https://cdn.example.com/chart.png", "caption": "A rising orange growth line trend on a graph shows the market."}],
-        sources=[], report_tier="brief"
+        sources=[], report_tier="detailed"
     )
     assert "External web image — publisher not identified" not in html
     assert "cdn.example.com/chart.png" not in html

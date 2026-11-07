@@ -110,7 +110,7 @@ def test_plural_chart_action_commits_two_charts_without_rewriting_section(monkey
         "editInstruction": instruction,
         "title": "Market Outlook",
         "charts": [], "images": [], "sources": [], "presentation": None,
-        "reportTier": "brief",
+        "reportTier": "detailed",
     }))
     payload = json.loads(response.body.decode("utf-8"))
 

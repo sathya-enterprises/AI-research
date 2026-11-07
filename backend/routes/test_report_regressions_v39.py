@@ -143,7 +143,7 @@ def test_page_budget_continuation_scales_module_count_to_remaining_gap(monkeypat
     expanded = asyncio.run(report_mod._expand_report_to_tier(
         report_text=report,
         question="Test report depth behaviour",
-        report_tier="brief",
+        report_tier="detailed",
         report_plan={"sections": [{"heading": f"Section {i}"} for i in range(1, 4)]},
         evidence_text="Verified source evidence and distinct contextual findings.",
         target_override=len(report) + 9000,

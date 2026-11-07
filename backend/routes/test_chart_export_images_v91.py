@@ -145,7 +145,7 @@ def test_replay_1629_brief_capture_requested_chart_types_on_topic_and_exportable
     def run():
         text, charts, meta = R._append_evidence_chart_gallery(
             report_text=report, charts=[], question=cap["question"], enriched=enriched, source_manifest=manifest,
-            report_tier="brief", entities=garbage_entities)
+            report_tier="detailed", entities=garbage_entities)
         man = R.ensure_cited_source_records(text, manifest)
         public = R._merge_source_evidence_statuses(man, R._attach_audit_source_evidence(man, enriched, text))
         roundtrip = normalise_source_manifest(json.loads(json.dumps(public)))

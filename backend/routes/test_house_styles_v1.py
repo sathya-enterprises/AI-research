@@ -35,8 +35,6 @@ def test_writer_contract_fixes_monthly_sections_and_describes_feature():
                     "## Outlook & Strategic Takeaways", "Key Watch-Points for July 2026"):
         assert heading in monthly
     assert "India : Market Currents — June 2026" in monthly
-    brief = writer_style_contract("market_currents", "Monthly market review for June 2026", "brief", TODAY)
-    assert "## Markets, Sectors & Flows" in brief and "## Sectoral Performance" not in brief
     topical = writer_style_contract("market_currents", "HDFC Bank outlook", "detailed", TODAY)
     assert "Desk View" in topical and "MONTHLY REVIEW STRUCTURE" not in topical
     feature = writer_style_contract("feature_article", "FPI selling and the rupee", "detailed", TODAY)

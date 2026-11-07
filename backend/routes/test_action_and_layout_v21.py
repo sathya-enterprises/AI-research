@@ -47,7 +47,7 @@ def test_additive_table_rejects_new_numbers_and_unknown_sources():
     assert any('unsupported numeric' in p for p in problems)
 
 
-def test_brief_dashboard_uses_three_columns_for_three_metrics_and_source_markers():
+def test_dashboard_uses_three_columns_for_three_metrics_and_source_markers():
     html = _render_key_stats([
         {'label': 'Metric A', 'value': '$1.0T', 'sourceIds': ['S1']},
         {'label': 'Metric B', 'value': '34%', 'sourceIds': ['S1']},

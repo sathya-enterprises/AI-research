@@ -12,7 +12,6 @@ HTML_REPORT = ROOT / "backend" / "routes" / "html_report.py"
 
 
 def test_automatic_tier_expansion_is_evidence_driven_not_page_or_character_targeted():
-    assert _TIER_EXPANSION_PASSES["brief"] == 0
     assert _TIER_EXPANSION_PASSES["detailed"] > 0
     assert _TIER_EXPANSION_PASSES["in_depth"] > _TIER_EXPANSION_PASSES["detailed"]
     source = (Path(__file__).with_name("report.py")).read_text(encoding="utf-8")
@@ -67,7 +66,7 @@ def test_tier_expansion_uses_plain_continuation_contract(monkeypatch):
     out = asyncio.run(report_mod._expand_report_to_tier(
         report_text=base,
         question="Analyze the market",
-        report_tier="brief",
+        report_tier="detailed",
         report_plan={"sections": [{"heading": "Market Structure"}, {"heading": "Risks"}]},
         evidence_text="[S1] Market evidence",
     ))
@@ -139,18 +138,16 @@ def test_longer_tiers_use_distinct_research_breadth_without_expansion_quotas():
     from routes.report import _TIER_SEARCH_LIMITS, _TIER_EXPANSION_PASSES
     from utils.report_tiers import get_report_tier_spec
 
-    assert _TIER_SEARCH_LIMITS["brief"] < _TIER_SEARCH_LIMITS["detailed"] < _TIER_SEARCH_LIMITS["in_depth"]
-    assert get_report_tier_spec("brief").research_breadth == "focused"
+    assert _TIER_SEARCH_LIMITS["detailed"] < _TIER_SEARCH_LIMITS["in_depth"]
     assert get_report_tier_spec("detailed").research_breadth == "expanded"
     assert get_report_tier_spec("in_depth").research_breadth == "comprehensive"
-    assert _TIER_EXPANSION_PASSES["brief"] == 0
     assert _TIER_EXPANSION_PASSES["detailed"] > 0
     assert _TIER_EXPANSION_PASSES["in_depth"] > _TIER_EXPANSION_PASSES["detailed"]
 
 
 def test_frontend_longer_tiers_use_background_jobs_without_changing_picker():
     text = TSX.read_text(encoding="utf-8")
-    assert "label: 'Brief'" in text and "label: 'In-Detail'" in text and "label: 'Deep Research'" in text
+    assert "label: 'Brief'" not in text and "label: 'In-Detail'" in text and "label: 'Deep Research'" in text
     assert "/api/chat/report/start" in text
     assert "/api/chat/report/status/" in text
-    assert "const useBackgroundReportJob = ['brief', 'detailed', 'in_depth'].includes(effectiveReportTier)" in text
+    assert "const useBackgroundReportJob = ['detailed', 'in_depth'].includes(effectiveReportTier)" in text

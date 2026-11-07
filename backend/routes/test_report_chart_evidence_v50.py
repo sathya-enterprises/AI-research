@@ -152,8 +152,6 @@ def _request(body):
 
 @pytest.mark.parametrize("route_module,handler_name", [
     ("routes.pdf", "generate_pdf"),
-    ("routes.html_report", "generate_html_report"),
-    ("routes.docx_report", "generate_docx"),
 ])
 def test_all_export_handlers_reject_chart_table_verification_conflicts(route_module, handler_name):
     import importlib

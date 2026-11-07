@@ -104,7 +104,7 @@ async def test_parallel_analysts_run_concurrently_and_merge_duplicate_findings(m
 
     result = await report_mod.run_parallel_evidence_analysis(
         question="Assess deposit growth outlook over the next three years.",
-        report_tier="brief",
+        report_tier="detailed",
         source_text=SOURCE_TEXT,
         research_engine_context="deposit growth observation: 12% in 2025",
         report_plan={"sections": [{"heading": "Growth outlook", "purpose": "Compare evidence."}]},

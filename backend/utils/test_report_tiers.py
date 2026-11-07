@@ -2,7 +2,7 @@ from utils.report_tiers import get_report_tier_spec, report_tier_contract
 
 
 def test_report_tiers_have_only_renderer_warning_caps_by_default():
-    expected_maxima = {"brief": 8, "detailed": 30, "in_depth": 100}
+    expected_maxima = {"detailed": 30, "in_depth": 100}
     for tier, maximum in expected_maxima.items():
         page_target = get_report_tier_spec(tier).page_target
         assert (page_target.minimum, page_target.target, page_target.maximum) == (None, None, maximum)
@@ -10,7 +10,7 @@ def test_report_tiers_have_only_renderer_warning_caps_by_default():
 
 def test_report_tier_contract_communicates_pagination_policy_and_source_breadth():
     expected = {
-        "brief": ("8 pages", "8–12 distinct relevant sources"),
+        "detailed": ("8 pages", "8–12 distinct relevant sources"),
         "detailed": ("30 pages", "20–30 distinct relevant sources"),
         "in_depth": ("100 pages", "35–50 distinct relevant sources"),
     }
@@ -35,7 +35,7 @@ def test_unknown_tier_defaults_to_detailed():
 
 
 def test_tier_contracts_keep_dynamic_structure_and_evidence_driven_visuals():
-    for tier in ("brief", "detailed", "in_depth"):
+    for tier in ("detailed", "in_depth"):
         contract = report_tier_contract(tier)
         assert "RENDERED PAGE BAND:" not in contract
         assert "Structure: choose the actual headings" in contract
@@ -43,7 +43,7 @@ def test_tier_contracts_keep_dynamic_structure_and_evidence_driven_visuals():
 
 
 def test_chart_density_profiles_match_each_report_tier():
-    for tier, label in (("brief", "Brief"), ("detailed", "In-Detail"), ("in_depth", "Deep Research")):
+    for tier, label in (("detailed", "In-Detail"), ("in_depth", "Deep Research")):
         contract = report_tier_contract(tier)
         assert f"CHART GUIDANCE: {label}" in contract
         assert "there is no minimum point count or visual quota" in contract

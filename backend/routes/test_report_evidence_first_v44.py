@@ -18,7 +18,7 @@ def test_secondary_quality_gate_does_not_call_another_llm_or_rewrite_sections(mo
     )
     body = "## Outlook\n\n" + duplicate + "\n\n" + duplicate + "\n\n## Risks\n\nRisks are evidence dependent."
     cleaned, charts, result = asyncio.run(report_mod._secondary_quality_gate(
-        body, "renewable energy outlook", "brief", "Title", "", [], [], [], {},
+        body, "renewable energy outlook", "detailed", "Title", "", [], [], [], {},
     ))
     assert cleaned.count(duplicate) == 1
     assert charts == []
@@ -78,7 +78,7 @@ def test_compact_capacity_comparison_is_measured_without_a_density_target():
             {"label": "Current capacity (2026)", "value": 283.46},
             {"label": "2030 target", "value": 500.0},
         ]}],
-    }, "brief")
+    }, "detailed")
     assert assessment["applicable"] is True
     assert assessment["count"] == 2
     assert assessment["minimum"] is None
@@ -111,7 +111,7 @@ def test_source_appendix_keeps_canonical_ids_for_url_less_and_same_domain_source
     ]
     html = _render_sources_appendix(
         registry, placement="appendix", include_appendix=True,
-        source_registry=registry, report_tier="brief", cited_source_ids={"S1", "S2", "S3"},
+        source_registry=registry, report_tier="detailed", cited_source_ids={"S1", "S2", "S3"},
     )
     assert "Total sources: 3" in html
     assert "[S1]" in html and "[S2]" in html and "[S3]" in html
@@ -135,7 +135,7 @@ def test_html_renderer_converts_raw_chart_markdown_to_inline_structured_chart():
     html = build_html_report(
         report="## Capacity outlook\n\n![Capacity growth trajectory](CHART_1)",
         title="Capacity report", question="capacity", summary="", key_stats=[], charts=[chart],
-        images=[], sources=[], report_tier="brief",
+        images=[], sources=[], report_tier="detailed",
     )
     assert "![Capacity growth trajectory](CHART_1)" not in html
     assert "Capacity growth trajectory" in html

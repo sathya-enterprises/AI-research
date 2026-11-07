@@ -104,14 +104,14 @@ def test_auto_repair_does_not_require_a_page_quota():
     assert full
 
 
-def test_brief_source_appendix_displays_canonical_citation_id_and_title():
+def test_source_appendix_displays_canonical_citation_id_and_title():
     registry = [{
         "id": "S8", "title": "ICRA Banking Credit Outlook", "publisher": "ICRA",
         "domain": "icra.in", "url": "https://example.org/icra-outlook",
     }]
     html = _render_sources_appendix(
         registry, placement="appendix", include_appendix=True,
-        source_registry=registry, report_tier="brief", cited_source_ids={"S8"},
+        source_registry=registry, report_tier="detailed", cited_source_ids={"S8"},
     )
     assert "[S8]" in html
     assert "ICRA Banking Credit Outlook" in html
@@ -169,7 +169,7 @@ def test_source_appendix_uses_compact_single_line_numbered_entries():
     }]
     html = _render_sources_appendix(
         registry, placement="appendix", include_appendix=True,
-        source_registry=registry, report_tier="brief", cited_source_ids={"S8"},
+        source_registry=registry, report_tier="detailed", cited_source_ids={"S8"},
     )
     # The compact source row keeps the exact URL visible in HTML and print.
     assert '<span class="gg-source-id">[S8]</span>' in html

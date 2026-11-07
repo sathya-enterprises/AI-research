@@ -75,7 +75,7 @@ def test_recover_report_body_from_dynamic_section_array():
     assert "## Provider envelope: second" in nested_recovered
 
 
-def test_shared_html_suppresses_unattributed_images_and_keeps_brief_compact():
+def test_shared_html_suppresses_unattributed_images():
     from routes.html_report import build_html_report
 
     common = {
@@ -87,20 +87,15 @@ def test_shared_html_suppresses_unattributed_images_and_keeps_brief_compact():
         "images": [{"url": "https://example.com/research-image.jpg", "caption": "Deployment"}],
         "sources": [],
     }
-    brief = build_html_report(
-        "## Evidence\n\n[IMAGE_1]", theme=None, presentation=None,
-        report_tier="brief", **common,
-    )
     detailed = build_html_report(
         "## Evidence\n\n[IMAGE_1]", theme=None, presentation=None,
         report_tier="detailed", **common,
     )
-    assert "[IMAGE_1]" not in brief
-    assert "research-image.jpg" not in brief
-    assert '<nav class="gg-report-nav"' not in brief
+    assert "[IMAGE_1]" not in detailed
+    assert "research-image.jpg" not in detailed
     assert '<nav class="gg-report-nav"' in detailed
-    assert "Attribution was not supplied with this item." not in brief
-    assert '<figure class="gg-figure' not in brief
+    assert "Attribution was not supplied with this item." not in detailed
+    assert '<figure class="gg-figure' not in detailed
 
     pdf_image = build_html_report(
         "## Evidence\n\n[WEB_IMG_1]", theme=None, presentation=None,
@@ -274,33 +269,6 @@ def test_report_normalizer_removes_unverified_metric_placeholders_and_raw_html()
     assert "<div" not in normalized and "</div>" not in normalized
     assert "<strong>" not in normalized and "</strong>" not in normalized
     assert "**Strategic Implication:** Banks should balance lending with funding resilience." in normalized
-
-
-def test_brief_page_budget_stops_after_the_minimum_valid_page_count(monkeypatch):
-    import asyncio
-    import routes.report as report
-
-    observed = {"expansion_calls": 0}
-    monkeypatch.setattr(report, "_rendered_page_count_preflight", lambda *args, **kwargs: 6)
-
-    async def unexpected_expand(**kwargs):
-        observed["expansion_calls"] += 1
-        return kwargs["report_text"] + "\n\nExtra padding text. " * 200
-
-    monkeypatch.setattr(report, "_expand_report_to_tier", unexpected_expand)
-
-    async def run():
-        text, pages = await report._ensure_report_page_budget(
-            report_text="# Brief\n\nEvidence-backed report body.", question="test topic",
-            report_tier="brief", report_plan={}, evidence_text="evidence " * 200,
-            title="Test brief", summary="", key_stats=[], charts=[], sources=[],
-            presentation={}, web_images=[], file_images=[], theme={},
-        )
-        assert pages == 6
-        assert text.startswith("# Brief")
-        assert observed["expansion_calls"] == 0
-
-    asyncio.run(run())
 
 
 def test_v14_report_normalizer_cleans_wrapped_placeholders_and_html_after_decode():
