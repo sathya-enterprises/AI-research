@@ -66,10 +66,29 @@ def _norm_heading(text: str) -> set[str]:
     return {w.rstrip("s") for w in words if w not in STOP and len(w) > 2}
 
 
+_PERIOD_IN_HEADING_RE = re.compile(r"(?i)\b(?:Q[1-4]\s*(?:FY|CY)?\s*'?\d{2,4}|FY\s*'?\d{2,4}|(?:19|20)\d{2})\b")
+
+
 def duplicate_headings(headings: list[tuple[int, str]]) -> list[tuple[str, str]]:
-    """Pairs of headings that cover the same topic (token Jaccard >= 0.5, >=2 shared tokens)."""
+    """Pairs of headings that cover the same topic (token Jaccard >= 0.5, >=2 shared tokens).
+
+    Not duplicates (C2): an H3 and the H2 it sits under (a parent naming its parts); an
+    entity-scoped heading ("Bank: Drivers, Risks") and an unscoped heading of another level
+    ("Macro Drivers, Risks"); headings naming different periods; an appendix heading and a
+    body heading (Appendix B reproduces tables the body discusses). Appendix headings are
+    still compared with each other.
+    """
     pairs = []
     norm = [(lvl, h, _norm_heading(h)) for lvl, h in headings]
+    parent: list[int] = []
+    zone: list[str] = []
+    current_h2, in_appendix = -1, False
+    for index, (lvl, h, _) in enumerate(norm):
+        if lvl == 2:
+            current_h2 = index
+            in_appendix = bool(re.match(r"(?i)\s*appendix\b", h))
+        parent.append(current_h2 if lvl > 2 else -1)
+        zone.append("appendix" if in_appendix else "body")
 
     def prefix(heading: str) -> str:
         match = re.match(r"^\s*([^:]{2,40}):\s+\S", heading)
@@ -83,6 +102,16 @@ def duplicate_headings(headings: list[tuple[int, str]]) -> list[tuple[str, str]]
             pa, pb = prefix(norm[i][1]), prefix(norm[j][1])
             if pa and pb and pa != pb:
                 continue  # "Bank: Performance" vs "IT: Performance" are different entity sections
+            if parent[j] == i or parent[i] == j:
+                continue
+            if bool(pa) != bool(pb) and norm[i][0] != norm[j][0]:
+                continue
+            if zone[i] != zone[j]:
+                continue
+            periods_i = {p.casefold().replace(" ", "") for p in _PERIOD_IN_HEADING_RE.findall(norm[i][1])}
+            periods_j = {p.casefold().replace(" ", "") for p in _PERIOD_IN_HEADING_RE.findall(norm[j][1])}
+            if periods_i and periods_j and periods_i != periods_j:
+                continue
             shared = a & b
             if len(shared) >= 2 and len(shared) / len(a | b) >= 0.5:
                 pairs.append((norm[i][1], norm[j][1]))
@@ -209,6 +238,69 @@ def charts_explained(report: str, charts: list) -> tuple[int, int]:
         if mentions_figure or (label_hit and value_hit):
             explained += 1
     return explained, referenced
+
+
+def _figure_paragraph_in_report(report: str, index: int) -> str:
+    """The paragraph that interprets chart ``index``: the one saying "Figure N", else the one after its marker."""
+    paragraphs = re.split(r"\n\s*\n", report or "")
+    for para in paragraphs:
+        if re.search(rf"\bFigure\s+{index}\b", para) and not para.lstrip().startswith("|"):
+            return para
+    for i, para in enumerate(paragraphs):
+        if f"[CHART_{index}]" in para:
+            rest = para.replace(f"[CHART_{index}]", "").strip()
+            return rest or (paragraphs[i + 1] if i + 1 < len(paragraphs) else "")
+    return ""
+
+
+def chart_title_mismatches(report: str, charts: list) -> list[str]:
+    """Charts whose title names entities the chart does not plot, or whose interpreting
+    paragraph is about other entities/values than the chart's own data."""
+    from utils.chart_titles import text_chart_mismatch, title_data_mismatch
+
+    out = []
+    for i, chart in enumerate(charts or [], 1):
+        if not isinstance(chart, dict) or f"[CHART_{i}]" not in (report or ""):
+            continue
+        reason = title_data_mismatch(chart)
+        if not reason:
+            paragraph = _figure_paragraph_in_report(report, i)
+            reason = text_chart_mismatch(paragraph, chart) if paragraph else ""
+        if reason:
+            out.append(f"Figure {i}: {reason} ({str(chart.get('title') or '')[:70]})")
+    return out
+
+
+def figure_numbering_issues(report: str, charts: list) -> list[str]:
+    """Figures must be numbered 1..n in the order they appear; every 'Figure N' must exist; no number twice."""
+    issues = []
+    markers = [int(n) for n in re.findall(r"\[CHART_(\d+)\]", report or "")]
+    first = list(dict.fromkeys(markers))
+    if first != sorted(first):
+        issues.append(f"figures out of order: {first[:12]}")
+    numbered = []
+    for i, chart in enumerate(charts or [], 1):
+        match = re.match(r"\s*Figure\s+(\d+)\s*:", str((chart or {}).get("title") or ""))
+        if match:
+            numbered.append(int(match.group(1)))
+            if int(match.group(1)) != i:
+                issues.append(f"chart {i} titled Figure {match.group(1)}")
+    duplicates = [n for n, c in Counter(numbered).items() if c > 1]
+    issues += [f"two charts titled Figure {n}" for n in duplicates]
+    captions = Counter(int(n) for n in re.findall(r"(?m)(?:^|\|\s*|\*\*)Figure\s+(\d+)\s*:", report or ""))
+    # Chart titles are rendered from the chart list, never written in the body: a "Figure N:" caption in
+    # the text is the writer labelling its own table, which duplicates (or invents) a figure number.
+    issues += [f"text caption 'Figure {n}:' duplicates a figure number" for n in captions]
+    present = set(markers)
+    for n in sorted({int(n) for n in re.findall(r"\bFigure\s+(\d+)\b", report or "")}):
+        if n not in present:
+            issues.append(f"text refers to Figure {n}, which is not in the report")
+    return issues
+
+
+def repeated_chart_titles(charts: list) -> list[str]:
+    titles = [re.sub(r"^\s*Figure\s+\d+\s*:\s*", "", str((c or {}).get("title") or "")).casefold() for c in charts or []]
+    return [t for t, n in Counter(titles).items() if t and n > 1]
 
 
 def numbers_removed(capture: dict | None, log_text: str) -> int | None:
@@ -391,6 +483,26 @@ def v2_metrics(capture: dict) -> dict:
     }
 
 
+def _removed_not_in_live_prompt(capture: dict, removed: list[dict]) -> int:
+    from utils.number_policy import normalize, number_set
+
+    prompts: dict[str, set[str]] = {}
+    for call in capture.get("llmCalls") or []:
+        sid = str(call.get("sectionId") or "").split("#")[0]
+        prompts.setdefault(sid, set()).update(number_set([str(call.get("llmPrompt") or "")]))
+    return sum(1 for r in removed
+               if normalize(str(r.get("number") or "")).lstrip("-") not in prompts.get(str(r.get("section") or ""), set()))
+
+
+def _captured_tiers(stages: dict, store):
+    """The entity tiers the live run used (replaying recomputed tiers would change the outline prompt)."""
+    summary = ((stages.get("entity_tiers") or {}).get("data")) or {}
+    if not summary.get("entities"):
+        return None
+    from utils.entity_tiers import tiers_from_summary
+    return tiers_from_summary(store, summary)
+
+
 def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     """Re-run V2 assembly offline from the captured passages and LLM responses."""
     stages = capture.get("stages") or {}
@@ -426,7 +538,7 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
                                          tier=str(capture.get("reportTier") or "detailed"), store=store,
                                          manifest=manifest_rows,
                                          today=str(capture.get("startedAt") or "")[:10], gateway=gateway,
-                                         chart_verifier=chart_verifier))
+                                         chart_verifier=chart_verifier, tiers=_captured_tiers(stages, store)))
     out = json.loads(result["raw"])
     # The PDF route resolves [S#] citations against the source manifest.
     # The PDF route resolves [S#] citations and re-checks charts against the manifest;
@@ -464,7 +576,27 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
         "v2replay_unsupported_numbers": result["meta"].get("unsupportedNumbers"),
         "v2replay_husk_callouts": len(husk_blocks(report)),
         "v2replay_duplicate_headings": len(duplicate_headings(headings)),
+        "v2replay_chart_title_mismatch": len(chart_title_mismatches(report, charts)),
+        "v2replay_figure_numbering_issues": len(figure_numbering_issues(report, charts)),
+        "v2replay_repeated_chart_titles": len(repeated_chart_titles(charts)),
+        "v2replay_charts_dropped_text_mismatch": len(result["meta"].get("chartTextMismatches") or []),
+        "v2replay_numbers_calculated_labelled": len((result["meta"].get("numberPolicy") or {}).get("calculatedLabelled") or []),
+        "v2replay_sentences_removed_unsupported": len((result["meta"].get("numberPolicy") or {}).get("sentencesRemoved") or []),
+        # A replay re-uses the live writer's text: a number the live writer was given (it is in the
+        # live prompt) but the current pipeline no longer gives it is a replay artefact, not a
+        # writer error. Only the others would also be removed in a live run with the current code.
+        "v2replay_sentences_removed_not_in_live_prompt": _removed_not_in_live_prompt(
+            capture, (result["meta"].get("numberPolicy") or {}).get("sentencesRemoved") or []),
+        "v2replay_unresolved_numbers": len((result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or []),
+        "v2replay_repeated_sentences_removed": (result["meta"].get("editorial") or {}).get("repeatedSentencesRemoved"),
+        "v2replay_sections_merged": len((result["meta"].get("editorial") or {}).get("mergedSections") or []),
+        "v2replay_contradictions_flagged": len((result["meta"].get("editorial") or {}).get("contradictions") or []),
+        "v2replay_sentence_fragments": len(sentence_fragments(report)),
     }
+    details = {"chart_title_mismatch": chart_title_mismatches(report, charts),
+               "figure_numbering": figure_numbering_issues(report, charts),
+               "duplicate_headings": duplicate_headings(headings)[:12]}
+    (run_dir / "v2_replay_details.json").write_text(json.dumps(details, ensure_ascii=False, indent=1), encoding="utf-8")
     if rerender:
         pdf_bytes, error = asyncio.run(_rerender(out, str(capture.get("question") or ""), str(capture.get("reportTier") or "detailed")))
         if pdf_bytes:
@@ -515,6 +647,9 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False,
         "empty_headings": len(empty_headings(report)),
         "duplicate_headings": len(duplicate_headings(headings)),
         "misplaced_sections": len(misplaced_sections(headings)),
+        "chart_title_mismatch": len(chart_title_mismatches(report, charts)),
+        "figure_numbering_issues": len(figure_numbering_issues(report, charts)),
+        "repeated_chart_titles": len(repeated_chart_titles(charts)),
         "dangling_refs": (
             sum(1 for n in re.findall(r"\[CHART_(\d+)\]", report) if int(n) > len(charts))
             + len(cited - manifest_ids)
@@ -526,6 +661,9 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False,
             "empty_headings": empty_headings(report)[:10],
             "duplicate_headings": duplicate_headings(headings)[:10],
             "misplaced_sections": misplaced_sections(headings),
+            "chart_title_mismatch": chart_title_mismatches(report, charts),
+            "figure_numbering": figure_numbering_issues(report, charts),
+            "repeated_chart_titles": repeated_chart_titles(charts),
         },
     }
     pdf_bytes = (run_dir / "report.pdf").read_bytes() if (run_dir / "report.pdf").exists() else None
@@ -555,7 +693,8 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False,
 ORDER = ["tier", "pages", "pdf_words", "report_words", "h2_sections", "subsections", "sources_fetched",
          "sources_in_appendix", "sources_cited", "pct_evidence_cited", "charts", "pct_charts_explained",
          "pct_charts_figure_ref", "numbers_removed", "husk_callouts", "sentence_fragments", "empty_headings",
-         "duplicate_headings", "misplaced_sections", "dangling_refs", "render_errors",
+         "duplicate_headings", "misplaced_sections", "chart_title_mismatch", "figure_numbering_issues",
+         "repeated_chart_titles", "dangling_refs", "render_errors",
          "pipeline", "llm_calls", "llm_calls_all_providers", "llm_tokens_in", "llm_tokens_out", "llm_failed_calls", "time_s",
          "v2_sections_ok", "v2_passages_provided", "v2_passages_cited", "v2_pct_passages_cited", "v2_unsupported_numbers",
          "v2_invalid_citations", "v2_entities_covered", "v2_scope_decisions", "v2_estimated_pages", "v2_evidence_supported_pages"]

@@ -122,6 +122,9 @@ class FakeGateway:
         self.stats.models["fake"] += 1
         if purpose == "outline":
             return LLMResult(ok=True, text=json.dumps(self.outline), model="fake")
+        if purpose == "editorial_transitions":
+            sids = re.findall(r"(?m)^(sec-\d+) \|", prompt)
+            return LLMResult(ok=True, text=json.dumps({sid: "The next section turns to the evidence behind this shift." for sid in sids[1:]}), model="fake")
         if purpose == "executive_summary":
             cites = re.findall(r"\[(S\d+\.\d+)\]", prompt)
             return LLMResult(ok=True, text=f"The rotation favoured banks over IT, and FPIs sold 11,704 crore of financials [{cites[0]}].", model="fake")
@@ -131,7 +134,11 @@ class FakeGateway:
             "Domestic institutions absorbed the selling through steady SIP inflows, which kept index drawdowns shallow "
             f"and shifted leadership towards domestically owned sectors [{ids[-1]}]. ") * 4
         for n in figs:
-            body += f"\n\nFigure {n} shows how the sectors compare across the window [{ids[0]}].\n\n[[FIGURE {n}]]"
+            # Interpret the figure from its own data (series/row and column labels in its brief).
+            brief = prompt.split(f"Figure {n}:", 1)[1]
+            m = re.search(r"\n  - ([^:\n]+): ([^=,\n]+)=", brief)
+            names = f", including {m.group(1).strip()} and {m.group(2).strip()}" if m else ""
+            body += f"\n\nFigure {n} shows how the sectors compare across the window{names} [{ids[0]}].\n\n[[FIGURE {n}]]"
         return LLMResult(ok=True, text=body + f"\n<<<SUMMARY>>>\nFPIs sold 11,704 crore [{ids[0]}].", model="fake")
 
 
@@ -227,11 +234,12 @@ def test_chart_unit_comes_from_the_plotted_column_and_old_periods_are_dropped():
         passages = [Passage("S1.1", "S1", table, "table", reliability=0.8),
                     Passage("S2.1", "S2", old, "table", reliability=0.8),
                     # Different data (identical data would be deduplicated before the reliability check).
-                    Passage("S3.1", "S3", table.replace("35,210.5", "36,001.0"), "table", reliability=0.3)]
+                    Passage("S3.1", "S3", table.replace("+1.2%", "+1.5%"), "table", reliability=0.3)]
 
     charts, dropped = build(S(), min_year=2025)
     assert len(charts) == 1
-    assert charts[0].spec["unit"] == "" and "Index Level" in charts[0].spec["title"]  # not '%' from the other column
+    # Index levels of different sectors are not comparable: the 1-week return column is plotted, with its own unit.
+    assert charts[0].spec["unit"] == "%" and "1 Week" in charts[0].spec["title"] and "Index Level" not in charts[0].spec["title"]
     reasons = " | ".join(d["reason"] for d in dropped)
     assert "outside the requested window" in reasons and "reliability 0.30 below 0.50" in reasons
 
@@ -300,7 +308,7 @@ def test_finalize_figures_renumbers_survivors_and_neutralises_removed_refs():
     assert "Figure 6" not in out and "underlying data" not in out
     assert "Flows (removed later) [S2]." in out  # claim kept, figure framing removed
     assert charts_out[1]["takeaway"] == "Figure 2 shows OI build-up."
-    assert stats == {"figures": 2, "danglingRefsNeutralized": 1, "mapping": {"3": 1, "9": 2}}
+    assert stats == {"figures": 2, "danglingRefsNeutralized": 1, "mapping": {"3": 1, "9": 2}, "reordered": False}
 
 
 def test_removed_figure_references_lose_their_framing_without_filler():
