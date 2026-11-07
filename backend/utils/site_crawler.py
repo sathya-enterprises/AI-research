@@ -260,7 +260,13 @@ async def crawl_relevant_internal_pages(
     default_limits = {"detailed": 12, "in_depth": 24}
     # Deep Research needs a wider bounded crawl; the report layer still filters
     # every returned page for query relevance before the model can use it.
-    page_limit = max(0, min(int(max_pages if max_pages is not None else default_limits.get(tier, 12)), 28))
+    # The tier budget (REPORT_TIER_CRAWL_PAGES: 24 / 48) is the real limit. The
+    # former hard ceiling of 28 silently cut Deep Research's 48-page budget.
+    try:
+        ceiling = max(1, int(os.getenv("GG_CRAWL_MAX_PAGES", "64")))
+    except ValueError:
+        ceiling = 64
+    page_limit = max(0, min(int(max_pages if max_pages is not None else default_limits.get(tier, 12)), ceiling))
     depth_limit = max(1, min(int(max_depth or 1), 3))
     stats = {"enabled": page_limit > 0, "seed_count": 0, "pages_requested": 0, "pages_fetched": 0, "links_discovered": 0, "accepted_candidates": 0, "errors": 0, "browser_fallback_attempts": 0, "browser_fallback_successes": 0, "max_depth": depth_limit, "page_limit": page_limit}
     if page_limit <= 0 or not seeds:

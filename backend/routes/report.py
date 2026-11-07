@@ -57,7 +57,7 @@ from utils.report_tiers import (
 from utils.deep_research_coverage import (
     audit_research_coverage, audit_requested_report_scope,
     indian_fy_quarter as _indian_fy_quarter,
-    requested_indian_fy_quarters, _requested_rolling_year_window,
+    requested_indian_fy_quarters, _requested_rolling_year_window, requested_quarter_count,
     _CALENDAR_DATE_RE, _parse_calendar_date,
     extract_verified_fta_signatures,
 )
@@ -8837,7 +8837,7 @@ def _build_sector_compounded_return_chart(rows: list, source_manifest: list) -> 
     ranked.sort(key=lambda item: item[1], reverse=True)
     return {
         "type": "horizontal_bar",
-        "title": "Compounded Sector Return Across Eight Completed Quarters",
+        "title": f"Compounded Sector Return Across {len(quarters)} Completed Quarters",
         "xLabel": "Compounded return (%)",
         "yLabel": "NSE sector index",
         "unit": "%",
@@ -9353,8 +9353,11 @@ async def _build_multi_angle_search_queries(
     subject = (str(getattr(intent, "resolved_topic", "") or "") + " " + cleaned_question).casefold()
     focused_queries: list[str] | None = None
     if re.search(r"\bsector rotation\b", subject):
+        # Ask only for the window the user requested (e.g. "last 4 quarters");
+        # the requested-window chart gate later removes anything wider.
+        _rotation_quarters = requested_quarter_count(question, date.today())
         focused_queries = [
-            "India NSE sectoral indices quarterly performance sector rotation last eight quarters",
+            f"India NSE sectoral indices quarterly performance sector rotation last {_rotation_quarters} quarters",
             "NSE sectoral index historical data quarter-wise India sector indices",
             "NSDL FPI FII sector-wise flows India equity quarterly data",
             "NSE India sectoral indices historical market data quarterly comparison",
@@ -9362,7 +9365,7 @@ async def _build_multi_angle_search_queries(
         ]
         if report_tier == "in_depth":
             focused_queries.extend([
-                "site:nseindia.com sectoral indices historical quarterly returns official data India last eight completed quarters",
+                f"site:nseindia.com sectoral indices historical quarterly returns official data India last {_rotation_quarters} completed quarters",
                 "NSDL FPI sector-wise equity holdings and flows India quarterly; DII allocation by sector primary data",
                 "Indian sector rotation drivers quarterly earnings valuations oil rupee rates sector index performance counterevidence",
             ])
@@ -20930,7 +20933,9 @@ async def generate_report(request: Request):
                     range_str="3y" if sector_rotation_request else "2y", interval="3mo",
                 )
                 if sector_rotation_request:
-                    quarterly_rows = await fetch_sector_quarterly_returns(quarters=8)
+                    quarterly_rows = await fetch_sector_quarterly_returns(
+                        quarters=requested_quarter_count(question),
+                    )
                     quarterly_source = format_sector_quarterly_returns_as_source(quarterly_rows)
                     if quarterly_source:
                         sources = [quarterly_source] + sources
@@ -23902,7 +23907,7 @@ async def generate_report(request: Request):
                 log.info("Sector-rotation quality gate injected verified quarterly chart (%d sectors, %d quarters)",
                          len(_quarter_chart.get("series") or []), len(quarterly_rows[0].get("quarters") or []))
             _compound_chart = _build_sector_compounded_return_chart(quarterly_rows, source_manifest)
-            if _compound_chart and not any("compounded sector return across eight completed quarters" in str(c.get("title") or "").casefold()
+            if _compound_chart and not any(str(c.get("title") or "").casefold().startswith("compounded sector return across")
                                             for c in (charts or []) if isinstance(c, dict)):
                 charts = list(charts or []) + [_compound_chart]
                 _compound_marker = f"[CHART_{len(charts)}]"

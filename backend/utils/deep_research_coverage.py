@@ -74,6 +74,24 @@ def requested_indian_fy_quarters(question: str, as_of_date: date | None = None) 
     return periods
 
 
+def requested_quarter_count(question: str, as_of_date: date | None = None, default: int = 8) -> int:
+    """Number of completed quarters a relative-window prompt asks for.
+
+    "last 4 quarters" -> 4; "past two years" -> 8 (capped at 12); otherwise ``default``.
+    Data fetches and search queries use this so they match the window that the
+    requested-window chart gate later enforces.
+    """
+    periods = requested_indian_fy_quarters(question, as_of_date)
+    if periods:
+        return len(periods)
+    match = re.search(r"\b(?:past|last)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+years?\b", str(question or ""), re.I)
+    if match:
+        years = _requested_count(match.group(1))
+        if years > 0:
+            return max(1, min(12, years * 4))
+    return default
+
+
 def _subtract_calendar_years(day: date, years: int) -> date:
     year = day.year - years
     try:
