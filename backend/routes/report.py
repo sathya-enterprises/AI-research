@@ -24755,6 +24755,15 @@ async def generate_report(request: Request):
             report_text = _WEB_IMG_PLACEHOLDER_RE.sub("", report_text)
             report_text = re.sub(r"(?m)^[ \t]*[-*+][ \t]*$", "", report_text)
             report_text = normalize_report_markdown(report_text)
+        if _v2_used:
+            # Later gates may have removed V2 charts; renumber the survivors in
+            # document order and neutralise references to removed figures.
+            from utils.report_pipeline_v2 import finalize_figures
+            report_text, charts, _v2_figures = finalize_figures(report_text, charts)
+            record_research_stage("pipeline_v2_figures", _v2_figures)
+            if _v2_figures.get("danglingRefsNeutralized"):
+                log.info("Report: pipeline v2 neutralised %d reference(s) to figures removed by later gates",
+                         _v2_figures["danglingRefsNeutralized"])
         clean_title = _align_title_horizon(_sanitize_title(parsed.get("title", ""), report_topic), question)
         clean_theme = _resolve_theme(parsed.get("theme"), question)
         final_format = recommended_format
