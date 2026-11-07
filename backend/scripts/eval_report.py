@@ -303,6 +303,34 @@ def repeated_chart_titles(charts: list) -> list[str]:
     return [t for t, n in Counter(titles).items() if t and n > 1]
 
 
+def layout_metrics(pdf_bytes: bytes | None, report: str, prefix: str = "") -> tuple[dict, dict]:
+    """Stage D layout checks from the PDF geometry (PyMuPDF) and the report text."""
+    from utils.pdf_layout_metrics import distinct_deep_dive_sets, pdf_layout_metrics
+
+    distinct, deep_dives = distinct_deep_dive_sets(report)
+    metrics = {f"{prefix}distinct_subsection_sets": f"{distinct}/{deep_dives}" if deep_dives else None}
+    if not pdf_bytes:
+        return metrics, {}
+    m = pdf_layout_metrics(pdf_bytes)
+    metrics.update({
+        f"{prefix}source_lists": m["source_lists"],
+        f"{prefix}prose_only_streak": m["prose_only_streak"],
+        f"{prefix}pct_body_pages_non_prose": m["pct_body_pages_non_prose"],
+        f"{prefix}stranded_headings": len(m["stranded_headings"]),
+        f"{prefix}heading_then_heading": len(m["heading_then_heading"]),
+        f"{prefix}appendix_pages": m["appendix_pages"],
+        f"{prefix}near_empty_pages": len(m["near_empty_pages"]),
+        f"{prefix}table_overflow_lines": len(m["table_overflow"]),
+        f"{prefix}prompt_text_in_headings": len(m["prompt_leak_headings"]),
+        f"{prefix}code_fences_in_pdf": len(m["code_fences"]),
+        # Below ~9pt means Chromium shrank the whole document to fit something too wide.
+        f"{prefix}body_font_pt": m["body_font_size"],
+    })
+    details = {k: m[k] for k in ("source_list_headings", "stranded_headings", "heading_then_heading", "near_empty_pages",
+                                 "table_overflow", "prompt_leak_headings", "code_fences")}
+    return metrics, details
+
+
 def numbers_removed(capture: dict | None, log_text: str) -> int | None:
     stage = ((capture or {}).get("stages") or {}).get("evidence_guard") or {}
     data = stage.get("data") if isinstance(stage, dict) else None
@@ -516,6 +544,8 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     store = store_from_passages(passages)
     manifest = (((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources")) or []
     gateway = ReplayGateway(capture)
+    # The replayed writer text was written for the recorded subsections: keep them.
+    os.environ["GG_V2_SUBSECTION_PLANNER"] = "0"
     manifest_rows = [m for m in manifest if isinstance(m, dict)]
     enriched_rows = [r for r in (((stages.get("sources_after_article_fetch") or {}).get("data") or {}).get("sources") or [])
                      if isinstance(r, dict)]
@@ -602,6 +632,9 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
         if pdf_bytes:
             (run_dir / "v2_replay.pdf").write_bytes(pdf_bytes)
         metrics["v2replay_pages"] = pdf_metrics(pdf_bytes).get("pages") if pdf_bytes else f"render error: {error}"
+        layout, layout_details = layout_metrics(pdf_bytes, report, prefix="v2replay_")
+        metrics.update(layout)
+        (run_dir / "v2_replay_layout.json").write_text(json.dumps(layout_details, ensure_ascii=False, indent=1), encoding="utf-8")
     return metrics
 
 
@@ -674,6 +707,9 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False,
             (run_dir / "report.rerendered.pdf").write_bytes(pdf_bytes)
     pm = pdf_metrics(pdf_bytes)
     metrics["pages"] = pm.get("pages")
+    layout, layout_details = layout_metrics(pdf_bytes, report)
+    metrics.update(layout)
+    metrics["_detail"]["layout"] = layout_details
     metrics["pdf_words"] = pm.get("pdf_words")
     metrics["render_errors"] = (1 if render_error else 0) + len(pm.get("raw_markers_in_pdf") or [])
     metrics["_detail"]["render"] = {"error": render_error, "raw_markers": pm.get("raw_markers_in_pdf"), "sparse_pages": pm.get("sparse_pages")}
@@ -694,7 +730,9 @@ ORDER = ["tier", "pages", "pdf_words", "report_words", "h2_sections", "subsectio
          "sources_in_appendix", "sources_cited", "pct_evidence_cited", "charts", "pct_charts_explained",
          "pct_charts_figure_ref", "numbers_removed", "husk_callouts", "sentence_fragments", "empty_headings",
          "duplicate_headings", "misplaced_sections", "chart_title_mismatch", "figure_numbering_issues",
-         "repeated_chart_titles", "dangling_refs", "render_errors",
+         "repeated_chart_titles", "source_lists", "prose_only_streak", "pct_body_pages_non_prose",
+         "distinct_subsection_sets", "stranded_headings", "heading_then_heading", "appendix_pages", "near_empty_pages",
+         "table_overflow_lines", "prompt_text_in_headings", "code_fences_in_pdf", "dangling_refs", "render_errors",
          "pipeline", "llm_calls", "llm_calls_all_providers", "llm_tokens_in", "llm_tokens_out", "llm_failed_calls", "time_s",
          "v2_sections_ok", "v2_passages_provided", "v2_passages_cited", "v2_pct_passages_cited", "v2_unsupported_numbers",
          "v2_invalid_citations", "v2_entities_covered", "v2_scope_decisions", "v2_estimated_pages", "v2_evidence_supported_pages"]

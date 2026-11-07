@@ -1,0 +1,43 @@
+{
+ "note": "Stage D offline before/after on the C1 confirmation capture (same LLM text, replayed). Before = C2 code (c2_replay.pdf); after = Stage D code. Subsection planner is off in replays (replayed text was written for the recorded subsections); planned distinct sets on this store: 16/16.",
+ "before": {
+  "distinct_subsection_sets": "1/13",
+  "source_lists": 2,
+  "prose_only_streak": 13,
+  "pct_body_pages_non_prose": 48.9,
+  "stranded_headings": 2,
+  "heading_then_heading": 18,
+  "appendix_pages": 24,
+  "near_empty_pages": 0,
+  "table_overflow_lines": 0,
+  "prompt_text_in_headings": 0,
+  "code_fences_in_pdf": 0,
+  "body_font_pt": 10.0,
+  "pages": 115
+ },
+ "after": {
+  "distinct_subsection_sets": "1/13",
+  "source_lists": 1,
+  "prose_only_streak": 8,
+  "pct_body_pages_non_prose": 64.3,
+  "stranded_headings": 0,
+  "heading_then_heading": 0,
+  "appendix_pages": 14,
+  "near_empty_pages": 2,
+  "table_overflow_lines": 0,
+  "prompt_text_in_headings": 0,
+  "code_fences_in_pdf": 0,
+  "body_font_pt": 10.0,
+  "pages": 141
+ },
+ "layout": {
+  "statStrips": 12,
+  "takeaways": 13,
+  "watch": 2,
+  "inlineTables": 38,
+  "comparisons": 0,
+  "scorecardRows": 21,
+  "headingsRemoved": 6,
+  "distinctDeepDiveSubsectionSets": 2
+ }
+}
