@@ -377,7 +377,11 @@ def print_table(rows: list[dict], baseline: dict | None = None) -> None:
         cells = []
         for r in rows:
             value = r.get(key)
-            text = "—" if value is None else str(value)
+            if isinstance(value, list):
+                unique = list(dict.fromkeys(str(v).split(":")[0] for v in value))
+                text = f"{len(value)}: {', '.join(unique)[:40]}" if value else "0"
+            else:
+                text = "—" if value is None else str(value)
             if baseline and key != "tier":
                 base = (baseline.get(r["run"]) or baseline.get(r.get("tier", "")) or {}).get(key)
                 if base is not None and base != value:

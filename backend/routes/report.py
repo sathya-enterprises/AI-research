@@ -21535,6 +21535,19 @@ async def generate_report(request: Request):
         "sourceCount": len(source_manifest),
         "sources": source_manifest,
     })
+    # Passage-level evidence store keyed by canonical source id (S12.3 = third
+    # passage of [S12]). Built for every run; the section-by-section pipeline
+    # (REPORT_PIPELINE_V2) retrieves from it, and its summary is captured.
+    evidence_store = None
+    try:
+        from utils.evidence_store import build_evidence_store
+        evidence_store = build_evidence_store(enriched, question=question, manifest=source_manifest)
+        log.info("Report: evidence store passages=%d sources=%d mean_reliability=%.3f",
+                 len(evidence_store.passages), len(evidence_store.source_ids()), evidence_store.mean_reliability())
+        record_research_stage("evidence_store", {**evidence_store.capture_summary(),
+                                                 "sourceSummary": evidence_store.source_summary()})
+    except Exception as _store_exc:
+        log.warning("Report: evidence store unavailable: %s", type(_store_exc).__name__)
 
     if search_audit_mode:
         retained_by_url = {str(item.get("url") or "").casefold().rstrip("/"): item for item in enriched if isinstance(item, dict)}
