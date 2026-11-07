@@ -989,10 +989,12 @@ def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
         today = _dt.date.today()
         end_month = _month_ordinal(today.year, today.month)
         if unit.startswith("quarter"):
-            # Rolling quarter charts use the latest completed calendar quarter.
+            # The window is the N completed calendar quarters plus the current quarter
+            # to date (Stage D decision): current-quarter data is valid evidence; charts
+            # label it "QTD, partial" and keep it apart from the completed quarters.
             current_q_start = _calendar_quarter_months((today.month - 1) // 3 + 1, today.year)[0]
-            end_month = current_q_start - 1
-            start_month = end_month - count * 3 + 1
+            start_month = current_q_start - count * 3
+            end_month = current_q_start + 2  # a "Q4 2026" / "Q3 FY27" label spans the whole current quarter
         elif unit.startswith("year"):
             start_month = end_month - count * 12 + 1
         elif unit.startswith("week"):

@@ -75,8 +75,37 @@ def _split_row(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
-    """0–1 chart from one table passage (the best numeric view of the table)."""
+QTD_LABEL = "QTD, partial"
+
+
+def qtd_start_month(today: str | None) -> int | None:
+    """Month ordinal of the first month of the current calendar quarter (None without a date)."""
+    try:
+        from datetime import date as _date
+        from utils.chart_evidence_audit import _calendar_quarter_months
+        day = _date.fromisoformat(str(today)[:10])
+    except (ValueError, TypeError, ImportError):
+        return None
+    return _calendar_quarter_months((day.month - 1) // 3 + 1, day.year)[0]
+
+
+def _is_qtd(text: str, qtd_start: int | None) -> bool:
+    if not qtd_start:
+        return False
+    from utils.chart_evidence_audit import _period_ranges
+    ranges = _period_ranges(text)
+    return bool(ranges) and all(start >= qtd_start for start, _end, _label in ranges)
+
+
+def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None, *,
+                        _only_cols: list[int] | None = None, _only_rows: set[str] | None = None,
+                        _qtd: bool = False) -> list[PlannedChart]:
+    """0–2 charts from one table passage (the best numeric view of the table).
+
+    Current-quarter-to-date data (``qtd_start``) is valid evidence but partial: a
+    table that mixes completed periods with QTD periods (columns or rows) becomes
+    two charts, the QTD one titled "(QTD, partial)".
+    """
     lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
     if len(lines) < 3:
         return []
@@ -90,6 +119,8 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
     if any(header_is_data(h) for h in header[1:]):
         return []  # the first row is data, not a header: metric names are unknown
     rows, _mixed_note = homogeneous_rows(rows)
+    if _only_rows is not None:
+        rows = [r for r in rows if r[0] in _only_rows]
     if len(rows) < 2:
         return []
     numeric_cols, col_units = [], {}
@@ -102,8 +133,21 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
             if "%" in header[col] or re.search(r"(?i)\breturns?\b.*\(%\)", header[col]):
                 units.add("%")
             col_units[col] = units
+    if _only_cols is not None:
+        numeric_cols = [c for c in numeric_cols if c in _only_cols]
     if not numeric_cols:
         return []
+    if qtd_start and not _qtd and _only_cols is None and _only_rows is None:
+        qtd_cols = [c for c in numeric_cols if _is_qtd(header[c], qtd_start)]
+        done_cols = [c for c in numeric_cols if c not in qtd_cols]
+        if qtd_cols and done_cols:
+            return (charts_from_passage(passage, chart_index, qtd_start, _only_cols=done_cols)
+                    + charts_from_passage(passage, chart_index, qtd_start, _only_cols=qtd_cols, _qtd=True))
+        qtd_rows = {r[0] for r in rows if _is_qtd(r[0], qtd_start)}
+        done_rows = {r[0] for r in rows if r[0] not in qtd_rows}
+        if len(qtd_rows) >= 2 and len(done_rows) >= 2:
+            return (charts_from_passage(passage, chart_index, qtd_start, _only_rows=done_rows)
+                    + charts_from_passage(passage, chart_index, qtd_start, _only_rows=qtd_rows, _qtd=True))
 
     def unit_of(cols: list[int]) -> str | None:
         """Unit shared by the plotted columns; None when they disagree (not one chart)."""
@@ -136,6 +180,9 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
         metric = header[numeric_cols[0]]
         title = data_title(metric=metric, labels=labels[:MAX_BAR_POINTS],
                            period=period_of([metric], heading, labels), unit=unit)
+    plotted_periods = [header[c] for c in (period_cols if len(period_cols) >= 2 else numeric_cols[:1])]
+    if _qtd or (qtd_start and (_is_qtd(title, qtd_start) or all(_is_qtd(h, qtd_start) for h in plotted_periods))):
+        title = f"{title} ({QTD_LABEL})"
     evidence_rows = {r[0]: " | ".join(r) for r in rows}
 
     def point(label: str, col_label: str, value: float, raw: str, row_label: str) -> dict:
@@ -183,7 +230,7 @@ def charts_from_passage(passage, chart_index: int) -> list[PlannedChart]:
     passage_ids = list(getattr(passage, "merged_ids", None) or [passage.passage_id])
     if len(passage_ids) > 1:
         spec["basisNote"] = f"Values copied from evidence passages {', '.join(passage_ids)}."
-    chart = PlannedChart(chart_id=f"c{chart_index}", spec=spec, passage_ids=passage_ids,
+    chart = PlannedChart(chart_id=f"c{chart_index}{'q' if _qtd else ''}", spec=spec, passage_ids=passage_ids,
                          source_ids=[passage.source_id], points=points,
                          # Placement uses the data only: the page heading can be about something else.
                          match_text=" ".join([title, header[0], *[r[0] for r in rows[:20]], *header[1:]]),
@@ -255,7 +302,7 @@ def _outside_window(chart: PlannedChart, min_year: int | None) -> str:
 
 
 def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None = None,
-                           min_reliability: float = 0.5) -> tuple[list[PlannedChart], list[dict]]:
+                           min_reliability: float = 0.5, today: str | None = None) -> tuple[list[PlannedChart], list[dict]]:
     """Charts from every table/calculated passage; returns (verified charts, dropped log).
 
     Dropped before writing: unverifiable data, periods entirely before the
@@ -263,7 +310,7 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
     """
     charts, dropped, seen, titles = [], [], set(), set()
     for passage in merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"}]):
-        for chart in charts_from_passage(passage, len(charts) + len(dropped) + 1):
+        for chart in charts_from_passage(passage, len(charts) + len(dropped) + 1, qtd_start_month(today)):
             signature = tuple(sorted((a, b, round(v, 4)) for a, b, v in chart.points))
             if signature in seen:
                 continue
