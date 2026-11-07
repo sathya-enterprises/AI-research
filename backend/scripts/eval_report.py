@@ -291,8 +291,60 @@ def retrieval_replay(capture: dict) -> dict:
     return out
 
 
+def refetch_replay(capture: dict) -> dict:
+    """Re-fetch the pages this run queued for enrichment with the *current* fetcher
+    (+ browser fallback). Network only — no LLM/search API credits."""
+    from routes import report as R
+    from utils.browser_fallback import apply_browser_fallback
+    from utils.source_extractor import fetch_source_document
+
+    stages = capture.get("stages") or {}
+    question = str(capture.get("question") or "")
+    tier = str(capture.get("reportTier") or "detailed")
+    queued = [r for r in (((stages.get("sources_queued_for_enrichment") or {}).get("data") or {}).get("sources") or [])
+              if isinstance(r, dict) and str(r.get("url") or "").startswith("http")]
+    # "Before" = the live run's fetch status for exactly these queued URLs (the
+    # stage-level counts also include crawl-added pages, which are not re-run).
+    fetched_rows = (((stages.get("sources_after_article_fetch") or {}).get("data") or {}).get("sources") or [])
+    status_by_url = {str(r.get("url")): str(r.get("pageFetchStatus") or "unknown") for r in fetched_rows if isinstance(r, dict)}
+    before = Counter(status_by_url.get(str(r.get("url")), "dropped_before_fetch_record") for r in queued)
+    max_chars = 20000 if tier == "in_depth" else 15000
+
+    async def run() -> list[dict]:
+        sem = asyncio.Semaphore(8)
+
+        async def one(row: dict) -> dict:
+            async with sem:
+                res = await fetch_source_document(row["url"], max_chars=max_chars, include_script_data=True)
+            text = str(res.get("text") or "")
+            out = dict(row)
+            if res.get("status") == "ok" and R._page_text_matches_source(text, out, question, None):
+                out.update(pageFetchStatus="ok", pageContent=text)
+            elif res.get("status") == "ok":
+                out["pageFetchStatus"] = "rejected_by_relevance_gate" if text.strip() else "empty_extraction"
+            else:
+                out["pageFetchStatus"] = str(res.get("status"))
+            return out
+
+        rows = await asyncio.gather(*(one(r) for r in queued))
+        stats = await apply_browser_fallback(rows, report_tier=tier, max_chars=max_chars,
+                                             matches_source=lambda t, r: R._page_text_matches_source(t, r, question, None))
+        return rows, stats
+
+    rows, browser = asyncio.run(run())
+    after = Counter(str(r.get("pageFetchStatus")) for r in rows)
+    return {
+        "refetch_queued": len(queued),
+        "refetch_ok_before": int(before.get("ok", 0)),
+        "refetch_ok_after": after.get("ok", 0),
+        "refetch_empty_before": int(before.get("empty_extraction", 0)),
+        "refetch_empty_after": after.get("empty_extraction", 0),
+        "refetch_browser_recovered": browser.get("recovered", 0),
+    }
+
+
 # ── per-run evaluation ────────────────────────────────────────────────────────
-def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False) -> dict:
+def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False, refetch: bool = False) -> dict:
     capture = _load(run_dir / "capture.json") or {}
     status = _load(run_dir / "status_final.json") or {}
     result = status.get("result") or {}
@@ -358,6 +410,8 @@ def evaluate_run(run_dir: Path, rerender: bool = False, retrieval: bool = False)
     metrics["_detail"]["render"] = {"error": render_error, "raw_markers": pm.get("raw_markers_in_pdf"), "sparse_pages": pm.get("sparse_pages")}
     if retrieval and capture:
         metrics.update(retrieval_replay(capture))
+    if refetch and capture:
+        metrics.update(refetch_replay(capture))
     return metrics
 
 
@@ -368,7 +422,7 @@ ORDER = ["tier", "pages", "pdf_words", "report_words", "h2_sections", "subsectio
 
 
 def print_table(rows: list[dict], baseline: dict | None = None) -> None:
-    keys = ORDER + sorted({k for r in rows for k in r if k.startswith("replay_")})
+    keys = ORDER + sorted({k for r in rows for k in r if k.startswith(("replay_", "refetch_"))})
     names = [r["run"] for r in rows]
     width = max(24, *(len(k) for k in keys))
     colw = max(18, *(len(n) for n in names)) if names else 18
@@ -395,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("runs", nargs="*", help="run directories (default: every run under diagnostics/eval_runs)")
     parser.add_argument("--rerender", action="store_true", help="rebuild PDFs from saved results with the current renderer")
     parser.add_argument("--retrieval", action="store_true", help="replay current retrieval scoring on captured search results")
+    parser.add_argument("--refetch", action="store_true", help="re-fetch queued pages with the current fetcher (network only, no API credits)")
     parser.add_argument("--baseline", help="JSON baseline to show before → after")
     parser.add_argument("--save-baseline", help="write metrics to this JSON file")
     parser.add_argument("--details", action="store_true", help="print the offending headings/husks/fragments")
@@ -404,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     if not run_dirs:
         print(f"No runs found under {DEFAULT_RUNS}", file=sys.stderr)
         return 2
-    rows = [evaluate_run(d, rerender=args.rerender, retrieval=args.retrieval) for d in run_dirs]
+    rows = [evaluate_run(d, rerender=args.rerender, retrieval=args.retrieval, refetch=args.refetch) for d in run_dirs]
     baseline = None
     if args.baseline:
         raw = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
