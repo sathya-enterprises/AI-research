@@ -243,7 +243,7 @@ async def crawl_relevant_internal_pages(
     seeds: list[dict],
     question: str,
     *,
-    report_tier: str = "brief",
+    report_tier: str = "detailed",
     max_pages: int | None = None,
     max_depth: int = 2,
     per_page_chars: int = 9000,
@@ -256,11 +256,11 @@ async def crawl_relevant_internal_pages(
     concurrency/page/time budget. The report layer applies its normal query-specific
     relevance filter again before any crawled content can be used as evidence.
     """
-    tier = str(report_tier or "brief").lower()
-    default_limits = {"brief": 3, "detailed": 12, "in_depth": 24}
+    tier = str(report_tier or "detailed").lower()
+    default_limits = {"detailed": 12, "in_depth": 24}
     # Deep Research needs a wider bounded crawl; the report layer still filters
     # every returned page for query relevance before the model can use it.
-    page_limit = max(0, min(int(max_pages if max_pages is not None else default_limits.get(tier, 3)), 28))
+    page_limit = max(0, min(int(max_pages if max_pages is not None else default_limits.get(tier, 12)), 28))
     depth_limit = max(1, min(int(max_depth or 1), 3))
     stats = {"enabled": page_limit > 0, "seed_count": 0, "pages_requested": 0, "pages_fetched": 0, "links_discovered": 0, "accepted_candidates": 0, "errors": 0, "browser_fallback_attempts": 0, "browser_fallback_successes": 0, "max_depth": depth_limit, "page_limit": page_limit}
     if page_limit <= 0 or not seeds:
@@ -269,7 +269,7 @@ async def crawl_relevant_internal_pages(
     investor_discovery = bool(_INVESTOR_DISCOVERY_RE.search(str(question or "")))
     seed_rows: list[dict] = []
     seed_hosts: set[str] = set()
-    max_seeds = {"brief": 2, "detailed": 5, "in_depth": 8}.get(tier, 2)
+    max_seeds = {"detailed": 5, "in_depth": 8}.get(tier, 5)
     for source in seeds:
         if not isinstance(source, dict) or source.get("pageFetchStatus") != "ok" or source.get("pageFetchRelevanceMatched") is False:
             continue
@@ -376,7 +376,7 @@ async def crawl_relevant_internal_pages(
                 if url in visited:
                     continue
                 host = _site_key(url)
-                host_cap = {"brief": 2, "detailed": 4, "in_depth": 6}.get(tier, 2)
+                host_cap = {"detailed": 4, "in_depth": 6}.get(tier, 4)
                 if per_host_counts.get(host, 0) >= host_cap:
                     continue
                 visited.add(url)

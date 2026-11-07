@@ -50,7 +50,10 @@ from utils.screener_kb import (
 from utils.intent import resolve_request_intent, RequestIntent, is_search_audit_request, _extract_research_topic
 from routes.house_styles import DEFAULT_REPORT_STYLE, normalize_report_style, writer_style_contract
 from routes import report_llm
-from utils.report_tiers import get_report_tier_spec, report_tier_contract, requested_report_page_count
+from utils.report_tiers import (
+    get_report_tier_spec, report_tier_contract, report_tier_error,
+    report_tier_for_page_count, requested_report_page_count,
+)
 from utils.deep_research_coverage import (
     audit_research_coverage, audit_requested_report_scope,
     indian_fy_quarter as _indian_fy_quarter,
@@ -200,7 +203,7 @@ log = logging.getLogger("report")
 # finish successfully while the browser has already lost the connection.
 # These small in-process job records let the UI start Deep Research quickly
 # and poll for completion instead. The existing synchronous endpoint remains
-# available for direct/API callers and for Brief/Detailed.
+# available for direct/API callers and for In-Detail.
 _REPORT_JOBS: dict[str, dict] = {}
 _REPORT_JOB_TTL_SECONDS = 60 * 60
 _REPORT_JOB_MAX = 8
@@ -1038,7 +1041,7 @@ You MUST respond with valid JSON only — no markdown fences, no preamble, no te
 Respond with EXACTLY this shape:
 {
   "title": "<concise NOUN-PHRASE report title, max 12 words. Examples: 'Top Banking Stocks India 2026', 'Indian Mutual Fund SIP Returns Analysis', 'HDFC vs ICICI Bank Comparison', 'Nifty 50 Market Outlook — June 2026'. STRICT RULES: NEVER start with 'So', 'You', 'I', 'Let's', 'Here', 'Based', 'Looking', 'Understanding', 'A look at', 'An analysis of', or any verb/pronoun. NEVER start with 'The' followed by a verb — e.g. BAD: 'The Nifty outlook today is mixed, with some analysts predicting...' (full sentence starting with The) → GOOD: 'Nifty 50 Outlook — Mixed Signals Amid Volatility'. NEVER write a full sentence — this includes sentences that don't start with one of those words too, e.g. BAD: 'The Minimum Investment Amounts For These Top-Performing SIPs Are As Follows' → GOOD: 'Top-Performing SIP Funds — Minimum Investment Requirements'. Never end a title with a colon, 'as follows', or '...' — those signal an incomplete sentence, not a heading. ALWAYS write a noun phrase — topic first, qualifiers after.>",
-  "report": "<full markdown report whose scope and structure fit this request and its usable evidence. The selected report tier controls research breadth and analytical depth, not a fixed page, word, or character count. Keep Brief concise; make In-Detail and Deep Research more comprehensive through distinct evidence, source-grounded comparisons, history, counterpoints, sensitivities and implications. Stop when material questions are answered or the evidence runs out; never pad, repeat, or invent numbers.",
+  "report": "<full markdown report whose scope and structure fit this request and its usable evidence. The selected report tier controls research breadth and analytical depth, not a fixed page, word, or character count. Make In-Detail and Deep Research comprehensive through distinct evidence, source-grounded comparisons, history, counterpoints, sensitivities and implications. Stop when material questions are answered or the evidence runs out; never pad, repeat, or invent numbers.",
   "charts": [...],
   "images": [{ "prompt": "<AI image-generation prompt — see AI IMAGE RULES>", "caption": "<short caption>" }, ...] (0-2 items — see AI IMAGE RULES; optional, include only where a genuine visual opportunity exists),
   "keyStats": [{ "label": "<short label>", "value": "<value string>", "change": "<+/- % or empty string>" }],
@@ -1491,7 +1494,7 @@ complete, authoritative listing, not a duplicate of the inline mentions.
 FORMAT RATIO — LET THE REQUEST DECIDE THE PRESENTATION, BUT OPTIMIZE ANALYTICAL REPORTS FOR SCANABILITY:
   Tables, charts, bullet lists, blockquote callouts, timelines, comparison blocks, KPI cards, and images are
   optional tools, not quotas. However, a professional research report is NOT expected to be a wall of prose.
-  For Brief, In-Detail, and Deep Research reports, actively look for evidence shapes that are clearer as a
+  For In-Detail and Deep Research reports, actively look for evidence shapes that are clearer as a
   structured visual or list than as consecutive paragraphs. Use the minimum number of meaningful structures
   needed to make the analysis easier to scan; do not add decorative elements or fabricate data just to vary the page.
   → When a section contains 2+ comparable entities/segments/periods with the same fields, prefer a compact TABLE.
@@ -1512,7 +1515,7 @@ FORMAT RATIO — LET THE REQUEST DECIDE THE PRESENTATION, BUT OPTIMIZE ANALYTICA
     drivers, findings, comparisons, or implications, split them into structured points.
   → Deep Research should be deeper, not merely longer: increase evidence, comparisons, mechanisms, scenarios and
     counterpoints rather than increasing paragraph count. In-Detail should broaden the analysis while remaining
-    highly scannable. Brief should surface the highest-value findings with especially compact presentation.
+    highly scannable.
   → Narrative/essay/comedic requests may remain prose-heavy when that is genuinely what the user asked for. The
     scanability rules above apply to research/analytical reports, not as a universal requirement for creative writing.
   There is still NO fixed percentage or mandatory component count. The report planner and writer must choose the
@@ -3699,7 +3702,7 @@ def _infer_gallery_targets(question: str, sources: list[dict]) -> list[str]:
 def _insert_source_observation_table(report_text: str, dataset, question: str, report_tier: str) -> tuple[str, int]:
     """Expose tier-appropriate numbers extracted from scraped sources inside the relevant section."""
     tier = str(report_tier or "detailed").casefold()
-    limits = {"brief": (5, 8), "detailed": (10, 15), "in_depth": (60, 89)}
+    limits = {"detailed": (10, 15), "in_depth": (60, 89)}
     minimum, maximum = limits.get(tier, (10, 15))
     observations = list(getattr(dataset, "observations", []) or [])
     is_banking_query = bool(re.search(
@@ -4254,8 +4257,8 @@ def _append_evidence_chart_gallery(
     dataset = _filter_gallery_dataset_for_question(dataset, question)
     meta["observations"] = len(dataset)
     tier_key = str(report_tier or "detailed").casefold()
-    coverage_minimum = {"brief": 5, "detailed": 10, "in_depth": 60}.get(tier_key, 10)
-    coverage_target = {"brief": [5, 8], "detailed": [10, 15], "in_depth": [60, 89]}.get(tier_key, [10, 15])
+    coverage_minimum = {"detailed": 10, "in_depth": 60}.get(tier_key, 10)
+    coverage_target = {"detailed": [10, 15], "in_depth": [60, 89]}.get(tier_key, [10, 15])
     metric_keys = {
         str(getattr(obs, "metric", "") or getattr(obs, "metric_label", "") or "").casefold()
         for obs in (getattr(dataset, "observations", []) or [])
@@ -4324,7 +4327,7 @@ def _append_evidence_chart_gallery(
     # version of the same small dataset in 20+ chart types.
     # Charts are mandatory and maximised for the client; redundant same-metric
     # variants are still removed below. Override with REPORT_TIER_GALLERY_CHARTS.
-    tier_limits = _tier_limits("REPORT_TIER_GALLERY_CHARTS", {"brief": 10, "detailed": 20, "in_depth": 40})
+    tier_limits = _tier_limits("REPORT_TIER_GALLERY_CHARTS", {"detailed": 20, "in_depth": 40})
     max_gallery_charts = tier_limits.get(tier_key, 20)
     catalog_audit = bool(re.search(
         r"(?is)\b(?:audit|test|inventory|list|demonstrate)\b.{0,100}\b(?:all\s+50|50|all)\b.{0,50}\bchart\s+types?\b",
@@ -5012,8 +5015,7 @@ def _add_verified_numeric_charts_from_tables(
     plots are separate native/SVG-compatible chart specs. No chart is invented when
     the underlying fetched table does not verify its values, labels, periods and units.
     """
-    tier = str(report_tier or "brief").strip().casefold().replace("-", "_")
-    maximum = 1 if tier == "brief" else 3
+    maximum = 3
     working = list(charts or [])
     output_text, removed_placeholders = _dedupe_chart_placeholders(str(report_text or ""))
     if removed_placeholders:
@@ -5413,7 +5415,6 @@ GEMINI_MAX_TOTAL_ATTEMPTS = max(1, int(_os.environ.get("GEMINI_REPORT_MAX_KEY_AT
 # Per-request network budget.  Successful detailed reports in this project often
 # take 15–25s; 35s leaves enough room without allowing a dead key to hang forever.
 _GEMINI_REQUEST_TIMEOUTS = {
-    "brief": 22,
     "detailed": 35,
     "in_depth": 50,
 }
@@ -5421,7 +5422,6 @@ _GEMINI_REQUEST_TIMEOUTS = {
 # End-to-end writer budget.  This is deliberately independent of provider/key
 # counts; the scheduler spends the budget on waves and then falls back.
 _DEPTH_TIME_BUDGETS = {
-    "brief": 60,
     "detailed": 150,
     "in_depth": 240,
 }
@@ -5444,7 +5444,7 @@ GEMINI_TIMEOUT_KEY_COOLDOWN_MS = 10_000
 # launch the next key immediately when one fails fast (429/exception). A 503
 # or 400/404 stops the wave so the scheduler moves straight to the next model.
 # GEMINI_REPORT_HEDGE_DELAY_SECONDS=0 restores the old all-at-once behaviour.
-_GEMINI_HEDGE_DELAYS = {"brief": 10.0, "detailed": 15.0, "in_depth": 20.0}
+_GEMINI_HEDGE_DELAYS = {"detailed": 15.0, "in_depth": 20.0}
 
 
 def _gemini_hedge_delay(depth: str) -> float:
@@ -5486,10 +5486,10 @@ _GEMINI_MAX_OUTPUT = {
     "gemini-3.5-flash-lite":  32_768,
     "gemini-2.5-flash":       65_536,
 }
-_DEPTH_OUTPUT_CAPS = {"brief": 16_384, "detailed": 65_536, "in_depth": 65_536}
+_DEPTH_OUTPUT_CAPS = {"detailed": 65_536, "in_depth": 65_536}
 # Retrieval breadth follows the selected report depth. These are capacity
-# settings, not report-section or visual quotas: Brief is focused, In-Detail
-# broadens evidence, and Deep Research uses the widest practical source set.
+# settings, not report-section or visual quotas: In-Detail broadens evidence,
+# and Deep Research uses the widest practical source set.
 # Retrieval and publisher-page extraction scale with the selected product tier.
 # Search, enrichment and crawl budgets are separate. Search limits below remain
 # administrator-configurable, but report-level search calls also use a per-query
@@ -5502,29 +5502,33 @@ def _tier_limits(env_name: str, defaults: dict[str, int]) -> dict[str, int]:
     try:
         values = [max(1, int(part.strip())) for part in raw.split(",")]
     except ValueError:
-        log.warning("%s=%r is not three comma-separated integers; using defaults", env_name, raw)
+        log.warning("%s=%r is not two comma-separated integers; using defaults", env_name, raw)
         return dict(defaults)
-    if len(values) != 3:
-        log.warning("%s=%r needs exactly three values (brief,detailed,in_depth); using defaults", env_name, raw)
+    if len(values) == 3:
+        # Legacy brief,detailed,in_depth format: the brief tier was removed.
+        log.warning("%s=%r uses the legacy three-value format; ignoring the removed brief value", env_name, raw)
+        values = values[1:]
+    if len(values) != 2:
+        log.warning("%s=%r needs exactly two values (detailed,in_depth); using defaults", env_name, raw)
         return dict(defaults)
-    return dict(zip(("brief", "detailed", "in_depth"), values))
+    return dict(zip(("detailed", "in_depth"), values))
 
 
 # Exa returns at most 100 results per query, so 100 is the useful search ceiling.
-_TIER_SEARCH_LIMITS = _tier_limits("REPORT_TIER_SEARCH_LIMITS", {"brief": 20, "detailed": 60, "in_depth": 100})
-_TIER_ENRICH_LIMITS = _tier_limits("REPORT_TIER_ENRICH_LIMITS", {"brief": 20, "detailed": 50, "in_depth": 80})
-_TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"brief": 6, "detailed": 24, "in_depth": 48})
+_TIER_SEARCH_LIMITS = _tier_limits("REPORT_TIER_SEARCH_LIMITS", {"detailed": 60, "in_depth": 100})
+_TIER_ENRICH_LIMITS = _tier_limits("REPORT_TIER_ENRICH_LIMITS", {"detailed": 50, "in_depth": 80})
+_TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"detailed": 24, "in_depth": 48})
 # Numeric observations (with provenance) handed to the writer, and the character
 # budget for that evidence block; the budget must grow with the count or the
 # block is truncated before the extra observations reach the model.
-_TIER_NUMERIC_OBSERVATIONS = _tier_limits("REPORT_TIER_NUMERIC_OBSERVATIONS", {"brief": 120, "detailed": 250, "in_depth": 400})
-_TIER_EVIDENCE_CONTEXT_CHARS = _tier_limits("REPORT_TIER_EVIDENCE_CONTEXT_CHARS", {"brief": 40_000, "detailed": 85_000, "in_depth": 140_000})
+_TIER_NUMERIC_OBSERVATIONS = _tier_limits("REPORT_TIER_NUMERIC_OBSERVATIONS", {"detailed": 250, "in_depth": 400})
+_TIER_EVIDENCE_CONTEXT_CHARS = _tier_limits("REPORT_TIER_EVIDENCE_CONTEXT_CHARS", {"detailed": 85_000, "in_depth": 140_000})
 
 
 def _report_search_results_per_query(report_tier: str) -> int:
     """Bound search fan-out while retaining enough candidates for evidence diversity."""
     tier = str(report_tier or "detailed").casefold()
-    tier_cap = {"brief": 8, "detailed": 12, "in_depth": 18}.get(tier, 12)
+    tier_cap = {"detailed": 12, "in_depth": 18}.get(tier, 12)
     try:
         configured_cap = max(4, int(os.getenv("GG_REPORT_PER_QUERY_SEARCH_CAP", "18")))
     except (TypeError, ValueError):
@@ -5539,9 +5543,9 @@ def _report_search_min_results(per_query_limit: int) -> int:
 
 
 def _extract_requested_depth(user_prompt: str, report_tier: str | None = None) -> str:
-    if report_tier in ("brief", "detailed", "in_depth"):
+    if report_tier in ("detailed", "in_depth"):
         return report_tier
-    m = re.search(r"Overall depth:\s*(brief|detailed|in_depth)\b", user_prompt or "", flags=re.I)
+    m = re.search(r"Overall depth:\s*(detailed|in_depth)\b", user_prompt or "", flags=re.I)
     return m.group(1).lower() if m else "detailed"
 
 
@@ -5573,8 +5577,8 @@ def _gemini_candidate_keys(keys: list[str], model: str, limit: int) -> list[str]
 # silence between chunks) plus a wall-clock cap per attempt. Set
 # GEMINI_REPORT_STREAMING=0 to restore the old single-response call.
 _GEMINI_REPORT_STREAMING = _os.environ.get("GEMINI_REPORT_STREAMING", "1").strip().lower() not in {"0", "false", "no", "off"}
-_GEMINI_STALL_TIMEOUTS = {"brief": 25.0, "detailed": 30.0, "in_depth": 35.0}
-_GEMINI_ATTEMPT_CAPS = {"brief": 70.0, "detailed": 120.0, "in_depth": 200.0}
+_GEMINI_STALL_TIMEOUTS = {"detailed": 30.0, "in_depth": 35.0}
+_GEMINI_ATTEMPT_CAPS = {"detailed": 120.0, "in_depth": 200.0}
 # (key, model) pairs whose stream has produced its first chunk. The hedging
 # scheduler reads this so it does not duplicate a prompt that is already flowing.
 _GEMINI_STREAMING_ATTEMPTS: set[tuple[str, str]] = set()
@@ -5909,13 +5913,6 @@ def _extract_prompt_topic(user_prompt: str) -> str:
     m = re.search(r"Research Question / Topic .*?:\s*(.+)", user_prompt or "", re.IGNORECASE)
     return (m.group(1).strip() if m else "Research Report")[:220]
 
-
-def _extract_prompt_tier(user_prompt: str) -> str:
-    m = re.search(r"SELECTED REPORT DEPTH:\s*(?:Brief Report|In-Detail Report|Deep Research Report)", user_prompt or "", re.IGNORECASE)
-    if not m:
-        return "detailed"
-    raw = m.group(0).lower()
-    return "brief" if "brief" in raw else ("in_depth" if "deep" in raw else "detailed")
 
 
 def _deterministic_report_json(
@@ -6350,7 +6347,7 @@ async def _parallel_gemini_analyst_once(prompt: str, report_tier: str, key: str,
     # 6.5 s was too short for a 12k-28k char evidence prompt with up to 3,072
     # output tokens: only flash-lite finished, and the 3.6-flash/3.5-flash
     # analysts timed out (2 of 5 analysts lost in the EV run). Default by tier.
-    _tier_call_default = {"brief": 10.0, "detailed": 12.0, "in_depth": 14.0}.get(report_tier, 12.0)
+    _tier_call_default = {"detailed": 12.0, "in_depth": 14.0}.get(report_tier, 12.0)
     try:
         per_call_seconds = max(4.0, min(30.0, float(os.getenv("REPORT_PARALLEL_REQUEST_TIMEOUT_SECONDS", str(_tier_call_default)))))
     except (TypeError, ValueError):
@@ -6504,8 +6501,8 @@ async def run_parallel_evidence_analysis(
     source_blocks = _parallel_source_blocks(source_text)
     if not source_blocks:
         return {"enabled": True, "findings": [], "gaps": [], "analysts": 0, "reason": "no_canonical_source_blocks"}
-    tier = report_tier if report_tier in {"brief", "detailed", "in_depth"} else "detailed"
-    context_limit = {"brief": 12000, "detailed": 20000, "in_depth": 26000}[tier]
+    tier = report_tier if report_tier in {"detailed", "in_depth"} else "detailed"
+    context_limit = {"detailed": 20000, "in_depth": 26000}[tier]
     # Give every canonical source a context slice and reserve the remaining budget
     # for structured numeric observations; do not let early sources crowd out later ones.
     evidence_context = _parallel_evidence_context(source_blocks, research_engine_context, context_limit)
@@ -8100,8 +8097,8 @@ def _filter_relevant_sources(
             r"(?i)\b(?:latest|current|recent|most recent|up.to.date|as of|through\s+20\d{2}|outlook)\b",
             str(question or ""),
         ))
-        banking_candidate_limit = {"brief": 10, "detailed": 30, "in_depth": 50}.get(str(report_tier or "").casefold(), 20)
-        banking_context_limit = {"brief": 10, "detailed": 25, "in_depth": 40}.get(str(report_tier or "").casefold(), 14)
+        banking_candidate_limit = {"detailed": 30, "in_depth": 50}.get(str(report_tier or "").casefold(), 20)
+        banking_context_limit = {"detailed": 25, "in_depth": 40}.get(str(report_tier or "").casefold(), 14)
         ranked_banks = []
         for score, hits, idx, src in scored:
             title = str(src.get("title") or "").strip()
@@ -11863,17 +11860,14 @@ def _best_matching_section(instruction: str, sections: list[dict]) -> tuple[int,
 # Tier expansion is evidence-driven: each accepted module must add distinct,
 # grounded analysis and stops when the source material cannot support more.
 _TIER_EXPANSION_PASSES = {
-    "brief": 0,
     "detailed": 4,
     "in_depth": 7,
 }
 _TIER_EXPANSION_CHUNK_TARGET = {
-    "brief": 8_000,
     "detailed": 22_000,
     "in_depth": 32_000,
 }
 _TIER_EXPANSION_TIME_BUDGETS = {
-    "brief": 18,
     "detailed": 180,
     # Deep Research remains bounded by the asynchronous job lifecycle.
     "in_depth": 480,
@@ -13793,7 +13787,7 @@ def _expand_source_supported_market_cagr_chart(
     """
     if not isinstance(chart, dict):
         return chart, False
-    tier_key = str(report_tier or "brief").strip().lower().replace("-", "_")
+    tier_key = str(report_tier or "detailed").strip().lower().replace("-", "_")
     if tier_key in {"in_depth", "deep_research", "advanced"}:
         return chart, False
     title = str(chart.get("title") or "").casefold()
@@ -13902,7 +13896,7 @@ def _expand_source_supported_market_cagr_chart(
         return chart, False
 
     start_year, start_value, end_year, end_value, rate = match_candidate
-    band_maximum = 8 if tier_key in {"brief", "basic", "brief_report"} else 15
+    band_maximum = 15
     if end_year - start_year + 1 <= band_maximum:
         years = list(range(start_year, end_year + 1))
     else:
@@ -15590,11 +15584,6 @@ async def _run_independent_report_audit(
     return audit, deterministic
 
 
-def _enforce_brief_section_cap(report_text: str, report_plan: dict | None, max_sections: int = 4) -> str:
-    """Compatibility shim; preserve the planner's complete dynamic structure."""
-    return report_text
-
-
 async def _ensure_report_page_budget(
     report_text: str, question: str, report_tier: str, report_plan: dict | None,
     evidence_text: str, title: str, summary: str, key_stats: list, charts: list,
@@ -15624,20 +15613,17 @@ async def _ensure_report_page_budget(
         log.info("Report pagination measured: pages=%d tier=%s; no implicit length target applied", pages, report_tier)
         return expanded, pages
 
-    total_budget = {"brief": 18.0, "detailed": 180.0, "in_depth": 480.0}.get(report_tier, 180.0)
+    total_budget = {"detailed": 180.0, "in_depth": 480.0}.get(report_tier, 180.0)
     # Explicit page requests are bounded; no default tier expands to a page minimum.
     # A single corrective pass avoids repeated LLM writes and PDF preflights.
-    max_rounds = {"brief": 1, "detailed": 4, "in_depth": 7}.get(report_tier, 4)
-    max_passes = {"brief": 1, "detailed": 4, "in_depth": 7}.get(report_tier, 4)
-    max_chars = {"brief": 32_000, "detailed": 120_000, "in_depth": 220_000}.get(report_tier, 120_000)
-    min_growth = {"brief": 2_000, "detailed": 7_000, "in_depth": 10_000}.get(report_tier, 7_000)
+    max_rounds = {"detailed": 4, "in_depth": 7}.get(report_tier, 4)
+    max_passes = {"detailed": 4, "in_depth": 7}.get(report_tier, 4)
+    max_chars = {"detailed": 120_000, "in_depth": 220_000}.get(report_tier, 120_000)
+    min_growth = {"detailed": 7_000, "in_depth": 10_000}.get(report_tier, 7_000)
     started = time.perf_counter()
 
     # The explicit user request is the only page-count generation target.
-    # Requiring the midpoint created avoidable LLM expansion + PDF preflight
-    # rounds even after a valid 6-page brief was ready. Longer tiers still aim
-    # toward their preferred target because depth is part of their contract.
-    expansion_threshold = minimum if report_tier == "brief" else target
+    expansion_threshold = target
     # Thin evidence: with few sources whose publisher page was actually fetched,
     # every extra expansion round mostly restates the same facts or adds
     # unsupported claims, which the audit then flags (repair -> re-audit). Aim
@@ -15650,8 +15636,8 @@ async def _ensure_report_page_budget(
             or len(str(row.get("pageContent") or "")) >= 1500
         )
     )
-    _thin_limit = {"brief": 0, "detailed": 8, "in_depth": 12}.get(report_tier, 8)
-    if report_tier != "brief" and _fetched_sources < _thin_limit:
+    _thin_limit = {"detailed": 8, "in_depth": 12}.get(report_tier, 8)
+    if _fetched_sources < _thin_limit:
         expansion_threshold = minimum
         max_rounds = min(max_rounds, 2)
         log.info("Report page-band: thin evidence (%d fetched sources < %d) — aiming for the tier minimum with at most %d round(s)",
@@ -15668,7 +15654,7 @@ async def _ensure_report_page_budget(
     # last run). Stop and disclose the shortfall instead of padding.
     _band_ratio = pages / max(1, minimum)
     _evidence_limited = (
-        report_tier != "brief" and _fetched_sources < _thin_limit and _band_ratio < 0.5
+        _fetched_sources < _thin_limit and _band_ratio < 0.5
     )
     if pages < expansion_threshold and _evidence_limited:
         log.warning(
@@ -16721,7 +16707,7 @@ async def _expand_report_semantically(
     A separate renderer-measured pass handles explicit user page requests only.
     """
     tier = str(report_tier or "detailed").lower()
-    if tier == "brief" or _TIER_EXPANSION_PASSES.get(tier, 0) <= 0:
+    if _TIER_EXPANSION_PASSES.get(tier, 0) <= 0:
         return report_text
     evidence = str(evidence_text or "").strip()
     if len(evidence) < 900:
@@ -16964,11 +16950,6 @@ async def _expand_report_to_tier(
         expansion_budget = min(expansion_budget, max(0.0, float(time_budget_override)))
     if expansion_budget <= 0.0:
         return report_text
-    if target_override is not None and report_tier == "brief":
-        # A Brief gets one small, renderer-measured completion attempt, not a
-        # 45-second multi-pass loop. If it cannot be completed safely, disclose
-        # the page shortfall rather than repeatedly regenerating sections.
-        expansion_budget = min(max(expansion_budget, 8), 25)
     deadline = time.perf_counter() + expansion_budget
     expanded = report_text
     # Headings whose last continuation was rejected (hygiene stripped it again or it
@@ -17238,7 +17219,7 @@ async def _apply_report_scanability_pass(report_text: str, question: str, report
     """
     cleaned = strip_generation_markers(report_text)
     tier_key = str(report_tier or "detailed").lower()
-    target_limit = 6 if tier_key in {"in_depth", "deep", "deep_research"} else (2 if tier_key == "brief" else 4)
+    target_limit = 6 if tier_key in {"in_depth", "deep", "deep_research"} else 4
     candidates = select_scanability_targets(cleaned, report_tier, max_targets=target_limit)
     before_audit = audit_scanability(cleaned)
     if not candidates:
@@ -18075,7 +18056,7 @@ You MUST respond with valid JSON only — no markdown fences, no preamble, no te
 
 Respond with this shape:
 {
-  "depth": "brief" | "detailed" | "in_depth",
+  "depth": "detailed" | "in_depth",
   "depth_reason": "<one short phrase explaining why this depth fits THIS request and source material>",
   "sections": [
     {
@@ -18175,10 +18156,6 @@ def _fallback_report_plan(question: str, intent=None, report_tier: str = "detail
         # selected tier increases analytical coverage only when this topic needs it.
         tier_key = str(report_tier or "detailed").lower()
         local_sections = {
-            "brief": [
-                ("Investor Options & Fit", "Identify plausible investor categories and named targets supported by the available evidence; distinguish verified fit from leads to validate.", "mixed"),
-                ("First-Priority Outreach & Evidence Gaps", "Prioritize practical next steps and state what must be verified before approaching any investor.", "bullets"),
-            ],
             "detailed": [
                 ("Electronic City Software & Startup Ecosystem", "Establish the relevant local company/startup context using location-specific directories and official ecosystem sources.", "mixed"),
                 ("Potential Investor Targets & Portfolio Fit", "Compare named funds, angel networks and investing platforms only where source evidence supports their relevance to software projects.", "table"),
@@ -18329,7 +18306,7 @@ def _report_plan_validation_errors(plan) -> list[str]:
     if not isinstance(plan, dict):
         return ["top_level_not_object"]
     depth = plan.get("depth") or plan.get("tier")
-    if depth not in ("brief", "detailed", "in_depth", "standard", "comprehensive"):
+    if depth not in ("detailed", "in_depth", "standard", "comprehensive"):
         errors.append("invalid_or_missing_depth")
     sections = plan.get("sections")
     if not isinstance(sections, list):
@@ -18678,7 +18655,7 @@ async def _plan_report_structure(
     failure so callers can fall back to the writer's existing implicit
     planning (REPORT STRUCTURE rules in SYSTEM_PROMPT) unchanged."""
     _preview_count, _preview_chars = {
-        "brief": (10, 350), "detailed": (25, 500), "in_depth": (40, 650),
+        "detailed": (25, 500), "in_depth": (40, 650),
     }.get(str(report_tier or "detailed").lower(), (25, 500))
     source_preview = _build_plan_source_preview(
         question, enriched_sources, file_section, okf_context, no_web_sources,
@@ -18793,9 +18770,7 @@ async def _plan_report_structure(
                 ("Data Quality and Evidence Limitations", "Report missing, undisclosed, inconsistent, or unavailable fields without converting them to zero.", "bullets"),
                 ("Conclusions and Analytical Implications", "State concise conclusions directly supported by workbook calculations and disclose what cannot be concluded.", "prose"),
             ]
-            if _pms_depth == "brief":
-                _pms_sections = _pms_sections[:3] + _pms_sections[-1:]
-            elif _pms_depth == "in_depth":
+            if _pms_depth == "in_depth":
                 _pms_sections += [
                     ("Return Distribution and Dispersion", "Analyze distribution and spread across valid strategy observations where the workbook contains sufficient numeric data.", "mixed"),
                     ("Strategy-Level Exceptions", "Highlight notable outliers or inconsistencies with their worksheet and row evidence.", "mixed"),
@@ -18819,7 +18794,7 @@ async def _plan_report_structure(
     if _is_local_company_investor_discovery(local_context):
         preview_lower = source_preview.casefold()
         investor_evidence = any(term in preview_lower for term in ("investor", "venture capital", "portfolio", "angel", "funding", "startup"))
-        minimum_by_tier = {"brief": 2, "detailed": 4, "in_depth": 6}
+        minimum_by_tier = {"detailed": 4, "in_depth": 6}
         min_sections = minimum_by_tier.get(report_tier, 2) if investor_evidence else 1
         current_sections = list(plan.get("sections") or [])
         if len(current_sections) < min_sections:
@@ -18882,8 +18857,7 @@ def _format_plan_for_prompt(plan: dict) -> str:
     if notes:
         lines.append(f"\nPlanner notes: {notes}")
     depth_guidance = {
-        "brief": "Brief: prioritize decision-useful evidence and stop when the supported core answer is complete, with necessary caveats.",
-        "detailed": "In-Detail: retain the core answer and findings, then add source-backed drivers, comparisons, historical context, quantitative evidence, implementation implications and risks supported by the request and evidence.",
+        "detailed": "In-Detail: answer the core question with findings, then add source-backed drivers, comparisons, historical context, quantitative evidence, implementation implications and risks supported by the request and evidence.",
         "in_depth": "Deep Research: broaden the source base and triangulate claims; extend the core analysis with granular history, entity/segment comparisons, scenarios, sensitivities, contradictions, methodology and evidence gaps where the evidence supports distinct analysis.",
     }.get(str(plan.get("depth") or "detailed"), "")
     if depth_guidance:
@@ -20046,22 +20020,6 @@ def _normalize_accidental_prompt_join(question: str) -> str:
     return raw
 
 
-def _explicit_report_tier_from_question(question: str) -> str | None:
-    """Resolve explicit report-depth wording before planning.
-
-    A stale persisted picker must not turn an explicit "Brief report" request
-    into an In-Detail report. The same resolver also protects direct API calls.
-    """
-    q = re.sub(r"\s+", " ", question or "").strip().lower()
-    if re.search(r"\b(?:deep research|in[- ]depth|in_depth|deep[- ]dive|institutional[- ]grade)\b", q):
-        return "in_depth"
-    if re.search(r"\b(?:in[- ]detail|detailed|comprehensive)\s+(?:research\s+)?(?:report|analysis|study|review)\b", q):
-        return "detailed"
-    if re.search(r"\b(?:brief|executive|short)\s+(?:research\s+)?(?:report|analysis|study|review)\b", q):
-        return "brief"
-    return None
-
-
 @router.post("/start")
 async def start_report_job(request: Request):
     """Start any report tier without holding a long browser HTTP request open."""
@@ -20074,12 +20032,13 @@ async def start_report_job(request: Request):
     requested_pages = requested_report_page_count(str(body.get("question") or ""), body.get("requestedPageCount") or body.get("targetPages"))
     tier = str(body.get("reportTier") or body.get("depth") or body.get("reportDepth") or "").strip().lower()
     if requested_pages is not None:
-        tier = "in_depth" if requested_pages >= 70 else "detailed" if requested_pages > 10 else "brief"
+        tier = report_tier_for_page_count(requested_pages)
         body["requestedPageCount"] = requested_pages
         body["reportTier"] = tier
         log.info("Explicit report page target detected before job start: pages=%d tier=%s", requested_pages, tier)
-    if tier not in ("brief", "detailed", "in_depth"):
-        return JSONResponse({"error": "Invalid report tier. Use brief, detailed, or in_depth."}, status_code=400)
+    _tier_error = report_tier_error(tier)
+    if _tier_error:
+        return JSONResponse({"error": _tier_error}, status_code=400)
     _prune_report_jobs()
     # Duplicate-submission guard: a retry/double-click with the same client
     # request id reuses the existing job instead of starting another one.
@@ -20341,11 +20300,12 @@ async def generate_report(request: Request):
     # Ordinary prose adjectives do not override the UI tier. An explicit page-count
     # constraint does, because it is an unambiguous delivery requirement.
     if requested_page_count is not None:
-        report_tier = "in_depth" if requested_page_count >= 70 else "detailed" if requested_page_count > 10 else "brief"
+        report_tier = report_tier_for_page_count(requested_page_count)
         body["requestedPageCount"] = requested_page_count
         log.info("Report explicit page target resolved: pages=%d tier=%s", requested_page_count, report_tier)
-    if report_tier not in ("brief", "detailed", "in_depth"):
-        return JSONResponse({"error": "Invalid reportTier. Use brief, detailed, or in_depth."}, status_code=400)
+    _tier_error = report_tier_error(report_tier)
+    if _tier_error:
+        return JSONResponse({"error": _tier_error}, status_code=400)
     tier_spec = get_report_tier_spec(report_tier)
     # Client house style (Market Currents by default, or Feature Article).
     report_style = normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE)
@@ -20765,7 +20725,7 @@ async def generate_report(request: Request):
         if _news_kb_enabled and _news_question and not has_file_data:
             from utils.research_store import retrieve_web_research as _retrieve_kb
             _kb_query = str(getattr(intent, "resolved_topic", "") or question).strip()
-            _kb_limit = {"brief": 3, "detailed": 5, "in_depth": 8}.get(report_tier, 4)
+            _kb_limit = {"detailed": 5, "in_depth": 8}.get(report_tier, 4)
             _kb_rows = await asyncio.wait_for(asyncio.to_thread(
                 _retrieve_kb, _kb_query, _kb_limit, int(os.getenv("GG_REPORT_NEWS_KB_MAX_AGE_DAYS", "45")),
                 source_type="market_news_article", require_page_text=True,
@@ -21169,7 +21129,7 @@ async def generate_report(request: Request):
         "sources": sources,
     })
     ENRICH_SOURCE_COUNT = _TIER_ENRICH_LIMITS.get(report_tier, 25)
-    ENRICH_FETCH_CHARS = {"brief": 10000, "detailed": 15000, "in_depth": 20000}.get(report_tier, 15000)
+    ENRICH_FETCH_CHARS = {"detailed": 15000, "in_depth": 20000}.get(report_tier, 15000)
     try:
         # Source-page network I/O dominates this stage. Bound the fan-out but
         # overlap more independent pages to reduce time-to-evidence.
@@ -21356,8 +21316,8 @@ async def generate_report(request: Request):
         crawl_subject = " ".join((question, str(getattr(intent, "resolved_topic", "") or ""), conversation_context))
         crawled_rows, crawl_stats = await crawl_relevant_internal_pages(
             enriched, crawl_subject, report_tier=report_tier,
-            max_pages=_TIER_CRAWL_PAGES.get(report_tier, _TIER_CRAWL_PAGES["brief"]),
-            max_depth={"brief": 2, "detailed": 2, "in_depth": 3}.get(report_tier, 2),
+            max_pages=_TIER_CRAWL_PAGES.get(report_tier, _TIER_CRAWL_PAGES["detailed"]),
+            max_depth={"detailed": 2, "in_depth": 3}.get(report_tier, 2),
         )
         if crawled_rows:
             # Keep only genuinely query-relevant crawled pages and avoid
@@ -21740,7 +21700,7 @@ async def generate_report(request: Request):
         elif page_evidence:
             evidence_parts.append("DIRECT PUBLISHER PAGE TEXT (fetched from this URL):\n" + page_evidence[:ENRICH_FETCH_CHARS])
         if search_evidence and str(source_item.get("evidenceOrigin") or "").casefold() != "okf_retrieval":
-            _search_cap = int(os.getenv("REPORT_SEARCH_EXTRACT_WRITER_CHARS", "") or {"brief": 4000, "detailed": 3500, "in_depth": 3000}.get(report_tier, 3500))
+            _search_cap = int(os.getenv("REPORT_SEARCH_EXTRACT_WRITER_CHARS", "") or {"detailed": 3500, "in_depth": 3000}.get(report_tier, 3500))
             evidence_parts.append("SEARCH-INDEX EXCERPT (may be partial; use only with explicit source qualification):\n" + search_evidence[:_search_cap])
         evidence = "\n\n".join(evidence_parts)
         if not evidence and canonical.get("source_type") == "Uploaded document":
@@ -21757,7 +21717,6 @@ async def generate_report(request: Request):
         )
     full_src_text = "\n\n---\n\n".join(src_parts)
     source_context_limit = {
-        "brief": 48_000,
         "detailed": 96_000,
         "in_depth": 180_000,
     }.get(report_tier, 96_000)
@@ -21996,10 +21955,6 @@ async def generate_report(request: Request):
     # selected UI tier asked for a materially deeper report.
     tier_spec = get_report_tier_spec(report_tier)
     _depth_instructions = {
-        "brief": (
-            "Use a focused evidence surface and synthesize only the most decision-relevant findings. "
-            "Prefer a concise answer over secondary background; stop when the supported core answer is complete."
-        ),
         "detailed": (
             "Broaden evidence coverage across the material analytical dimensions of the question. "
             "Develop substantive supporting analysis, relevant comparisons, historical/contextual evidence, "
@@ -22117,7 +22072,7 @@ async def generate_report(request: Request):
         "3B. TABLE-CELL EVIDENCE: Treat each numeric table cell as a separate factual claim. A citation on a row must be attached to the exact data cell or row values it supports; at least one cited source must explicitly contain each material numeric value or a clearly equivalent unit-normalized value. Do not infer annual sector additions from different-date cumulative totals unless you show the calculation, label the result as a calculated estimate, and cite both inputs. If the supplied source excerpts do not establish a table value, write 'Not available in the retrieved evidence' instead of guessing or borrowing a citation from a general sector overview. Do not let a source cited for a row's capacity value implicitly support another cell's annual addition, policy claim, or driver.\n"
         "3C. INVESTOR DISCOVERY INTEGRITY: Distinguish direct capital providers (VC funds, angel investors and corporate investment arms) from incubators, R&D organizations, export agencies, industry associations and technology parks. Do not label an ecosystem enabler as an investor unless the source documents a direct investment or funding programme. Never invent fund names, check sizes, portfolio valuations, aggregate funding totals, eligibility or pitch access. A numeric funding/check-size/valuation/export claim can appear only when a cited, fetched publisher page supports the exact number, unit, subject and period; otherwise state that it was not verified in retrieved publisher-page evidence. Never emit NaN/Infinity or a computed percentage without valid finite inputs.\n"
         "4. Add charts when they clarify comparable, source-supported values or answer an explicit chart request. Preserve source data and citations; never invent points. Put each [CHART_n] beside the section that interprets it, with a dedicated data section only as a fallback.\n"
-        "5. Write at the selected tier without a page, word, or character target. Brief should be concise; In-Detail and Deep Research should add distinct, source-backed analysis and broader evidence. Use the planner's question-driven structure; do not impose a fixed section-count template. Add charts or tables only when they make verified evidence clearer; do not add one for every data series. Stop when material questions are answered or the evidence is exhausted. Never pad, repeat, or invent figures. Insert [CHART_n] inline wherever valid chart data exists.\n"
+        "5. Write at the selected tier without a page, word, or character target. In-Detail and Deep Research should add distinct, source-backed analysis and broader evidence. Use the planner's question-driven structure; do not impose a fixed section-count template. Add charts or tables only when they make verified evidence clearer; do not add one for every data series. Stop when material questions are answered or the evidence is exhausted. Never pad, repeat, or invent figures. Insert [CHART_n] inline wherever valid chart data exists.\n"
         "6. Choose prose, tables, charts, bullets, timelines, comparisons, risk matrices, KPI/callout blocks, or images according to the request and evidence. Use structured treatments when they make distinct drivers, comparisons, time series, risks, or scenarios easier to inspect. Keep paragraphs short and avoid repetition. Do not force charts, images, or KPI cards to fill space; omit visuals whose values cannot be verified.\n"
         "6A. REPETITION CONTROL: treat every section and subsection as a distinct analytical job. Before writing a new subsection, identify what the report has already established and do not restate the same market-size figures, drivers, history, company facts, or implications under a new heading. A new module must add a genuinely different lens (for example, mechanics, comparison, economics, scenario, sensitivity, risk, or implementation). Do not paraphrase an earlier paragraph just to increase depth.\n"
         + ("7. Insert [FILE_IMG_n] references inline where you reference data visible in that extracted image/chart.\n" if embedded_file_images else "")
@@ -23542,9 +23497,6 @@ async def generate_report(request: Request):
         # (or requested as a grounded generated illustration); do not fill an
         # empty selection with a search engine's lead photo.
         images, _ = ([], False) if file_only_report else _force_fallback_images(images, image_candidates, model_used)
-        if report_tier == "brief" and len(images) > 4:
-            images = list(images[:4])
-            images_valid_mask = list(images_valid_mask[:4])
         if not image_candidates and not images:
             # Was previously logged whenever the FALLBACK candidate pool was
             # empty, regardless of whether the model's own AI-generated
@@ -23714,7 +23666,7 @@ async def generate_report(request: Request):
             before_scanability = len(report_text)
             report_text, scanability_result = await asyncio.wait_for(
                 _apply_report_scanability_pass(report_text, report_topic, report_tier),
-                timeout=58.0 if report_tier == "in_depth" else (20.0 if report_tier == "brief" else 40.0),
+                timeout=58.0 if report_tier == "in_depth" else 40.0,
             )
             if len(report_text) != before_scanability or scanability_result.get("before", {}).get("marker_leak_count", 0):
                 refreshed = _rendered_page_count_preflight(
@@ -24465,9 +24417,7 @@ async def generate_report(request: Request):
 
         # The initial page-band pass precedes the evidence guard as an early
         # layout estimate. Evidence validation can shorten the report, so remeasure
-        # the validated final body and only then run a bounded Brief expansion.
-        # Every added paragraph is passed back through the same evidence guard and
-        # independent audit before it may be returned.
+        # the validated final body so the reported page count reflects the final text.
         _final_measured_pages = _rendered_page_count_preflight(
             report_text, str(parsed.get("title") or report_topic), question,
             str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
@@ -24476,77 +24426,6 @@ async def generate_report(request: Request):
         )
         if _final_measured_pages is not None:
             preflight_pages = _final_measured_pages
-        _final_pageband_ran = False
-        if (
-            str(report_tier).casefold() == "brief"
-            and not file_only_report
-            and requested_page_count is not None
-            and preflight_pages is not None
-            and preflight_pages < int(requested_page_count)
-        ):
-            log.info(
-                "Report post-evidence explicit page-request pass: pages=%d target=%d; starting bounded expansion",
-                preflight_pages, int(requested_page_count),
-            )
-            _pageband_input_text = report_text
-            try:
-                report_text, _post_evidence_pages = await _ensure_report_page_budget(
-                    report_text=report_text, question=report_topic, report_tier=report_tier,
-                    report_plan=report_plan,
-                    evidence_text=src_text if not no_web_sources else file_section,
-                    title=str(parsed.get("title") or report_topic),
-                    summary=str(parsed.get("summary") or ""),
-                    key_stats=parsed.get("keyStats", []) or [], charts=charts,
-                    sources=source_manifest, presentation=report_presentation,
-                    web_images=images, file_images=embedded_file_images,
-                    theme=_resolve_theme(parsed.get("theme"), question),
-                    requested_pages=requested_page_count,
-                )
-                report_text = normalize_report_markdown(strip_generation_markers(report_text))
-                _final_pageband_ran = report_text != _pageband_input_text
-            except Exception as _pageband_exc:
-                log.warning("Post-evidence Brief page-band expansion failed safely: %s", type(_pageband_exc).__name__)
-
-            if _final_pageband_ran:
-                source_manifest = ensure_cited_source_records(report_text, source_manifest)
-                audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
-                report_text, charts, _pageband_metric_redactions = _sanitize_unverified_financial_claims(
-                    report_text, charts, audit_sources,
-                )
-                parsed["keyStats"], _pageband_key_stats_removed = _sanitize_report_key_stats(
-                    parsed.get("keyStats", []), audit_sources,
-                )
-                report_text = normalize_report_markdown(_decode_leaked_unicode_escapes(report_text))
-                report_text = reconcile_orphaned_chart_references(report_text, charts)
-                source_manifest = ensure_cited_source_records(report_text, source_manifest)
-                audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
-                if _pageband_metric_redactions or _pageband_key_stats_removed:
-                    log.warning(
-                        "Post-evidence Brief expansion guard redacted=%d KPI_removed=%d",
-                        _pageband_metric_redactions, _pageband_key_stats_removed,
-                    )
-                _postband_pages = _rendered_page_count_preflight(
-                    report_text, str(parsed.get("title") or report_topic), question,
-                    str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
-                    source_manifest, report_presentation, report_tier, web_images=images,
-                    file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
-                )
-                if _postband_pages is not None:
-                    preflight_pages = _postband_pages
-                # The body changed after the prior audit. Never carry forward its
-                # status as if it reviewed this exact final text.
-                gemini_audit, final_deterministic_audits = await _run_independent_report_audit(
-                    title=str(parsed.get("title") or report_topic), question=question,
-                    report_text=report_text, report_tier=report_tier, charts=charts,
-                    images=images, sources=audit_sources, timeout_seconds=24.0,
-                )
-                log.info(
-                    "Post-evidence Brief page-request result: pages=%s target=%s audit=%s",
-                    preflight_pages, requested_page_count, gemini_audit.get("status", "unknown"),
-                )
-        elif str(report_tier).casefold() == "brief" and preflight_pages is None:
-            log.warning("Post-evidence Brief page-band sizing skipped because the final renderer could not measure pagination")
-
         # Repeat source consistency repairs after any LLM audit/repair pass: repaired
         # text is untrusted and must not reintroduce unsupported numeric tables,
         # faux chart tables, or a known reversed ratio label.

@@ -724,7 +724,7 @@ async def call_report_writer(
     log = runtime.log
     mark_rate_limited = runtime.mark_rate_limited
     depth = report_tier or "detailed"
-    deadline = {"brief": 60, "detailed": 150, "in_depth": 240}.get(depth, 150)
+    deadline = {"detailed": 150, "in_depth": 240}.get(depth, 150)
     try:
         raw, model = await asyncio.wait_for(runtime.call_gemini(user_prompt, report_tier), timeout=deadline)
     except asyncio.TimeoutError:
@@ -831,7 +831,7 @@ async def gemini_plain_continuation(prompt: str, report_tier: str, *, runtime) -
         return await runtime._call_groq_plain_continuation(prompt, report_tier)
 
     ring = runtime.round_robin(keys)
-    max_out = 2_500 if report_tier == "brief" else (4_500 if report_tier == "detailed" else 6_000)
+    max_out = 4_500 if report_tier == "detailed" else 6_000
     system_text = (
         "You are a continuation editor for a professional Growth Gradual research report. "
         "Return ONLY new markdown content for the requested existing sections. "

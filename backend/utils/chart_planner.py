@@ -240,7 +240,7 @@ _DOMAINS: tuple[tuple[str, re.Pattern, tuple[ChartNeed, ...]], ...] = (
      re.compile(r"(?i)banking\s+sector|scheduled\s+commercial|bank\s+credit|deposit\s+growth|gross\s+npa|net\s+npa|indian\s+banks|credit\s+growth"),
      (_BANK_SERIES,)),
 )
-_TIER_MAX_NEEDS = {"brief": 3, "detailed": 5, "in_depth": 6}
+_TIER_MAX_NEEDS = {"detailed": 5, "in_depth": 6}
 
 
 def plan_chart_needs(question: str, report_tier: str = "detailed") -> list[ChartNeed]:

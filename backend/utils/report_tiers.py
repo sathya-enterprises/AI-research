@@ -1,6 +1,6 @@
 """Dynamic report-depth profiles shared by the planner, writer and renderers.
 
-The three user-facing toggles are *generation profiles*, not fixed templates.
+The two user-facing toggles (In-Detail and Deep Research) are *generation profiles*, not fixed templates.
 They control depth, evidence density, visual density, appendix tolerance and
 whether generation may be modular.  The actual section names/order are chosen
 by the report planner from the user's request and the evidence found.
@@ -15,7 +15,6 @@ from utils.chart_catalog import chart_density_contract
 
 
 class ReportTier(str, Enum):
-    BRIEF = "brief"
     DETAILED = "detailed"
     IN_DEPTH = "in_depth"
 
@@ -52,34 +51,6 @@ class ReportTierSpec:
     component_guidance: tuple[str, ...]
 
 
-BRIEF_SPEC = ReportTierSpec(
-    tier=ReportTier.BRIEF,
-    label="Brief Report",
-    objective="High-level, decision-oriented executive overview for rapid decision-making.",
-    page_target=PageTarget(None, None, 8),
-    research_breadth="focused",
-    evidence_intensity="selective",
-    allow_cover=True,
-    allow_toc=False,
-    allow_appendix=True,
-    allow_scenarios=False,
-    allow_risk_matrix=True,
-    modular_generation=False,
-    chunked_generation=False,
-    chunk_size_sections=4,
-    max_output_tokens=12288,
-    paragraph_style="concise",
-    table_depth="compact",
-    citation_density="material_claims",
-    component_guidance=(
-        "Keep the report concise and substantive; use page count only as a final-rendering measurement, never as a content target.",
-        "Prioritize the findings, KPIs, comparisons and risks that materially answer the request rather than repeating background.",
-        "An executive summary, KPI treatment, market/financial view, or risk/action section may be used when the evidence and question justify it.",
-        "Prefer compact visual blocks, short single-idea paragraphs, bullets, and small evidence-backed tables/charts over long prose blocks.",
-        "When the evidence contains several distinct findings, drivers, comparisons, or KPIs, surface them as scannable points or compact visual structures instead of stacking paragraphs.",
-    ),
-)
-
 DETAILED_SPEC = ReportTierSpec(
     tier=ReportTier.DETAILED,
     label="In-Detail Report",
@@ -100,7 +71,7 @@ DETAILED_SPEC = ReportTierSpec(
     table_depth="full",
     citation_density="claim_level",
     component_guidance=(
-        "Preserve the core question coverage a Brief would answer and add material analytical depth rather than replacing it with a narrower report.",
+        "Answer the core question completely and add material analytical depth rather than a narrow summary.",
         "Add source-backed detail, comparisons, historical evidence, implementation implications, alternative explanations and forward-looking assumptions that materially answer the request.",
         "Use detailed KPI benchmarking, tables, multi-variable charts, structured risk analysis, comparison blocks and appendices when the evidence supports them; favor mixed section treatments over long uninterrupted prose.",
         "Keep analytical paragraphs short and single-purpose; use bullets/callouts/tables/charts to expose distinct findings rather than burying them in prose.",
@@ -136,7 +107,26 @@ DEEP_SPEC = ReportTierSpec(
     ),
 )
 
-REPORT_TIER_SPECS = {s.tier.value: s for s in (BRIEF_SPEC, DETAILED_SPEC, DEEP_SPEC)}
+REPORT_TIER_SPECS = {s.tier.value: s for s in (DETAILED_SPEC, DEEP_SPEC)}
+
+VALID_REPORT_TIERS: tuple[str, ...] = tuple(REPORT_TIER_SPECS)
+REMOVED_BRIEF_TIER_ERROR = '"brief" was removed; use "detailed" or "in_depth"'
+INVALID_REPORT_TIER_ERROR = 'Invalid report tier. Use "detailed" or "in_depth".'
+
+
+def report_tier_error(tier: str | None) -> str | None:
+    """Return a client-facing error for an unsupported tier, or None when valid."""
+    value = str(tier or "").strip().lower()
+    if value in VALID_REPORT_TIERS:
+        return None
+    if value == "brief":
+        return REMOVED_BRIEF_TIER_ERROR
+    return INVALID_REPORT_TIER_ERROR
+
+
+def report_tier_for_page_count(pages: int) -> str:
+    """Map an explicit page-count request to a tier (10 pages or fewer -> detailed)."""
+    return "in_depth" if pages >= 70 else "detailed"
 
 
 def requested_report_page_count(question: str = "", supplied: object = None) -> int | None:
@@ -185,7 +175,6 @@ def report_tier_contract(tier: str | None) -> str:
         f"Use {maximum} pages only as a renderer-measured upper warning threshold."
     )
     source_guidance = {
-        "brief": "Prefer 8–12 distinct relevant sources where available.",
         "detailed": "Prefer 20–30 distinct relevant sources, with meaningful publisher-page extraction rather than search snippets alone.",
         "in_depth": "Prefer 35–50 distinct relevant sources and broader same-site crawling where available; prioritize independent, authoritative sources and triangulate key claims.",
     }.get(spec.tier.value, "Use relevant sources appropriate to the request.")
@@ -209,7 +198,7 @@ DYNAMIC STRUCTURE GUIDANCE:
 TIER RULES:
 - The selected tier controls research breadth, evidence density and analytical depth; it is NOT a fixed section template.
 - Choose the actual section names, order, hierarchy and component mix from THIS request and THIS evidence.
-- Brief gives the concise core answer; In-Detail retains that core coverage and develops it materially further; Deep Research widens the source base and adds granular analysis and triangulation.
+- In-Detail answers the core question with material analytical depth; Deep Research widens the source base and adds granular analysis and triangulation.
 - Page count is a renderer measurement and warning cap, not a content target. Follow an explicit page request only when present and supported by distinct evidence; never pad.
 - Use only evidence-supported charts and tables; state evidence gaps when information is unavailable.
 - Use [S1], [S2], etc. inline for citations.

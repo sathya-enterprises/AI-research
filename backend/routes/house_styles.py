@@ -127,19 +127,11 @@ MONTHLY_REVIEW_SECTIONS: list[tuple[str, str]] = [
      "One lead paragraph naming the swing factors for next month. `### Key Watch-Points for {next_month} {next_year}` as bullets each opening with a bold label. `### Positioning Considerations for HNI Portfolios` as bullets. End with a `> **Closing Note from the Desk:**` callout."),
 ]
 
-_BRIEF_MONTHLY_SECTIONS = [
-    ("Executive Summary", "Overview, a `> **Desk View:**` callout and a numbered 'What Mattered Most' list."),
-    ("Markets, Sectors & Flows", "Index path, sector returns and FII/DII flows with one chart and one table."),
-    ("Macro, Global & Commodities", "Dated timeline of the month's macro/global events and a currency/commodity table."),
-    ("Outlook & Strategic Takeaways", "Watch-points and positioning, ending with a `> **Closing Note from the Desk:**` callout."),
-]
-
-
 def _monthly_section_block(report_tier: str, month: str, year: int) -> str:
     month_index = _MONTHS.index(month)
     next_month = _MONTHS[(month_index + 1) % 12]
     next_year = year + (1 if month_index == 11 else 0)
-    sections = _BRIEF_MONTHLY_SECTIONS if report_tier == "brief" else MONTHLY_REVIEW_SECTIONS
+    sections = MONTHLY_REVIEW_SECTIONS
     lines = []
     for number, (heading, guidance) in enumerate(sections, 1):
         guidance = guidance.format(month=month, year=year, next_month=next_month, next_year=next_year)

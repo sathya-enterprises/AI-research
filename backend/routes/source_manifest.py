@@ -353,7 +353,7 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
     """Build a manifest, preserving IDs if input is already canonical.
 
     Canonical entries are copied with their exact IDs, even when IDs are not
-    contiguous (for example a Brief appendix displays only cited sources).
+    contiguous (for example an appendix that displays only cited sources).
     Fresh retrieval inputs without the registry marker are deduplicated first,
     then numbered from S1. This prevents source IDs from shifting between writer
     prompts, audit payloads, HTML, PDF, and a later export.

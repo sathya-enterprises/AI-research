@@ -4303,10 +4303,8 @@ body.gg-tier--in_depth .gg-sources[data-source-placement="end_of_report"] {
 .gg-report-nav { display: none !important; }
 .gg-report-footer { display: none !important; }
 .gg-report-index a::after { content: leader(".") target-counter(attr(href), page); color: #46545e; font-size: 8.5pt; }
-body.gg-tier--brief .gg-section-heading h2 { font-size: 16pt; }
 body.gg-tier--detailed .gg-section-heading h2 { font-size: 18pt; }
 body.gg-tier--in_depth .gg-section-heading h2 { font-size: 19pt; }
-body.gg-tier--brief .gg-section { margin-bottom: 14px; }
 body.gg-tier--in_depth .gg-section { margin-bottom: 14px; }
 .gg-footer { display: none !important; }
 .gg-section[data-density="sparse"] { padding-top: 0; padding-bottom: 0; }
@@ -4316,94 +4314,6 @@ body.gg-tier--in_depth .gg-section { margin-bottom: 14px; }
     # unbreakable source appendices and split a KPI strip across pages.
     print_css = print_css.replace("</style>", """
 <style>
-body.gg-tier--brief .gg-dashboard-strip,
-body.gg-tier--brief .gg-dashboard-strip .gg-stats-grid {
-  break-inside: avoid !important; page-break-inside: avoid !important;
-}
-/* V7 editorial pagination: Brief is an executive document, not a newspaper.
-   Keep prose sections in one readable measure so a page never opens with a
-   stranded bullet list while its pull-quote or heading sits on the next page.
-   Charts/tables remain atomic visual units. */
-body.gg-tier--brief .gg-section-body--two_column,
-body.gg-tier--brief .gg-section-body--grid {
-  display: block !important;
-  grid-template-columns: none !important;
-  columns: 1 !important;
-  column-count: 1 !important;
-  column-width: auto !important;
-  width: 100% !important;
-}
-body.gg-tier--brief .gg-section-body--two_column > *,
-body.gg-tier--brief .gg-section-body--grid > * {
-  width: 100% !important;
-  max-width: 100% !important;
-  margin-left: 0 !important;
-  margin-right: 0 !important;
-}
-body.gg-tier--brief .gg-section-body--two_column > .gg-pullquote,
-body.gg-tier--brief .gg-section-body--grid > .gg-pullquote {
-  margin: 12px 0 14px !important;
-}
-body.gg-tier--brief .gg-section-body--two_column > .gg-figure,
-body.gg-tier--brief .gg-section-body--grid > .gg-figure {
-  max-width: 72% !important;
-  margin: 14px 0 16px !important;
-}
-body.gg-tier--brief .gg-section-body--two_column > .gg-list,
-body.gg-tier--brief .gg-section-body--grid > .gg-list {
-  margin: 8px 0 12px !important;
-  padding-left: 18px !important;
-}
-body.gg-tier--brief .gg-section-body--two_column > .gg-list li,
-body.gg-tier--brief .gg-section-body--grid > .gg-list li {
-  margin: 0 0 7px !important;
-}
-body.gg-tier--brief .gg-section {
-  break-inside: auto !important;
-  page-break-inside: auto !important;
-  margin-bottom: 12px !important;
-}
-body.gg-tier--brief .gg-section + .gg-section {
-  margin-top: 8px !important;
-}
-body.gg-tier--brief .gg-chart-wrap,
-body.gg-tier--brief .gg-table-wrap,
-body.gg-tier--brief .gg-figure,
-body.gg-tier--brief .gg-callout,
-body.gg-tier--brief .gg-pullquote {
-  break-inside: avoid !important;
-  page-break-inside: avoid !important;
-}
-body.gg-tier--brief .gg-chart-wrap {
-  margin: 12px 0 14px !important;
-  padding: 11px 13px !important;
-}
-body.gg-tier--brief .gg-chart-canvas-box {
-  min-height: 215px !important;
-  height: 215px !important;
-}
-body.gg-tier--brief .gg-chart-inline-svg {
-  min-height: 185px !important;
-}
-body.gg-tier--brief .gg-table-wrap {
-  margin: 12px 0 14px !important;
-}
-body.gg-tier--brief .gg-source-card {
-  font-size: 8pt !important;
-}
-body.gg-tier--brief .gg-dashboard-strip .gg-stats-grid {
-  display: flex !important; flex-wrap: wrap !important; gap: 7px !important;
-}
-body.gg-tier--brief .gg-dashboard-strip .gg-stat-card {
-  flex: 1 1 43% !important; max-width: calc(50% - 4px) !important;
-  min-height: 60px !important; break-inside: avoid !important;
-}
-body.gg-tier--brief .gg-stat-value {
-  font-size: 16pt !important; overflow-wrap: normal !important;
-  word-break: normal !important; white-space: normal !important;
-}
-body.gg-tier--brief .gg-cover { min-height: 0 !important; padding: 7px 0 12px !important; }
-body.gg-tier--brief .gg-title { font-size: 23pt !important; }
 .gg-sources { break-inside: auto !important; page-break-inside: auto !important; }
 .gg-sources-grid { align-items: start !important; }
 .gg-source-card { break-inside: avoid !important; page-break-inside: avoid !important; }
@@ -4438,7 +4348,6 @@ body.gg-tier--brief .gg-title { font-size: 23pt !important; }
     final_print_overrides = """
 <style id="gg-pdf-v20-layout-qa">
 @media print {
-  body.gg-tier--brief .gg-section-body--grid,
   body.gg-tier--detailed .gg-section-body--grid,
   body.gg-tier--in_depth .gg-section-body--grid {
     display: block !important; grid-template-columns: none !important;
@@ -4601,8 +4510,6 @@ table.gg-table { width: 100% !important; max-width: 100% !important; table-layou
 .gg-sources-count { margin: 0 0 7pt !important; font-size: 8.6pt !important; color: #66767C !important; font-weight: 600 !important; }
 .gg-sources-grid { display: block !important; width: 100% !important; }
 .gg-source-card--url-only { display: block !important; width: 100% !important; padding: 6pt 0 !important; margin: 0 !important; border: 0 !important; border-bottom: .5pt solid #E3EAE5 !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; break-inside: avoid !important; }
-body.gg-tier--brief .gg-sources-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 3pt 12pt !important; align-items: start !important; }
-body.gg-tier--brief .gg-source-card--url-only { padding: 4pt 0 !important; }
 .gg-source-url-only, .gg-source-link.gg-source-url-only { display: block !important; width: 100% !important; font-size: 8.6pt !important; line-height: 1.35 !important; color: #286849 !important; text-decoration: underline !important; overflow-wrap: anywhere !important; word-break: normal !important; }
 .gg-source-note { margin-top: 5pt !important; padding-top: 5pt !important; font-size: 7.6pt !important; line-height: 1.32 !important; border-top: .5pt solid #E3EAE5 !important; }
 .gg-source-identity { display: block !important; margin: 0 0 3pt !important; font-size: 8.3pt !important; line-height: 1.3 !important; }
@@ -4630,18 +4537,14 @@ main { padding: 10pt 0 16pt !important; }
 .gg-section-body--grid > * { display: block !important; width: 100% !important; max-width: 100% !important; min-width: 0 !important; }
 .gg-report-index { width: 100% !important; max-width: 100% !important; }
 .gg-reveal { opacity: 1 !important; transform: none !important; }
-body.gg-tier--brief .gg-section-heading-copy h2 { font-size: 16.5pt !important; }
-body.gg-tier--brief .gg-section-body > p { font-size: 10.2pt !important; line-height: 1.47 !important; margin-bottom: 5.5pt !important; }
 body.gg-tier--detailed .gg-section-heading-copy h2 { font-size: 18pt !important; }
 body.gg-tier--in_depth .gg-section-heading-copy h2 { font-size: 18.5pt !important; }
 body.gg-tier--in_depth .gg-section-body > p { font-size: 10.35pt !important; line-height: 1.52 !important; }
 body.gg-tier--in_depth .gg-section { margin-bottom: 18pt !important; }
 body.gg-tier--in_depth .gg-section-body--grid,
-body.gg-tier--detailed .gg-section-body--grid,
-body.gg-tier--brief .gg-section-body--grid { display: block !important; grid-template-columns: none !important; }
+body.gg-tier--detailed .gg-section-body--grid { display: block !important; grid-template-columns: none !important; }
 body.gg-tier--in_depth .gg-section-body--grid > *,
-body.gg-tier--detailed .gg-section-body--grid > *,
-body.gg-tier--brief .gg-section-body--grid > * { display: block !important; width: 100% !important; max-width: 100% !important; }
+body.gg-tier--detailed .gg-section-body--grid > * { display: block !important; width: 100% !important; max-width: 100% !important; }
 </style>"""
     # V25 pagination and visual-polish layer. Keep headings attached to useful
     # following content, allow genuinely long tables to flow across pages,
@@ -5439,7 +5342,7 @@ async def generate_pdf(request: Request):
     theme: dict | None = body.get("theme") if isinstance(body.get("theme"), dict) else None
     presentation = body.get("presentation")
     report_tier = str(body.get("reportTier") or "detailed").strip().lower()
-    if report_tier not in ("brief", "detailed", "in_depth"):
+    if report_tier not in ("detailed", "in_depth"):
         report_tier = "detailed"
     sources = normalise_source_manifest(body.get("sources", []))
     # Exports use the client house style unless the request names another.

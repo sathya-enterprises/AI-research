@@ -76,7 +76,6 @@ STRUCTURED_CHART_TYPES: frozenset[str] = frozenset({
 # Retain the historical helper shape for stored report compatibility; its
 # cardinality limits are intentionally unset.
 CHART_POINT_BANDS: dict[str, dict[str, Any]] = {
-    "brief": {"name": "Brief", "minimum": None, "maximum": None, "target": None},
     "detailed": {"name": "In-Detail", "minimum": None, "maximum": None, "target": None},
     "in_depth": {"name": "Deep Research", "minimum": None, "maximum": None, "target": None},
 }
@@ -109,7 +108,6 @@ def normalize_chart_type(value: Any) -> str:
 def _normalize_report_tier(tier: str | None) -> str:
     key = re.sub(r"[\s-]+", "_", str(tier or "detailed").strip().lower())
     aliases = {
-        "brief_report": "brief", "basic": "brief",
         "detailed_report": "detailed", "in_detail": "detailed", "in_detail_report": "detailed", "standard": "detailed",
         "deep": "in_depth", "deep_research": "in_depth", "deep_research_report": "in_depth", "in_depth_report": "in_depth",
         "advanced": "in_depth",
@@ -129,12 +127,9 @@ def chart_density_contract(tier: str | None) -> str:
     if tier_key == "in_depth":
         depth_rule = "When the source contains useful granular history or segments, preserve and analyze that detail; otherwise explain the evidence limit."
         profile = "Deep Research"
-    elif tier_key == "detailed":
+    else:
         depth_rule = "Use a comparison or trend visualization when additional sourced observations materially improve the analysis."
         profile = "In-Detail"
-    else:
-        depth_rule = "Prefer only the most useful evidence-backed visual; a short comparison is valid when it answers the question."
-        profile = "Brief"
     return f"""CHART GUIDANCE: {profile}
 - Charts are MANDATORY: every section that contains sourced numbers must include at least one chart, and the report should carry as many distinct, evidence-backed charts as the sources support. Prefer charts and data tables over prose; keep prose to short interpretive notes (2–3 sentences) that state what each chart shows, citing sources, with no generic background or filler.
 - Use every relevant observation actually supported by the source, while keeping labels readable; there is no minimum point count or visual quota.

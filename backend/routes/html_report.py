@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse, Response
 # <style> tag, so re-running the same hex/font-name/CSS-escape checks used
 # when the theme was first produced (routes/report.py) costs nothing and
 # closes off a client that edits the JSON it sends back before re-download.
-from routes.report import _sanitize_theme, _enforce_brief_section_cap
+from routes.report import _sanitize_theme
 from utils.presentation_schema import ReportPresentationSpec
 from utils.report_document import build_report_document, ReportSectionModel
 from routes.house_styles import (
@@ -2822,146 +2822,12 @@ def _render_key_stats(
     return f'<div class="gg-stats-grid gg-stats-count-{len(cards)}">{"".join(cards)}</div>' if cards else ""
 
 
-def _brief_key_stats(key_stats: list) -> list:
-    """Keep Brief KPI cards decision-useful: numeric metrics first, no prose disguised as KPI."""
-    valid = [item for item in (key_stats or []) if isinstance(item, dict) and str(item.get("value") or "").strip()]
-    numeric = []
-    other = []
-    for item in valid:
-        value = str(item.get("value") or "")
-        if re.search(r"(?:[$€£₹]|\d)", value):
-            numeric.append(item)
-        else:
-            other.append(item)
-    # Brief mode is an executive surface: three cards form a stable visual
-    # unit. Four cards create an orphan/2+2 dashboard and compete with the
-    # narrative. Prefer numeric signals first, then other useful KPIs.
-    selected = (numeric + other)[:3]
-    return selected
-
-
-def _verified_metric_trend(key_stats: list, report: str, registry: list[dict]) -> dict | None:
-    """Recover one native visual only for same-unit, sourced, dated KPI series.
-
-    Never compare incompatible market estimates or infer a missing year/value.
-    """
-    groups = {}
-    for stat in key_stats or []:
-        if not isinstance(stat, dict):
-            continue
-        label, value = str(stat.get("label") or ""), str(stat.get("value") or "")
-        year = re.search(r"\b(?:19|20)\d{2}\b", label)
-        number = re.search(r"\$?\s*([\d,]+(?:\.\d+)?)\s*(billion|million|trillion|[bmk])\b", value, re.I)
-        if not (year and number):
-            continue
-        metric = re.sub(r"\b(?:19|20)\d{2}\b|\b(projected|estimated|forecast|actual)\b", "", label, flags=re.I)
-        metric = re.sub(r"[^a-z]+", " ", metric.lower()).strip()
-        if not metric or len(metric) < 5:
-            continue
-        unit = number.group(2).lower()
-        unit = {"b":"billion", "m":"million", "k":"thousand"}.get(unit, unit)
-        if unit not in ("billion", "million", "trillion"):
-            continue
-        # A source must explicitly accompany the KPI, or the exact KPI value
-        # must occur near a report citation. An appendix entry alone is not proof.
-        source = stat.get("source") or stat.get("sources") or ""
-        ids = _source_ids(source)
-        if isinstance(source, str) and re.fullmatch(r"S\d+", source.strip(), re.I):
-            ids = [source.strip().upper()]
-        if not ids:
-            escaped = re.escape(number.group(1)).replace(r"\,", "[,]?")
-            near = re.search(escaped + r".{0,180}?\[S(\d+)\]", report, re.I | re.S)
-            if near:
-                ids = ["S" + near.group(1)]
-        valid = {str(item.get("id")) for item in registry}
-        ids = [sid for sid in ids if sid in valid]
-        if not ids:
-            continue
-        groups.setdefault((metric, unit), []).append((int(year.group()), float(number.group(1).replace(",", "")), ids))
-    for (metric, unit), items in groups.items():
-        unique = {yr: (val, ids) for yr, val, ids in items}
-        if len(unique) < 2:
-            continue
-        years = sorted(unique)
-        citations = list(dict.fromkeys(sid for yr in years for sid in unique[yr][1]))
-        if len(citations) > 4:
-            continue
-        return {"type":"bar", "title":metric.title() + " — sourced trend", "yLabel":unit.title(),
-                "series":[{"name":metric.title(), "data":[{"label":str(yr), "value":unique[yr][0]} for yr in years]}],
-                "source":citations}
-    return None
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # Full document
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _verified_report_trend(report: str, registry: list[dict]) -> dict | None:
-    """Recover one chart from a source-cited year/value comparison in prose.
-
-    This is deliberately conservative: it only converts two or more monetary
-    values when each value has a nearby year and the same paragraph contains a
-    valid [S#] citation. No interpolation, CAGR reconstruction, or unsupported
-    values are created.
-    """
-    valid_ids = {str(item.get("id") or "").upper() for item in registry if isinstance(item, dict)}
-    if not valid_ids:
-        return None
-    paragraphs = re.split(r"\n\s*\n", str(report or ""))
-    money_re = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)\s*(billion|bn|b|million|mn|m|trillion|tn|t)\b", re.I)
-    year_re = re.compile(r"\b(?:19|20)\d{2}\b")
-    for paragraph in paragraphs:
-        if len(paragraph) < 40:
-            continue
-        values = []
-        for match in money_re.finditer(paragraph):
-            value = float(match.group(1).replace(",", ""))
-            unit = match.group(2).lower()
-            multiplier = {"billion":1,"bn":1,"b":1,"million":0.001,"mn":0.001,"m":0.001,"trillion":1000,"tn":1000,"t":1000}[unit]
-            # Find the closest year within 70 characters before/after the value.
-            nearby = []
-            window_start = max(0, match.start() - 80)
-            window_end = min(len(paragraph), match.end() + 80)
-            for y in year_re.finditer(paragraph[window_start:window_end]):
-                absolute = window_start + y.start()
-                nearby.append((int(y.group(0)), absolute))
-            if not nearby:
-                continue
-            year, _ = min(nearby, key=lambda item: abs(item[1] - match.end()))
-            values.append((year, value * multiplier, match.group(0)))
-        if len(values) < 2:
-            continue
-        # Prefer two distinct years and avoid mixing unrelated values.
-        by_year = {}
-        for year, value, raw in values:
-            by_year.setdefault(year, (value, raw))
-        if len(by_year) < 2:
-            continue
-        ordered = sorted(by_year.items())[:4]
-        ids = [sid for sid in _source_ids(paragraph) if sid.upper() in valid_ids]
-        if not ids:
-            continue
-        # The prose must describe an actual trajectory, not just two unrelated
-        # dollar figures in a paragraph.
-        lowered = paragraph.lower()
-        if not re.search(r"\b(from|to|by|through|grow|expand|increase|rise|reach|project|forecast)\b", lowered):
-            continue
-        data = [{"label": str(year), "value": value} for year, (value, _) in ordered]
-        if len(data) < 2:
-            continue
-        return {
-            "type": "bar" if len(data) == 2 else "line",
-            "title": "Market size trajectory",
-            "unit": "$B",
-            "x_label": "Year",
-            "y_label": "Market size (US$B)",
-            "series": [{"name": "Market size", "data": data}],
-            "source": ids[:3],
-            "rationale": "The report evidence provides source-cited market-size observations for distinct years.",
-            "takeaway": f"The cited evidence moves from ${data[0]['value']:,.1f}B in {data[0]['label']} to ${data[-1]['value']:,.1f}B in {data[-1]['label']}.",
-        }
-    return None
 
 def _clamp255(v: int) -> int:
     return max(0, min(255, v))
@@ -3314,7 +3180,6 @@ body.gg-tier--in_depth .gg-sources[data-source-placement="end_of_report"] {{ bre
 @media print {{ .gg-v-data-driven .gg-title-band {{ display:block; }} .gg-v-bold-banner .gg-title-band {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }} }}
 
 @media print {{
-  .gg-tier--brief .gg-sources-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
   .gg-section + .gg-section {{ padding-top: 20px; }}
   .gg-section-heading {{ break-inside: avoid; break-after: avoid-page; page-break-after: avoid; }}
   .gg-section-heading h2 {{ max-width: 24ch; }}
@@ -3374,10 +3239,6 @@ body.gg-tier--in_depth .gg-sources[data-source-placement="end_of_report"] {{ bre
 .gg-chart-size-compact .gg-chart-inline-svg {{ min-height: 180px; }}
 .gg-chart-size-standard .gg-chart-inline-svg {{ min-height: 240px; }}
 .gg-chart-size-large .gg-chart-inline-svg {{ min-height: 300px; }}
-.gg-tier--brief main {{ padding-top: 26px; }}
-.gg-tier--brief .gg-report-sections {{ gap: 22px; }}
-.gg-tier--brief .gg-section-heading h2 {{ font-size: clamp(22px, 2.8vw, 30px); }}
-.gg-tier--brief .gg-chart-size-large .gg-chart-canvas-box {{ height: 300px; }}
 .gg-tier--detailed .gg-report-sections {{ gap: 28px; }}
 .gg-tier--in_depth main {{ padding-top: 38px; }}
 .gg-tier--in_depth .gg-report-sections {{ gap: 34px; }}
@@ -3413,10 +3274,6 @@ body.gg-tier--in_depth .gg-sources[data-source-placement="end_of_report"] {{ bre
 .gg-dashboard-strip {{ margin: 18px 0 28px; }}
 .gg-dashboard-strip .gg-stats-grid {{ grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin: 0; }}
 .gg-dashboard-strip .gg-stat-card {{ border-radius: 9px; box-shadow: 0 3px 12px rgba(23,56,79,.045); }}
-body.gg-tier--brief .gg-dashboard-strip .gg-stats-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
-body.gg-tier--brief .gg-dashboard-strip .gg-stat-card {{ min-width: 0; min-height: 78px; padding: 14px 15px; }}
-body.gg-tier--brief .gg-dashboard-strip .gg-stat-value {{ font-size: clamp(20px, 2.2vw, 28px); line-height: 1.05; }}
-body.gg-tier--brief .gg-dashboard-strip .gg-stat-label {{ font-size: 9px; line-height: 1.2; }}
 .gg-source-meta {{ overflow-wrap: anywhere; }}
 .gg-sources {{ scroll-margin-top: 72px; }}
 .gg-report-footer {{ width: min(var(--content-max), calc(100% - 48px)); margin: 0 auto; padding: 18px 0 28px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; color: var(--text-muted); font-size: 11px; }}
@@ -3468,9 +3325,6 @@ body.gg-tier--brief .gg-dashboard-strip .gg-stat-label {{ font-size: 9px; line-h
   h1 {{ break-after: avoid-page; }}
   h2, h3, h4 {{ break-after: avoid-page; page-break-after: avoid; }}
   /* Tier-aware print rhythm. The structure remains dynamic; only density and component sizing change. */
-  body.gg-tier--brief main {{ padding-top: 12px; }}
-  body.gg-tier--brief .gg-section {{ margin-bottom: 16px; }}
-  body.gg-tier--brief .gg-section-heading h2 {{ font-size: 16pt; }}
   body.gg-tier--detailed .gg-section {{ margin-bottom: 20px; }}
   body.gg-tier--in_depth main {{ padding-top: 18px; }}
   body.gg-tier--in_depth .gg-section {{ margin-bottom: 26px; }}
@@ -3508,8 +3362,8 @@ body.gg-tier--brief .gg-dashboard-strip .gg-stat-label {{ font-size: 9px; line-h
   }}
   .gg-cover {{ margin-top: 0; }}
   /* A selected cover is a true print cover; do not stack the title band beneath it. */
-  body.gg-has-cover:not(.gg-tier--brief) .gg-cover {{ break-after: page; page-break-after: always; }}
-  body.gg-has-cover.gg-cover-bold-banner:not(.gg-tier--brief) .gg-cover {{ min-height: 215mm; display: flex; align-items: center; }}
+  body.gg-has-cover .gg-cover {{ break-after: page; page-break-after: always; }}
+  body.gg-has-cover.gg-cover-bold-banner .gg-cover {{ min-height: 215mm; display: flex; align-items: center; }}
   .gg-title {{ font-size: 30pt; line-height: 1.08; }}
   .gg-summary {{ font-size: 12pt; line-height: 1.5; }}
   .gg-summary-card {{ padding: 16px 18px; }}
@@ -3561,17 +3415,6 @@ body.gg-tier--brief .gg-dashboard-strip .gg-stat-label {{ font-size: 9px; line-h
   .gg-source-meta {{ font-size: 7.6pt; margin-top: 2px; }}
   .gg-source-link {{ font-size: 7.8pt; line-height: 1.15; }}
   .gg-footer {{ padding: 18px 0 24px; font-size: 8pt; break-before: avoid; }}
-  /* Premium brief: atomic, legible KPI dashboard and compact evidence cards. */
-  body.gg-tier--brief .gg-stats-grid {{ display: flex !important; flex-wrap: wrap; gap: 7px; break-inside: avoid !important; page-break-inside: avoid !important; }}
-  body.gg-tier--brief .gg-stat-card {{ flex: 1 1 43%; max-width: calc(50% - 4px); min-height: 65px; break-inside: avoid !important; padding: 10px 12px; }}
-  body.gg-tier--brief .gg-stat-value {{ font-size: 17pt !important; line-height: 1.1; overflow-wrap: normal; word-break: normal; }}
-  body.gg-tier--brief .gg-stat-label {{ font-size: 8.2pt; letter-spacing: .02em; }}
-  body.gg-tier--brief .gg-dashboard-strip {{ break-inside: avoid !important; page-break-inside: avoid !important; }}
-  body.gg-tier--brief .gg-cover {{ padding: 8px 0 14px !important; margin-bottom: 6px; min-height: 0 !important; }}
-  body.gg-tier--brief .gg-title {{ font-size: 23pt !important; line-height: 1.13; }}
-  body.gg-tier--brief .gg-summary-card {{ padding: 11px 15px; }}
-  body.gg-tier--brief .gg-section-body p {{ text-align: left; hyphens: none; }}
-  body.gg-tier--brief .gg-brief-trend {{ break-inside: avoid; page-break-inside: avoid; }}
   .gg-sources {{ break-inside: auto !important; page-break-inside: auto !important; }}
   .gg-source-card {{ break-inside: avoid !important; page-break-inside: avoid !important; }}
   .gg-reveal {{ opacity: 1 !important; transform: none !important; }}
@@ -3641,27 +3484,6 @@ main {{ max-width: 1160px; }}
 .gg-source-card:hover {{ transform:translateY(-1px); box-shadow:var(--gg-shadow-soft); }}
 .gg-source-number {{ border-radius:7px; background:var(--paper-alt); }}
 .gg-report-footer {{ padding-top:14px; }}
-body.gg-tier--brief .gg-section-heading {{ grid-template-columns:34px minmax(0,1fr); margin-bottom:12px; padding-bottom:8px; }}
-body.gg-tier--brief .gg-section-index {{ width:28px; height:28px; font-size:9px; }}
-body.gg-tier--brief .gg-section-heading-copy h2 {{ font-size:22px; }}
-body.gg-tier--brief .gg-section-body > p {{ font-size:14px; line-height:1.48; }}
-body.gg-tier--brief .gg-chart-wrap {{ margin:12px 0; padding:12px 14px 10px; }}
-body.gg-tier--brief .gg-table-wrap {{ margin:12px 0; }}
-body.gg-tier--brief .gg-source-card {{ padding:8px 9px; }}
-body.gg-tier--brief .gg-sources {{ margin-top:18px; padding:12px 14px; }}
-body.gg-tier--brief .gg-sources-intro {{ margin:4px 0 8px; font-size:10px; }}
-body.gg-tier--brief .gg-sources h2 {{ font-size:20px; }}
-body.gg-tier--brief .gg-sources-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }}
-/* Brief KPI row: three equal cards, compact typography, and no aggressive
-   word breaking. A long multi-company metric stays legible instead of
-   becoming a visually dominant/tall card. */
-body.gg-tier--brief .gg-metrics {{ grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:10px 0 12px; }}
-body.gg-tier--brief .gg-metric {{ min-width:0; min-height:72px; padding:10px 11px; break-inside:avoid; page-break-inside:avoid; }}
-body.gg-tier--brief .gg-metric-value {{ font-size:20px; line-height:1.08; overflow-wrap:normal; word-break:normal; }}
-body.gg-tier--brief .gg-metric-label {{ font-size:8.5px; line-height:1.18; letter-spacing:.025em; }}
-body.gg-tier--brief .gg-metric-change {{ font-size:8.5px; }}
-body.gg-tier--brief .gg-source-title {{ font-size:11px; line-height:1.25; }}
-body.gg-tier--brief .gg-source-meta, body.gg-tier--brief .gg-source-link {{ font-size:9px; line-height:1.25; }}
 body.gg-tier--in_depth .gg-section-heading-copy h2 {{ font-size:clamp(24px,2.7vw,32px); }}
 body.gg-tier--in_depth .gg-section-body > p {{ max-width:78ch; }}
 body.gg-tier--in_depth .gg-chart-wrap, body.gg-tier--in_depth .gg-table-wrap {{ box-shadow:none; }}
@@ -3686,11 +3508,6 @@ body.gg-tier--in_depth .gg-stat-card {{ box-shadow:none; }}
   .gg-chart-wrap {{ padding:9px 11px 8px; }}
   .gg-table th {{ padding:6px 7px; }}
   .gg-table td {{ padding:6px 7px; }}
-  body.gg-tier--brief .gg-dashboard-strip .gg-stats-grid {{ display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important; margin:10px 0 14px !important; break-inside:avoid !important; page-break-inside:avoid !important; }}
-  body.gg-tier--brief .gg-dashboard-strip .gg-stat-card {{ width:auto !important; max-width:none !important; min-height:68px !important; padding:9px 10px !important; break-inside:avoid !important; page-break-inside:avoid !important; }}
-  body.gg-tier--brief .gg-dashboard-strip .gg-stat-value {{ font-size:16pt !important; line-height:1.05 !important; }}
-  body.gg-tier--brief .gg-dashboard-strip .gg-stat-label {{ font-size:7.5pt !important; line-height:1.15 !important; }}
-  body.gg-tier--brief .gg-section {{ margin-bottom:10px; }}
   /* Let long risk tables flow to the next page without painting an empty pink
      continuation panel. Keep individual rows together, not the entire table. */
   .gg-section[data-emphasis="critical"] {{ background:transparent !important; padding:0 !important; border-radius:0 !important; break-inside:auto !important; page-break-inside:auto !important; }}
@@ -3698,22 +3515,11 @@ body.gg-tier--in_depth .gg-stat-card {{ box-shadow:none; }}
   .gg-section-type--risk_assessment .gg-table-wrap,
   .gg-section-type--risk_assessment .gg-table-scroll {{ break-inside:auto !important; page-break-inside:auto !important; overflow:visible !important; }}
   .gg-section-type--risk_assessment .gg-table tr {{ break-inside:avoid !important; page-break-inside:avoid !important; }}
-  body.gg-tier--brief .gg-section-body > p {{ font-size:9.4pt; line-height:1.38; }}
-  body.gg-tier--brief .gg-section-heading-copy h2 {{ font-size:14pt; }}
-  body.gg-tier--brief .gg-chart-canvas-box {{ height:180px; }}
   .gg-print-page-break {{ display:none; }}
-  body.gg-tier--brief .gg-print-page-break {{ display:block; height:0; margin:0; padding:0; break-before:page; page-break-before:always; }}
-  body.gg-tier--brief .gg-sources {{ margin-top:10px; padding:8px 10px; break-before:page !important; page-break-before:always !important; }}
-  body.gg-tier--brief .gg-sources h2 {{ font-size:13pt; }}
-  body.gg-tier--brief .gg-sources-intro {{ margin:2px 0 6px; }}
-  body.gg-tier--brief .gg-sources-grid {{ grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }}
-  body.gg-tier--brief .gg-source-card {{ padding:5px 6px; }}
-  body.gg-tier--brief .gg-source-title {{ font-size:7.7pt; line-height:1.15; }}
-  body.gg-tier--brief .gg-source-meta, body.gg-tier--brief .gg-source-link {{ font-size:6.7pt; line-height:1.1; }}
   body.gg-tier--detailed .gg-section {{ margin-bottom:13px; }}
   body.gg-tier--in_depth .gg-section {{ margin-bottom:18px; }}
   /* Keep the terminal source appendix from producing a source-only tail page. */
-  body:not(.gg-tier--brief) .gg-sources {{ break-before: page; page-break-before: always; }}
+  body .gg-sources {{ break-before: page; page-break-before: always; }}
   .gg-sources {{ box-shadow:none; }}
   .gg-source-card {{ padding:5px; }}
 }}
@@ -3753,25 +3559,8 @@ body.gg-tier--in_depth .gg-section-body > p {{ text-align: justify !important; t
 .gg-source-link {{ display: inline !important; margin: 0 !important; font-size: 9pt !important; line-height: inherit !important; white-space: nowrap; }}
 .gg-source-unavailable {{ display: inline; font-size: 8.5pt; color: var(--muted); }}
 @media print {{
-  /* Source cards contain an ID column and a full-width content cell. Keep the
-     bibliography readable rather than squeezing seven Brief sources into four
-     narrow columns, which caused URL/title cards to spill across pages. */
-  /* Six-source brief appendices otherwise leave the final citation alone on a
-     mostly blank tail page. Use two readable columns only for this compact case;
-     larger source sets remain full-width to keep long URLs legible. */
-  body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-sources-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 6px !important; }}
-  body.gg-tier--brief .gg-sources:not([data-source-count="6"]) .gg-sources-grid {{ grid-template-columns: minmax(0, 1fr) !important; }}
-  body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-source-card {{ gap: 5px !important; padding: 4px 5px !important; }}
-  body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-source-number {{ flex-basis: 34px !important; width: 34px !important; min-width: 34px !important; max-width: 34px !important; font-size: 6.5pt !important; }}
-  body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-source-title {{ font-size: 7pt !important; line-height: 1.12 !important; overflow-wrap: anywhere !important; }}
-  body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-source-meta, body.gg-tier--brief .gg-sources[data-source-count="6"] .gg-source-link {{ font-size: 6pt !important; line-height: 1.1 !important; overflow-wrap: anywhere !important; }}
-  body.gg-tier--brief .gg-sources .gg-source-card {{ display: flex !important; align-items: flex-start !important; gap: 8px !important; }}
-  body.gg-tier--brief .gg-sources .gg-source-number {{ box-sizing: border-box !important; flex: 0 0 44px !important; width: 44px !important; min-width: 44px !important; max-width: 44px !important; padding: 0 2px !important; white-space: nowrap !important; }}
-  body.gg-tier--brief .gg-source-content {{ flex: 1 1 0 !important; min-width: 0 !important; width: auto !important; }}
-  body.gg-tier--brief .gg-section-body--grid,
   body.gg-tier--detailed .gg-section-body--grid,
   body.gg-tier--in_depth .gg-section-body--grid {{ display:block !important; grid-template-columns:none !important; columns:1 !important; gap:0 !important; width:100% !important; }}
-  body.gg-tier--brief .gg-section-body--grid > *,
   body.gg-tier--detailed .gg-section-body--grid > *,
   body.gg-tier--in_depth .gg-section-body--grid > * {{ display:block !important; width:100% !important; max-width:100% !important; min-width:0 !important; }}
   .gg-table--wide th, .gg-table--wide td {{ padding:5px 6px; font-size:11px; line-height:1.25; }}
@@ -4756,10 +4545,6 @@ def _render_sources_appendix(
     if not manifest or placement == "none":
         return ""
     display_manifest = list(manifest)
-    if str(report_tier).lower() == "brief":
-        cited = {str(x).upper() for x in (cited_source_ids or set())}
-        if cited:
-            display_manifest = [src for src in display_manifest if str(src.get("id") or "").upper() in cited]
     if not display_manifest:
         return ""
 
@@ -4810,7 +4595,7 @@ def _render_sources_appendix(
         )
     count = len(display_manifest)
     heading = "Appendix — Data Sources" if placement == "appendix" or include_appendix else "Data Sources"
-    print_break = '<div class="gg-print-page-break" aria-hidden="true"></div>' if str(report_tier).lower() == "brief" else ""
+    print_break = ""
     return (
         f'{print_break}<section id="data-sources" class="gg-sources gg-reveal" data-reveal data-source-placement="{html.escape(placement, quote=True)}" data-source-count="{count}">'
         f'<h2>{heading}</h2>'
@@ -4945,9 +4730,7 @@ def _report_anchor(title: object, index: int, prefix: str = "section") -> str:
 
 
 def _render_report_navigation(entries: list[tuple[str, str]], report_tier: str) -> str:
-    # Brief is an executive dashboard: keep its opening compact. Navigation
-    # earns its space in the longer analytical editions.
-    if report_tier == "brief" or len(entries) < 2:
+    if len(entries) < 2:
         return ""
     links = "".join(
         f'<li><a href="#{html.escape(anchor, quote=True)}">{html.escape(label)}</a></li>'
@@ -5134,18 +4917,8 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # not create an untitled "Report" section.
     report, _leading_status = _extract_leading_status_banner(report)
     report_tier = str(report_tier or "detailed").strip().lower()
-    if report_tier not in ("brief", "detailed", "in_depth"):
+    if report_tier not in ("detailed", "in_depth"):
         report_tier = "detailed"
-    if report_tier == "brief":
-        # Final renderer boundary: even if a stale frontend or provider bypasses
-        # the generation-time Brief contract, never let a Brief render as a
-        # Detailed report. The validated presentation plan supplies the dynamic
-        # section intent; this does not impose domain-specific section names.
-        report = _enforce_brief_section_cap(report, presentation if isinstance(presentation, dict) else None, max_sections=4)
-        # Provider/planner wrappers occasionally leak a standalone "Report"
-        # label into the markdown body. It is not research content and creates
-        # a misleading orphan line beneath a section heading.
-        report = re.sub(r"(?im)^\s*(?:#{1,4}\s*)?(?:\*\*|__)?Report(?:\*\*|__)?\s*$", "", report)
     render_theme = dict(theme or {})
     # Keep the browser/PDF family on one restrained institutional palette;
     # report mode changes composition density, not the visual identity.
@@ -5385,7 +5158,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         summary_cls = "gg-summary-wrap gg-summary-wrap--sidebar" if exec_placement == "sidebar" else "gg-summary-wrap--end" if exec_placement == "end_summary" else "gg-summary-wrap"
         body = _markdown_to_html(exec_body, [], [], render_theme, source_registry, force_source_notes)
         metrics = _render_metrics(exec_metrics, source_registry)
-        summary_heading = str(exec_spec.get("heading") or ("Executive Takeaway" if report_tier == "brief" else "Executive Summary"))
+        summary_heading = str(exec_spec.get("heading") or "Executive Summary")
         summary_html = f'<section id="report-overview" class="{summary_cls}"><div class="gg-summary-card gg-summary-card--high"><h2 class="gg-summary-heading">{html.escape(summary_heading)}</h2>{body}{metrics}</div></section>'
 
     planned_metric_content = any(
@@ -5397,10 +5170,10 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         )
         for section in (spec_dict.get("sections") or [])
     )
-    stat_limit = 3 if report_tier == "brief" else 6 if report_tier == "detailed" else 8
-    dashboard_stats = _brief_key_stats(key_stats) if report_tier == "brief" else key_stats
-    # A Brief report gets one KPI surface, not an executive-metrics row followed
-    # by a second dashboard made from the same keyStats payload. If the planner
+    stat_limit = 6 if report_tier == "detailed" else 8
+    dashboard_stats = key_stats
+    # One KPI surface, not an executive-metrics row followed by a second
+    # dashboard made from the same keyStats payload. If the planner
     # supplied executive metrics, those own the KPI presentation. A dashboard is
     # only rendered when there are no executive metrics to avoid duplicate cards.
     explicit_exec_metrics = bool(exec_metrics)
@@ -5411,13 +5184,6 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         + '</section>'
         if should_render_dashboard else ""
     )
-
-    if report_tier == "brief" and not charts:
-        recovered = _verified_metric_trend(key_stats, report, source_registry) or _verified_report_trend(report, source_registry)
-        if recovered:
-            chart_html = _render_chart_block(recovered, 991, render_theme, source_registry, force_source_note=True)
-            if chart_html:
-                dashboard_html += '<section class="gg-brief-trend" aria-label="Sourced report trend">' + chart_html + '</section>'
 
     # Collapse ultra-thin, text-only headings into the previous section as H3
     # when there is no visual/structured material. This keeps dynamic reports
@@ -5458,7 +5224,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
         emphasis = str(plan.get("emphasis") or "normal")
         section_type = str(plan.get("section_type") or "narrative")
         body_raw = str(actual.get("body") or "").strip()
-        metric_limit = 4 if report_tier == "brief" else 6 if report_tier == "detailed" else 8
+        metric_limit = 6 if report_tier == "detailed" else 8
         block_html, chart_cursor, blocks_meaningful = _render_structured_blocks(
             plan.get("blocks") or [], charts, key_stats, render_theme, chart_cursor,
             source_registry, force_source_notes=force_source_notes, metric_limit=metric_limit,
@@ -5476,7 +5242,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
             # report prose merely because the planner also requested KPI/table/callout blocks.
             body_html = (narrative_html + "\n" + block_html).strip() if narrative_html.strip() and block_html.strip() else (narrative_html or block_html)
         if section_type == "metrics_dashboard" and key_stats and "gg-metric" not in body_html and not legacy_metrics_rendered and not dashboard_html:
-            metric_limit = 4 if report_tier == "brief" else 6 if report_tier == "detailed" else 8
+            metric_limit = 6 if report_tier == "detailed" else 8
             body_html = _render_key_stats(key_stats, source_registry, metric_limit) + body_html
             legacy_metrics_rendered = True
         if section_type == "timeline" and not blocks_meaningful:
@@ -5695,7 +5461,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
   {title_band_html}
   {status_banner_html}
   {index_html}
-  {(opening_html + dashboard_html) if report_tier == "brief" else (dashboard_html + opening_html)}
+  {dashboard_html + opening_html}
   {inline_sources_html}
   <div class="gg-report-sections">{"".join(body_sections)}</div>
   {closing_summary}
@@ -5738,7 +5504,7 @@ async def generate_html_report(request: Request):
     sources = normalise_source_manifest(body.get("sources", []))
     presentation = body.get("presentation")
     report_tier = str(body.get("reportTier") or "detailed").strip().lower()
-    if report_tier not in ("brief", "detailed", "in_depth"):
+    if report_tier not in ("detailed", "in_depth"):
         report_tier = "detailed"
 
     # Same unwrap-double-encoded-JSON safety net as routes/pdf.py.
