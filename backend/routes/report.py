@@ -15584,13 +15584,21 @@ async def _ensure_report_page_budget(
     sources: object, presentation: object, web_images: list | None = None,
     file_images: list | None = None, theme: dict | None = None,
     requested_pages: int | None = None,
+    allow_floor_expansion: bool = True,
 ) -> tuple[str, int | None]:
-    """Measure pagination; expand only when the user explicitly requested pages."""
+    """Measure pagination; expand toward an explicit page request, or toward the mode's
+    evidence-depth floor (utils/page_policy) when the evidence is not thin.
+
+    Expansion is bounded and novelty-checked; below the floor with thin evidence the
+    shortfall is disclosed, never padded. V2 output passes allow_floor_expansion=False:
+    its sections are already sized from the evidence.
+    """
     spec = get_report_tier_spec(report_tier)
     maximum = int(spec.page_target.maximum)
     explicit_target = int(requested_pages) if requested_pages is not None and 6 <= int(requested_pages) <= 100 else None
-    minimum = explicit_target or 1
-    target = explicit_target or 1
+    depth_floor = int(spec.page_target.minimum or 1) if allow_floor_expansion else 1
+    minimum = explicit_target or depth_floor
+    target = explicit_target or depth_floor
     if explicit_target is not None:
         maximum = max(maximum, explicit_target)
         log.info("Report page budget: explicit requested target=%d", explicit_target)
@@ -15603,8 +15611,8 @@ async def _ensure_report_page_budget(
     if pages is None:
         log.warning("Report page target unavailable: final PDF renderer could not measure tier=%s", report_tier)
         return expanded, None
-    if explicit_target is None:
-        log.info("Report pagination measured: pages=%d tier=%s; no implicit length target applied", pages, report_tier)
+    if explicit_target is None and pages >= minimum:
+        log.info("Report pagination measured: pages=%d tier=%s; at or above the %d-page depth floor", pages, report_tier, minimum)
         return expanded, pages
 
     total_budget = {"detailed": 180.0, "in_depth": 480.0}.get(report_tier, 180.0)
@@ -23806,7 +23814,7 @@ async def generate_report(request: Request):
                 key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
                 presentation=report_presentation, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
-                requested_pages=requested_page_count,
+                requested_pages=requested_page_count, allow_floor_expansion=not _v2_used,
             )
         report_text = strip_generation_markers(report_text)
         if preflight_pages is not None:
@@ -24912,7 +24920,9 @@ async def generate_report(request: Request):
                 "minimumReached": (preflight_pages >= _effective_minimum if preflight_pages is not None and _effective_minimum is not None else None),
                 "warning": (
                     "Pagination could not be measured by the export renderer." if preflight_pages is None else
-                    f"Rendered output has {preflight_pages} pages, below the {_effective_minimum}-page requested minimum (target {_effective_target}). Check source coverage and continuation logs."
+                    f"Rendered output has {preflight_pages} pages, below the {_effective_minimum}-page "
+                    f"{'requested minimum' if requested_page_count else 'evidence-depth floor'} (target {_effective_target}). "
+                    "Check source coverage; the report is not padded to reach it."
                     if _effective_minimum is not None and preflight_pages < _effective_minimum else
                     f"Rendered output has {preflight_pages} pages, above the {_effective_maximum}-page maximum; distinct supported content was preserved."
                     if preflight_pages > _effective_maximum else None

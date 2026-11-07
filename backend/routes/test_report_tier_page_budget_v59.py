@@ -18,7 +18,10 @@ def test_json_wrapped_continuation_sections_are_recovered():
     )]
 
 
-def test_page_budget_measures_default_tier_without_expansion_target(monkeypatch):
+def test_page_budget_expands_toward_the_depth_floor_only_from_evidence(monkeypatch):
+    # Stage D: 3 rendered pages is below the 20-page detailed floor and 24 sources were
+    # fetched (not thin), so ONE bounded, novelty-checked expansion round runs toward the
+    # floor; it stops as soon as the remeasured PDF reaches it (27 pages).
     measured_pages = iter([3])
     expansion_calls = []
 
@@ -42,7 +45,8 @@ def test_page_budget_measures_default_tier_without_expansion_target(monkeypatch)
     # This test isolates renderer/page-budget iteration. Keep the separate
     # novelty gate satisfied so synthetic filler is not treated as padding.
     monkeypatch.setattr(report, "_expansion_novelty", lambda _before, _after: (1, {"S2", "S3"}))
-    body = "## Findings\n\n" + ("The retrieved sources establish a relevant baseline and identify limitations. [S1] " * 55)
+    body = "## Findings\n\n" + " ".join(
+        f"Finding {i} establishes a separate baseline and identifies its limitation [S1]." for i in range(55))
     evidence = "\n\n".join(f"[S{i}] Distinct relevant publisher evidence about the research question." for i in range(1, 25))
 
     final_body, pages = asyncio.run(report._ensure_report_page_budget(
@@ -59,9 +63,9 @@ def test_page_budget_measures_default_tier_without_expansion_target(monkeypatch)
         presentation={},
     ))
 
-    assert expansion_calls == []
-    assert pages == 3
-    assert final_body == body.strip()
+    assert len(expansion_calls) == 1
+    assert pages == 27
+    assert final_body.startswith(body.strip()) and "evidence angle 1" in final_body
 
 
 def test_page_budget_does_not_fabricate_content_when_evidence_is_insufficient(monkeypatch):

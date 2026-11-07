@@ -92,15 +92,18 @@ def test_generation_prompt_does_not_set_a_page_or_character_quota():
 
 
 @pytest.mark.asyncio
-async def test_page_budget_controller_only_measures_and_never_pads_to_a_floor(monkeypatch):
+async def test_page_budget_never_pads_to_the_floor_when_evidence_is_thin(monkeypatch):
+    # Stage D: below the 20-page depth floor, but no fetched sources (thin evidence):
+    # the shortfall is disclosed and nothing is expanded or padded.
     import routes.report as report_mod
 
     async def unexpected_expansion(*args, **kwargs):
-        raise AssertionError("pagination is informational and must not trigger expansion")
+        raise AssertionError("thin evidence must not trigger expansion toward the depth floor")
 
     monkeypatch.setattr(report_mod, "_expand_report_to_tier", unexpected_expansion)
     monkeypatch.setattr(report_mod, "_rendered_page_count_preflight", lambda *args, **kwargs: 6)
-    base = "## Section 1\n\n" + ("Analysis. " * 900)
+    # Distinct sentences: the normaliser collapses literally repeated filler.
+    base = "## Section 1\n\n" + " ".join(f"Finding {i} describes a separate driver of the result." for i in range(300))
     out, pages = await report_mod._ensure_report_page_budget(
         base, "test topic", "detailed", {"sections": [{"heading": "Section 1"}]},
         "source evidence", "Test Report", "Summary", [], [], [], None,

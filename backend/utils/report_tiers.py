@@ -21,8 +21,9 @@ class ReportTier(str, Enum):
 
 @dataclass(frozen=True)
 class PageTarget:
-    # Page ranges are metadata only. minimum/target are populated only for an
-    # explicit user page request; the tier's maximum is a renderer warning cap.
+    # Stage D page policy (utils/page_policy.py): minimum is the evidence-depth
+    # floor, maximum the cap; the target is computed from evidence volume per run
+    # (or is an explicit user page request). Nothing is padded to reach a number.
     minimum: int | None
     target: int | None
     maximum: int
@@ -55,7 +56,7 @@ DETAILED_SPEC = ReportTierSpec(
     tier=ReportTier.DETAILED,
     label="In-Detail Report",
     objective="Comprehensive business and technical analysis for managers and analysts.",
-    page_target=PageTarget(None, None, 30),
+    page_target=PageTarget(20, None, 32),
     research_breadth="expanded",
     evidence_intensity="broad",
     allow_cover=True,
@@ -83,7 +84,7 @@ DEEP_SPEC = ReportTierSpec(
     tier=ReportTier.IN_DEPTH,
     label="Deep Research Report",
     objective="Institutional-grade, exhaustive research paper or prospectus-level analysis.",
-    page_target=PageTarget(None, None, 100),
+    page_target=PageTarget(40, None, 140),
     research_breadth="comprehensive",
     evidence_intensity="exhaustive",
     allow_cover=True,
@@ -172,7 +173,8 @@ def report_tier_contract(tier: str | None) -> str:
     page_guidance = (
         "An explicit user page-count request may be used as a bounded delivery constraint."
         if spec.page_target.target is not None else
-        f"Use {maximum} pages only as a renderer-measured upper warning threshold."
+        f"Length follows the verified evidence: aim for at least {spec.page_target.minimum} pages of depth when the "
+        f"evidence supports it, up to {maximum} pages."
     )
     source_guidance = {
         "detailed": "Prefer 20–30 distinct relevant sources, with meaningful publisher-page extraction rather than search snippets alone.",
@@ -182,7 +184,7 @@ def report_tier_contract(tier: str | None) -> str:
 Tier ID: {spec.tier.value}
 Objective: {spec.objective}
 Research breadth: {spec.research_breadth}; evidence intensity: {spec.evidence_intensity}
-PAGINATION: {page_guidance} Do not target a page, word, or character count. Let the request and verified evidence determine report length; never pad or invent material.
+PAGINATION: {page_guidance} Do not pad to reach a page, word, or character count. Let the request and verified evidence determine report length; never pad or invent material.
 SOURCE COVERAGE: {source_guidance} Do not keep irrelevant pages merely to meet a source count.
 Structure: choose the actual headings, order, hierarchy and blocks from this request and the evidence. No fixed section template or minimum section count is required.
 Quantitative callouts: include only material, source-supported values; do not invent a KPI to fill space.

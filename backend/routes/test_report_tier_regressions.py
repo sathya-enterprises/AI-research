@@ -17,18 +17,20 @@ def test_automatic_generation_does_not_expand_to_a_length_quota_for_any_tier():
         assert " ".join(result.split()) == " ".join(original.split())
 
 
-def test_page_budget_measures_without_expanding_under_a_former_page_floor(monkeypatch):
+def test_page_budget_below_the_floor_does_not_expand_without_evidence(monkeypatch):
+    # Stage D: 4 pages is below the 20-page floor, but there are no fetched sources and
+    # under 900 characters of evidence, so nothing is expanded (shortfall disclosed).
     import asyncio
     from routes import report as report_mod
 
     preflight_results = iter([4])
 
     async def expand(report_text, question, report_tier, report_plan, evidence_text, target_override=None, max_passes_override=None):
-        raise AssertionError("pagination measurement must not invoke prose expansion")
+        raise AssertionError("expansion toward the floor needs evidence the report has not used")
 
     monkeypatch.setattr(report_mod, "_rendered_page_count_preflight", lambda *args, **kwargs: next(preflight_results))
     monkeypatch.setattr(report_mod, "_expand_report_to_tier", expand)
-    original = "## Market View\n\n" + ("Source-grounded analysis of distinct market drivers. " * 50)
+    original = "## Market View\n\n" + " ".join(f"Driver {i} is analysed from its own source." for i in range(50))
     body, pages = asyncio.run(report_mod._ensure_report_page_budget(
         report_text=original, question="Analyze the market", report_tier="detailed",
         report_plan={"sections": [{"heading": "Market View"}]}, evidence_text="Verified sources",

@@ -1,25 +1,26 @@
 from utils.report_tiers import get_report_tier_spec, report_tier_contract
 
 
-def test_report_tiers_have_only_renderer_warning_caps_by_default():
-    expected_maxima = {"detailed": 30, "in_depth": 100}
-    for tier, maximum in expected_maxima.items():
+def test_report_tiers_have_an_evidence_depth_floor_and_a_cap():
+    # Stage D page policy: minimum = evidence-depth floor, maximum = cap; the target is
+    # computed per run from evidence volume (None here) unless the user asks for pages.
+    expected = {"detailed": (20, 32), "in_depth": (40, 140)}
+    for tier, (floor, cap) in expected.items():
         page_target = get_report_tier_spec(tier).page_target
-        assert (page_target.minimum, page_target.target, page_target.maximum) == (None, None, maximum)
+        assert (page_target.minimum, page_target.target, page_target.maximum) == (floor, None, cap)
 
 
 def test_report_tier_contract_communicates_pagination_policy_and_source_breadth():
     expected = {
-        "detailed": ("8 pages", "8–12 distinct relevant sources"),
-        "detailed": ("30 pages", "20–30 distinct relevant sources"),
-        "in_depth": ("100 pages", "35–50 distinct relevant sources"),
+        "detailed": ("at least 20 pages", "up to 32 pages", "20–30 distinct relevant sources"),
+        "in_depth": ("at least 40 pages", "up to 140 pages", "35–50 distinct relevant sources"),
     }
-    for tier, (warning_cap, source_band) in expected.items():
+    for tier, (floor_text, cap_text, source_band) in expected.items():
         contract = report_tier_contract(tier)
-        assert warning_cap in contract
+        assert floor_text in contract and cap_text in contract
         assert source_band in contract
-        assert "warning threshold" in contract.lower()
-        assert "Do not target a page, word, or character count" in contract
+        assert "when the evidence supports it" in contract
+        assert "Do not pad to reach a page, word, or character count" in contract
 
 
 def test_report_tier_contract_is_authoritative():

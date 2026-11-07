@@ -30,7 +30,10 @@ def test_long_tier_fallback_keeps_salvaged_body_and_reports_page_target():
     text = Path(ROOT / "routes" / "report.py").read_text(encoding="utf-8")
     assert 'salvaged_report if report_tier in ("detailed", "in_depth")' in text
     assert 'if report_tier in ("detailed", "in_depth"):' in text
-    assert '"report":     salvaged_report' in text
+    # The salvaged body is returned normalized and citation-sanitized.
+    assert '"report":     salvaged_public_report' in text
     assert '"pageTarget": _salvage_page_target' in text
+    # Stage D: the salvage page target's minimum is the tier's evidence-depth floor (or an explicit request).
     assert '"min": _salvage_minimum' in text
+    assert "_salvage_minimum = requested_page_count or tier_spec.page_target.minimum" in text
     assert 'salvage final pages' not in text
