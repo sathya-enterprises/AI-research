@@ -74,7 +74,7 @@ def test_agreement_ledger_reads_an_official_register_split_across_passages():
     })
     manifest = [{"id": "S16", "url": "https://sansad.in/getFile/annex.pdf"}, {"id": "S5", "url": "https://theprint.in/x"}]
     block, meta = ledger_block(store, manifest, date(2025, 11, 8), date(2026, 11, 8), items="FTAs")
-    assert "| India-Oman CEPA | 18th December 2025 [S16.8] | 01st June 2026 [S16.8] | yes |" in block
+    assert "| India-Oman CEPA | 18th December 2025 [S16.8] | 01st June 2026 [S16.8] | yes (one official source; no second official source found) |" in block
     assert "India-New Zealand FTA | 27th April 2026 [S16.8] | Under ratification process" in block
     assert "UAE" not in block  # no event in the window
     assert meta["verifiedOfficialSignings"] == 2 and "18th December 2025" in meta["statement"]

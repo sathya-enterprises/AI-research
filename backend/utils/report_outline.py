@@ -552,7 +552,15 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
             return Section(section_id=f"sec-{counter[0]}", title=title[:140], goal=goal[:400],
                            queries=[q for q in queries if q][:4] or [title], role="cross_cutting")
 
-        repair_for_asks(asks, sections, decisions, _factory)
+        windows = None
+        if asks.items and re.search(r"(?i)\b(?:fta|agreement|cepa|treat)", asks.items):
+            # Agreements dated before the window are a comparison with the earlier past (Stage G).
+            from datetime import date as _date
+            from utils.agreement_ledger import partner_windows
+            from utils.question_asks import month_window
+            span = month_window(question, _date.fromisoformat(today[:10]))
+            windows = partner_windows(store, span[0], span[1]) if span else None
+        repair_for_asks(asks, sections, decisions, _factory, partner_windows=windows)
     entities = [e for e in (data.get("entities") or []) if isinstance(e, dict)][:40]
     dimensions = _clean_list(data.get("dimensions"), 10)
     coverage = entity_coverage(store, entities, dimensions)

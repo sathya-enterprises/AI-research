@@ -54,8 +54,11 @@ class Asks:
         lines = ["THE QUESTION ASKS FOR (each item must be answered by a named section or subsection; say which in \"asks\"):"]
         lines += [f"- [{a.ask_id}] {a.requirement}" for a in self.asks]
         if self.per_item:
-            lines.append(f"For EACH of the {self.items or 'items'}: one section (or subsection) with subsections "
-                         + ", ".join(f'"{w.capitalize()}"' for w in self.per_item) + ".")
+            lines.append(f"For EACH of the {self.items or 'items'} dated inside the window: one section (or subsection) with "
+                         "subsections " + ", ".join(f'"{w.capitalize()}"' for w in self.per_item) + ".")
+            if self.window_note.startswith("TIME WINDOW"):
+                lines.append(f"{self.items or 'Items'} dated BEFORE the window are not part of the list: cover them only in compact "
+                             "sections titled \"Comparison with the earlier past: ...\" (no Why/What/How).")
         if self.exhaustive_requested:
             lines.append("The client asked for an exhaustive list: plan a table of every item the sources name, and a note on "
                          "how complete it is. Never call the list exhaustive or complete unless a source states it is complete.")
@@ -202,11 +205,36 @@ def map_asks(asks: Asks, sections: list, llm_mapping: dict | None = None) -> Non
                 ask.status = (ask.status + "; exhaustive not claimable") if ask.status == "mapped" else "not claimable"
 
 
-def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_factory) -> list:
+def _earlier_past(section, partner_windows: dict[str, bool] | None) -> bool:
+    """A section about agreements that ALL fall before the window (e.g. the 2022 UAE / Australia
+    agreements in a 'past 1 year' question)."""
+    if not partner_windows:
+        return False
+    text = f"{section.title} {getattr(section, 'entity', '')}".casefold()
+    named = [inside for partner, inside in partner_windows.items() if re.search(rf"(?<![a-z]){re.escape(partner)}(?![a-z])", text)]
+    return bool(named) and not any(named)
+
+
+def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_factory,
+                    partner_windows: dict[str, bool] | None = None) -> list:
     """Add a section for each unmapped comparison/analysis/deliverable ask, and Why/What/How
     subsections to item sections that lack them. ``section_factory(title, goal, queries)`` builds
-    a Section; passages are assigned afterwards from the queries, like any planned section."""
+    a Section; passages are assigned afterwards from the queries, like any planned section.
+
+    With ``partner_windows`` (agreement partner -> has a date in the window), a section about
+    agreements that all predate the window becomes a compact section labelled "Comparison with the
+    earlier past"; only in-window agreements get the full Why/What/How."""
     added = []
+    for section in sections:
+        if _earlier_past(section, partner_windows):
+            if not section.title.casefold().startswith("comparison with the earlier past"):
+                old = section.title
+                section.title = f"Comparison with the earlier past: {old}"[:140]
+                section.role = "compact"
+                section.subsections = [s for s in section.subsections
+                                       if not re.match(r"(?i)\s*(?:why|what|how)\b", s.title)]
+                decisions.append(f"'{old}' covers agreements dated before the window: compact section labelled "
+                                 "'Comparison with the earlier past' (no Why/What/How).")
     for ask in asks.asks:
         if ask.status != "unmapped" or ask.kind in {"window", "audience"}:
             continue
@@ -222,6 +250,8 @@ def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_fa
         for section in sections:
             text = _section_text(section)
             if getattr(section, "role", "") != "deep_dive" and not (item_terms and any(t in section.title.casefold() for t in item_terms)):
+                continue
+            if _earlier_past(section, partner_windows):
                 continue
             if not getattr(section, "entity", "") or re.search(
                     r"(?i)\b(?:histor|legacy|context|comparison|benchmark|outlook|landscape|overview|effectiveness|evidence)", section.title):

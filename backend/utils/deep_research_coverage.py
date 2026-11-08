@@ -180,7 +180,7 @@ def _official_exchange_coverage(sources: object) -> dict[str, bool]:
 
 def _official_fta_signature_source(sources: object, cited_ids: set[str] | None = None) -> bool:
     rows = sources if isinstance(sources, list) else ([sources] if isinstance(sources, dict) else [])
-    official_domains = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in")
+    official_domains = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in", "indiantradeportal.gov.in")
     agreement_terms = re.compile(r"\b(?:fta|free trade|cepa|ecta|tepa|trade agreement)\b", re.I)
     signature_terms = re.compile(r"\b(?:sign(?:ed|ing)?|signature)\b", re.I)
     required_ids = {str(value).strip().upper() for value in cited_ids or set() if str(value).strip()}
@@ -296,7 +296,7 @@ def extract_verified_fta_signatures(
         return []
     window_start, window_end = window
     rows = sources if isinstance(sources, list) else ([sources] if isinstance(sources, dict) else [])
-    official_domains = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in")
+    official_domains = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in", "indiantradeportal.gov.in")
     agreement_terms = re.compile(r"\b(?:fta|free trade agreement|cepa|ecta|tepa|ceta|trade agreement)\b", re.I)
     active_signing = re.compile(r"\b(?:signed|signs|sign|signing)\b", re.I)
     future_signing = re.compile(

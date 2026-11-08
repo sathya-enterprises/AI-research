@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-_OFFICIAL = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in")
+_OFFICIAL = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in", "indiantradeportal.gov.in")
 _ORD_DATE = r"\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December),?\s+20\d{2}"
 # A register row in an official table (e.g. a Lok Sabha answer annexure, PDF text):
 # "India – Oman CEPA 18th December 2025 01st June 2026" / "India-New Zealand FTA 27th April 2026 Under ratification process"
@@ -168,7 +168,10 @@ def ledger_block(store, manifest: list[dict], start: date, end: date, *, items: 
              f"({start:%d %b %Y} - {end:%d %b %Y})**", "",
              "| Agreement | Date signed | Entry into force | Signing date from an official source |", "| --- | --- | --- | --- |"]
     for row, signed, in_force in in_window:
-        official = "yes" if signed and signed.official else "no"
+        official_sources = {e.passage_id.split(".")[0] for e in row.signed if e.official and signed and e.month == signed.month}
+        official = ("no (official confirmation not found)" if not (signed and signed.official)
+                    else "yes, two or more official sources" if len(official_sources) >= 2
+                    else "yes (one official source; no second official source found)")
         eif = cell(in_force) if in_force or not row.status else f"{row.status} [{signed.passage_id}]" if signed else row.status
         lines.append(f"| {row.agreement} | {cell(signed)} | {eif} | {official} |")
     verified = [(row, s) for row, s, _ in in_window if s and s.official and s.day and start <= s.day <= end]
@@ -176,8 +179,12 @@ def ledger_block(store, manifest: list[dict], start: date, end: date, *, items: 
                              and re.search(r"(?i)\b(?:fta|cepa|ecta|tepa|trade agreement)\b", p.text)
                              and re.search(r"(?i)\bsign", p.text)})[:3])
     if verified:
+        single = [row.agreement for row, s in verified
+                  if len({e.passage_id.split(".")[0] for e in row.signed if e.official and e.month == s.month}) < 2]
         statement = ("Signing dates inside the window confirmed by an official Indian source: "
-                     + "; ".join(f"{row.agreement}, signed on {s.when} [{s.passage_id}]" for row, s in verified) + ".")
+                     + "; ".join(f"{row.agreement}, signed on {s.when} [{s.passage_id}]" for row, s in verified) + "."
+                     + (f" Only one official source was found for {', '.join(single)}; no second official source "
+                        "confirms these dates." if single else ""))
     elif cite:
         statement = (f"No FTA signed inside the window ({start:%d %b %Y} - {end:%d %b %Y}) is verified with a dated "
                      f"signing in the official Indian sources reviewed [{cite}]; the signing dates above come from the "
@@ -187,3 +194,19 @@ def ledger_block(store, manifest: list[dict], start: date, end: date, *, items: 
                      "signing date for these agreements; the dates above come from the sources cited in each row.")
     meta.update({"verifiedOfficialSignings": len(verified), "statement": statement})
     return "\n".join(lines) + "\n\n" + statement, meta
+
+
+_PARTNER_RE = re.compile(r"^India-(.+?)\s+(?:FTA|CEPA|CECPA|CETA|ECTA|TEPA|CECA|BTA|PTA|Comprehensive|Economic|Trade|Free)\b")
+
+
+def partner_windows(store, start: date, end: date) -> dict[str, bool]:
+    """{partner (lower case): has a signing / entry-into-force date inside the window} from the evidence."""
+    out: dict[str, bool] = {}
+    for row in build_ledger(store, []).values():
+        match = _PARTNER_RE.match(row.agreement)
+        if not match:
+            continue
+        partner = re.sub(r"\s*\(.*$", "", match.group(1)).strip().casefold()
+        inside = any(_in_window(e, start, end) for e in row.signed + row.in_force)
+        out[partner] = out.get(partner, False) or inside
+    return out
