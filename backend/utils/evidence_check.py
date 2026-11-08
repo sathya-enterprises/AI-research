@@ -62,6 +62,90 @@ def manifest_auditor(manifest: list[dict], enriched: list[dict]):
     return audit
 
 
+def agreeing_auditor(auditor, store, overrides: list[dict] | None = None):
+    """Make report.py's check and the fact-sheet check agree (Stage F).
+
+    report.py's check reads units off the text next to a number, so it misreads values whose unit
+    sits in a table header ("1-month Returns (%)" | 7.09), in a compact form ("INR52bn") or in a
+    neighbouring sentence. A flag it raises is cleared ONLY when every statistic in the flagged claim
+    is a fact in the claim's own cited sources (value + compatible unit + sign + metric); each
+    cleared flag is recorded in ``overrides`` for the publication report. Anything else stays flagged."""
+    from utils.fact_sheet import FactSheet
+
+    sheet = FactSheet(store.passages)
+    sink = overrides if overrides is not None else []
+
+    def audit(report_text: str) -> list[dict]:
+        return _reconcile_groups(auditor(report_text), report_text, sheet, store, sink)
+
+    return audit
+
+
+def _fact_supported(sheet, store, claim: str, sources: set[str]) -> bool:
+    """Every statistic in ``claim`` is a fact in one of ``sources`` (value + unit + sign + metric)."""
+    from utils.fact_sheet import lookup, unit_family
+    from utils.number_policy import statistic_tokens
+
+    pids = {p.passage_id for p in store.passages if p.passage_id.split(".")[0].upper() in sources}
+    tokens = statistic_tokens(claim)
+    if not pids or not tokens:
+        return False
+    plain = CITE_SRC_RE.sub(" ", claim)
+    for token in tokens:
+        at = claim.find(token)
+        end = at + len(token)
+        sign = "-" if token[:1] in "-−" else ("+" if token[:1] == "+" else "")
+        unit = unit_family(claim[end:end + 16]) if at >= 0 else ""
+        if lookup(sheet, token, sign=sign, unit=unit, sentence=plain, passage_ids=pids).status != "ok":
+            return False
+    return True
+
+
+def _reconcile_groups(groups: list[dict], report_text: str, sheet, store, sink: list[dict]) -> list[dict]:
+    kept = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        claim = str(group.get("claim") or "")
+        span = _locate(report_text, claim)
+        text = report_text[span[0]:span[1]] if span else claim
+        sources = {str(s).upper() for s in group.get("sourceIds") or []}
+        if not group.get("subjectMismatchTokens") and _fact_supported(sheet, store, text, sources):
+            sink.append({"claim": re.sub(r"\s+", " ", CITE_SRC_RE.sub("", text)).strip()[:200],
+                         "values": list(group.get("unmatchedNumericClaims") or [])[:6],
+                         "sources": sorted(sources)[:6],
+                         "reason": "report.py could not read the unit; the fact sheet holds every value in the cited source"})
+            continue
+        kept.append(group)
+    return kept
+
+
+def reconcile_final_audit(audits: dict, report_text: str, store) -> list[dict]:
+    """report.py's final source-evidence gate, made to agree with the fact sheet (V2 only).
+
+    Clears a mismatched citation group only when the fact sheet holds every statistic of the claim
+    in its cited sources; recomputes ``blocking``; records each override (returned, and stored on
+    the audit as ``factSheetOverrides``) so the publication report lists them."""
+    from utils.fact_sheet import FactSheet
+
+    evidence = audits.get("sourceEvidenceAudit") if isinstance(audits, dict) else None
+    if not isinstance(evidence, dict) or not evidence.get("mismatchedCitationGroups"):
+        return []
+    overrides: list[dict] = []
+    kept = _reconcile_groups(list(evidence.get("mismatchedCitationGroups") or []), report_text,
+                             FactSheet(store.passages), store, overrides)
+    if overrides:
+        cleared = {_norm(o["claim"])[:60] for o in overrides}
+        evidence["mismatchedCitationGroups"] = kept
+        evidence["blocking"] = bool(kept)
+        evidence["flags"] = [f for f in evidence.get("flags") or []
+                             if not any(c and c in _norm(str(f)) for c in cleared)]
+        evidence["factSheetOverrides"] = overrides
+        log.info("V2: the fact sheet cleared %d source-evidence flag(s) report.py raised on unit reading; %d remain",
+                 len(overrides), len(kept))
+    return overrides
+
+
 def _norm(text: str) -> str:
     text = CITE_SRC_RE.sub(" ", re.sub(r"[*_`]", "", str(text or "")))
     return re.sub(r"\W+", " ", text.casefold()).strip()
@@ -94,21 +178,67 @@ def _locate(report_md: str, claim: str) -> tuple[int, int] | None:
     return None
 
 
-def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4) -> tuple[str, list[dict], list[dict]]:
-    """Drop claims report.py's evidence check flags; returns (text, removed, still_flagged)."""
-    removed: list[dict] = []
+def fact_rewriter(store):
+    """Rewrite a flagged claim to what the evidence supports, when it can be done without guessing:
+    the claimed value IS in a cited source, on a row/sentence whose entity the claim does not name
+    ("ES5: -8.5%" -> "ES5: -8.5% for Realty"). Returns None when no such rewrite exists."""
+    from utils.fact_sheet import FactSheet
+
+    sheet = FactSheet(store.passages)
+
+    def rewrite(snippet: str, group: dict) -> str | None:
+        cited = {str(s).upper() for s in group.get("sourceIds") or []}
+        text = snippet
+        changed = False
+        for token in group.get("unmatchedNumericClaims") or []:
+            value = str(token).split(":", 1)[-1].split("~")[0]
+            facts = [f for f in sheet.by_value.get(value.lstrip("-").rstrip("0").rstrip(".") if "." in value else value.lstrip("-"), [])
+                     if f.passage_id.split(".")[0] in cited and f.entity]
+            entities = {f.entity for f in facts}
+            if len(entities) != 1:
+                continue  # absent, or ambiguous between several entities: no rewrite
+            entity = entities.pop()
+            if re.search(rf"(?i)(?<![A-Za-z]){re.escape(entity)}(?![A-Za-z])", text):
+                continue
+            raw = next((f.raw for f in facts), "")
+            number = re.escape(raw.lstrip("+-−–").strip())
+            match = re.search(rf"{number}\s?(?:%|crore|cr|lakh crore|trillion|billion|million|bn|mn|x)?", text)
+            if not match:
+                continue
+            text = f"{text[:match.end()]} for {entity}{text[match.end():]}"
+            changed = True
+        return text if changed else None
+
+    return rewrite
+
+
+def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4, rewriter=None) -> tuple[str, list[dict], list[dict]]:
+    """Loop until clean: each flagged claim is rewritten to what the evidence supports (once) or removed,
+    re-checked, up to ``max_rounds``; whatever is still flagged after that is removed with its line.
+    Returns (text, actions, still_flagged); each action is logged and has ``action`` = rewritten|removed."""
+    actions: list[dict] = []
     flagged: list[dict] = []
-    for _round in range(max_rounds):
+    rewritten_once: set[str] = set()
+    for _round in range(max_rounds + 1):
         try:
             flagged = auditor(report_md)
         except Exception as exc:  # the check must never break the report
             log.warning("V2 evidence check failed: %s", type(exc).__name__)
-            return report_md, removed, []
+            return report_md, actions, []
         if not flagged:
             break
+        last_round = _round == max_rounds
         changed = False
         for group in flagged:
-            span = _locate(report_md, str(group.get("claim") or ""))
+            claim = str(group.get("claim") or "")
+            span = _locate(report_md, claim)
+            if not span and last_round:
+                # Forced removal: the line that holds the start of the claim.
+                key = _norm(claim)[:40]
+                for line_match in re.finditer(r"(?m)^.*$", report_md):
+                    if key and key in _norm(line_match.group(0)) and not line_match.group(0).lstrip().startswith("#"):
+                        span = (line_match.start(), line_match.end())
+                        break
             if not span:
                 continue
             start, end = span
@@ -116,6 +246,16 @@ def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4) -> tuple
             values = list(group.get("unmatchedNumericClaims") or [])[:6]
             reason = ("cited sources hold the number for a different metric" if group.get("subjectMismatchTokens")
                       else "number not found in the cited sources (value or unit)")
+            fixed = rewriter(snippet, group) if rewriter and not last_round and _norm(snippet) not in rewritten_once else None
+            if fixed and fixed != snippet:
+                report_md = report_md[:start] + fixed + report_md[end:]
+                rewritten_once.add(_norm(fixed))
+                actions.append({"action": "rewritten", "claim": re.sub(r"\s+", " ", fixed).strip()[:240], "values": values,
+                                "reason": reason + "; named the entity whose row holds the value",
+                                "sources": list(group.get("sourceIds") or [])[:6]})
+                log.info("V2 evidence check rewrote a claim (named its entity): %s", ", ".join(map(str, values))[:120])
+                changed = True
+                continue
             line_start = report_md.rfind("\n", 0, start) + 1
             line_end = report_md.find("\n", end)
             line_end = len(report_md) if line_end < 0 else line_end
@@ -124,16 +264,11 @@ def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4) -> tuple
                 report_md = report_md[:line_start] + report_md[line_end + 1:]
             else:
                 report_md = report_md[:start] + report_md[end:]
-            removed.append({"claim": re.sub(r"\s+", " ", snippet).strip()[:240], "values": values, "reason": reason,
-                            "sources": list(group.get("sourceIds") or [])[:6]})
+            actions.append({"action": "removed", "claim": re.sub(r"\s+", " ", snippet).strip()[:240], "values": values,
+                            "reason": reason, "sources": list(group.get("sourceIds") or [])[:6]})
             log.info("V2 evidence check removed a claim (%s): %s", reason, ", ".join(map(str, values))[:120])
             changed = True
         report_md = re.sub(r"[ \t]{2,}", " ", re.sub(r"\n{3,}", "\n\n", report_md))
         if not changed:
             break
-    else:
-        try:
-            flagged = auditor(report_md)
-        except Exception:
-            flagged = []
-    return report_md, removed, flagged
+    return report_md, actions, flagged

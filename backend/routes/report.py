@@ -14651,7 +14651,7 @@ def _attach_audit_source_evidence(
     def norm_title(value: object) -> str:
         return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
-    def numbers(value: str) -> set[str]:
+    def numbers(value: str, evidence: bool = False) -> set[str]:
         """Extract comparable numeric quantities with conservative unit normalization.
 
         Equivalent units such as 283.46 GW and 283,460 MW should match. A raw
@@ -14762,6 +14762,11 @@ def _attach_audit_source_evidence(
                 token += f"~{tolerance:.6g}"
             # Avoid binary float noise while still tolerating ordinary displayed rounding.
             found.add(token)
+            if evidence and normalized < 0:
+                # Writers state a negative source value with words ("lagged by 7.10%", "outflows of
+                # 47,955 crore"); an unsigned claim matches it. A claim's explicit sign is checked by
+                # the V2 fact lookup.
+                found.add(token.replace(f"{family}:-", f"{family}:", 1))
         return found
 
     def _claim_numbers(value: str) -> set[str]:
@@ -15190,7 +15195,7 @@ def _attach_audit_source_evidence(
         token_subject_stems: dict[str, list[list[str]]] = {}
         previous_source_sentence = ""
         for sentence, origin in deduped_sentences:
-            sent_numbers = numbers(sentence)
+            sent_numbers = numbers(sentence, evidence=True)
             # A bare cell on a table line that declares percentages or growth
             # ("Percentage variation", "(Per cent)") is a percent value even
             # though the cell itself carries no unit. Subject overlap is still
@@ -22063,6 +22068,7 @@ async def generate_report(request: Request):
         _v2_requested = False
     _v2_used = False
     _v2_unsupported_after_policy: list = []
+    _v2_meta_for_publication: dict = {}
     _report_progress("planning", "Planning sections around the question and retrieved evidence…", 61)
     report_plan = None if _v2_requested else await _plan_report_structure(
         question=question,
@@ -22333,6 +22339,7 @@ async def generate_report(request: Request):
             _v2_unsupported_after_policy += [", ".join(map(str, g.get("values") or [])) or "flagged claim"
                                              for g in (_v2_result["meta"].get("evidenceCheck") or {}).get("stillFlagged") or []]
             record_research_stage("pipeline_v2", _v2_result["meta"])
+            _v2_meta_for_publication = _v2_result["meta"]
             _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
             log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
                      "cross-section dedupe are skipped (v2 checks numbers per passage: %s unsupported)",
@@ -24935,6 +24942,10 @@ async def generate_report(request: Request):
         report_text = sanitize_inline_citations(report_text, source_manifest)
         parsed["summary"] = _sanitize_cover_summary_amounts(parsed.get("summary"), report_text)
         parsed["summary"] = sanitize_inline_citations(parsed.get("summary"), source_manifest)
+        if _v2_used and evidence_store is not None:
+            # Stage F: the final source-evidence gate and V2's fact-sheet check must agree.
+            from utils.evidence_check import reconcile_final_audit as _v2_reconcile
+            _v2_reconcile(final_deterministic_audits, report_text, evidence_store)
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
         _capture_path = finish_research_capture({
             "reportId": report_id,
@@ -25082,6 +25093,20 @@ async def generate_report(request: Request):
             response_payload["failureSummary"] = _outcome["failureSummary"]
             response_payload["draftAvailable"] = True
         response_payload["publicationOutcome"] = _outcome["outcome"]
+        try:
+            # Stage F: one publication report per run (every gate, PASS/FAIL, the exact failing items).
+            from utils.publication_report import build_publication_report, save_publication_report
+            from pathlib import Path as _PubPath
+            _publication_report = build_publication_report(
+                outcome=_outcome, audits=final_deterministic_audits, v2_meta=_v2_meta_for_publication,
+                question=question, tier=report_tier, report_id=report_id)
+            response_payload["publicationReportPath"] = save_publication_report(
+                _publication_report, _capture_path,
+                _PubPath(__file__).resolve().parents[1] / "diagnostics" / "publication_reports")
+            response_payload["publicationGates"] = [{"gate": g["gate"], "status": g["status"], "failing": g["failingCount"]}
+                                                    for g in _publication_report["gates"]]
+        except Exception as _pubrep_exc:
+            log.warning("Publication report skipped: %s", type(_pubrep_exc).__name__)
         if response_payload.get("publicationStatus") == "FAIL":
             # Do not present a deterministic publication failure as a successful
             # report. The single bounded repair/re-audit has already run above;

@@ -548,10 +548,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # Number check = report.py's source-evidence check (value, unit and metric): claims it
     # flags are dropped here, with a log line, before report.py's own check runs. Whatever is
     # still flagged stays flagged (the report is then a draft); nothing is hidden.
-    evidence_removed, evidence_flagged = [], []
+    evidence_removed, evidence_flagged, fact_overrides = [], [], []
     if evidence_auditor is not None:
-        from utils.evidence_check import fix_flagged_claims
-        report_md, evidence_removed, evidence_flagged = fix_flagged_claims(report_md, evidence_auditor)
+        from utils.evidence_check import agreeing_auditor, fact_rewriter, fix_flagged_claims
+        report_md, evidence_removed, evidence_flagged = fix_flagged_claims(
+            report_md, agreeing_auditor(evidence_auditor, store, fact_overrides), rewriter=fact_rewriter(store))
         report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", report_md)))
     est_pages = estimate_pages(sum(d.words for d in good), len(exec_body.split()), len(charts_out),
@@ -577,13 +578,17 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "numberPolicy": {
             "calculatedLabelled": [c for d in good for c in d.calculated_numbers] + exec_policy.calculated,
             "sentencesRemoved": [r for d in good for r in d.removed_sentences] + exec_policy.removed,
+            "numbersRewritten": [r for d in good for r in d.rewritten_numbers] + list(exec_policy.rewritten),
             "unresolvedTableValues": [t for d in good for t in d.unsupported_numbers] + exec_unsupported,
         },
         "editorial": editorial.to_dict(),
-        "evidenceCheck": {"removedClaims": evidence_removed,
+        "evidenceCheck": {"removedClaims": [a for a in evidence_removed if a.get("action") != "rewritten"],
+                          "rewrittenClaims": [a for a in evidence_removed if a.get("action") == "rewritten"],
                           "stillFlagged": [{"claim": str(g.get("claim") or "")[:200],
                                             "values": list(g.get("unmatchedNumericClaims") or [])[:6]}
-                                           for g in evidence_flagged]},
+                                           for g in evidence_flagged],
+                          # report.py flags the fact sheet overruled (unit read from a table header etc.).
+                          "factSheetOverrides": list({o["claim"]: o for o in fact_overrides}.values())},
         "layout": {k: (sorted(v) if isinstance(v, set) else v) for k, v in layout.items() if k != "scorecard"},
         "chartTextMismatches": chart_text_mismatches,
         "failedSections": failed, "words": words, "estimatedPages": est_pages,

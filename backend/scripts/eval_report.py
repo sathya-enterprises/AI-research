@@ -577,8 +577,10 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     store = store_from_passages(passages)
     manifest = (((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources")) or []
     gateway = ReplayGateway(capture)
-    # The replayed writer text was written for the recorded subsections: keep them.
-    os.environ["GG_V2_SUBSECTION_PLANNER"] = "0"
+    # Reproduce the live outline: the subsection planner is deterministic, so it runs in the replay
+    # exactly when it ran live (recorded in the outline decisions); older captures predate it.
+    _decisions = (((stages.get("pipeline_v2") or {}).get("data") or {}).get("outline") or {}).get("decisions") or []
+    os.environ["GG_V2_SUBSECTION_PLANNER"] = "1" if any(str(d).startswith("Deep-dive subsections chosen") for d in _decisions) else "0"
     manifest_rows = [m for m in manifest if isinstance(m, dict)]
     enriched_rows = [r for r in (((stages.get("sources_after_article_fetch") or {}).get("data") or {}).get("sources") or [])
                      if isinstance(r, dict)]
@@ -625,6 +627,21 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     out.setdefault("publicationOutcome", "draft")
     out.setdefault("reportTier", str(capture.get("reportTier") or "detailed"))
     (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
+    # Publication report for the replay: the number gates are the ones V2 ran here (report.py's
+    # source-evidence check via the store auditor); report.py's chart/structure gates did not run.
+    from utils.publication_report import build_publication_report, render_markdown
+    v2meta = result["meta"]
+    number_ok = not (v2meta.get("numberPolicy") or {}).get("unresolvedTableValues") and not (v2meta.get("evidenceCheck") or {}).get("stillFlagged")
+    pub = build_publication_report(
+        outcome={"outcome": "would publish (number gates)" if number_ok else "draft (number gates)"},
+        audits={"sourceEvidenceAudit": {"mismatchedCitationGroups": (v2meta.get("evidenceCheck") or {}).get("stillFlagged") or []}},
+        v2_meta=v2meta, question=str(capture.get("question") or ""), tier=str(capture.get("reportTier") or ""),
+        report_id=str(capture.get("reportId") or run_dir.name))
+    for gate in pub["gates"]:
+        if gate["gate"] in {"Chart evidence", "Report structure", "Consistency", "Scope coverage"}:
+            gate["status"], gate["note"] = "NOT RUN OFFLINE", "report.py runs this gate on the live response only"
+    (run_dir / "v2_replay_publication_report.json").write_text(json.dumps(pub, ensure_ascii=False, indent=1), encoding="utf-8")
+    (run_dir / "v2_replay_publication_report.md").write_text(render_markdown(pub), encoding="utf-8")
     report = out.get("report") or ""
     headings = [(len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(report)]
     explained, referenced = charts_explained(report, out.get("charts") or [])
@@ -653,6 +670,9 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
             capture, (result["meta"].get("numberPolicy") or {}).get("sentencesRemoved") or []),
         "v2replay_unresolved_numbers": len((result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or []),
         "v2replay_evidence_check_removed": len((result["meta"].get("evidenceCheck") or {}).get("removedClaims") or []),
+        "v2replay_evidence_check_rewritten": len((result["meta"].get("evidenceCheck") or {}).get("rewrittenClaims") or []),
+        "v2replay_evidence_check_fact_overrides": len((result["meta"].get("evidenceCheck") or {}).get("factSheetOverrides") or []),
+        "v2replay_policy_numbers_rewritten": len((result["meta"].get("numberPolicy") or {}).get("numbersRewritten") or []),
         "v2replay_evidence_check_still_flagged": len((result["meta"].get("evidenceCheck") or {}).get("stillFlagged") or []),
         "v2replay_repeated_sentences_removed": (result["meta"].get("editorial") or {}).get("repeatedSentencesRemoved"),
         "v2replay_sections_merged": len((result["meta"].get("editorial") or {}).get("mergedSections") or []),
