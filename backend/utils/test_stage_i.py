@@ -71,3 +71,25 @@ def test_how_to_read_does_not_promise_inline_markers_when_hidden(monkeypatch):
     monkeypatch.setenv("REPORT_INLINE_CITATIONS", "0")
     note = how_to_read(deep_dives=0, compact=0, has_qtd=True, has_calculated=False)
     assert "[S#]" not in note and "sector deep-dives" not in note and "compact sections" not in note
+
+
+# ── FIX 7: data sanity ───────────────────────────────────────────────────────────────────────────
+def test_financial_services_qtd_diverging_from_bank_is_blocked():
+    from utils.data_sanity import check_dataset_rows
+    rows = [
+        {"label": "NIFTY FINANCIAL SERVICES", "quarters": ["Q2 FY27"], "returns": [3.1],
+         "qtd": {"return": 17.97, "close": 29151.95}},
+        {"label": "NIFTY BANK", "quarters": ["Q2 FY27"], "returns": [2.4], "qtd": {"return": 7.61, "close": 58000.0}},
+        {"label": "NIFTY METAL", "quarters": ["Q2 FY27"], "returns": [5.0], "qtd": {"return": 4.0, "close": 9000.0}},
+    ]
+    findings = check_dataset_rows(rows)
+    assert rows[0]["qtd"] is None and rows[1]["qtd"] and rows[2]["qtd"]
+    assert any("NIFTY BANK" in f["reason"] for f in findings)
+
+
+def test_qtd_close_far_from_live_level_and_out_of_range_values_are_blocked():
+    from utils.data_sanity import check_dataset_rows
+    rows = [{"label": "NIFTY IT", "quarters": ["Q1 FY27", "Q2 FY27"], "returns": [80.0, 2.0],
+             "qtd": {"return": 3.0, "close": 40000.0}}]
+    findings = check_dataset_rows(rows, live_levels={"NIFTY IT": 36000.0})
+    assert rows[0]["qtd"] is None and rows[0]["returns"] == [None, 2.0] and len(findings) == 2

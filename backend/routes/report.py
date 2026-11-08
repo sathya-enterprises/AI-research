@@ -21026,6 +21026,7 @@ async def generate_report(request: Request):
         and re.search(r"\b(?:stock|equity|share)\s+(?:market|index|indices)\b", question, re.IGNORECASE)
     ))
     if _is_index_question:
+        quotes = []
         try:
             quotes = await fetch_index_quotes()
             quote_source = format_quotes_as_source(quotes)
@@ -21052,6 +21053,15 @@ async def generate_report(request: Request):
                     quarterly_rows = await fetch_sector_quarterly_returns(
                         quarters=requested_quarter_count(question),
                     )
+                    try:  # Stage I: cross-checks block implausible values before they become evidence
+                        from utils.data_sanity import check_dataset_rows
+                        _sanity = check_dataset_rows(quarterly_rows, live_levels={
+                            str(q.get("label") or "").upper(): q.get("price") for q in (quotes or [])
+                            if isinstance(q, dict) and q.get("price")})
+                        if _sanity:
+                            log.warning("Report: dataset sanity blocked %d value(s)", len(_sanity))
+                    except Exception as e:
+                        log.warning("Report: dataset sanity check failed, continuing: %s", e)
                     quarterly_source = format_sector_quarterly_returns_as_source(quarterly_rows)
                     if quarterly_source:
                         sources = [quarterly_source] + sources

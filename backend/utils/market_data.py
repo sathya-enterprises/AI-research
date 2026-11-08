@@ -762,6 +762,8 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
             # Quarter-to-date: the latest monthly bar after the last completed quarter end (its close is
             # the latest available close of the current, partial quarter). Kept apart from the matrix.
             latest_after: tuple[tuple[int, int], float] | None = None
+            latest_symbol = ""
+            end_series = ""  # the series that supplied the last completed quarter-end close
             # Primary ticker first, then aliases, each only filling months that
             # are still missing; stop as soon as every quarter end is covered.
             for candidate in [symbol] + SECTOR_YAHOO_ALIASES.get(label, []):
@@ -773,11 +775,14 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                 later = [key for key in found if key > ends[-1]]
                 if later and latest_after is None:
                     latest_after = (max(later), found[max(later)])
+                    latest_symbol = candidate
                 filled = [key for key in ends if key in found and key not in month_closes]
                 if not filled:
                     continue
                 for key in filled:
                     month_closes[key] = found[key]
+                if ends[-1] in filled:
+                    end_series = candidate
                 history_sources.append(
                     "Yahoo Finance monthly bars" if candidate == symbol
                     else f"Yahoo Finance monthly bars (alias {candidate})"
@@ -797,6 +802,8 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                     if key in official_closes:
                         month_closes[key] = official_closes[key]
                         recovered += 1
+                        if key == ends[-1]:
+                            end_series = "niftyindices"
                 if recovered:
                     official_recovered = recovered
                     history_sources.append("official Nifty Indices daily history")
@@ -814,10 +821,30 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                 log.warning("market_data: monthly bars did not cover requested quarter ends for %s", label)
                 return None
             qtd = None
+            if latest_after and closes[-1] and end_series and end_series != latest_symbol:
+                # Never divide one series' level by another's (an alias ticker's level is not the index's).
+                log.warning("market_data: QTD for %s skipped - quarter-end close and latest close come from "
+                            "different series (%s vs %s)", label, end_series, latest_symbol)
+                latest_after = None
             if latest_after and closes[-1]:
                 (qy, qm), qclose = latest_after
-                qtd = {"from": quarter_labels[-1], "as_of_month": f"{datetime(qy, qm, 1):%b %Y}",
-                       "close": qclose, "return": round((qclose / closes[-1] - 1) * 100, 2)}
+                as_of_month, as_of_date, qtd_source = f"{datetime(qy, qm, 1):%b %Y}", "", "monthly bar"
+                # Stage I: the QTD close is the same ticker's latest DAILY close, with its exact date (the
+                # latest monthly bar of an alias ticker was out of line with the index level: Nifty
+                # Financial Services showed +17.97% QTD against +7.61% for Nifty Bank).
+                async with semaphore:
+                    daily = await _yf_chart_history(client, latest_symbol or symbol, "5d", "1d")
+                if daily:
+                    last = daily[-1]
+                    try:
+                        when = datetime.strptime(str(last.get("date")), "%Y-%m-%d")
+                        if (when.year, when.month) >= (qy, qm) or (when.year, when.month) > ends[-1]:
+                            qclose, as_of_date, qtd_source = float(last["close"]), f"{when:%d %b %Y}", "daily close"
+                            as_of_month = f"{when:%b %Y}"
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                qtd = {"from": quarter_labels[-1], "as_of_month": as_of_month, "as_of_date": as_of_date,
+                       "close": qclose, "source": qtd_source, "return": round((qclose / closes[-1] - 1) * 100, 2)}
             return {
                 "label": label, "quarters": quarter_labels[1:], "returns": returns, "qtd": qtd,
                 "quarter_end_closes": closes[1:], "missing_quarters": missing,
@@ -885,7 +912,7 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
     qtd_rows = [r for r in rows if isinstance(r.get("qtd"), dict)]
     if qtd_rows:
         # Current quarter so far: partial, so it is a separate table and never mixed into the matrix.
-        as_of = qtd_rows[0]["qtd"].get("as_of_month") or ""
+        as_of = qtd_rows[0]["qtd"].get("as_of_date") or qtd_rows[0]["qtd"].get("as_of_month") or ""
         lines.append("")
         lines.append(f"CURRENT QUARTER TO DATE (QTD, partial; latest monthly close {as_of} vs the {quarters[-1] if quarters else 'last'} quarter-end close):")
         lines.append(f"Sector | QTD return to {as_of} (%)")
