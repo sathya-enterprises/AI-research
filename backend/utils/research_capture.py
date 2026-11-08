@@ -127,7 +127,10 @@ def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
         result = {}
         source_kind = " ".join(str(value.get(k) or "") for k in ("source_type", "sourceType", "kind", "type")).casefold()
         source_url = str(value.get("url") or "").casefold()
-        private_source = any(term in source_kind for term in ("uploaded document", "user upload", "private document", "attached file")) or source_url.startswith("internal://")
+        # Fetched public market datasets (internal://verified-*: index closes, calculated sector
+        # returns) are not private: keeping them lets offline replays check the numbers they back.
+        private_source = any(term in source_kind for term in ("uploaded document", "user upload", "private document", "attached file")) or (
+            source_url.startswith("internal://") and not source_url.startswith("internal://verified-"))
         for key, item in value.items():
             key_text = str(key)
             if _SENSITIVE_KEY_RE.search(key_text) or key_text.lower() in {"headers", "request_headers", "authorization_header"}:

@@ -867,7 +867,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", help="JSON baseline to show before → after")
     parser.add_argument("--save-baseline", help="write metrics to this JSON file")
     parser.add_argument("--details", action="store_true", help="print the offending headings/husks/fragments")
+    parser.add_argument("--replay-gates", action="store_true",
+                        help="replay every publication gate + self-healing over all saved captures (offline)")
     args = parser.parse_args(argv)
+    if args.replay_gates:
+        from scripts.replay_gates import main as _replay_gates  # noqa: E402
+        return _replay_gates([Path(p) for p in args.runs] or sorted(p.parent for p in DEFAULT_RUNS.glob("*/*/status_final.json")))
 
     run_dirs = [Path(p) for p in args.runs] or sorted(p.parent for p in DEFAULT_RUNS.glob("*/*/capture.json"))
     if not run_dirs:
