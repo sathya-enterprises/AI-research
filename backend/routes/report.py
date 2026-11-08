@@ -25021,8 +25021,12 @@ async def generate_report(request: Request):
         })
         # Final public-output boundary: the response decoder itself can reveal
         # escaped HTML. Always normalize after decoding, not before it.
+        # V2: inline [S#] markers stay in the report text; the renderer removes them at the final render
+        # step (REPORT_INLINE_CITATIONS) and turns them into each section's "Sources:" line. Stripping
+        # single markers here left the renderer unable to name a section's sources.
+        _public_clean = (lambda text: text) if _v2_used else _clean_inline_source_markers_for_display
         response_payload["report"] = sanitize_inline_citations(
-            normalize_report_markdown(_clean_inline_source_markers_for_display(
+            normalize_report_markdown(_public_clean(
                 strip_generation_markers(_decode_leaked_unicode_escapes(response_payload.get("report", "")))
             )),
             source_manifest,

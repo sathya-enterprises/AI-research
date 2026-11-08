@@ -320,8 +320,10 @@ def entity_table(columns: list[Column], entities: list[str], *, caption: str, ma
         return ""
     rows = []
     for entity in entities:
-        cells = [c.values.get(entity, "—") for c in columns]
-        if sum(cell != "—" for cell in cells) >= min_values:
+        # A sector without a value in a column gets an EMPTY cell: the chart checks read an em dash
+        # as "this value is not verified", which would contradict a chart of the same metric.
+        cells = [c.values.get(entity, "") for c in columns]
+        if sum(cell != "" for cell in cells) >= min_values:
             rows.append("| " + " | ".join([entity, *cells]) + " |")
     if len(rows) < 3:
         return ""
