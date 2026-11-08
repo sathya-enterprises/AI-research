@@ -180,6 +180,9 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
                 if comparison:
                     body = insert_after_first_paragraph(body, comparison)
                     stats["comparisons"] += 1
+                    # Its source tables are now shown: not placed again inline (same numbers twice
+                    # fail the PDF export audit as a repeated observation).
+                    stats["placedTables"].update(c.table.passage_id for c in columns[:3])
         if asks is not None and (asks.per_item or asks.items) and not any(b.startswith("> [!STATS]") for b in top):
             # List / why-what-how questions (agreements, deals): a timeline of the section's own dated events.
             from utils.section_layout import insert_after_first_paragraph as _after_first, timeline_from_body
@@ -545,9 +548,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     used.sort(key=_doc_position)
     mapping = {c.figure_number: i for i, c in enumerate(used, 1)}
     charts_out = []
+    claims_seen: set[str] = set()
     for c in used:
         c.claim = _renumber_figures(c.claim, mapping)  # the claim must use the final figure number
         c.figure_number = mapping[c.figure_number]
+        # One sentence about two figures ("Figure 21 and Figure 22 compare ...") must not caption both:
+        # the export audit reads the repeated caption as a repeated observation. The second figure
+        # gets its own deterministic interpretation, or a caption naming its own data.
+        key = re.sub(r"\W+", " ", c.claim).strip().casefold()
+        if key and key in claims_seen:
+            c.claim = (f"Figure {c.figure_number} shows {c.interpretation[0].lower()}{c.interpretation[1:]}"
+                       if c.interpretation else f"Figure {c.figure_number} shows {c.spec.get('title')}.")
+            c.claim = re.sub(r"\s+", " ", CITE_RE.sub("", c.claim)).strip()[:400]
+        claims_seen.add(re.sub(r"\W+", " ", c.claim).strip().casefold())
         spec = dict(c.spec)
         spec["title"] = f"Figure {c.figure_number}: {spec.get('title')}"
         spec["takeaway"] = c.claim
