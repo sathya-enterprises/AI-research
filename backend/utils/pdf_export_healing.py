@@ -31,6 +31,8 @@ def heal_rendered_duplicates(report: str, charts: list, findings: list[dict]) ->
     actions: list[str] = []
     if not targets:
         return report, charts, actions
+    report, dropped = drop_overlapping_tables(report, flagged=targets)
+    actions += [f"dropped a table repeating the rows of an earlier one ({d})" for d in dropped]
     charts = [dict(c) if isinstance(c, dict) else c for c in charts or []]
     for target in targets:
         # 1) A caption / takeaway shared by two figures: the later figure names its own data.
@@ -83,3 +85,55 @@ def export_failure_payload(audit: dict, findings: list[dict]) -> dict:
         "publicationStatus": "FAIL", "exported": False,
         "renderedPdfAudit": audit, "findings": list(findings or [])[:20],
     }
+
+
+def _row_numbers(line: str) -> frozenset:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")][1:]
+    return frozenset(n.replace(",", "").lstrip("+") for n in re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", " ".join(cells)))
+
+
+def _row_label(line: str) -> str:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return re.sub(r"[^a-z0-9%]+", " ", re.sub(r"\*\*", "", cells[0]).casefold()).strip() if cells else ""
+
+
+def drop_overlapping_tables(report: str, *, min_rows: int = 3, overlap: float = 0.75,
+                            flagged: list[str] | None = None) -> tuple[str, list[str]]:
+    """Two tables listing (mostly) the same rows - e.g. a writer's table and an evidence table placed from
+    the same source in another section - are one observation shown twice (live run H: the rendered-PDF
+    audit blocked export). The later table and its caption are dropped; returns what was dropped."""
+    lines = report.split("\n")
+    blocks, i = [], 0
+    while i < len(lines):
+        if lines[i].strip().startswith("|"):
+            start = i
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                i += 1
+            rows = [ln for ln in lines[start + 1:i] if not re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", ln)]
+            labels = {_row_label(r): _row_numbers(r) for r in rows if _row_label(r)}
+            blocks.append((start, i, labels))
+        else:
+            i += 1
+    drop, dropped = [], []
+    for j, (start, end, labels) in enumerate(blocks):
+        if len(labels) < min_rows:
+            continue
+        for _s, _e, earlier in blocks[:j]:
+            shared = [k for k in labels if k in earlier]
+            # Same rows AND the same values: the same observation twice (not the same sectors on another metric).
+            same_values = [k for k in shared if labels[k] and earlier[k]
+                           and len(labels[k] & earlier[k]) >= min(2, len(labels[k]), len(earlier[k]))]
+            if len(earlier) >= min_rows and len(same_values) >= overlap * min(len(labels), len(earlier)):
+                if flagged is not None and not any(_norm(f) and any(_norm(f) in k or k in _norm(f) for k in labels) for f in flagged):
+                    continue  # only a table holding a line the rendered-PDF audit flagged
+                cap = start
+                while cap > 0 and (not lines[cap - 1].strip() or lines[cap - 1].startswith("**Table")):
+                    cap -= 1
+                    if lines[cap].startswith("**Table"):
+                        break
+                drop.append((cap if lines[cap].startswith("**Table") else start, end))
+                dropped.append(", ".join(sorted(labels))[:120])
+                break
+    for start, end in reversed(drop):
+        del lines[start:end]
+    return "\n".join(lines), dropped
