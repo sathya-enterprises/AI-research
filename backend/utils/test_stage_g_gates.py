@@ -215,3 +215,41 @@ def test_an_agreement_signed_in_the_window_without_a_section_gets_one_with_why_w
     assert "India-Oman CEPA" in titles and "India-New Zealand FTA" in titles
     oman = next(s for s in sections if s.title == "India-Oman CEPA")
     assert [s.title for s in oman.subsections] == ["Why it was signed", "What it covers", "How it works and is implemented"]
+
+
+def test_gateway_retries_network_failures_with_backoff_without_cooling_keys(monkeypatch):
+    import asyncio
+    from utils import llm_gateway as G
+
+    class Runtime:
+        GEMINI_MODELS = ["m1"]
+        GEMINI_KEY_COOLDOWN_MS = GEMINI_TIMEOUT_KEY_COOLDOWN_MS = GEMINI_MODEL_COOLDOWN_MS = 1000
+        cooled = []
+        def get_gemini_keys(self): return ["AIzaTEST"]
+        def _is_rest_api_key(self, k): return True
+        def round_robin(self, keys): return keys
+        def _gemini_model_cooling(self, m): return False
+        def _gemini_candidate_keys(self, ring, model, n): return ring
+        def is_rate_limited(self, k): return False
+        def mark_rate_limited(self, k, ms): self.cooled.append(k)
+        def _gemini_gen_config(self, model, config): return config
+
+    runtime = Runtime()
+    gw = G.LLMGateway(runtime, "detailed", capture=False)
+    calls = {"n": 0}
+
+    async def fake_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return G.LLMResult(ok=False, error="network:ConnectError model=m1")
+        return G.LLMResult(ok=True, text="ok", model="m1")
+
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(gw, "_gemini_once", fake_once)
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    result = asyncio.run(gw.generate(purpose="outline", prompt="p", retries=1))
+    assert result.ok and calls["n"] == 3 and slept == [5] and gw.stats.network_retries == 1

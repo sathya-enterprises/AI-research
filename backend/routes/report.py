@@ -22069,6 +22069,7 @@ async def generate_report(request: Request):
     _v2_used = False
     _v2_unsupported_after_policy: list = []
     _v2_meta_for_publication: dict = {}
+    _v2_fallback_reason = ""
     _report_progress("planning", "Planning sections around the question and retrieved evidence…", 61)
     report_plan = None if _v2_requested else await _plan_report_structure(
         question=question,
@@ -22354,6 +22355,7 @@ async def generate_report(request: Request):
             log.warning("Report: pipeline v2 failed, falling back to the single-call writer: %s: %s",
                         type(_v2_exc).__name__, str(_v2_exc)[:300])
             record_research_stage("pipeline_v2", {"error": f"{type(_v2_exc).__name__}: {str(_v2_exc)[:500]}", "fallback": True})
+            _v2_fallback_reason = f"{type(_v2_exc).__name__}: {str(_v2_exc)[:200]}"
     if not _v2_used:
         raw, model_used = await call_report_writer(
             user_prompt, report_tier, report_plan=report_plan, fallback_sources=enriched
@@ -25127,7 +25129,11 @@ async def generate_report(request: Request):
             from pathlib import Path as _PubPath
             _publication_report = build_publication_report(
                 outcome=_outcome, audits=final_deterministic_audits, v2_meta=_v2_meta_for_publication,
-                question=question, tier=report_tier, report_id=report_id, healing=_gate_healing_summary)
+                question=question, tier=report_tier, report_id=report_id, healing=_gate_healing_summary,
+                pipeline_note=(f"V2 pipeline failed ({_v2_fallback_reason}); the report was written by the fallback "
+                               "single-call writer, so the fact sheet, dataset charts, self-healing gates and coverage "
+                               "note did not run." if _v2_fallback_reason else ""))
+            response_payload["reportPipeline"] = "fallback_single_call" if _v2_fallback_reason else ("v2" if _v2_used else "single_call")
             response_payload["publicationReportPath"] = save_publication_report(
                 _publication_report, _capture_path,
                 _PubPath(__file__).resolve().parents[1] / "diagnostics" / "publication_reports")

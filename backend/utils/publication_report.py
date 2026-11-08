@@ -50,7 +50,8 @@ def _as_list(value) -> list:
 
 
 def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dict | None = None,
-                             question: str = "", tier: str = "", report_id: str = "", healing: dict | None = None) -> dict:
+                             question: str = "", tier: str = "", report_id: str = "", healing: dict | None = None,
+                             pipeline_note: str = "") -> dict:
     audits = audits if isinstance(audits, dict) else {}
     meta = v2_meta if isinstance(v2_meta, dict) else {}
     publication = audits.get("publicationAudit") if isinstance(audits.get("publicationAudit"), dict) else {}
@@ -96,6 +97,7 @@ def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dic
                    "droppedAfterAssembly": len(charts.get("droppedAfterAssembly") or []), **({"funnel": funnel} if funnel else {})},
         "coverage": meta.get("coverage") or {},
         "selfHealing": healing or {},
+        "pipelineNote": pipeline_note,
     }
 
 
@@ -104,6 +106,8 @@ def render_markdown(report: dict) -> str:
     if report.get("question"):
         lines += [f"Question: {report['question']}", ""]
     lines += [f"Tier: {report.get('tier') or '?'} | report id: {report.get('reportId') or '?'}", ""]
+    if report.get("pipelineNote"):
+        lines += [f"**PIPELINE WARNING:** {report['pipelineNote']}", ""]
     if report.get("failedStage"):
         lines += [f"Blocked at: {report['failedStage']}", ""]
     lines += ["| Gate | Status | Failing items |", "|---|---|---|"]

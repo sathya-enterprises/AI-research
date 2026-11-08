@@ -72,6 +72,7 @@ class GatewayStats:
     succeeded: int = 0
     failed: int = 0
     budget_refusals: int = 0
+    network_retries: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     by_purpose: Counter = field(default_factory=Counter)
@@ -79,7 +80,7 @@ class GatewayStats:
 
     def to_dict(self) -> dict:
         return {"calls": self.calls, "succeeded": self.succeeded, "failed": self.failed,
-                "budgetRefusals": self.budget_refusals, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
+                "budgetRefusals": self.budget_refusals, "networkRetries": self.network_retries, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
                 "byPurpose": dict(self.by_purpose), "models": dict(self.models)}
 
 
@@ -116,12 +117,28 @@ class LLMGateway:
             started = time.perf_counter()
             result = LLMResult(ok=False, error="no_attempt")
             tried: set[tuple[str, str]] = set()
-            for attempt in range(1, retries + 2):
+            backoff = [5, 15, 30]  # extra tries after network failures only (transport, not provider)
+            attempt = 0
+            while True:
+                attempt += 1
                 result = await self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout, tried)
                 result.attempts = attempt
                 if result.ok:
                     break
                 log.warning("V2 LLM %s/%s attempt %d failed: %s", purpose, section_id or "-", attempt, result.error)
+                network = str(result.error or "").startswith("network:")
+                if attempt <= retries:
+                    if network:
+                        tried.clear()  # the same key/model pairs may be retried after a network failure
+                    continue
+                if network and backoff:
+                    delay = backoff.pop(0)
+                    self.stats.network_retries += 1
+                    log.warning("V2 LLM %s/%s: network failure; retrying in %ds", purpose, section_id or "-", delay)
+                    await asyncio.sleep(delay)
+                    tried.clear()
+                    continue
+                break
             if not result.ok and not json_mode:
                 result = await self._groq_fallback(prompt, system, result)
             result.elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -190,6 +207,11 @@ class LLMGateway:
             except (httpx.TimeoutException, asyncio.TimeoutError):
                 rt.mark_rate_limited(f"report:gemini:{key}:{model}", rt.GEMINI_TIMEOUT_KEY_COOLDOWN_MS)
                 last_error = f"timeout model={model}"
+                continue
+            except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                # A network failure is not the key's or the model's fault: no cooldown (live run G: a
+                # ConnectError cooled every key/model, so the retry found nothing and V2 fell back).
+                last_error = f"network:{type(exc).__name__} model={model}"
                 continue
             except Exception as exc:
                 rt.mark_rate_limited(f"report:gemini:{key}:{model}", rt.GEMINI_KEY_COOLDOWN_MS)
