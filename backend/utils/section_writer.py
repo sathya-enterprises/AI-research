@@ -39,8 +39,10 @@ NON-NEGOTIABLE RULES
    Only cite ids that appear in EVIDENCE PASSAGES.
 3. Numbers: state only numbers that appear in your passages or in the FIGURE data. Copy them exactly (same units).
    Quote each number with exactly the unit and scale the passage uses (crore stays crore, lakh crore stays lakh
-   crore, trillion stays trillion, %, bps); never convert units, change the scale or round. If you compute a number (a sum, difference, share or change), write
-   "(calculated: <inputs>)" right after it, using only numbers from the cited passages. If a number you would need is
+   crore, trillion stays trillion, %, bps); never convert units, change the scale or round. Name the entity a number
+   belongs to in the same sentence. NEVER compute a number yourself: to state a sum, difference, share or change,
+   write [[calc: A + B]], [[calc: A - B]], [[calc: A / B]] (share, %) or [[calc: change from A to B]] with A, B copied
+   exactly from the passages; the system computes the value and shows its inputs. If a number you would need is
    not in the evidence, say the evidence does not show it. Sentences with numbers the evidence does not contain are removed.
 4. Figures: for each figure listed, put its marker [[FIGURE N]] on its own line where it belongs, and in the adjacent
    paragraph write "Figure N shows ..." and interpret it: what it compares, the key pattern, and why it matters for the
@@ -71,6 +73,7 @@ class SectionDraft:
     unsupported_numbers: list[str] = field(default_factory=list)
     calculated_numbers: list[dict] = field(default_factory=list)
     removed_sentences: list[dict] = field(default_factory=list)
+    rewritten_numbers: list[dict] = field(default_factory=list)
     figures_referenced: list[int] = field(default_factory=list)
     figures_dropped: list[int] = field(default_factory=list)
     calls: int = 0
@@ -95,16 +98,25 @@ def _number_set(texts) -> set[str]:
     return out
 
 
-def unsupported_numbers(body: str, allowed: set[str]) -> list[str]:
-    """Statistics in the text that are not in the evidence (labelled calculations are checked by the policy)."""
+def unsupported_numbers(body: str, allowed: set[str], passage_texts: dict[str, str] | None = None) -> list[str]:
+    """Statistics in the text that are not in the evidence (labelled calculations are checked by the policy).
+
+    With ``passage_texts`` the section's fact sheet decides too (it reads "INR494bn", "1,91,520"), so this
+    count agrees with the number policy that already accepted the sentence."""
     # A labelled calculation ("₹83,816 crore (calculated: 47,955 + ...)") was verified by the
     # number policy against its inputs: neither the number nor its inputs are "unsupported".
     text = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated:[^)]*\)", " ", body)
+    sheet = None
+    if passage_texts:
+        from types import SimpleNamespace
+
+        from utils.fact_sheet import FactSheet
+        sheet = FactSheet([SimpleNamespace(passage_id=k, text=v) for k, v in passage_texts.items()])
     out = []
     for token in statistic_tokens(text):
         norm = _normalize_number(token)
         plain = norm.lstrip("-")
-        if norm not in allowed and plain not in allowed:
+        if norm not in allowed and plain not in allowed and not (sheet and sheet.candidates(token.rstrip(",."))):
             out.append(token)
     return out
 
@@ -218,7 +230,8 @@ def unfence(body: str) -> str:
 
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
                 figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None,
-                passage_texts: dict[str, str] | None = None, own_figures: set[int] | None = None) -> SectionDraft:
+                passage_texts: dict[str, str] | None = None, own_figures: set[int] | None = None,
+                context_entity: str = "") -> SectionDraft:
     text = str(raw or "").strip()
     if SUMMARY_MARKER in text:
         body, summary = text.split(SUMMARY_MARKER, 1)
@@ -250,10 +263,11 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         # Number policy: label calculations with their inputs; remove sentences whose
         # numbers are not in the evidence (logged and recorded, never hidden).
         policy = apply_number_policy(body, passage_texts=passage_texts, allowed_numbers=allowed_numbers,
-                                     section_id=draft.section_id)
+                                     section_id=draft.section_id, context_entity=context_entity)
         body = policy.body
         draft.calculated_numbers += policy.calculated
         draft.removed_sentences += policy.removed
+        draft.rewritten_numbers += policy.rewritten
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}
@@ -290,7 +304,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     draft.summary = re.sub(r"\s+", " ", summary)[:900]
     draft.invalid_citations = invalid
     draft.cited_passages = sorted({t.strip().upper() for g in CITE_RE.findall(body) for t in re.split(r"\s*[,;]\s*", g) if "." in t})
-    draft.unsupported_numbers = unsupported_numbers(body, allowed_numbers)
+    draft.unsupported_numbers = unsupported_numbers(body, allowed_numbers, passage_texts)
     draft.words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", body)))
     draft.ok = draft.words >= min_words
     if not draft.ok:
@@ -361,7 +375,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         part = SectionDraft(section_id=draft.section_id, title=draft.title)
         postprocess(part, result.text, allowed_passages=allowed_passages, allowed_numbers=allowed_numbers,
                     figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers,
-                    passage_texts=passage_texts, own_figures=own_figures)
+                    passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""))
         if not part.ok:
             draft.error = (f"{draft.error}; " if draft.error else "") + f"part {gi + 1}: {part.error}"
         if part.ok:
@@ -372,6 +386,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             draft.unsupported_numbers += part.unsupported_numbers
             draft.calculated_numbers += part.calculated_numbers
             draft.removed_sentences += part.removed_sentences
+            draft.rewritten_numbers += part.rewritten_numbers
             draft.figures_referenced += part.figures_referenced
     # Evidence-driven extension: a short section that left several of its own
     # passages uncited gets ONE more call with only those unused passages. More
@@ -402,7 +417,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)
             postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
                         allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers,
-                        passage_texts=passage_texts, own_figures=own_figures)
+                        passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""))
             if extra.ok:
                 bodies.append(extra.body)
                 if extra.summary:
@@ -412,6 +427,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                 draft.unsupported_numbers += extra.unsupported_numbers
                 draft.calculated_numbers += extra.calculated_numbers
                 draft.removed_sentences += extra.removed_sentences
+                draft.rewritten_numbers += extra.rewritten_numbers
     # Figures never referenced in any part are dropped.
     for fig in figures:
         if fig.status != "referenced":

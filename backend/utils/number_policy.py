@@ -38,7 +38,12 @@ _NON_STAT_RE = re.compile(
     r"|(?<![\d,.])\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\b"
     r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b(?![,.]\d)"
     r"|(?<![\d,.])\b\d{1,3}\s+(?:out\s+)?of\s+(?:the\s+)?\d{1,3}\b(?![,.]\d)"
-    r"|\b(?:top|bottom|first|last|all|over|across|among)\s+\d{1,2}\b(?![,.]\d)(?!\s*%)(?!\s+(?:out\s+)?of\b)(?=\s+[a-z])")
+    r"|\b(?:top|bottom|first|last|all|over|across|among)\s+\d{1,2}\b(?![,.]\d)(?!\s*%)(?!\s+(?:out\s+)?of\b)(?=\s+[a-z])"
+    # Index names and ranges are names, not statistics: "Nifty 50", "Nifty Midcap 150", "Services 25/50",
+    # "12-18 months".
+    r"|\b(?:nifty|sensex|bse|s&p\s+bse)(?:\s+(?:next|midcap|smallcap|microcap|largemidcap|total\s+market|india))?\s+\d{2,3}\b(?![,.]\d|\s*%)"
+    r"|\b\d{1,3}\s*/\s*\d{1,3}\b(?![,.]\d|\s*%)"
+    r"|(?<![\d,.])\b\d{1,3}\s*[-–]\s*\d{1,3}\s*(?:weeks?|months?|years?|days?|quarters?)\b")
 SMALL_ORDINALS = {"0", "1", "2", "3", "4", "5"}
 _QUALIFIER_RE = re.compile(r"(?i)\b(?:over|more than|above|about|around|nearly|almost|approximately|approx\.?|roughly|close to|under|below|less than|some)\s*(?:₹|rs\.?|inr|usd|\$)?\s*$")
 _UNIT_FACTORS = {  # value_in_text * factor == value_in_passage
@@ -144,7 +149,7 @@ class PoolNumber:
     unit: str = ""
 
 
-_UNIT_WORD_RE = re.compile(r"\s*(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\b|crores?|crs?\b|trillion|tn\b|billion|bn\b|million|mn\b)", re.I)
+_UNIT_WORD_RE = re.compile(r"\s*(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\b|crores?|crs?\b|trillion|tn\b|billion|bn\b|million|mn\b|bps\b|x(?![A-Za-z])|times\b)", re.I)
 
 
 def unit_family(after: str) -> str:
@@ -302,6 +307,7 @@ class PolicyResult:
     calculated: list[dict] = field(default_factory=list)
     removed: list[dict] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
+    rewritten: list[dict] = field(default_factory=list)
 
 
 _TABLE_LINE_RE = re.compile(r"^\s*\|")
@@ -313,94 +319,113 @@ def _sentences(paragraph: str) -> list[str]:
 
 
 def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_numbers: set[str],
-                        section_id: str = "") -> PolicyResult:
-    """Label calculated numbers, remove sentences whose numbers the evidence does not support."""
+                        section_id: str = "", context_entity: str = "") -> PolicyResult:
+    """Number check = lookup in the section's fact sheet (value + unit + explicit sign + metric/entity).
+
+    Per number in a sentence:
+      * supported fact -> kept;
+      * right value whose sentence does not name its entity -> rewritten ("-8.5% for Realty");
+      * the passage's value written in another unit -> rewritten back to the passage's form;
+      * "[[calc: ...]]" requests -> computed in code from facts (utils.fact_sheet.apply_calculations);
+      * anything else (absent, other metric/entity, contradicted sign, unverifiable calculation)
+        -> the sentence is removed, with a log line.
+    Derived numbers are never guessed from coincidental pairs of passage numbers.
+    """
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import FactSheet, apply_calculations, lookup
+
+    sheet = FactSheet([SimpleNamespace(passage_id=pid, text=text) for pid, text in passage_texts.items()])
     result = PolicyResult(body=body)
+    result.rewritten = []
+    body, calcs, failed_calcs = apply_calculations(body, sheet, None)
+    result.calculated += [{"section": section_id, "number": c["value"], "inputs": c["inputs"]} for c in calcs]
     out_lines = []
     for line in body.split("\n"):
         if not line.strip() or _TABLE_LINE_RE.match(line) or _HEADING_RE.match(line) or _FIG_RE.fullmatch(line.strip()):
             # A table cell can only be a reported value: a row with a value the evidence does
             # not contain is removed (logged and recorded), like an unsupported sentence.
             if _TABLE_LINE_RE.match(line) and not re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", line):
-                bad = [t for t in statistic_tokens(line)
-                       if normalize(t) not in allowed_numbers and normalize(t).lstrip("-") not in allowed_numbers]
+                # A labelled calculation in a cell is checked through its inputs and arithmetic.
+                calc_reason = verify_calculation_labels(line, number_pool(passage_texts)) if "(calculated" in line else ""
+                plain_cells = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n|]{0,30}\(calculated[^)]*\)", " ", line)
+                bad = [t for t in statistic_tokens(plain_cells) if not sheet.candidates(t.rstrip(",."))]
+                bad += [calc_reason.split(" ")[-1]] if calc_reason else []
                 if bad:
-                    result.removed.append({"section": section_id, "number": bad[0], "sentence": "table row: " + line.strip()[:220]})
+                    result.removed.append({"section": section_id, "number": bad[0],
+                                           "reason": f"table row: {', '.join(bad)[:80]} not in the evidence",
+                                           "sentence": "table row: " + line.strip()[:220]})
                     log.info("V2 number policy removed a table row in %s: value(s) %s not found in the evidence",
                              section_id or "?", ", ".join(bad)[:120])
                     continue
             out_lines.append(line)
             continue
-        pieces = _sentences(line)
         kept: list[str] = []
-        for piece in pieces:
+        for piece in _sentences(line):
             if not piece.strip():
                 kept.append(piece)
                 continue
             sentence = piece
+            reason = ""
+            if "[[UNSUPPORTED_CALC]]" in sentence:
+                reason = "requested calculation uses numbers that are not facts in the evidence"
             cited = [t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)]
-            cited_texts = {pid: passage_texts[pid] for pid in cited if pid in passage_texts}
-            if not cited_texts:
-                cited_texts = {pid: text for pid, text in passage_texts.items()
-                               if any(pid.split(".")[0] == c.split(".")[0] for c in cited)}
-            pool = number_pool(cited_texts) if cited_texts else []
-            # An uncited sentence may still state a labelled unit conversion of a number the
-            # section was given (2,645 crore -> "₹26,450 million"); only conversions are searched.
-            conversion_pool = pool or number_pool(passage_texts)
+            cited_ids = {pid for pid in passage_texts if pid in cited or any(pid.split(".")[0] == c for c in cited)}
             tokens = statistic_tokens(re.sub(r"\(calculated[^)]*\)", " ", sentence))
-            cited_values = {normalize(n.raw).lstrip("-") for n in pool}
-            # Inputs the writer states in its own sentence count only if a cited passage holds them too.
-            sentence_pool = [n for n in number_pool({"sentence": CITE_RE.sub(" ", sentence)})
-                             if normalize(n.raw).lstrip("-") in {normalize(t).lstrip("-") for t in tokens}
-                             and (not pool or normalize(n.raw).lstrip("-") in cited_values)]
-
-            def supported(token: str) -> bool:
-                plain = normalize(token).lstrip("-")
-                if not pool:   # no usable citation: the section's evidence set (citation repair ran first)
-                    return normalize(token) in allowed_numbers or plain in allowed_numbers
+            named_entity = False
+            for token in ([] if reason else tokens):
                 start = sentence.find(token)
-                claim_unit = unit_family(sentence[start + len(token):start + len(token) + 16]) if start >= 0 else ""
-                for item in pool:
-                    if normalize(item.raw).lstrip("-") != plain:
+                if start < 0:
+                    continue
+                end = start + len(token)
+                explicit = "-" if token[:1] in "-−" else ("+" if token[:1] == "+" else "")
+                unit = unit_family(sentence[end:end + 16])
+                if re.match(r"[^()\d\n]{0,30}\(calculated", sentence[end:]):
+                    continue  # a labelled calculation: checked below through its inputs and arithmetic
+                found = lookup(sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),
+                               passage_ids=cited_ids or None, context_entity=context_entity)
+                if found.status == "ok":
+                    continue
+                if cited_ids and found.status in {"absent", "metric_mismatch"}:
+                    # The fact is in another passage of this section's evidence: correct the citation.
+                    other = lookup(sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),
+                                   passage_ids=None, context_entity=context_entity)
+                    if other.status == "ok":
+                        right = other.fact.passage_id
+                        sentence = CITE_RE.sub(lambda m: f"[{m.group(1)}, {right}]", sentence, count=1)
+                        cited_ids = cited_ids | {right}
+                        result.rewritten.append({"section": section_id, "number": token,
+                                                 "change": f"corrected citation to {right} (the passage holding the value)"})
                         continue
-                    # Same value AND same unit as written in the passage (a table cell may carry
-                    # its unit in the column header, so a bare passage number is accepted).
-                    if not claim_unit or not item.unit or claim_unit == item.unit:
-                        return True
-                return False
-
-            unsupported = [t for t in tokens if not supported(t)]
-            drop = False
-            for token in unsupported:
-                start = sentence.find(token)
-                qualifier = qualifier_before(sentence[:max(0, start)]) if start >= 0 else ""
-                unit_word = re.match(r"\s*(lakh crore|crore|cr|trillion|billion|million|bn|mn|tn)\b",
-                                     sentence[start + len(token):] if start >= 0 else "", re.I)
-                unit_word = unit_word.group(1) if unit_word else ""
-                derivation = (find_conversion(token, pool or conversion_pool, qualifier=qualifier, unit=unit_word)
-                              or find_derivation(token, pool, qualifier=qualifier, sentence_pool=sentence_pool))
-                if derivation:
-                    label = f" (calculated: {derivation})"
-                    end = start + len(token)
-                    # Keep the unit with the number: "₹83,816 crore (calculated: ...)".
-                    unit = re.match(r"\s*(?:%|x|bps|pp|percentage points?|(?:lakh\s+)?crore|cr|trillion|billion|million|bn|mn|tn)\b|\s*%", sentence[end:], re.I)
-                    if unit:
-                        end += unit.end()
-                    if "calculated" not in sentence[end:end + 15]:
-                        sentence = sentence[:end] + label + sentence[end:]
-                    result.calculated.append({"section": section_id, "number": token, "inputs": derivation})
-                else:
-                    drop = True
-                    result.removed.append({"section": section_id, "number": token,
-                                           "sentence": re.sub(r"\s+", " ", CITE_RE.sub("", piece)).strip()[:240]})
-            label_problem = "" if drop else verify_calculation_labels(sentence, pool)
-            if label_problem:
-                drop = True
-                result.removed.append({"section": section_id, "number": "calculated label", "reason": label_problem,
+                    found = other if other.status != "absent" else found
+                if found.status == "entity_missing" and not named_entity:
+                    unit_match = _UNIT_WORD_RE.match(sentence[end:])
+                    end += unit_match.end() if unit_match else 0
+                    sentence = f"{sentence[:end]} for {found.fact.entity}{sentence[end:]}"
+                    named_entity = True
+                    result.rewritten.append({"section": section_id, "number": token, "change": f"named entity {found.fact.entity}"})
+                    continue
+                if found.status in {"absent", "unit_mismatch"} and unit in {"trillion", "billion", "lakh crore", "million"}:
+                    conversion = find_conversion(token, number_pool({pid: passage_texts[pid] for pid in (cited_ids or passage_texts)}),
+                                                 unit=unit)
+                    source = re.match(r"converted from (\S+) (.+)$", conversion or "")
+                    if source:
+                        unit_match = _UNIT_WORD_RE.match(sentence[end:])
+                        stop = end + (unit_match.end() if unit_match else 0)
+                        sentence = f"{sentence[:start]}{source.group(1)} {source.group(2)}{sentence[stop:]}"
+                        result.rewritten.append({"section": section_id, "number": token,
+                                                 "change": f"restored the passage's unit: {source.group(1)} {source.group(2)}"})
+                        continue
+                reason = {"absent": f"{token} is not in the evidence", "unit_mismatch": f"{token} has a different unit in the evidence",
+                          "sign_mismatch": f"{token} contradicts the sign in the evidence",
+                          "metric_mismatch": f"{token} is in the evidence for another metric or entity"}.get(found.status, found.status)
+                break
+            if not reason:
+                reason = verify_calculation_labels(sentence, number_pool({pid: passage_texts[pid] for pid in (cited_ids or passage_texts)}))
+            if reason:
+                result.removed.append({"section": section_id, "number": reason.split(" ")[0], "reason": reason,
                                        "sentence": re.sub(r"\s+", " ", CITE_RE.sub("", piece)).strip()[:240]})
-            if drop:
-                log.info("V2 number policy removed a sentence in %s: %s", section_id or "?",
-                         label_problem or f"number(s) {', '.join(t for t in unsupported)[:120]} not in the cited evidence (value or unit)")
+                log.info("V2 number policy removed a sentence in %s: %s", section_id or "?", reason[:160])
                 continue
             kept.append(sentence)
         new_line = "".join(kept).strip()

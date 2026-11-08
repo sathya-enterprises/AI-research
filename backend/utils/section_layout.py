@@ -138,7 +138,8 @@ def stat_strip(tables: list[Table], entity: str, preferred: set[str], *, qtd=Non
             if not _numeric(row[col]) or key in labels:
                 continue
             labels.add(key)
-            items.append(f"{label}: {_value_with_unit(table, col, row[col])} {table.cite}")
+            # The row label names the entity, so each card is checkable on its own ("Nifty Bank, Change %").
+            items.append(f"{clean_label(row[0])}, {label}: {_value_with_unit(table, col, row[col])} {table.cite}")
         if len(items) >= max_items:
             break
     return f"> [!STATS] {' | '.join(items)}" if len(items) >= 3 else ""

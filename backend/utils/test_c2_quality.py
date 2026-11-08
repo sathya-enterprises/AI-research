@@ -118,14 +118,18 @@ def _policy(body, texts):
     return apply_number_policy(body, passage_texts=texts, allowed_numbers=number_set(texts.values()), section_id="t")
 
 
-def test_calculated_numbers_are_labelled_with_their_inputs():
+def test_calculated_numbers_come_from_code_not_from_guesses():
+    # Stage F: derived numbers are computed in code from facts the writer names ([[calc: ...]]);
+    # an unlabelled derived number is not guessed (it is removed), and a unit conversion is
+    # rewritten back to the passage's own value.
     texts = {"S14.2": FLOWS, "S20.8": CAGR}
-    r = _policy("Foreign investors pulled a cumulative ₹83,816 crore out of equities over three fortnights [S14.2]. "
-                "Custody assets fell to ₹65.25 trillion [S14.2]. IT's CAGR fell by 2.4 percentage points [S20.8].", texts)
-    assert "₹83,816 crore (calculated: 47,955 + 21,745 + 14,116)" in r.body
-    assert "₹65.25 trillion (calculated: converted from 65,25,808 crore)" in r.body
-    assert "2.4 percentage points (calculated: 15.19% − 12.79%)" in r.body
-    assert len(r.calculated) == 3 and r.removed == []
+    r = _policy("Foreign investors pulled a cumulative ₹[[calc: 47,955 + 21,745 + 14,116]] crore over three "
+                "fortnights [S14.2]. Custody assets fell to ₹65.25 trillion [S14.2]. "
+                "IT's CAGR fell by 2.4 percentage points [S20.8].", texts)
+    assert "₹83,816 (calculated: 47,955 + 21,745 + 14,116) crore" in r.body
+    assert "₹65,25,808 crore" in r.body and "trillion" not in r.body
+    assert "2.4 percentage points" not in r.body
+    assert len(r.calculated) == 1 and len(r.rewritten) == 1 and len(r.removed) == 1
 
 
 def test_unsupported_sentence_is_removed_and_recorded():
