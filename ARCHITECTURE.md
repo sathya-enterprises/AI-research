@@ -361,6 +361,29 @@ them for an audit copy.
 **Rollback**: set `REPORT_PIPELINE_V2=0` and restart the backend; nothing else changes (the old writer, its gates and
 the renderer are unchanged). Offline evaluation and replay: `backend/scripts/eval_report.py` (`--replay-v2 --rerender`).
 
+### 7.6 Stage F: numbers from a fact sheet, data-first charts, the question's asks
+
+- **Fact sheet** (`utils/fact_sheet.py`): every number in the evidence becomes a fact (value, unit, metric,
+  entity, period, passage). The number policy is a lookup against it: right value without its entity ->
+  entity named; passage value in another unit -> passage's own form; value in another passage of the
+  section -> citation corrected; otherwise the sentence is removed (logged). Writers never compute:
+  `[[calc: A + B]]` is computed in code and shown as "value (calculated: inputs)".
+- **One number check** (`utils/evidence_check.py`): report.py's source-evidence check runs in a
+  rewrite-or-remove loop (4 rounds); a flag it raises is cleared only when the fact sheet holds every
+  statistic of the claim in its cited sources (`agreeing_auditor`, and `reconcile_final_audit` on the final
+  gate); each override is recorded.
+- **Publication report** (`utils/publication_report.py`): `<capture>.publication_report.{md,json}` per run,
+  every gate PASS/FAIL with its failing items; replays write `v2_replay_publication_report.md`.
+- **Data-first charts** (`utils/dataset_charts.py`): from the fetched NSE quarterly matrix (now reaching the
+  evidence store), each deep-dive gets "sector vs Nifty 50" quarterly returns; compounded-return and a
+  separate QTD chart go to the rotation overview; each chart has a deterministic interpretation. Charts V2
+  validated are not removed by the later topical-relevance heuristic. `meta.chartFunnel` lists every drop.
+  Detailed reports carry at most 6 charts (32-page cap).
+- **Question asks** (`utils/question_asks.py`): windows ("past 8 quarters" = 8 completed + QTD shown
+  separately; "past 1 year" = 12 months to today), why/what/how per item, lists ("exhaustive" never
+  claimed), audience, comparisons; mapped to outline sections (missing ones added) and reported in the
+  methodology's coverage note. FTA-list questions get a dated agreement ledger (`utils/agreement_ledger.py`).
+
 ## 8. Export and delivery
 
 PDF is the only report output format.
