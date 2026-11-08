@@ -149,9 +149,37 @@ OTHER SECTIONS in this report (leave their goals to them):
 
 FIGURES FOR THIS SECTION:
 {figs}
-
+{fact_block(passages)}
 EVIDENCE PASSAGES (cite by id):
 {ev}"""
+
+
+def fact_block(passages, limit: int = 60) -> str:
+    """The section's fact sheet, compact: the numbers the writer may quote, each with its unit, what it
+    measures, whose it is and its passage (Stage G: most removed numbers were a right value attached to
+    the wrong metric/entity, or a calculation on inexact inputs)."""
+    try:
+        from utils.fact_sheet import FactSheet
+        facts = [f for f in FactSheet(passages).facts if f.kind == "table" and f.metric and f.entity
+                 and not re.fullmatch(r"(?:19|20)\d{2}", f.value)]
+    except Exception:  # the block is an aid; the section still has its passages
+        return ""
+    seen, lines = set(), []
+    for f in facts:
+        key = (f.value, f.unit, f.entity.casefold(), f.metric.casefold()[:30])
+        if key in seen:
+            continue
+        seen.add(key)
+        metric = re.sub(r"\s+", " ", f.metric)[:50]
+        lines.append(f"- {f.raw}{(' ' + f.unit) if f.unit and f.unit not in f.raw else ''} | {metric or '-'} | "
+                     f"{(f.label or f.entity)[:40] or '-'} | {f.period or '-'} | [{f.passage_id}]")
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return ""
+    return ("\nFACT SHEET (numbers you may quote, as value | what it measures | whose | period | passage). Quote a number "
+            "only with the metric and entity shown here; use these exact values as [[calc: ...]] inputs:\n"
+            + "\n".join(lines) + "\n")
 
 
 def _sentence_numbers(sentence: str) -> list[str]:

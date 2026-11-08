@@ -98,6 +98,8 @@ class Fact:
     period: str
     passage_id: str
     stems: set[str] = field(default_factory=set)
+    kind: str = "prose"     # table | prose
+    label: str = ""         # a table row's own label ("Nifty PSU Bank")
 
     def to_dict(self) -> dict:
         return {"id": self.fid, "value": self.raw, "unit": self.unit, "metric": self.metric[:60], "entity": self.entity[:40],
@@ -153,6 +155,7 @@ def extract_facts(passage) -> list[Fact]:
                     metric = header[col] if col < len(header) else ""
                     facts.append(_fact(pid, len(facts), match, unit, metric, _entity_in(label) or label,
                                        _period(metric) or _period(label), f"{label} {metric} {heading}"))
+                    facts[-1].kind, facts[-1].label = "table", label.strip()[:60]
             continue
         tokens = stripped.split()
         numeric = [t for t in tokens if re.fullmatch(r"[+\-−–]?\d[\d,]*(?:\.\d+)?%?x?", t)]
@@ -169,6 +172,7 @@ def extract_facts(passage) -> list[Fact]:
                     unit = "%" if tok.endswith("%") else ""
                     facts.append(_fact(pid, len(facts), match, unit, names[i] if i < len(names) else "",
                                        _entity_in(label) or label, "", f"{label} {names[i] if i < len(names) else ''} {heading}"))
+                    facts[-1].kind, facts[-1].label = "table", label.strip()[:60]
             continue
         for sentence in re.split(r"(?<=[.!?;])\s+", stripped):
             for match in _NUM_RE.finditer(sentence):
