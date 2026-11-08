@@ -24948,10 +24948,32 @@ async def generate_report(request: Request):
         report_text = sanitize_inline_citations(report_text, source_manifest)
         parsed["summary"] = _sanitize_cover_summary_amounts(parsed.get("summary"), report_text)
         parsed["summary"] = sanitize_inline_citations(parsed.get("summary"), source_manifest)
-        if _v2_used and evidence_store is not None:
-            # Stage F: the final source-evidence gate and V2's fact-sheet check must agree.
-            from utils.evidence_check import reconcile_final_audit as _v2_reconcile
-            _v2_reconcile(final_deterministic_audits, report_text, evidence_store)
+        _gate_healing_summary: dict = {}
+        if _v2_used:
+            # Stage G: every gate self-heals (utils/gate_healing.py). Hard findings are rewritten or
+            # removed and ALL deterministic gates re-run (up to 4 rounds); soft findings become
+            # visible qualifiers. The fact sheet decides number disagreements. Nothing is hidden.
+            from utils.gate_healing import heal as _gate_heal, add_verification_note as _gate_note
+
+            def _gate_rerun(text, chs):
+                _srcs = _attach_audit_source_evidence(source_manifest, enriched, text)
+                return {
+                    "chartDensity": _chart_density_audit(chs, report_tier),
+                    "publicationAudit": audit_report_publication(text, chs, images, _srcs, question=question),
+                    "sourceEvidenceAudit": _source_evidence_quality_audit(_srcs),
+                    "structure": audit_report_structure(text),
+                    "scopeCoverageAudit": audit_requested_report_scope(question, text, _srcs),
+                }
+
+            try:
+                report_text, charts, final_deterministic_audits, _gate_healing_summary = _gate_heal(
+                    report_text, charts, _gate_rerun(report_text, charts), _gate_rerun, store=evidence_store,
+                    v2_unresolved=_v2_unsupported_after_policy)
+                if not _gate_healing_summary.get("stillFailing"):
+                    _v2_unsupported_after_policy = []
+                report_text = _gate_note(report_text, _gate_healing_summary, _v2_meta_for_publication)
+            except Exception as _heal_exc:
+                log.warning("Gate healing skipped safely: %s: %s", type(_heal_exc).__name__, str(_heal_exc)[:200])
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
         _capture_path = finish_research_capture({
             "reportId": report_id,
@@ -25105,7 +25127,7 @@ async def generate_report(request: Request):
             from pathlib import Path as _PubPath
             _publication_report = build_publication_report(
                 outcome=_outcome, audits=final_deterministic_audits, v2_meta=_v2_meta_for_publication,
-                question=question, tier=report_tier, report_id=report_id)
+                question=question, tier=report_tier, report_id=report_id, healing=_gate_healing_summary)
             response_payload["publicationReportPath"] = save_publication_report(
                 _publication_report, _capture_path,
                 _PubPath(__file__).resolve().parents[1] / "diagnostics" / "publication_reports")

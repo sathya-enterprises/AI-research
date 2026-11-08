@@ -32,6 +32,12 @@ from utils.section_writer import CITE_RE, FIGURE_MARKER_RE, FIGURE_REF_RE, SUMMA
 
 log = logging.getLogger("report_pipeline_v2")
 
+def blank_dash_cells(markdown: str) -> str:
+    """A table cell holding only a dash means "no value"; the chart checks read an em dash as
+    "explicitly not verified", so such cells are left empty (Stage E false alarm)."""
+    return re.sub(r"(?m)(?<=\|)[ \t]*[—–-][ \t]*(?=\|)", " ", markdown)
+
+
 MAX_CHARTS = {"detailed": 10, "in_depth": 36}
 CHARTS_PER_SECTION = {"detailed": 2, "in_depth": 3}
 # All charts in the report (fetched-dataset + table charts): a detailed report has a 32-page cap,
@@ -635,7 +641,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
     # A table cell that is only a dash means "no value"; the chart checks read an em dash as
     # "explicitly not verified" and then reject charts of the same entity. Leave such cells empty.
-    report_md = re.sub(r"(?m)(?<=\|)[ \t]*[—–][ \t]*(?=\|)", " ", report_md)
+    report_md = blank_dash_cells(report_md)
     from utils.section_layout import fix_heading_runs
     report_md, layout["headingsRemoved"] = fix_heading_runs(report_md)
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)

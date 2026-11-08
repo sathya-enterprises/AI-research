@@ -66,6 +66,11 @@ def _stems(text: str) -> set[str]:
             if word.endswith("s") and len(word) > 4 and not word.endswith("ss"):
                 word = word[:-1]
             out.add(word[:5])
+    # Acronyms of multi-word names: "Oil & Natural Gas Corporation Ltd." is cited as "ONGC".
+    for run in re.findall(r"(?:[A-Z][a-z]+(?:\s+(?:&|and|of)\s+|\s+)){1,5}[A-Z][a-z]+", text or ""):
+        initials = "".join(w[0] for w in re.findall(r"[A-Z][a-z]+", run) if w not in {"Ltd", "Limited", "The", "Inc"})
+        if 2 <= len(initials) <= 6:
+            out.add(initials.casefold())
     # Metric families: the writer says "net selling" where the table says "net investment".
     for family, members in _FAMILIES.items():
         if out & members:

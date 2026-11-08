@@ -81,13 +81,17 @@ def agreeing_auditor(auditor, store, overrides: list[dict] | None = None):
     return audit
 
 
-def _fact_supported(sheet, store, claim: str, sources: set[str]) -> bool:
-    """Every statistic in ``claim`` is a fact in one of ``sources`` (value + unit + sign + metric)."""
+def _fact_supported(sheet, store, claim: str, sources: set[str], context: str = "") -> bool:
+    """Every statistic in ``claim`` is a fact in one of ``sources`` (value + unit + sign + metric).
+
+    ``sources`` is widened by the citations inside the claim itself (one sentence can cite two
+    groups); ``context`` (the surrounding line) supplies the subject when the claim says "its"."""
     from utils.fact_sheet import lookup, unit_family
     from utils.number_policy import statistic_tokens
 
     from utils.number_policy import number_pool, verify_calculation_labels
 
+    sources = set(sources) | {t.strip().split(".")[0].upper() for g in CITE_SRC_RE.findall(claim) for t in re.split(r"\s*[,;]\s*", g)}
     pids = {p.passage_id for p in store.passages if p.passage_id.split(".")[0].upper() in sources}
     if not pids:
         return False
@@ -96,11 +100,13 @@ def _fact_supported(sheet, store, claim: str, sources: set[str]) -> bool:
     if "(calculated" in claim:
         if verify_calculation_labels(claim, number_pool({p.passage_id: p.text for p in store.passages if p.passage_id in pids})):
             return False
-        claim = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated[^)]*\)", " ", claim)
+        # (one level of nested parentheses: "(calculated: 13 - (-91) = 104 crore)")
+        claim = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated(?:[^()]|\([^()]*\))*\)", " ", claim)
+        claim = re.sub(r"\(calculated(?:[^()]|\([^()]*\))*\)", " ", claim)
     tokens = statistic_tokens(claim)
     if not tokens:
         return False
-    plain = CITE_SRC_RE.sub(" ", claim)
+    plain = CITE_SRC_RE.sub(" ", f"{context} {claim}")
     for token in tokens:
         at = claim.find(token)
         end = at + len(token)
@@ -109,6 +115,45 @@ def _fact_supported(sheet, store, claim: str, sources: set[str]) -> bool:
         if lookup(sheet, token, sign=sign, unit=unit, sentence=plain, passage_ids=pids).status != "ok":
             return False
     return True
+
+
+_CLAIM_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*])")
+
+
+def _flag_values(group: dict) -> list[str]:
+    out = []
+    for token in group.get("unmatchedNumericClaims") or []:
+        raw = str(token).split(":", 1)[-1].split("~")[0].lstrip("-+")
+        if raw.endswith(".0"):
+            raw = raw[:-2]
+        if raw:
+            out.append(raw)
+    return out
+
+
+def _claim_scope(text: str, group: dict, report_text: str, span) -> str:
+    """What the flag is about: the sentence(s) holding the flagged values (a bullet's other, separate
+    sentences are not part of the claim); for a table row, the row plus its table's header row."""
+    stripped = text.strip()
+    if stripped.startswith("|") and span:
+        before = report_text[:span[0]].rstrip("\n").split("\n")
+        header = ""
+        for line in reversed(before):
+            if not line.strip().startswith("|"):
+                break
+            if not re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", line):
+                header = line
+        return f"{header}\n{text}" if header else text
+    values = _flag_values(group)
+    sentences = [s for s in _CLAIM_SENTENCE_RE.split(text) if s.strip()]
+    if len(sentences) < 2 or not values:
+        return text
+    plain = lambda s: s.replace(",", "")  # noqa: E731
+    hit = [s for s in sentences if any(re.search(rf"(?<![\d.]){re.escape(v)}(?![\d])", plain(s)) for v in values)]
+    if not hit:
+        return text
+    # Keep each sentence's trailing citation (it may follow the full stop).
+    return " ".join(hit)
 
 
 def _reconcile_groups(groups: list[dict], report_text: str, sheet, store, sink: list[dict]) -> list[dict]:
@@ -127,7 +172,14 @@ def _reconcile_groups(groups: list[dict], report_text: str, sheet, store, sink: 
             cite = re.search(r"\]", line[int(0.6 * len(claim)):])
             text = line[: int(0.6 * len(claim)) + cite.end()] if cite else line
         sources = {str(s).upper() for s in group.get("sourceIds") or []}
-        if not group.get("subjectMismatchTokens") and _fact_supported(sheet, store, text, sources):
+        line_start = report_text.rfind("\n", 0, span[0]) + 1 if span else 0
+        line_end = report_text.find("\n", span[1]) if span else -1
+        # The whole line (bullet / paragraph) the claim sits in: its subject may be in another sentence.
+        context = report_text[line_start:(line_end if line_end >= 0 else len(report_text))][:1200] if span else ""
+        text = _claim_scope(text, group, report_text, span)
+        # The fact sheet decides (Stage G): its lookup checks value, unit, sign AND metric/entity, so a
+        # report.py "different metric" flag is also cleared when the fact sheet holds the claim's numbers.
+        if _fact_supported(sheet, store, text, sources, context=context):
             sink.append({"claim": re.sub(r"\s+", " ", CITE_SRC_RE.sub("", text)).strip()[:200],
                          "values": list(group.get("unmatchedNumericClaims") or [])[:6],
                          "sources": sorted(sources)[:6],

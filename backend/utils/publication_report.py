@@ -50,7 +50,7 @@ def _as_list(value) -> list:
 
 
 def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dict | None = None,
-                             question: str = "", tier: str = "", report_id: str = "") -> dict:
+                             question: str = "", tier: str = "", report_id: str = "", healing: dict | None = None) -> dict:
     audits = audits if isinstance(audits, dict) else {}
     meta = v2_meta if isinstance(v2_meta, dict) else {}
     publication = audits.get("publicationAudit") if isinstance(audits.get("publicationAudit"), dict) else {}
@@ -80,8 +80,8 @@ def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dic
     gates.append(_gate("Chart evidence", [i for k in _CHART_KEYS for i in _as_list(publication.get(k))]))
     gates.append(_gate("Report structure", [f"{k}: {_short(publication.get(k), 160)}" for k in _STRUCTURAL_KEYS if publication.get(k)]))
     gates.append(_gate("Consistency", [f"{k}: {_short(publication.get(k), 160)}" for k in _CONSISTENCY_KEYS if publication.get(k)]))
-    gates.append(_gate("Scope coverage", list(scope.get("flags") or []) if scope.get("blocking") else [],
-                       info=list(scope.get("flags") or []) if not scope.get("blocking") else []))
+    gates.append(_gate("Scope coverage (soft: qualified, never blocks)", list(scope.get("flags") or []) if scope.get("blocking") else [],
+                       info=list(scope.get("softenedFlags") or scope.get("flags") or []) if not scope.get("blocking") else []))
     charts = meta.get("charts") or {}
     funnel = meta.get("chartFunnel") or {}
     return {
@@ -95,6 +95,7 @@ def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dic
                    "droppedAfterWriting": len(charts.get("droppedAfterWriting") or []),
                    "droppedAfterAssembly": len(charts.get("droppedAfterAssembly") or []), **({"funnel": funnel} if funnel else {})},
         "coverage": meta.get("coverage") or {},
+        "selfHealing": healing or {},
     }
 
 
@@ -124,6 +125,18 @@ def render_markdown(report: dict) -> str:
         lines += [f"- {k}: {v}" for k, v in funnel.items() if not isinstance(v, (list, dict))]
         for drop in funnel.get("drops") or []:
             lines.append(f"- dropped: {_short(drop, 200)}")
+    healing = report.get("selfHealing") or {}
+    if healing:
+        from utils.gate_healing import gate_table
+        lines += ["", "## Self-healing gates", "", "| Gate | Blocking | Automatic remedy |", "|---|---|---|"]
+        lines += [f"| {g['gate']} | {'hard (blocks)' if g['blocking'] else 'soft (qualifier)'} | {g['remedy']} |" for g in gate_table()]
+        lines += ["", f"Rounds: {healing.get('rounds', 0)} | removed: {healing.get('removed', 0)} | rewritten: "
+                      f"{healing.get('rewritten', 0)} | qualified: {healing.get('qualified', 0)} | still failing: "
+                      f"{', '.join(healing.get('stillFailing') or []) or 'none'}"]
+        for action in healing.get("actions") or []:
+            lines.append(f"- [{action.get('gate')}] {action.get('action')}: {_short(action.get('detail'), 220)}")
+        for q in healing.get("qualifiers") or []:
+            lines.append(f"- qualifier shown in the report: {_short(q, 220)}")
     coverage = report.get("coverage") or {}
     if coverage.get("note"):
         lines += ["", "## Coverage note", coverage["note"]]
