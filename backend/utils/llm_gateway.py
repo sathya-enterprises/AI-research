@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -117,7 +118,7 @@ class LLMGateway:
             started = time.perf_counter()
             result = LLMResult(ok=False, error="no_attempt")
             tried: set[tuple[str, str]] = set()
-            backoff = [5, 15, 30]  # extra tries after network failures only (transport, not provider)
+            backoff = [4, 8, 16]  # exponential; extra tries after network failures and HTTP 5xx only
             attempt = 0
             while True:
                 attempt += 1
@@ -126,7 +127,7 @@ class LLMGateway:
                 if result.ok:
                     break
                 log.warning("V2 LLM %s/%s attempt %d failed: %s", purpose, section_id or "-", attempt, result.error)
-                network = str(result.error or "").startswith("network:")
+                network = bool(re.match(r"(?:network:|http_5\d\d)", str(result.error or "")))
                 if attempt <= retries:
                     if network:
                         tried.clear()  # the same key/model pairs may be retried after a network failure
@@ -134,7 +135,8 @@ class LLMGateway:
                 if network and backoff:
                     delay = backoff.pop(0)
                     self.stats.network_retries += 1
-                    log.warning("V2 LLM %s/%s: network failure; retrying in %ds", purpose, section_id or "-", delay)
+                    log.warning("V2 LLM %s/%s: transient failure (%s); retrying in %ds", purpose, section_id or "-",
+                                str(result.error or "")[:60], delay)
                     await asyncio.sleep(delay)
                     tried.clear()
                     continue

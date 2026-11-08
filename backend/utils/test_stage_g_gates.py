@@ -252,7 +252,7 @@ def test_gateway_retries_network_failures_with_backoff_without_cooling_keys(monk
     monkeypatch.setattr(gw, "_gemini_once", fake_once)
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     result = asyncio.run(gw.generate(purpose="outline", prompt="p", retries=1))
-    assert result.ok and calls["n"] == 3 and slept == [5] and gw.stats.network_retries == 1
+    assert result.ok and calls["n"] == 3 and slept == [4] and gw.stats.network_retries == 1
 
 
 def test_a_stranded_number_fragment_is_removed_and_a_one_character_claim_is_found():
@@ -267,3 +267,79 @@ def test_a_stranded_number_fragment_is_removed_and_a_one_character_claim_is_foun
     healed, _, _, summary = heal("Growth held. Index rose 1 [S94] in October. More text.", [], audits,
                                  _rerun_factory([clean, clean, clean]))
     assert not summary["stillFailing"]
+
+
+# ── Stage H: no silent fallback, pre-flight, transient retries, deadline ───────────────────────────
+def test_in_depth_fallback_is_a_labelled_draft_and_detailed_is_labelled():
+    from utils.pipeline_fallback import label_fallback
+    payload = {}
+    out = label_fallback(payload, {"outcome": "published"}, v2_used=False, v2_requested=True,
+                         fallback_reason="PipelineV2Error: outline call failed: ConnectError", tier="in_depth")
+    assert out["outcome"] == "draft" and out["failedStage"] == "pipeline_fallback"
+    assert payload["pipeline"] == "legacy_fallback" and "ConnectError" in payload["fallbackReason"]
+    assert "not a full deep-research report" in payload["failureSummary"][0]["issue"]
+    payload = {}
+    out = label_fallback(payload, {"outcome": "published"}, v2_used=False, v2_requested=True,
+                         fallback_reason="X", tier="detailed")
+    assert out["outcome"] == "published" and payload["pipeline"] == "legacy_fallback"
+    payload = {}
+    assert label_fallback(payload, {"outcome": "published"}, v2_used=True, v2_requested=True,
+                          fallback_reason="", tier="in_depth")["outcome"] == "published" and payload["pipeline"] == "v2"
+
+
+def test_connectivity_preflight_fails_fast_with_a_clear_message(monkeypatch):
+    import asyncio
+    import httpx
+    from utils import preflight
+
+    def handler(request):
+        if "exa" in str(request.url):
+            raise httpx.ConnectError("down")
+        return httpx.Response(404)
+
+    real = httpx.AsyncClient
+
+    class Client(real):
+        def __init__(self, *a, **k):
+            k["transport"] = httpx.MockTransport(handler)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(preflight.httpx, "AsyncClient", Client)
+    real_sleep = asyncio.sleep
+
+    async def no_wait(seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(preflight.asyncio, "sleep", no_wait)
+    result = asyncio.run(preflight.check_connectivity())
+    assert not result["ok"] and "Web search (Exa)" in result["message"] and "not started" in result["message"]
+    llm = next(c for c in result["checks"] if c["name"].startswith("LLM"))
+    assert llm["ok"] and llm["status"] == 404  # reachable: any HTTP status counts
+
+
+def test_gateway_retries_http_5xx_with_exponential_backoff(monkeypatch):
+    import asyncio
+    from utils import llm_gateway as G
+    gw = G.LLMGateway(object(), "in_depth", capture=False)
+    errors = iter(["http_503 model=m1", "http_502 model=m1", "network:ConnectError model=m1"])
+
+    async def fake_once(*a, **k):
+        err = next(errors, None)
+        return G.LLMResult(ok=False, error=err) if err else G.LLMResult(ok=True, text="ok", model="m1")
+
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(gw, "_gemini_once", fake_once)
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    result = asyncio.run(gw.generate(purpose="section", prompt="p", retries=0))
+    assert result.ok and slept == [4, 8, 16]
+
+
+def test_write_section_budget_scale_and_no_extension_under_the_deadline():
+    import inspect
+    from utils.section_writer import write_section
+    params = inspect.signature(write_section).parameters
+    assert params["allow_extension"].default is True and params["budget_scale"].default == 1.0

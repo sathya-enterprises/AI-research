@@ -20288,6 +20288,7 @@ async def generate_report(request: Request):
         )
 
     report_id = uuid.uuid4().hex
+    _job_started_at = time.monotonic()  # Stage H: the in-depth runtime deadline counts from here
     raw_question: str = _normalize_accidental_prompt_join(str(body.get("question", "") or ""))
     if raw_question != str(body.get("question", "") or "").strip():
         log.warning("Report request contained a malformed concatenated prompt; using the trailing complete request")
@@ -20500,6 +20501,19 @@ async def generate_report(request: Request):
             has_rag=has_rag,
             has_files=bool(file_context.strip()) or bool(file_images) or bool(embedded_file_images),
         )
+    if not file_only_report:
+        # Stage H: fail fast when the LLM or search endpoint is unreachable (no silent fallback later).
+        from utils.preflight import check_connectivity as _preflight_check, enabled as _preflight_enabled
+        if _preflight_enabled():
+            _preflight = await _preflight_check()
+            if not _preflight["ok"]:
+                log.error("Report: connectivity pre-flight failed; not starting the run")
+                return JSONResponse({
+                    "error": _preflight["message"], "code": "connectivity_preflight_failed",
+                    "failedStage": "report_start", "retryable": True,
+                    "connectivity": [{k: c.get(k) for k in ("name", "ok", "status", "error")} for c in _preflight["checks"]],
+                    "report": "", "charts": [], "keyStats": [], "summary": "", "title": "",
+                }, status_code=503)
     _report_progress("search", "Finding relevant sources and checking saved research…", 14)
     log.info(
         "Report intent: topic=%r followup=%s evidence=%s (%s)",
@@ -22336,6 +22350,8 @@ async def generate_report(request: Request):
                 tiers=_v2_tiers, chart_verifier=_v2_chart_preverify, entity_search_stats=_v2_entity_stats,
                 # V2 runs this same source-evidence check on its own text and drops what it flags.
                 evidence_auditor=_v2_manifest_auditor(source_manifest, enriched),
+                # Stage H: in-depth runtime deadline from job start (target 40 min, hard stop 50 min).
+                deadline=((_job_started_at + 40 * 60, _job_started_at + 50 * 60) if report_tier == "in_depth" else None),
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
@@ -25122,6 +25138,11 @@ async def generate_report(request: Request):
             response_payload["failedStage"] = _outcome["failedStage"]
             response_payload["failureSummary"] = _outcome["failureSummary"]
             response_payload["draftAvailable"] = True
+        # Stage H: no silent fallback. When V2 could not run, the result says so; an in-depth report
+        # from the legacy path is a labelled draft, never a normal deep-research result.
+        from utils.pipeline_fallback import label_fallback as _label_fallback
+        _outcome = _label_fallback(response_payload, _outcome, v2_used=_v2_used, v2_requested=_v2_requested,
+                                   fallback_reason=_v2_fallback_reason, tier=report_tier)
         response_payload["publicationOutcome"] = _outcome["outcome"]
         try:
             # Stage F: one publication report per run (every gate, PASS/FAIL, the exact failing items).
@@ -25133,7 +25154,6 @@ async def generate_report(request: Request):
                 pipeline_note=(f"V2 pipeline failed ({_v2_fallback_reason}); the report was written by the fallback "
                                "single-call writer, so the fact sheet, dataset charts, self-healing gates and coverage "
                                "note did not run." if _v2_fallback_reason else ""))
-            response_payload["reportPipeline"] = "fallback_single_call" if _v2_fallback_reason else ("v2" if _v2_used else "single_call")
             response_payload["publicationReportPath"] = save_publication_report(
                 _publication_report, _capture_path,
                 _PubPath(__file__).resolve().parents[1] / "diagnostics" / "publication_reports")
