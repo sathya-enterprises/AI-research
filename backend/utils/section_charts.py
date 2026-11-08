@@ -42,6 +42,7 @@ class PlannedChart:
     drop_reason: str = ""
     match_text: str = ""
     heading: str = ""                             # page heading above the table (period context only)
+    interpretation: str = ""                      # deterministic paragraph (fetched-dataset charts, Stage F)
 
     def brief(self) -> str:
         """Compact data listing for the section writer."""
@@ -339,10 +340,18 @@ def _terms(text: str) -> set[str]:
 
 
 def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: int = 2) -> None:
-    """Give each chart to the section whose queries/passages fit it best (passage overlap first)."""
+    """Give each chart to the section whose queries/passages fit it best (passage overlap first).
+
+    Charts already assigned (fetched-dataset charts, utils.dataset_charts.preassign) keep their
+    section and count towards its limit."""
     load: dict[str, int] = {}
+    for chart in charts:
+        if chart.section_id:
+            load[chart.section_id] = load.get(chart.section_id, 0) + 1
     ranked = []
     for chart in charts:
+        if chart.section_id:
+            continue
         best = None
         plotted = label_entities([a for a, _, _ in chart.points] + [b for _, b, _ in chart.points])
         for section in sections:

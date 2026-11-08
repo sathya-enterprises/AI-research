@@ -564,6 +564,27 @@ def _captured_tiers(stages: dict, store):
     return tiers_from_summary(store, summary)
 
 
+def restore_fetched_dataset(store, stages: dict, manifest: list) -> bool:
+    """Captures from before Stage F lost the fetched quarterly dataset on the way into the evidence
+    store (the registry renamed it). A live run now keeps it, so the replay rebuilds it from the
+    captured dataset rows (exactly the rows the live run fetched)."""
+    qrows = ((stages.get("calculated_sector_quarterly_dataset") or {}).get("data") or {}).get("rows") or []
+    if not qrows or any(p.kind == "calculated" and "Sector | Q" in p.text for p in store.passages):
+        return False
+    from utils.market_data import format_sector_quarterly_returns_as_source
+    source = format_sector_quarterly_returns_as_source(qrows)
+    sid = next((str(m.get("id")).upper() for m in manifest if isinstance(m, dict)
+                and "by calendar quarter" in str(m.get("title") or "").casefold()), "")
+    if not source or not sid:
+        return False
+    for stale in [p for p in store.passages if p.source_id == sid]:
+        store.passages.remove(stale)
+        store._by_id.pop(stale.passage_id, None)
+    store.add_source(sid, source)
+    store.finalize()
+    return True
+
+
 def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     """Re-run V2 assembly offline from the captured passages and LLM responses."""
     stages = capture.get("stages") or {}
@@ -576,6 +597,7 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
 
     store = store_from_passages(passages)
     manifest = (((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources")) or []
+    restore_fetched_dataset(store, stages, manifest)
     gateway = ReplayGateway(capture)
     # Reproduce the live outline: the subsection planner is deterministic, so it runs in the replay
     # exactly when it ran live (recorded in the outline decisions); older captures predate it.
@@ -585,13 +607,28 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     enriched_rows = [r for r in (((stages.get("sources_after_article_fetch") or {}).get("data") or {}).get("sources") or [])
                      if isinstance(r, dict)]
     question = str(capture.get("question") or "")
+    # Captures redact long page text; live, the verifier sees the full fetched page. Offline the
+    # source text is the captured page text plus the evidence-store passages (as store_auditor does).
+    _texts: dict[str, list[str]] = {}
+    for _p in store.passages:
+        _texts.setdefault(_p.source_id, []).append(str(_p.text or ""))
+    _by_url = {str(r.get("url") or "").rstrip("/"): r for r in enriched_rows}
+    verifier_rows = []
+    for _m in manifest_rows:
+        _sid = str(_m.get("id") or "").upper()
+        _fetched = _by_url.get(str(_m.get("url") or "").rstrip("/"), {})
+        _body = "\n\n".join([str(_fetched.get("fullContent") or ""), *_texts.get(_sid, [])]).strip()
+        if _body:
+            verifier_rows.append({**_fetched, **_m, "id": _sid, "fullContent": _body, "pageContent": _body,
+                                  "snippet": str(_fetched.get("snippet") or _body[:600]), "pageFetchStatus": "ok"})
 
     def chart_verifier(specs, report_text=""):
         """Offline twin of report.py's _v2_chart_preverify (same audit functions, captured evidence)."""
         from routes import report as R
         R._register_v2_chart_evidence(specs, store)
-        public = R._merge_source_evidence_statuses(manifest_rows, R._attach_audit_source_evidence(manifest_rows, enriched_rows, report_text))
-        res = R.audit_chart_evidence_consistency(report_text, specs, public, question=question)
+        public = R._merge_source_evidence_statuses(manifest_rows, R._attach_audit_source_evidence(manifest_rows, verifier_rows, report_text))
+        res = R.audit_chart_evidence_consistency(report_text, specs, public, question=question,
+                                                 require_publisher_verification=True)
         reasons = [""] * len(specs)
         for failure in list(res.get("chartEvidenceFailures") or []) + list(res.get("chartTableVerificationConflicts") or []):
             index = int(failure.get("chartIndex") or 0) - 1
@@ -651,6 +688,7 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
         "v2replay_prompts_changed": len(gateway.prompt_changed),
         "v2replay_words": len(WORD_RE.findall(CITE_RE.sub(" ", MARKER_RE.sub(" ", report)))),
         "v2replay_charts": len(charts),
+        "v2replay_charts_from_datasets": (result["meta"].get("chartFunnel") or {}).get("usedFromFetchedDatasets", 0),
         "v2replay_charts_dropped_after_assembly": len(result["meta"].get("charts", {}).get("droppedAfterAssembly") or []),
         "v2replay_sections_ok": sum(1 for x in result["meta"].get("sections") or [] if x.get("ok")),
         "v2replay_pct_charts_explained": round(100 * explained / len(charts), 1) if charts else None,

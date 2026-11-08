@@ -1,6 +1,7 @@
 """Deterministic provenance checks for numeric charts and report tables."""
 from __future__ import annotations
 
+import contextvars
 import os
 import re
 import logging
@@ -9,6 +10,18 @@ import datetime as _dt
 from utils.evidence_provenance import is_trusted_calculated_sector_source
 
 log = logging.getLogger(__name__)
+
+# Charts the V2 pipeline validated once, early (evidence, window, placement next to a paragraph
+# about them): their observation signatures, per request. The topical-relevance heuristic does not
+# remove them; the evidence and duplicate checks still run. Set server-side only (Stage F).
+_TRUSTED_CHART_SIGNATURES: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "trusted_chart_signatures", default=frozenset())
+
+
+def trust_validated_charts(charts: list | None) -> int:
+    signatures = frozenset(_chart_observation_signature(c) for c in (charts or []) if isinstance(c, dict))
+    _TRUSTED_CHART_SIGNATURES.set(signatures)
+    return len(signatures)
 
 _UNVERIFIED = re.compile(
     r"(?i)\b(?:not\s+verified|unverified|unsupported|insufficient\s+evidence|not\s+established)\b"
@@ -649,7 +662,8 @@ def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple
             and chart.get("_serverWorkbookEvidence") is True
             and str(chart.get("sourceOrigin") or "").strip().casefold() == "uploaded_workbook"
         )
-        keep = server_workbook_chart or _chart_is_relevant(chart, report, question, idx)
+        v2_validated = _chart_observation_signature(chart) in _TRUSTED_CHART_SIGNATURES.get()
+        keep = server_workbook_chart or v2_validated or _chart_is_relevant(chart, report, question, idx)
         if keep:
             signature = _chart_observation_signature(chart)
             title_tokens = _chart_metric_tokens(chart)

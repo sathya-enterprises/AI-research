@@ -428,6 +428,19 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                 draft.calculated_numbers += extra.calculated_numbers
                 draft.removed_sentences += extra.removed_sentences
                 draft.rewritten_numbers += extra.rewritten_numbers
+    # Fetched-dataset charts the text did not interpret keep their place: the figure goes at the end of
+    # the section with its deterministic interpretation (built from the plotted rows), next to it.
+    for fig in figures:
+        if fig.status != "referenced" and getattr(fig, "interpretation", "") and bodies:
+            n = fig.figure_number
+            text = fig.interpretation
+            if re.match(r"(?:Compounded|In)\b", text):
+                text = text[0].lower() + text[1:]
+            bodies[-1] = f"{bodies[-1].rstrip()}\n\n[[FIGURE {n}]]\n\nAs Figure {n} shows, {text}"
+            fig.status, fig.drop_reason = "referenced", ""
+            fig.claim = re.sub(r"\s+", " ", CITE_RE.sub("", f"As Figure {n} shows, {text}")).strip()[:400]
+            draft.figures_dropped = [x for x in draft.figures_dropped if x != n]
+            draft.figures_referenced.append(n)
     # Figures never referenced in any part are dropped.
     for fig in figures:
         if fig.status != "referenced":

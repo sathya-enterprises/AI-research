@@ -378,6 +378,29 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         min_year = None
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
                                                      today=today)
+    table_chart_count = len(candidates) + len(chart_drops)
+    # Data first (Stage F): charts planned from fetched datasets before writing; they go through
+    # the same verification below and are placed in their own sector's deep-dive.
+    from utils.dataset_charts import build_dataset_charts, preassign
+    from utils.section_charts import verify_chart
+    dataset_charts, dataset_note = build_dataset_charts(store)
+    for chart in dataset_charts:
+        reason = verify_chart(chart, "\n".join(store.get(pid).text for pid in chart.passage_ids if store.get(pid)))
+        if reason:
+            chart.status, chart.drop_reason = "dropped", reason
+            chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
+                                "reason": reason, "provenance": "fetched dataset"})
+    dataset_values = [sorted(round(v, 4) for _, _, v in c.points) for c in dataset_charts if c.status != "dropped"]
+    deduped = []
+    for chart in candidates:
+        values = sorted(round(v, 4) for _, _, v in chart.points)
+        if any(values == dv for dv in dataset_values):
+            chart.status, chart.drop_reason = "dropped", "same values as a fetched-dataset chart (duplicate view)"
+            chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
+                                "reason": chart.drop_reason})
+            continue
+        deduped.append(chart)
+    candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
     # Run the same chart verification the export gates use BEFORE writing, so the
     # writer only interprets charts that will survive to the PDF.
     if chart_verifier and candidates:
@@ -395,14 +418,27 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             else:
                 kept.append(chart)
         candidates = kept
-    assign_charts(candidates, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
+    # Fetched-dataset charts are placed first (a deep-dive gets its own sector's chart) and come on
+    # top of the per-section limit for table charts; they are numbered from 101 until the final
+    # renumbering in document order, so table charts keep the numbers the writer is given.
+    data_first = [c for c in candidates if c.interpretation]
+    preassign(data_first, analysis)
+    table_charts = [c for c in candidates if not c.interpretation]
+    assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
+    unassigned = [c for c in candidates if not c.section_id]
     planned = [c for c in candidates if c.section_id]
     figure_no = 0
     for sec in analysis:
-        for chart in [c for c in planned if c.section_id == sec.section_id][:CHARTS_PER_SECTION.get(tier, 2)]:
+        for chart in [c for c in table_charts if c.section_id == sec.section_id][:CHARTS_PER_SECTION.get(tier, 2)]:
             figure_no += 1
             chart.figure_number = figure_no
-    planned = [c for c in planned if c.figure_number][: MAX_CHARTS.get(tier, 10)]
+    data_no = 100
+    for sec in analysis:
+        for chart in [c for c in data_first if c.section_id == sec.section_id]:
+            data_no += 1
+            chart.figure_number = data_no
+    planned = ([c for c in planned if c.figure_number and not c.interpretation][: MAX_CHARTS.get(tier, 10)]
+               + [c for c in planned if c.figure_number and c.interpretation])
 
     # Sections in waves: each wave sees summaries of completed sections.
     wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "3") or 3))
@@ -431,6 +467,17 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             continue
         paragraph = _figure_paragraph(body_of.get(chart.section_id, ""), chart.figure_number) or chart.claim
         reason = text_chart_mismatch(paragraph, dict(chart.spec))
+        if reason and chart.interpretation:
+            # A fetched-dataset chart is not dropped: its own interpretation (from the plotted rows)
+            # is placed right after the figure, so the chart sits next to a paragraph about it.
+            draft = next((d for d in drafts if d.section_id == chart.section_id), None)
+            marker = f"[[FIGURE {chart.figure_number}]]"
+            if draft is not None and marker in draft.body:
+                draft.body = draft.body.replace(marker, f"{marker}\n\nAs Figure {chart.figure_number} shows, {chart.interpretation}", 1)
+                body_of[chart.section_id] = draft.body
+                chart_text_mismatches.append({"title": chart.spec.get("title"), "reason": reason, "claim": chart.claim[:200],
+                                              "action": "kept; dataset interpretation placed next to the figure"})
+                continue
         if reason:
             chart.status, chart.drop_reason = "dropped", f"chart/text mismatch: {reason}"
             chart_text_mismatches.append({"title": chart.spec.get("title"), "reason": reason, "claim": chart.claim[:200]})
@@ -463,7 +510,16 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
 
     # Figure renumbering in document order (dropped figures leave no gaps).
     used = [c for c in planned if c.status == "referenced"]
-    used.sort(key=lambda c: c.figure_number)
+    # Document order: section order, then where the figure's marker sits in the section text.
+    section_order = {s.section_id: i for i, s in enumerate(analysis)}
+    body_by_section = {d.section_id: d.body for d in drafts}
+
+    def _doc_position(c):
+        body = body_by_section.get(c.section_id, "")
+        at = body.find(f"[[FIGURE {c.figure_number}]]")
+        return (section_order.get(c.section_id, 999), at if at >= 0 else len(body), c.figure_number)
+
+    used.sort(key=_doc_position)
     mapping = {c.figure_number: i for i, c in enumerate(used, 1)}
     charts_out = []
     for c in used:
@@ -572,6 +628,18 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                    "droppedAfterWriting": [{"title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"],
                    "droppedAfterAssembly": dropped_after_assembly,
                    "claims": [{"figure": c.figure_number, "claim": c.claim, "passages": c.passage_ids} for c in used]},
+        # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
+        "chartFunnel": {
+            "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,
+            "verifiedBeforeWriting": len(candidates), "placedInSections": len(planned) + len([c for c in candidates if c.section_id and not c.figure_number]),
+            "unplaced": len(unassigned), "interpretedAfterWriting": len([c for c in planned if c.status == "referenced"]),
+            "droppedAfterAssembly": len(dropped_after_assembly), "used": len(charts_out),
+            "usedFromFetchedDatasets": len([c for c in used if c.interpretation]),
+            "drops": ([{"stage": "before writing", "title": d.get("title"), "reason": d.get("reason")} for d in chart_drops]
+                      + [{"stage": "not placed", "title": c.spec.get("title"), "reason": "no section fits it, or its section already has the most charts"} for c in unassigned]
+                      + [{"stage": "after writing", "title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"]
+                      + [{"stage": "after assembly", "title": d.get("title"), "reason": d.get("reason")} for d in dropped_after_assembly]),
+        },
         "citations": {"passagesProvided": len({pid for s in analysis for pid in s.passage_ids} | {pid for s in analysis for l in s.leaves() for pid in l.passage_ids}),
                       "passagesCited": len(cited_passages), "sourcesCited": len(cited_sources), "citedPassageIds": cited_passages},
         "unsupportedNumbers": sum(len(d.unsupported_numbers) for d in good) + len(exec_unsupported),

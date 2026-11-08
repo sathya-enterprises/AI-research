@@ -22315,7 +22315,10 @@ async def generate_report(request: Request):
                 _register_v2_chart_evidence(specs, evidence_store)
                 _audited = _attach_audit_source_evidence(source_manifest, enriched, report_text)
                 _public = _merge_source_evidence_statuses(source_manifest, _audited)
-                _result = audit_chart_evidence_consistency(report_text, specs, _public, question=question)
+                # Stage F: as strict as the final publication gate (publisher verification required), so a
+                # chart validated here is not deleted later; this is the one early validation.
+                _result = audit_chart_evidence_consistency(report_text, specs, _public, question=question,
+                                                           require_publisher_verification=True)
                 reasons = [""] * len(specs)
                 for failure in list(_result.get("chartEvidenceFailures") or []) + list(_result.get("chartTableVerificationConflicts") or []):
                     index = int(failure.get("chartIndex") or 0) - 1
@@ -22341,6 +22344,9 @@ async def generate_report(request: Request):
             record_research_stage("pipeline_v2", _v2_result["meta"])
             _v2_meta_for_publication = _v2_result["meta"]
             _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
+            # Stage F: one early validation; later topical-relevance pruning keeps these charts.
+            from utils.chart_evidence_audit import trust_validated_charts as _v2_trust_charts
+            _v2_trust_charts(json.loads(raw).get("charts") or [])
             log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
                      "cross-section dedupe are skipped (v2 checks numbers per passage: %s unsupported)",
                      _v2_registered, _v2_result["meta"].get("unsupportedNumbers"))
