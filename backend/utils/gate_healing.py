@@ -302,6 +302,10 @@ def _remedy_evidence(text: str, groups: list[dict], actions: list[dict], rewrite
             actions.append({"gate": "mismatchedCitationGroups", "action": "rewritten", "detail": fixed[:240]})
             continue
         if span:
+            from utils.evidence_check import _is_table_header
+            if _is_table_header(text, span[0]):
+                actions.append({"gate": "mismatchedCitationGroups", "action": "kept table header", "detail": snippet[:200]})
+                continue
             # Remove only the sentence(s) that hold the flagged values (a bullet's other sentences stay),
             # unless it is a table row (the row goes).
             from utils.evidence_check import _claim_scope

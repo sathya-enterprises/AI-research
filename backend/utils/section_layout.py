@@ -23,6 +23,10 @@ from dataclasses import dataclass, field
 from utils.chart_titles import clean_label, header_is_data, non_comparable_metric, period_of
 from utils.entity_tiers import SYNONYMS, canonical
 
+import logging
+
+_log = logging.getLogger("section_layout")
+
 CITE_RE = re.compile(r"\[(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\]")
 _NUM_CELL_RE = re.compile(r"^\(?[+\-−–]?\s*(?:₹|\$|rs\.?\s*)?[\d,]*\.?\d+\s*(?:%|x|pts|bps|cr|crore|bn|mn)?\)?$", re.I)
 _PERIOD_HEADER_RE = re.compile(
@@ -42,6 +46,8 @@ class Table:
     rows: list[list[str]]
     reliability: float = 0.0
     kind: str = "table"
+    period_label: str = ""       # Stage I: the period the table's data refers to, or "as of <date>"
+    period_end: object = None
 
     @property
     def cite(self) -> str:
@@ -59,8 +65,10 @@ def parse_table(passage) -> Table | None:
     rows = [r for r in (split(ln) for ln in lines[1:]) if len(r) == len(header) and r[0]]
     if len(header) < 2 or len(rows) < 2 or any(header_is_data(h) for h in header[1:]):
         return None
+    from utils.period_hygiene import table_period
+    label, end = table_period(heading, header, str(getattr(passage, "published", "") or ""))
     return Table(passage.passage_id, passage.source_id, heading, header, rows,
-                 float(getattr(passage, "reliability", 0) or 0), passage.kind)
+                 float(getattr(passage, "reliability", 0) or 0), passage.kind, label or "", end)
 
 
 def _numeric(cell: str) -> bool:
@@ -87,14 +95,20 @@ def _value_columns(table: Table) -> list[int]:
 
 
 def _metric_label(table: Table, col: int) -> str:
-    header = clean_label(table.header[col])
-    if _PERIOD_HEADER_RE.match(header):
+    from utils.period_hygiene import fy_label
+    from utils.period_hygiene import fy_labels_in
+    header = fy_labels_in(fy_label(clean_label(table.header[col])))  # calendar quarters shown as fiscal quarters
+    if table.kind == "calculated" and re.match(r"(?i)quarter coverage", table.heading or ""):
+        return f"Quarterly return (%), {header}"  # the fetched dataset; its first line is not a title
+    if _PERIOD_HEADER_RE.match(header) or re.fullmatch(r"Q[1-4] FY\d{2}", header):
         base = clean_label(table.header[0]) if table.header[0] and not re.fullmatch(
             r"(?i)sectors?|index|indices|name|company|stock|item|industry|particulars", table.header[0]) else ""
         context = base or (table.heading[:40] if table.heading else "Value")
         return f"{context}, {header}"
     # A metric without a period takes the period its own table names ("fortnight ending 15 Oct 2026").
     period = period_of([header], table.heading, [r[0] for r in table.rows])
+    if not period and not re.search(r"\b(?:19|20)\d{2}\b|\bFY\d{2}\b|QTD", header) and table.period_label:
+        period = table.period_label  # every column states its period or an as-of date (Stage I)
     return f"{header}, {period}" if period else header
 
 
@@ -111,13 +125,22 @@ def _value_with_unit(table: Table, col: int, cell: str) -> str:
     return cell
 
 
-def tables_in(store) -> list[Table]:
+def tables_in(store, window_start=None) -> list[Table]:
+    """Tables for the layout blocks. With ``window_start`` (Stage I), a table whose data ends before
+    the requested window, or that nothing dates, is left out (logged): no stale or unlabeled period
+    reaches a scorecard, stat strip or layout table."""
+    from utils.period_hygiene import in_window
     out = []
     for passage in store.passages:
         if passage.kind in {"table", "calculated"}:
             table = parse_table(passage)
-            if table:
-                out.append(table)
+            if not table:
+                continue
+            if not in_window(table.period_end, window_start):
+                _log.info("Layout: table %s left out (period %s, window starts %s)", table.passage_id,
+                          table.period_label or "undated", window_start)
+                continue
+            out.append(table)
     return out
 
 
@@ -132,7 +155,8 @@ def stat_strip(tables: list[Table], entity: str, preferred: set[str], *, qtd=Non
             continue
         for col in _value_columns(table)[:1]:
             label = _metric_label(table, col)
-            if qtd and (qtd(table.header[col]) or qtd(label)):  # the period may come from the table heading
+            from utils.period_hygiene import qtd_tag_applies
+            if qtd and (qtd(table.header[col]) or qtd(label)) and qtd_tag_applies(label):  # period from the heading
                 label += " (QTD, partial)"
             key = re.sub(r"[^a-z0-9]+", " ", label.casefold()).strip()
             if not _numeric(row[col]) or key in labels:
@@ -314,7 +338,8 @@ def entity_columns(tables: list[Table], entities: list[str], *, qtd=None, prefer
             continue
         for col in _value_columns(table)[:1]:
             label = _metric_label(table, col)
-            if qtd and (qtd(table.header[col]) or qtd(label)):  # the period may come from the table heading
+            from utils.period_hygiene import qtd_tag_applies
+            if qtd and (qtd(table.header[col]) or qtd(label)) and qtd_tag_applies(label):  # period from the heading
                 label += " (QTD, partial)"
             values = {e: _value_with_unit(table, col, r[col]) for e, r in mapped.items() if _numeric(r[col])}
             if len(values) >= 3:

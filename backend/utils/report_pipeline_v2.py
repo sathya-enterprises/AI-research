@@ -130,7 +130,7 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
-def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None) -> dict:
+def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None, window_start=None) -> dict:
     """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
     from utils.number_policy import apply_number_policy
     from utils.section_charts import _is_qtd, qtd_start_month
@@ -140,7 +140,7 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
 
     start = qtd_start_month(today)
     qtd = (lambda text: _is_qtd(text, start)) if start else None
-    tables = tables_in(store)
+    tables = tables_in(store, window_start)  # Stage I: in-window, dated tables only
     by_id = {t.passage_id: t for t in tables}
     summaries = {d.section_id: d.summary for d in good}
     sections = {s.section_id: s for s in analysis}
@@ -631,8 +631,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         deadline_log["transitionsSkipped"] = True
         log.warning("V2 deadline: editorial transitions call skipped")
     edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway)
+    try:
+        from utils.source_quality import window_start as _window_start
+        layout_window = _window_start(question, _asks_date.fromisoformat(today[:10]))
+    except Exception:
+        layout_window = None
     layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
-                                   asks=asks)
+                                   asks=asks, window_start=layout_window)
     # Agreement list questions ("all the FTAs signed in the past 1 year"): the dated ledger from the
     # evidence (signing kept apart from entry into force; what official sources verify), placed in the
     # section that answers the list ask.
