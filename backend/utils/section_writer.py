@@ -241,7 +241,8 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     body = unfence(body)
     # The writer sometimes copies the prompt's subsection spec into the heading:
     # "### Title — goal: Review ... (~475 words)" -> "### Title".
-    body = re.sub(r"(?m)^(#{3,6}\s+.+?)\s*[—–-]+\s*goal:.*$", r"\1", body)
+    # (also echoed with another label, e.g. "— regard: returns by quarter, ...").
+    body = re.sub(r"(?m)^(#{3,6}\s+.+?)\s*[—–-]+\s*(?:goal|regard|focus|aim|scope|covers?)\s*:.*$", r"\1", body)
     body = re.sub(r"(?m)^(#{3,6}\s+.+?)\s*\(~?\d+\s+words\)\s*$", r"\1", body)
     allowed_sources = {pid.split(".")[0] for pid in allowed_passages}
     invalid = 0
@@ -419,6 +420,13 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                         allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers,
                         passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""))
             if extra.ok:
+                # The extension continues the section: a heading it repeats (the section already has
+                # it) is dropped and its text joins the section, so no heading appears twice.
+                seen = {re.sub(r"\W+", " ", h).strip().casefold()
+                        for h in re.findall(r"(?m)^#{3,6}\s+(.+?)\s*$", "\n\n".join(bodies))}
+                extra.body = re.sub(r"(?m)^#{3,6}\s+(.+?)\s*$\n?",
+                                    lambda m: "" if re.sub(r"\W+", " ", m.group(1)).strip().casefold() in seen else m.group(0),
+                                    extra.body).strip()
                 bodies.append(extra.body)
                 if extra.summary:
                     summaries.append(extra.summary)

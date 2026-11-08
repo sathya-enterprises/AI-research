@@ -256,7 +256,7 @@ def build_dataset_charts(store) -> tuple[list[PlannedChart], dict]:
     return charts, note
 
 
-def preassign(charts: list[PlannedChart], sections: list) -> None:
+def preassign(charts: list[PlannedChart], sections: list, *, side_charts: int = 4) -> None:
     """Deep-dives take the chart of their own sector; cross-sector charts go to the rotation overview."""
     from utils.chart_titles import canonical, clean_label, label_entities
 
@@ -294,7 +294,8 @@ def preassign(charts: list[PlannedChart], sections: list) -> None:
         return
     compounded = next((c for c in cross if c.points[0][0] == "Compounded return"), None)
     order = [b for _, b, _ in sorted(compounded.points, key=lambda p: -p[2])] if compounded else []
-    picks = [name for name in order[:2] + order[-2:] if name != "Nifty 50"]
+    half = max(1, side_charts // 2)
+    picks = [name for name in order[:half] + order[-half:] if name != "Nifty 50"]
     for name in dict.fromkeys(picks):
         chart = next((c for c in charts if not c.section_id and {a for a, _, _ in c.points} - {"Nifty 50"} == {name}), None)
         if chart:

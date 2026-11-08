@@ -3015,7 +3015,7 @@ main {{ width: min(var(--content-max), calc(100% - 40px)); margin: 0 auto; paddi
 .gg-table {{ width: 100%; border-collapse: collapse; font-family: var(--font-heading); font-size: 14px; }}
 .gg-table th {{ text-align: left; padding: 10px 12px; color: var(--ink); border-bottom: 2px solid var(--accent); }}
 .gg-table td {{ padding: 10px 12px; border-bottom: 1px solid var(--rule); color: var(--ink-soft); vertical-align: top; }}
-.gg-source-note {{ margin-top: 8px; color: var(--ink-soft); font-size: 11px; line-height: 1.35; text-align: left; overflow-wrap: anywhere; }}
+.gg-source-note {{ margin-top: 8px; color: var(--ink-soft); font-size: 11px; line-height: 1.35; text-align: left; overflow-wrap: anywhere; break-before: avoid; page-break-before: avoid; break-inside: avoid; }}
 .gg-source-note-label {{ color: var(--ink); font-weight: 700; }}
 .gg-source-note-separator {{ color: var(--muted); padding: 0 2px; }}
 .gg-source-method {{ color: var(--ink-soft); }}

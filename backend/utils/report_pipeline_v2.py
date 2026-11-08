@@ -34,6 +34,10 @@ log = logging.getLogger("report_pipeline_v2")
 
 MAX_CHARTS = {"detailed": 10, "in_depth": 36}
 CHARTS_PER_SECTION = {"detailed": 2, "in_depth": 3}
+# All charts in the report (fetched-dataset + table charts): a detailed report has a 32-page cap,
+# and its layout fills ~28 pages without charts, so it carries at most 6 (Stage F target >= 5).
+MAX_TOTAL_CHARTS = {"detailed": 6, "in_depth": 36}
+DATASET_SIDE_CHARTS = {"detailed": 2, "in_depth": 4}
 
 
 class PipelineV2Error(RuntimeError):
@@ -436,7 +440,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # top of the per-section limit for table charts; they are numbered from 101 until the final
     # renumbering in document order, so table charts keep the numbers the writer is given.
     data_first = [c for c in candidates if c.interpretation]
-    preassign(data_first, analysis)
+    preassign(data_first, analysis, side_charts=DATASET_SIDE_CHARTS.get(tier, 4))
     table_charts = [c for c in candidates if not c.interpretation]
     assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
     unassigned = [c for c in candidates if not c.section_id]
@@ -451,8 +455,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         for chart in [c for c in data_first if c.section_id == sec.section_id]:
             data_no += 1
             chart.figure_number = data_no
-    planned = ([c for c in planned if c.figure_number and not c.interpretation][: MAX_CHARTS.get(tier, 10)]
-               + [c for c in planned if c.figure_number and c.interpretation])
+    planned_data = [c for c in planned if c.figure_number and c.interpretation][: MAX_TOTAL_CHARTS.get(tier, 36)]
+    table_quota = max(0, min(MAX_CHARTS.get(tier, 10), MAX_TOTAL_CHARTS.get(tier, 36) - len(planned_data)))
+    planned_table = [c for c in planned if c.figure_number and not c.interpretation]
+    for chart in planned_table[table_quota:]:
+        chart.section_id, chart.figure_number = "", 0  # over the report's chart budget (page cap)
+        unassigned.append(chart)
+    planned = planned_table[:table_quota] + planned_data
 
     # Sections in waves: each wave sees summaries of completed sections.
     wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "3") or 3))
@@ -666,7 +675,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             "droppedAfterAssembly": len(dropped_after_assembly), "used": len(charts_out),
             "usedFromFetchedDatasets": len([c for c in used if c.interpretation]),
             "drops": ([{"stage": "before writing", "title": d.get("title"), "reason": d.get("reason")} for d in chart_drops]
-                      + [{"stage": "not placed", "title": c.spec.get("title"), "reason": "no section fits it, or its section already has the most charts"} for c in unassigned]
+                      + [{"stage": "not placed", "title": c.spec.get("title"), "reason": "no section fits it, its section already has the most charts, or the report's chart budget (page cap) is used"} for c in unassigned]
                       + [{"stage": "after writing", "title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"]
                       + [{"stage": "after assembly", "title": d.get("title"), "reason": d.get("reason")} for d in dropped_after_assembly]),
         },
