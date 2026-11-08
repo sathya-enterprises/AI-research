@@ -148,6 +148,29 @@ def _drop_duplicate_tables(text: str) -> tuple[str, int]:
     return "\n".join(lines), len(drop)
 
 
+_FRAGMENT_RE = re.compile(
+    r"(?m)(?:^|(?<=[.!?]\s))[ 	]*[-+−]?\d[\d.,]*%?[ 	]*\[S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*\]\.?[ 	]*")
+
+
+def remove_fragments(text: str, actions: list[dict]) -> str:
+    """A bare 'number [S#].' at the start of a line or sentence is the tail of a cut sentence (live run
+    G: '1 [S94]. Manufacturing PMI ...' was left after an earlier removal split '...58.1'). Remove it."""
+    def repl(match: re.Match) -> str:
+        actions.append({"gate": "fragment", "action": "removed fragment", "detail": match.group(0).strip()})
+        return ""
+    return _FRAGMENT_RE.sub(repl, text)
+
+
+def _remove_short_claim(text: str, claim: str, sources: list) -> tuple[str, str]:
+    """A claim too short to locate by its text ('1'): find it by value + its citation."""
+    ids = "|".join(re.escape(str(s).upper()) for s in sources or []) or r"S\d+"
+    pattern = re.compile(rf"(?<![\w.]){re.escape(claim.strip())}\s*%?\s*\[(?:{ids})(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*\]\.?")
+    match = pattern.search(text)
+    if not match:
+        return text, ""
+    return text[:match.start()] + text[match.end():], match.group(0)
+
+
 def _remedy_publication(text: str, charts: list, pub: dict, actions: list[dict], *, force: bool) -> tuple[str, list]:
     def act(gate, action, detail):
         actions.append({"gate": gate, "action": action, "detail": re.sub(r"\s+", " ", str(detail))[:240]})
@@ -291,6 +314,8 @@ def _remedy_evidence(text: str, groups: list[dict], actions: list[dict], rewrite
                 removed = snippet
         else:
             text, removed = _remove_containing(text, claim)
+            if not removed and len(_norm(claim)) < 5:
+                text, removed = _remove_short_claim(text, claim, list(group.get("sourceIds") or []))
         if removed:
             actions.append({"gate": "mismatchedCitationGroups", "action": "removed", "detail": re.sub(r"\s+", " ", removed)[:240],
                             "values": list(group.get("unmatchedNumericClaims") or [])[:6]})
@@ -374,6 +399,10 @@ def heal(text: str, charts: list, audits: dict, rerun, *, store=None, max_rounds
     Returns (text, charts, audits, summary) where summary has the actions, rounds, qualifiers and
     whatever is still failing (empty when the report may publish)."""
     actions: list[dict] = []
+    cleaned = remove_fragments(text, actions)
+    if cleaned != text:
+        text = cleaned
+        audits = rerun(text, charts)
     if v2_unresolved:
         text = _remove_unresolved_rows(text, v2_unresolved, actions)
         audits = rerun(text, charts)

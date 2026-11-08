@@ -355,7 +355,10 @@ def _chunks(subsections: list, max_words: int = 2600) -> list[list]:
 
 
 async def write_section(gateway, store, section, figures: list, *, question: str, thesis: str,
-                        already_covered: list[str], other_sections: list[str]) -> SectionDraft:
+                        already_covered: list[str], other_sections: list[str], allow_extension: bool = True,
+                        budget_scale: float = 1.0) -> SectionDraft:
+    """``allow_extension`` / ``budget_scale``: the in-depth runtime deadline (Stage H) skips the optional
+    extension call and, past the hard stop, writes the section concisely from the same evidence."""
     draft = SectionDraft(section_id=section.section_id, title=section.title)
     passages = [p for p in (store.get(pid) for pid in section.passage_ids) if p]
     for leaf in section.leaves():
@@ -387,6 +390,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         group_passages = [p for p in passages if p.passage_id in group_passage_ids] or passages
         group_figures = [f for f in figures if not group or set(f.passage_ids) & group_passage_ids or gi == 0]
         budget = sum(s.word_budget for s in group) if group else section.word_budget
+        budget = max(150, int(budget * budget_scale))
         prompt = build_section_prompt(
             question=question, thesis=thesis, title=section.title, goal=section.goal,
             subsections=[{"title": s.title, "goal": s.goal, "words": s.word_budget} for s in group],
@@ -424,7 +428,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     words_so_far = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", body_so_far)))
     cited_so_far = {t.strip().upper() for g in CITE_RE.findall(body_so_far) for t in re.split(r"\s*[,;]\s*", g)}
     unused = [p for p in passages if p.passage_id not in cited_so_far]
-    if body_so_far and words_so_far < 0.7 * section.word_budget and len(unused) >= 3:
+    if allow_extension and body_so_far and words_so_far < 0.7 * section.word_budget * budget_scale and len(unused) >= 3:
         remaining = max(250, section.word_budget - words_so_far)
         prompt = (
             f"REPORT QUESTION: {question}\nREPORT THESIS: {thesis}\n\nSECTION: {section.title}\nSECTION GOAL: {section.goal}\n\n"

@@ -25,7 +25,7 @@ class PagePolicy:
 
 POLICIES = {
     "detailed": PagePolicy(floor=20, band=(25, 30), cap=32, words_cap=7_500),  # live G: 8,048 words + 6 charts = 34 pages
-    "in_depth": PagePolicy(floor=40, band=(60, 130), cap=140, words_cap=52_000),
+    "in_depth": PagePolicy(floor=40, band=(60, 130), cap=140, words_cap=34_000),  # live G: 39,124 words = 154 pages
 }
 WORDS_PER_PAGE = 380
 
