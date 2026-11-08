@@ -19,7 +19,8 @@ INSTRUCTION_RE = re.compile(
     r"(?i:\bdo\s+not\s+recompute\b|\buse these exact\b|\bpre-computed\b|\(\s*goal\s*:|~\s?\d{2,5}\s+words\b"
     r"|\breport it separately\b|\bnever mixed into completed-quarter\b|\bcite by id\b)"
     r"|\bdo NOT\b|\bQUARTER WINDOW\b|\bTIME WINDOW:|\bCURRENT QUARTER TO DATE:|\bEVIDENCE PASSAGES\b"
-    r"|\bTHE QUESTION ASKS FOR\b|\bReturn (?:valid )?JSON\b|<<<SUMMARY>>>")
+    r"|\bTHE QUESTION ASKS FOR\b|\bReturn (?:valid )?JSON\b|<<<SUMMARY>>>"
+    r"|\bMARKET REGIME \(computed\b|\bfixed facts - the thesis\b")
 # Our own report boilerplate (built from code templates) is not a leak.
 _OWN_BOILERPLATE_RE = re.compile(r"^\s*\*\*(?:Coverage of the question|Verification|Evidence base|Reliability scoring|"
                                  r"How the report was built|Entity coverage|Scope decisions|Length)\.\*\*")

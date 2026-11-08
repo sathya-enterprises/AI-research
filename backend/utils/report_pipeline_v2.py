@@ -398,12 +398,32 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if tiers is None and tier == "in_depth":
         from utils.entity_tiers import entity_tiers
         tiers = entity_tiers(store, tier=tier)
+    # Stage I (FIX 4): the market regime is computed in code from the fetched dataset and given to the
+    # outline and the executive summary as fixed facts; the thesis and rotation claims are checked against it.
+    regime, regime_log = None, {"computed": False, "thesisRewritten": False, "claims": [], "mislabels": []}
+    try:
+        from utils.dataset_charts import find_quarterly_dataset
+        from utils.regime import compute_regime
+        regime = compute_regime(find_quarterly_dataset(store))
+    except Exception as exc:  # never block the report on the regime summary
+        log.warning("V2 regime summary skipped: %s", type(exc).__name__)
+    if regime is not None:
+        regime_log.update(computed=True, firstHalf=regime.first_half, secondHalf=regime.second_half,
+                          compounded=regime.compounded, leaders=regime.leaders, laggards=regime.laggards)
+        window_note = f"{window_note}\n{regime.facts_block()}".strip()
     try:
         outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note,
                                       asks=asks,
                                       tiers=tiers)
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
+    if regime is not None:
+        from utils.regime import contradicted_rotation
+        reason = contradicted_rotation(outline.thesis or "", regime)
+        if reason:
+            log.warning("V2 regime: outline thesis rewritten (%s)", reason)
+            regime_log.update(thesisRewritten=True, thesisReason=reason, originalThesis=(outline.thesis or "")[:400])
+            outline.thesis = regime.thesis_sentence()
     analysis = outline.analysis_sections()
     if len(analysis) < 3:
         raise PipelineV2Error(f"only {len(analysis)} analysis sections have enough evidence")
@@ -556,7 +576,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     exec_section = next(s for s in outline.sections if s.kind == "executive_summary")
     summaries = "\n\n".join(f"## {d.title}\n{d.summary}" for d in good if d.summary)
     exec_prompt = (f"QUESTION: {question}\nTHESIS: {outline.thesis}\nLENGTH: about {exec_section.word_budget} words.\n\n"
-                   f"SECTION SUMMARIES:\n{summaries}")
+                   + (f"{regime.facts_block()}\n\n" if regime is not None else "")
+                   + f"SECTION SUMMARIES:\n{summaries}")
     exec_result = await gateway.generate(purpose="executive_summary", section_id="exec", system=EXEC_SYSTEM,
                                          prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120)
     exec_body = (exec_result.text.split(SUMMARY_MARKER)[0].strip() if exec_result.ok else "")
@@ -697,6 +718,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md, exhaustive_rewrites = guard_exhaustive_claims(report_md, asks)
     from utils.leak_gate import remove_leaks
     report_md, leak_actions = remove_leaks(report_md)  # Stage I: no writer-prompt text reaches the report
+    try:
+        from utils.regime import fix_mislabels, heal_rotation_claims
+        report_md, regime_log["mislabels"] = fix_mislabels(report_md)
+        if regime is not None:
+            report_md, regime_log["claims"] = heal_rotation_claims(report_md, regime)
+    except Exception as exc:
+        log.warning("V2 regime checks skipped: %s", type(exc).__name__)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     report_md, charts_out, _ = finalize_figures(report_md, charts_out)
     # Some chart checks depend on the finished text (e.g. a report table that marks
@@ -754,6 +782,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                      "hardStop": round(deadline[1] - time.monotonic()) if deadline else None},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
         "leakGate": leak_actions,
+        "regime": regime_log,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

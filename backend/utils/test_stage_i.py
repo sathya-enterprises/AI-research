@@ -129,3 +129,44 @@ def test_rendered_gate_flags_chains_and_flattened_tables_only():
             "Eligibility: trade with > 90% of days\n[S7] India's imports - IndBiz | Economic Division | IndBiz |")
     issues = [f["issue"] for f in rendered_flow_findings(text)]
     assert len(issues) == 2 and "arrow" in issues[0] and "table" in issues[1]
+
+
+# ── FIX 4: regime from data ──────────────────────────────────────────────────────────────────────
+def _dataset(rows: dict, compounded: dict | None = None):
+    from utils.dataset_charts import QuarterlyDataset, Row
+    quarters = ["Q3 FY25", "Q4 FY25", "Q1 FY26", "Q2 FY26"]
+    return QuarterlyDataset("S2", quarters, {k: Row(k, "", "p1", [], v) for k, v in rows.items()},
+                            {k: (v, "", "", "p1") for k, v in (compounded or {}).items()}, "Nov 2026", {})
+
+
+def test_regime_is_computed_and_contradicted_rotation_is_rewritten():
+    from utils.regime import compute_regime, contradicted_rotation, heal_rotation_claims
+    data = _dataset({"NIFTY METAL": [8, 6, -4, -5], "NIFTY AUTO": [5, 4, -3, -2],
+                     "NIFTY FMCG": [-1, 0, 3, 4], "NIFTY PHARMA": [0, 1, 4, 5], "NIFTY 50": [2, 2, 0, 0]})
+    regime = compute_regime(data)
+    assert regime.first_half == "cyclical" and regime.second_half == "defensive"
+    assert regime.rotation == ("cyclical", "defensive")
+    assert not contradicted_rotation("Leadership rotated from cyclicals to defensives over the window.", regime)
+    bad = "Markets saw a rotation from defensives to cyclicals as growth recovered [S3]."
+    assert contradicted_rotation(bad, regime)
+    text, actions = heal_rotation_claims(f"Intro [S1]. {bad} Next point.", regime)
+    assert "from defensives to cyclicals" not in text and "leadership moved from cyclical to defensive" in text
+    assert actions and actions[0]["action"].startswith("rewritten")
+
+
+def test_regime_groups_are_configurable(monkeypatch):
+    from utils.regime import compute_regime
+    monkeypatch.setenv("REGIME_GROUPS_JSON", '{"cyclical": ["NIFTY METAL"], "defensive": ["NIFTY FMCG", "NIFTY AUTO"]}')
+    regime = compute_regime(_dataset({"NIFTY METAL": [8, 6, -4, -5], "NIFTY AUTO": [5, 4, -3, -2],
+                                      "NIFTY FMCG": [-1, 0, 3, 4]}))
+    assert regime.members["defensive"] == ["NIFTY FMCG", "NIFTY AUTO"]
+
+
+def test_sector_mislabels_are_corrected():
+    from utils.regime import fix_mislabels
+    out, actions = fix_mislabels("The high-beta FMCG names fell. IT, a defensive sector, held up. "
+                                 "Defensive sectors like Nifty Pharma and Nifty FMCG were steady. "
+                                 "High-beta sectors like Nifty Realty and Nifty FMCG fell. It remained defensive.")
+    assert "defensive FMCG names" in out and "IT, an export-driven sector" in out
+    assert "Defensive sectors like Nifty Pharma" in out and "Sectors like Nifty Realty and Nifty FMCG" in out
+    assert "It remained defensive." in out and len(actions) == 3
