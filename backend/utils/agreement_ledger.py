@@ -199,14 +199,55 @@ def ledger_block(store, manifest: list[dict], start: date, end: date, *, items: 
 _PARTNER_RE = re.compile(r"^India-(.+?)\s+(?:FTA|CEPA|CECPA|CETA|ECTA|TEPA|CECA|BTA|PTA|Comprehensive|Economic|Trade|Free)\b")
 
 
-def partner_windows(store, start: date, end: date) -> dict[str, bool]:
-    """{partner (lower case): has a signing / entry-into-force date inside the window} from the evidence."""
+def _partners(name: str) -> list[str]:
+    """Partner names of an agreement, lower case, with the acronym in parentheses as an alias:
+    'India-European Free Trade Association (EFTA) Trade ...' -> ['european free trade association', 'efta']."""
+    named = re.match(r"India-([^()]+?)\s*\(([A-Z]{2,6})\)", name)
+    if named and named.group(2) not in {"FTA", "CEPA", "CETA", "ECTA", "TEPA", "CECA", "CECPA"}:
+        return [named.group(1).strip().casefold(), named.group(2).casefold()]
+    match = _PARTNER_RE.match(name)
+    if not match:
+        return []
+    raw = match.group(1)
+    out = [re.sub(r"\s*\(.*$", "", raw).strip().casefold()]
+    out += [a.casefold() for a in re.findall(r"\(([A-Z]{2,6})\)", name) if a not in {"FTA", "CEPA", "CETA", "ECTA", "TEPA", "CECA", "CECPA"}]
+    aliases = {"uk": "united kingdom", "uae": "united arab emirates", "us": "united states", "usa": "united states",
+               "eu": "european union", "aus": "australia"}
+    out += [aliases[o] for o in list(out) if o in aliases]
+    return [o for o in dict.fromkeys(out) if o]
+
+
+def partner_windows(store, start: date, end: date, *, signed_only: bool = True) -> dict[str, bool]:
+    """{partner or alias (lower case): the agreement was signed inside the window} from the evidence
+    (``signed_only=False``: a signing OR entry-into-force date inside the window)."""
     out: dict[str, bool] = {}
     for row in build_ledger(store, []).values():
-        match = _PARTNER_RE.match(row.agreement)
-        if not match:
-            continue
-        partner = re.sub(r"\s*\(.*$", "", match.group(1)).strip().casefold()
-        inside = any(_in_window(e, start, end) for e in row.signed + row.in_force)
-        out[partner] = out.get(partner, False) or inside
+        events = row.signed if signed_only else row.signed + row.in_force
+        inside = any(_in_window(e, start, end) for e in events)
+        for partner in _partners(row.agreement):
+            out[partner] = out.get(partner, False) or inside
     return out
+
+
+def signed_in_window(store, start: date, end: date) -> list[tuple[str, str]]:
+    """[(agreement name, partner)] for agreements whose signing date falls inside the window."""
+    out = []
+    for row in build_ledger(store, []).values():
+        partners = _partners(row.agreement)
+        if partners and any(_in_window(e, start, end) for e in row.signed):
+            out.append((row.agreement, partners[0]))
+    return out
+
+
+def ledger_timeline(store, manifest: list[dict], start: date, end: date) -> str:
+    """'> [!TIMELINE] ...' of the agreements' own dated events inside the window (signed / entry into force)."""
+    events = []
+    for row in build_ledger(store, manifest).values():
+        for kind, items in (("signed", row.signed), ("entered into force", row.in_force)):
+            event = _best([e for e in items if _in_window(e, start, end)])
+            if event and event.month:
+                events.append((event.month, f"{_MONTHS[event.month[1] - 1].capitalize()} {event.month[0]} — "
+                                            f"{row.agreement} {kind} ({event.when}) [{event.passage_id}]"))
+    if len(events) < 2:
+        return ""
+    return "> [!TIMELINE] " + " | ".join(text for _, text in sorted(events)[:8])

@@ -215,8 +215,14 @@ def _earlier_past(section, partner_windows: dict[str, bool] | None) -> bool:
     return bool(named) and not any(named)
 
 
+def _mentions_partner(section, partner: str) -> bool:
+    text = f"{section.title} {getattr(section, 'entity', '')}".casefold()
+    return bool(re.search(rf"(?<![a-z]){re.escape(partner)}(?![a-z])", text))
+
+
 def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_factory,
-                    partner_windows: dict[str, bool] | None = None) -> list:
+                    partner_windows: dict[str, bool] | None = None,
+                    signed_items: list[tuple[str, list[str]]] | None = None) -> list:
     """Add a section for each unmapped comparison/analysis/deliverable ask, and Why/What/How
     subsections to item sections that lack them. ``section_factory(title, goal, queries)`` builds
     a Section; passages are assigned afterwards from the queries, like any planned section.
@@ -225,6 +231,18 @@ def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_fa
     agreements that all predate the window becomes a compact section labelled "Comparison with the
     earlier past"; only in-window agreements get the full Why/What/How."""
     added = []
+    # Every agreement signed inside the window gets its own section (live run G: the outline gave
+    # the full Why/What/How to an earlier agreement and none to the two signed in the window).
+    for name, partners in signed_items or []:
+        if any(_mentions_partner(s, p) for s in sections for p in partners):
+            continue
+        section = section_factory(name, f"Why it was signed, what it covers and how it is implemented: {name}",
+                                  [name, f"{name} signed", f"{name} tariff market access", f"{name} rules of origin"])
+        section.role, section.entity = "deep_dive", name
+        # Right after the opening (list / overview) section, in signing order, not after the outlook.
+        sections.insert(min(len(sections), 1 + len(added)), section)
+        added.append(section)
+        decisions.append(f"'{name}' was signed inside the window but had no section: added it (Why/What/How).")
     for section in sections:
         if _earlier_past(section, partner_windows):
             if not section.title.casefold().startswith("comparison with the earlier past"):

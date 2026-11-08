@@ -189,7 +189,11 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
                     # Its source tables are now shown: not placed again inline (same numbers twice
                     # fail the PDF export audit as a repeated observation).
                     stats["placedTables"].update(c.table.passage_id for c in columns[:3])
-        if asks is not None and (asks.per_item or asks.items) and not any(b.startswith("> [!STATS]") for b in top):
+        agreement_question = bool(asks is not None and re.search(r"(?i)\b(?:fta|agreement|cepa|treat)", asks.items or ""))
+        # Agreement questions take their timeline from the agreement ledger (dated signing / entry into
+        # force); a section's other dated sentences (e.g. administrative notices) are not a timeline of it.
+        if (asks is not None and (asks.per_item or asks.items) and not agreement_question
+                and not any(b.startswith("> [!STATS]") for b in top)):
             # List / why-what-how questions (agreements, deals): a timeline of the section's own dated events.
             from utils.section_layout import insert_after_first_paragraph as _after_first, timeline_from_body
             timeline = timeline_from_body(body)
@@ -610,6 +614,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         from utils.agreement_ledger import ledger_block
         from utils.section_layout import insert_after_first_paragraph as _ledger_after
         block, ledger_meta = ledger_block(store, manifest, span[0], span[1], items=asks.items)
+        from utils.agreement_ledger import ledger_timeline
+        timeline = ledger_timeline(store, manifest, span[0], span[1])
+        if block and timeline:
+            block = f"{block}\n\n{timeline}"
         if block:
             list_titles = [t for a in asks.asks if a.kind == "deliverable" for t in a.sections]
             target = next((e for e in edited if e.title in list_titles), edited[0])

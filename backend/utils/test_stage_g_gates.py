@@ -155,7 +155,8 @@ def test_agreements_before_the_window_become_compact_earlier_past_sections():
     store = _store({"S16.8": "5 India - UK Comprehensive Economic and Trade Agreement (CETA) 24th July 2025 15th July 2026 "
                              "6 India – Oman CEPA 18th December 2025 01st June 2026 2 India-UAE CEPA 18th February, 2022 1st May 2022"})
     windows = partner_windows(store, date(2025, 11, 8), date(2026, 11, 8))
-    assert windows == {"uk": True, "oman": True, "uae": False}
+    # signed inside the window (the UK CETA was signed in July 2025, before it; in force July 2026)
+    assert windows["oman"] is True and windows["uk"] is False and windows["united kingdom"] is False and windows["uae"] is False
     asks = parse_asks("List down the why, what, how of all the FTAs signed by India in the past 1 year.", date(2026, 11, 8))
     uae = Section("sec-1", "The India-UAE CEPA", role="deep_dive", entity="India-UAE CEPA")
     oman = Section("sec-2", "India-Oman CEPA", role="deep_dive", entity="India-Oman CEPA")
@@ -185,3 +186,32 @@ def test_export_heals_a_caption_shared_by_two_figures_and_a_repeated_table():
     assert healed.count("NIFTY AUTO") == 1 and actions
     payload = export_failure_payload({"status": "FAIL"}, findings)
     assert payload["reportAvailable"] and payload["code"] == "pdf_export_audit_failed" and "still available" in payload["error"]
+
+
+def test_an_agreement_signed_in_the_window_without_a_section_gets_one_with_why_what_how():
+    from datetime import date
+    from utils.agreement_ledger import _partners, signed_in_window
+    from utils.question_asks import parse_asks, repair_for_asks
+    from utils.report_outline import Section
+    store = _store({"S17.8": "4 India-European Free Trade Association (EFTA) Trade and Economic Partnership Agreement (TEPA) "
+                             "(Iceland, Liechtenstein, Norway, and Switzerland) 10th March 2024 01st October 2025 "
+                             "6 India – Oman CEPA 18th December 2025 01st June 2026 7 India-New Zealand FTA 27th April 2026 Under ratification process"})
+    span = (date(2025, 11, 8), date(2026, 11, 8))
+    from utils.agreement_ledger import partner_windows
+    windows = partner_windows(store, *span)
+    signed = [(n, _partners(n)) for n, _ in signed_in_window(store, *span)]
+    asks = parse_asks("List down the why, what, how of all the FTAs signed by India in the past 1 year.", date(2026, 11, 8))
+    efta = Section("sec-1", "India-EFTA Trade and Economic Partnership Agreement", role="deep_dive", entity="EFTA TEPA")
+    sections = [efta]
+    n = [1]
+
+    def factory(title, goal, queries):
+        n[0] += 1
+        return Section(f"sec-{n[0]}", title, goal=goal, queries=queries)
+
+    repair_for_asks(asks, sections, [], factory, partner_windows=windows, signed_items=signed)
+    titles = [s.title for s in sections]
+    assert efta.title.startswith("Comparison with the earlier past") and efta.role == "compact"
+    assert "India-Oman CEPA" in titles and "India-New Zealand FTA" in titles
+    oman = next(s for s in sections if s.title == "India-Oman CEPA")
+    assert [s.title for s in oman.subsections] == ["Why it was signed", "What it covers", "How it works and is implemented"]
