@@ -593,6 +593,21 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     edited, editorial = await editorial_pass(edited, gateway=gateway)
     layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
                                    asks=asks)
+    # Agreement list questions ("all the FTAs signed in the past 1 year"): the dated ledger from the
+    # evidence (signing kept apart from entry into force; what official sources verify), placed in the
+    # section that answers the list ask.
+    ledger_meta: dict = {}
+    from utils.question_asks import month_window
+    span = month_window(question, _asks_date.fromisoformat(today[:10]))
+    if span and re.search(r"(?i)\b(?:fta|agreement|cepa|treat)", asks.items or "") and edited:
+        from utils.agreement_ledger import ledger_block
+        from utils.section_layout import insert_after_first_paragraph as _ledger_after
+        block, ledger_meta = ledger_block(store, manifest, span[0], span[1], items=asks.items)
+        if block:
+            list_titles = [t for a in asks.asks if a.kind == "deliverable" for t in a.sections]
+            target = next((e for e in edited if e.title in list_titles), edited[0])
+            target.body = _ledger_after(target.body, block)
+            ledger_meta["section"] = target.title
     if layout["scorecard"]:
         parts.append(layout["scorecard"])
     parts += [f"## {e.title}\n\n{e.body}" for e in edited]
@@ -679,7 +694,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                    "droppedAfterAssembly": dropped_after_assembly,
                    "claims": [{"figure": c.figure_number, "claim": c.claim, "passages": c.passage_ids} for c in used]},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
-        "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites},
+        "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
+                     "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
         "chartFunnel": {
             "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,

@@ -283,8 +283,8 @@ def timeline_from_body(body: str, *, max_events: int = 6) -> str:
         key = (int(match.group(4)), month)
         if key in events:
             continue
-        text = re.sub(r"\s+", " ", CITE_RE.sub("", sentence.replace("|", "/"))).strip(" *-")
-        text = re.sub(r"\*\*([^*]+)\*\*:?", r"\1", text)
+        text = re.sub(r"\*\*([^*]+?):?\*\*:?", r"\1:", CITE_RE.sub("", sentence.replace("|", "/")))
+        text = re.sub(r"\s+", " ", text.replace("**", "")).strip(" *-")
         if len(text) > 110:
             text = text[:110].rsplit(" ", 1)[0].rstrip(",;:") + "…"
         events[key] = f"{_MONTHS[month - 1].capitalize()} {key[0]} — {text} [{cites[0]}]"

@@ -62,3 +62,19 @@ def test_timeline_from_dated_cited_sentences():
     line = timeline_from_body(body)
     assert line.startswith("> [!TIMELINE] Feb 2025") and line.count(" | ") == 2 and "[S5.1]" in line
     assert timeline_from_body("Signed in July 2025 [S4.1]. Approved in March 2026 [S5.1].") == ""
+
+
+def test_agreement_ledger_reads_an_official_register_split_across_passages():
+    from utils.agreement_ledger import ledger_block
+    from utils.evidence_store import store_from_passages
+    store = store_from_passages({
+        "S16.7": {"id": "S16.7", "text": "FREE TRADE AGREEMENTS (FTAS) SIGNED BY INDIA India-UAE CEPA 18th February, 2022 1st May 2022 3 India-Australia Economic Cooperation and"},
+        "S16.8": {"id": "S16.8", "text": "Trade Agreement (Ind-Aus ECTA) 2nd April, 2022 29th December 2022 5 India - UK Comprehensive Economic and Trade Agreement (CETA) 24th July 2025 15th July 2026 6 India – Oman CEPA 18th December 2025 01st June 2026 7 India-New Zealand FTA 27th April 2026 Under ratification process"},
+        "S5.1": {"id": "S5.1", "text": "India's FTA with New Zealand, signed in April 2026, is the latest in a string of agreements."},
+    })
+    manifest = [{"id": "S16", "url": "https://sansad.in/getFile/annex.pdf"}, {"id": "S5", "url": "https://theprint.in/x"}]
+    block, meta = ledger_block(store, manifest, date(2025, 11, 8), date(2026, 11, 8), items="FTAs")
+    assert "| India-Oman CEPA | 18th December 2025 [S16.8] | 01st June 2026 [S16.8] | yes |" in block
+    assert "India-New Zealand FTA | 27th April 2026 [S16.8] | Under ratification process" in block
+    assert "UAE" not in block  # no event in the window
+    assert meta["verifiedOfficialSignings"] == 2 and "18th December 2025" in meta["statement"]

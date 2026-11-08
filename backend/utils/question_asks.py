@@ -87,6 +87,17 @@ def _fy_quarter(day: date) -> tuple[str, date]:
     return f"Q{q} FY{fy % 100:02d}", start
 
 
+def month_window(question: str, today: date) -> tuple[date, date] | None:
+    """(start, today) for "past N years/months" questions; None otherwise."""
+    q = str(question or "")
+    years = re.search(r"(?i)\b(?:past|last|previous)\s+(\d{1,2}|" + "|".join(_NUM_WORDS) + r")\s+years?\b", q)
+    months = re.search(r"(?i)\b(?:past|last|previous)\s+(\d{1,2}|" + "|".join(_NUM_WORDS) + r")\s+months?\b", q)
+    span = (_count(years.group(1)) * 12) if years else (_count(months.group(1)) if months else 0)
+    if not span and re.search(r"(?i)\b(?:past|last)\s+year\b", q):
+        span = 12
+    return (_minus_months(today, span), today) if span else None
+
+
 def window_note(question: str, today: date) -> str:
     q = str(question or "")
     quarters = re.search(r"(?i)\b(?:past|last|previous)\s+(\d{1,2}|" + "|".join(_NUM_WORDS) + r")\s+quarters?\b", q)
@@ -212,6 +223,9 @@ def repair_for_asks(asks: Asks, sections: list, decisions: list[str], section_fa
             text = _section_text(section)
             if getattr(section, "role", "") != "deep_dive" and not (item_terms and any(t in section.title.casefold() for t in item_terms)):
                 continue
+            if not getattr(section, "entity", "") or re.search(
+                    r"(?i)\b(?:histor|legacy|context|comparison|benchmark|outlook|landscape|overview|effectiveness|evidence)", section.title):
+                continue  # one item's own section only (live run F: a "Historical Context" section got Why/What/How)
             have = {w for w in asks.per_item if any(re.match(rf"(?i)\s*{w}\b", sub.title) for sub in section.subsections)}
             missing = [w for w in asks.per_item if w not in have]
             if not missing:
