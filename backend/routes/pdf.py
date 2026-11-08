@@ -5215,6 +5215,10 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
             continue
         if len(line) < 24 or not metric_line.search(observation_text) or not re.search(r"\d", observation_text):
             continue
+        # A line whose only numbers are years ("QTD RETURN TO NOV 2026 (%)", a column header shared by
+        # two tables) states no observation (Stage G false alarm from a live run).
+        if not re.search(r"\d", re.sub(r"\b(?:19|20)\d{2}\b", "", observation_text)):
+            continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)
         normalized = re.sub(r"\bS\d+\b", "", normalized, flags=re.I)
         normalized = re.sub(r"[^a-z0-9%₹$€£]+", " ", normalized.casefold()).strip()
@@ -5728,6 +5732,32 @@ async def generate_pdf(request: Request):
             except Exception as _duplicate_repair_exc:
                 log.error("PDF: duplicate-line repair render failed: %s", type(_duplicate_repair_exc).__name__)
 
+    # Stage G: bounded self-healing for what the two repairs above cannot fix (a caption shared by
+    # two figures, a table shown twice): up to 3 more rounds, each re-rendered and fully re-audited.
+    from utils.pdf_export_healing import export_failure_payload, heal_rendered_duplicates
+    for _heal_round in range(3):
+        if not _rendered_pdf_audit.get("blocking"):
+            break
+        _findings_now = list(_rendered_pdf_audit.get("findings") or [])
+        _healed_report, _healed_charts, _heal_actions = heal_rendered_duplicates(report, charts, _findings_now)
+        _healed_report, _more = _remove_exact_duplicate_observation_lines(_healed_report, _findings_now)
+        if not _heal_actions and not _more:
+            break
+        log.warning("PDF: export self-healing round %d: %s", _heal_round + 1, "; ".join(_heal_actions) or f"{_more} duplicate line(s)")
+        report, charts = normalize_report_markdown(_healed_report), _healed_charts
+        try:
+            pdf_bytes = build_pdf(
+                report, title, question, summary, key_stats, charts, logo_b64,
+                file_images, web_images, theme, sources, presentation,
+                report_tier=report_tier, report_style=report_style, kicker=kicker,
+            )
+            pdf_bytes = _trim_trailing_blank_pages(pdf_bytes)
+            pdf_bytes = _trim_furniture_only_middle_pages(pdf_bytes)
+            _rendered_pdf_audit = _audit_rendered_pdf_bytes(pdf_bytes, report, title, charts, sources, question=question)
+        except Exception as _heal_render_exc:
+            log.error("PDF: export self-healing render failed: %s", type(_heal_render_exc).__name__)
+            break
+
     if _rendered_pdf_audit.get("blocking"):
         _audit_findings = list(_rendered_pdf_audit.get("findings") or [])[:20]
         for _finding in _audit_findings:
@@ -5736,13 +5766,8 @@ async def generate_pdf(request: Request):
                 _finding.get("severity", "critical"), str(_finding.get("issue") or "unknown")[:220],
                 json.dumps({k: v for k, v in _finding.items() if k not in {"severity", "issue"}}, ensure_ascii=False, default=str)[:500],
             )
-        _first_issue = str((_audit_findings[0] or {}).get("issue") or "unresolved integrity/evidence finding") if _audit_findings else "unresolved integrity/evidence finding"
-        return JSONResponse({
-            "error": "The rendered PDF still fails final integrity/evidence validation after a safe repair attempt. " + _first_issue,
-            "publicationStatus": "FAIL", "exported": False,
-            "renderedPdfAudit": _rendered_pdf_audit,
-            "findings": _audit_findings,
-        }, status_code=422)
+        # A clear, actionable error; the report itself stays available (draft export is offered).
+        return JSONResponse(export_failure_payload(_rendered_pdf_audit, _audit_findings), status_code=422)
     elapsed = (time.perf_counter() - t0) * 1000
     log.info("PDF: done — %.1f KB in %.0fms; final audit=PASS pages=%d extracted_text=%d chars", len(pdf_bytes) / 1024, elapsed,
              _rendered_pdf_audit.get("pageCount", 0), _rendered_pdf_audit.get("extractedTextChars", 0))

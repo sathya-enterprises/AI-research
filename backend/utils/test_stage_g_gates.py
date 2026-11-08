@@ -168,3 +168,20 @@ def test_agreements_before_the_window_become_compact_earlier_past_sections():
     repair_for_asks(asks, [uae, oman], [], factory, partner_windows=windows)
     assert uae.title.startswith("Comparison with the earlier past") and uae.role == "compact" and not uae.subsections
     assert [s.title for s in oman.subsections] == ["Why it was signed", "What it covers", "How it works and is implemented"]
+
+
+def test_export_heals_a_caption_shared_by_two_figures_and_a_repeated_table():
+    from utils.pdf_export_healing import export_failure_payload, heal_rendered_duplicates
+    caption = "Figure 21 and Figure 22 compare these short-term returns across sectors."
+    charts = [{"title": "Figure 21: 1W (%)", "takeaway": caption}, {"title": "Figure 22: 1M (%)", "takeaway": caption}]
+    table = "| Sector | QTD return to Nov 2026 (%) |\n| --- | --- |\n| NIFTY AUTO | +9.1% |"
+    report = f"Intro.\n\n{table}\n\nMiddle.\n\n**Table: Sector by QTD**\n\n{table}\n\nEnd."
+    findings = [{"issue": "The final rendered PDF repeats the same numeric observation under different or repeated source attributions.",
+                 "text": caption},
+                {"issue": "The final rendered PDF repeats the same numeric observation under different or repeated source attributions.",
+                 "text": "QTD RETURN TO NOV 2026 (%)"}]
+    healed, new_charts, actions = heal_rendered_duplicates(report, charts, findings)
+    assert new_charts[0]["takeaway"] == caption and new_charts[1]["takeaway"] == "Shows 1M (%)."
+    assert healed.count("NIFTY AUTO") == 1 and actions
+    payload = export_failure_payload({"status": "FAIL"}, findings)
+    assert payload["reportAvailable"] and payload["code"] == "pdf_export_audit_failed" and "still available" in payload["error"]
