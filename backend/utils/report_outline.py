@@ -132,7 +132,7 @@ def tiers_block(tiers: dict | None) -> str:
 
 
 def outline_prompt(question: str, tier: str, overview: str, today: str, window_note: str,
-                   tiers: dict | None = None, rejection: str = "") -> tuple[str, str]:
+                   tiers: dict | None = None, rejection: str = "", asks_block: str = "") -> tuple[str, str]:
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     system = (
         "You are the research director planning an evidence-grounded investment research report. "
@@ -169,7 +169,7 @@ REPORT TIER: {tier}
 
 {structure}
 
-{rejection}Do NOT include an executive summary, methodology, sources or appendix sections; those are added automatically.
+{asks_block}{rejection}Do NOT include an executive summary, methodology, sources or appendix sections; those are added automatically.
 Sections must not overlap: give each a distinct goal. The thesis is the report's single central claim, phrased so the
 evidence can support or qualify it.
 For every section and subsection give 2-4 search queries made of words likely to appear in the sources (index names,
@@ -183,6 +183,7 @@ Return JSON:
   "thesis": "<1-2 sentences>",
   "entities": [{{"name": "...", "type": "...", "aliases": ["..."]}}],
   "dimensions": ["..."],
+  "asks": {{"A1": ["<title of the section answering ask A1>"]}},
   "sections": [{{"title": "...", "role": "cross_cutting|deep_dive|compact", "entity": "<deep-dive entity or empty>",
                  "goal": "<what this section must establish>", "queries": ["..."], "entities": ["..."],
                  "subsections": [{{"title": "...", "goal": "...", "queries": ["..."], "entities": ["..."]}}]}}]}}"""
@@ -505,13 +506,14 @@ def seed_entity_evidence(store, sections: list[Section], tiers: dict | None) -> 
 
 
 async def build_outline(store, gateway, *, question: str, tier: str, today: str, window_note: str = "",
-                        tiers: dict | None = None) -> Outline:
+                        tiers: dict | None = None, asks=None) -> Outline:
     overview = evidence_overview(store)
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     decisions: list[str] = []
     attempts, rejection, data, result, sections = [], "", None, None, []
     for attempt in (1, 2):
-        system, prompt = outline_prompt(question, tier, overview, today, window_note, tiers=tiers, rejection=rejection)
+        system, prompt = outline_prompt(question, tier, overview, today, window_note, tiers=tiers, rejection=rejection,
+                                        asks_block=asks.prompt_block() if asks else "")
         result = await gateway.generate(purpose="outline", section_id=f"outline#{attempt}" if attempt > 1 else "outline",
                                         system=system, prompt=prompt, max_tokens=12288, temperature=0.2, json_mode=True,
                                         timeout=150, retries=1)
@@ -538,6 +540,19 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         sections = repair_outline(sections, tier, tiers, decisions)
         for error in validate_outline(sections, tier, tiers):
             decisions.append(f"Outline still below the structural minimum after repair: {error}.")
+    if asks is not None and asks.asks:
+        # Stage F: every ask in the question maps to a section; missing ones are added.
+        from utils.question_asks import map_asks, repair_for_asks
+        mapping = data.get("asks") if isinstance(data.get("asks"), dict) else None
+        map_asks(asks, sections, mapping)
+        counter = [len(sections)]
+
+        def _factory(title, goal, queries):
+            counter[0] += 1
+            return Section(section_id=f"sec-{counter[0]}", title=title[:140], goal=goal[:400],
+                           queries=[q for q in queries if q][:4] or [title], role="cross_cutting")
+
+        repair_for_asks(asks, sections, decisions, _factory)
     entities = [e for e in (data.get("entities") or []) if isinstance(e, dict)][:40]
     dimensions = _clean_list(data.get("dimensions"), 10)
     coverage = entity_coverage(store, entities, dimensions)
@@ -554,6 +569,8 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     seed_entity_evidence(store, sections, tiers)
     resolve_thin_evidence(store, sections, decisions)
     meta: dict = {"tier": tier, "outlineModel": result.model if result else "", "outlineAttempts": attempts}
+    if asks is not None:
+        meta["questionAsks"] = asks.to_dict()
     if tiers:
         meta["entityTiers"] = {k: [e.name for e in v] for k, v in tiers.items()}
         meta["tierCounts"] = {k: len(v) for k, v in tiers.items()}

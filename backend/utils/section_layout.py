@@ -262,6 +262,37 @@ def entities_mentioned(text: str) -> list[str]:
     return [name for _pos, name in sorted(found)]
 
 
+_MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+_DATE_RE = re.compile(r"(?i)\b(?:(\d{1,2})\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:(\d{1,2}),\s+)?((?:19|20)\d{2})\b")
+
+
+def timeline_from_body(body: str, *, max_events: int = 6) -> str:
+    """'> [!TIMELINE] Jul 2025 — ... [S4] | ...' from the section's own dated, cited sentences (Stage F).
+
+    Each event is a sentence of the section (already checked by the number policy) that names a month
+    and year; it is shortened at a word boundary and keeps its citation. Three or more distinct dates
+    are needed; otherwise ''."""
+    events: dict[tuple[int, int], str] = {}
+    prose = re.sub(r"(?m)^\s*(?:#|\||>|\[CHART).*$", " ", body or "")
+    for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z*])", prose):
+        match = _DATE_RE.search(sentence)
+        cites = CITE_RE.findall(sentence)
+        if not match or not cites:
+            continue
+        month = _MONTHS.index(match.group(2)[:3].casefold()) + 1
+        key = (int(match.group(4)), month)
+        if key in events:
+            continue
+        text = re.sub(r"\s+", " ", CITE_RE.sub("", sentence.replace("|", "/"))).strip(" *-")
+        text = re.sub(r"\*\*([^*]+)\*\*:?", r"\1", text)
+        if len(text) > 110:
+            text = text[:110].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+        events[key] = f"{_MONTHS[month - 1].capitalize()} {key[0]} — {text} [{cites[0]}]"
+    if len(events) < 3:
+        return ""
+    return "> [!TIMELINE] " + " | ".join(events[k] for k in sorted(events)[:max_events])
+
+
 def insert_after_first_paragraph(body: str, block: str) -> str:
     """Put a block after the section's opening paragraph (or at the top when it opens with a heading)."""
     parts = re.split(r"\n\s*\n", body, maxsplit=1)

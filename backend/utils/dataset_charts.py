@@ -60,6 +60,16 @@ def pretty(label: str) -> str:
     return " ".join(w if w in _UPPER_WORDS else w.capitalize() for w in words)
 
 
+def fy_label(calendar_quarter: str) -> str:
+    """'Q4 2025' (Oct-Dec 2025) -> 'Q3 FY26': the Indian fiscal-quarter labels the report's window uses."""
+    match = re.fullmatch(r"Q([1-4]) (\d{4})", str(calendar_quarter or "").strip())
+    if not match:
+        return calendar_quarter
+    q, year = int(match.group(1)), int(match.group(2))
+    fy_q, fy = (4, year) if q == 1 else (q - 1, year + 1)
+    return f"Q{fy_q} FY{fy % 100:02d}"
+
+
 def _num(raw: str) -> float | None:
     match = _VALUE_RE.match(raw or "")
     return float(match.group(1).replace("−", "-")) if match else None
@@ -82,7 +92,8 @@ def find_quarterly_dataset(store) -> QuarterlyDataset | None:
             for line in str(passage.text or "").splitlines():
                 head = _HEAD_RE.match(line)
                 if head:
-                    quarters = quarters or [q.strip() for q in head.group(1).split("|")]
+                    # Shown in the report's Indian fiscal-quarter labels; the quoted rows keep their own.
+                    quarters = quarters or [fy_label(q.strip()) for q in head.group(1).split("|")]
                     mode = "matrix"
                     continue
                 if _COMPOUND_HEAD_RE.match(line):

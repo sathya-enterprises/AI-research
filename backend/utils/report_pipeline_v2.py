@@ -120,7 +120,7 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
-def _apply_section_layout(edited, *, store, outline, analysis, good, today: str) -> dict:
+def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None) -> dict:
     """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
     from utils.number_policy import apply_number_policy
     from utils.section_charts import _is_qtd, qtd_start_month
@@ -176,6 +176,13 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str)
                 if comparison:
                     body = insert_after_first_paragraph(body, comparison)
                     stats["comparisons"] += 1
+        if asks is not None and (asks.per_item or asks.items) and not any(b.startswith("> [!STATS]") for b in top):
+            # List / why-what-how questions (agreements, deals): a timeline of the section's own dated events.
+            from utils.section_layout import insert_after_first_paragraph as _after_first, timeline_from_body
+            timeline = timeline_from_body(body)
+            if timeline:
+                body = _after_first(body, timeline)
+                stats["timelines"] = stats.get("timelines", 0) + 1
         before = set(stats["placedTables"])
         # Long sections may carry a third small evidence table; short ones at most two.
         long_section = len(re.findall(r"[A-Za-z]+", body)) > 1500
@@ -357,11 +364,18 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
     gateway = gateway or LLMGateway(runtime, tier)
+    # Stage F: what the question asks for (window, why/what/how, lists, audience, comparisons).
+    from datetime import date as _asks_date
+    from utils.question_asks import parse_asks
+    asks = parse_asks(question, _asks_date.fromisoformat(today[:10]))
+    if asks.window_note and asks.window_note not in window_note:
+        window_note = f"{window_note}\n{asks.window_note}".strip()
     if tiers is None and tier == "in_depth":
         from utils.entity_tiers import entity_tiers
         tiers = entity_tiers(store, tier=tier)
     try:
         outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note,
+                                      asks=asks,
                                       tiers=tiers)
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
@@ -555,12 +569,25 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if progress:
         progress("Editing the full report…")
     edited, editorial = await editorial_pass(edited, gateway=gateway)
-    layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today)
+    layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
+                                   asks=asks)
     if layout["scorecard"]:
         parts.append(layout["scorecard"])
     parts += [f"## {e.title}\n\n{e.body}" for e in edited]
     method = methodology_markdown(store=store, manifest=manifest, outline=outline, charts=candidates, drafts=good,
                                   gateway_stats=gateway.stats.to_dict(), question=question, window_note=window_note, failed=failed)
+    # Coverage note: each ask of the question and the section that answers it (sections that failed
+    # to generate no longer count); "exhaustive" is never claimed.
+    from utils.question_asks import coverage_note, guard_exhaustive_claims
+    written = {d.title for d in good}
+    for ask in asks.asks:
+        if ask.kind != "window":
+            ask.sections = [t for t in ask.sections if t in written]
+            if not ask.sections and ask.status in {"mapped", "added"}:
+                ask.status = "unmapped"
+    note = coverage_note(asks)
+    if note:
+        method = f"**{note.split(':', 1)[0]}.** {note.split(':', 1)[1].strip()}\n\n{method}"
     parts.append(f"## Methodology and Evidence Base\n\n{method}")
     if tier == "in_depth":
         # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
@@ -576,6 +603,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md, layout["headingsRemoved"] = fix_heading_runs(report_md)
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)
     report_md = _source_level(report_md)
+    report_md, exhaustive_rewrites = guard_exhaustive_claims(report_md, asks)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     report_md, charts_out, _ = finalize_figures(report_md, charts_out)
     # Some chart checks depend on the finished text (e.g. a report table that marks
@@ -628,6 +656,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                    "droppedAfterWriting": [{"title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"],
                    "droppedAfterAssembly": dropped_after_assembly,
                    "claims": [{"figure": c.figure_number, "claim": c.claim, "passages": c.passage_ids} for c in used]},
+        # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
+        "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
         "chartFunnel": {
             "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,

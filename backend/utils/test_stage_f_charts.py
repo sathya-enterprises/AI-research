@@ -86,3 +86,11 @@ def test_v2_validated_charts_survive_the_relevance_heuristic():
     _, kept, removed = _dedupe_chart_specs("[CHART_1]", [dict(chart)], question)
     assert removed == 0 and kept
     trust_validated_charts([])
+
+
+def test_dataset_quarters_use_the_report_fiscal_labels():
+    from utils.dataset_charts import fy_label
+    assert [fy_label(q) for q in QUARTERS] == ["Q2 FY26", "Q3 FY26", "Q4 FY26", "Q1 FY27"]
+    charts, note = build_dataset_charts(_store())
+    assert note["quarters"][0] == "Q2 FY26"
+    assert any("Q2 FY26 to Q1 FY27" in c.spec["title"] for c in charts)
