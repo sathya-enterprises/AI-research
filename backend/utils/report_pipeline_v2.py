@@ -41,7 +41,9 @@ class PipelineV2Error(RuntimeError):
 
 
 def enabled() -> bool:
-    return os.getenv("REPORT_PIPELINE_V2", "0").strip().lower() in {"1", "true", "yes", "on"}
+    # Default since Stage E: V2 writes both modes. REPORT_PIPELINE_V2=0 rolls back to the single-call writer
+    # (which also remains the automatic fallback when V2 fails, and the path for file-only reports).
+    return os.getenv("REPORT_PIPELINE_V2", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 EXEC_SYSTEM = """You write the executive summary of a research report from the section summaries provided.

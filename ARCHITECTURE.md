@@ -301,6 +301,66 @@ flowchart TD
     S --> T
 ```
 
+### 7.5 V2 report pipeline (default for both modes)
+
+Report text is produced by the V2 pipeline (`backend/utils/report_pipeline_v2.py`, called from `routes/report.py`).
+`REPORT_PIPELINE_V2=0` rolls back to the single-call writer, which also remains the automatic fallback when V2
+raises (too little evidence, outline failure, too few sections generated).
+
+**Two modes**
+
+| Mode | Target | Shape |
+|---|---|---|
+| `detailed` (In-Detail) | ~25-30 pages when the evidence supports it; 20-page depth floor, 32-page cap | 6-8 analysis sections, sector scorecard, methodology |
+| `in_depth` (Deep Research) | up to 100+ pages when the evidence supports it; 40-page floor, 140-page cap | one deep-dive per sector with 3+ good sources, compact comparisons for the rest, cross-cutting sections, appendices |
+
+Length follows the verified evidence (`utils/page_policy.py`): below the floor the shortfall is disclosed in the
+methodology, never padded. Output is PDF only.
+
+**Stages**
+
+1. *Evidence store* (`utils/evidence_store.py`): fetched pages, tables and calculated datasets split into passages
+   with ids (`S12.3`), provenance and a reliability score (authority tier, recency, evidence strength).
+2. *Entity tiers and per-entity search* (`utils/entity_tiers.py`, `utils/entity_research.py`, in-depth): sectors
+   with 3+ good text sources are deep-dives, others compact; up to `GG_V2_ENTITY_SEARCH_CAP` (24) targeted searches
+   fill thin sectors through the same relevance/fetch/quality path.
+3. *Outline* (`utils/report_outline.py`): thesis, sections, evidence per section and word budgets; a validator
+   rejects outlines that omit or merge qualifying sectors (one retry, then deterministic repair); deep-dive
+   subsections are chosen per sector from its evidence (`utils/subsection_planner.py`).
+4. *Charts* (`utils/section_charts.py`, `utils/chart_titles.py`): built only from table passages, titled from their
+   own data, verified with the same checks as the export gates before writing; current-quarter data is labelled
+   "QTD, partial".
+5. *Section writing* (`utils/section_writer.py`, `utils/llm_gateway.py`): one grounded call per section (waves of 3,
+   running summary), passage citations, exact units; number policy (`utils/number_policy.py`) labels verified
+   calculations and drops unsupported sentences.
+6. *Executive summary, editorial pass and layout* (`utils/editorial_pass.py`, `utils/section_layout.py`): section
+   order, merges, repetition, stat strips, takeaways, inline evidence tables, comparisons, "what to watch", a sector
+   scorecard.
+7. *Number check* (`utils/evidence_check.py`): V2 runs report.py's own source-evidence check on its assembled text
+   and drops what it flags before the final check; "published" only when every number is supported.
+8. *Methodology and appendices*: deterministic; the renderer lists every cited source once ("Data Sources").
+
+**Reader-facing citations**: the pipeline and every check keep `[S#]` markers; the renderer removes them at the final
+render step and adds a "Sources:" line per section (`utils/citation_display.py`). `REPORT_INLINE_CITATIONS=1` keeps
+them for an audit copy.
+
+**Environment flags**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `REPORT_PIPELINE_V2` | `1` | `0` = old single-call writer (rollback) |
+| `REPORT_INLINE_CITATIONS` | `0` | `1` = inline `[S#]` markers in the PDF (audit copy) |
+| `GG_V2_ENTITY_SEARCH_CAP` | `24` (in-depth) | per-entity search queries |
+| `GG_V2_MAX_DEEP_DIVES` | `16` | ceiling on sector deep-dives |
+| `GG_V2_LLM_CALL_BUDGET_DETAILED` / `_IN_DEPTH` | `30` / `90` | V2 LLM call budget per report |
+| `GG_V2_SECTION_CONCURRENCY` | `3` | parallel section calls |
+| `GG_V2_SUBSECTION_PLANNER` | `1` | evidence-chosen deep-dive subsections (replays set `0`) |
+| `GG_V2_MODEL_429_COOLDOWN_MS` | `60000` | model cooldown after 429s on two keys |
+| `GG_RESEARCH_CAPTURE` | `0` | `1` = write a research capture (all LLM calls) for offline replay |
+
+**Rollback**: set `REPORT_PIPELINE_V2=0` and restart the backend; nothing else changes (the old writer, its gates and
+the renderer are unchanged). Offline evaluation and replay: `backend/scripts/eval_report.py` (`--replay-v2 --rerender`).
+
 ## 8. Export and delivery
 
 PDF is the only report output format.

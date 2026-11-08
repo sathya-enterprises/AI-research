@@ -86,6 +86,14 @@ The owner confirmed that the one-time Supabase migrations for session metadata, 
 
 The report UI starts a backend job via `/api/chat/report/start`, receives progress and draft previews through `/stream/{jobId}`, and can recover through `/status/{jobId}` polling. The backend performs research, evidence gathering, report drafting and quality gates before returning the structured report payload. The PDF endpoint renders the report (PDF is the only output format); email delivery is also exposed when configured. See `ARCHITECTURE.md` for the full pipeline and current process boundaries.
 
+## Report pipeline
+
+Two report modes, both delivered as PDF only: **In-Detail** (`detailed`, about 25-30 pages when the evidence supports it) and **Deep Research** (`in_depth`, up to 100+ pages when the evidence supports it; one deep-dive per well-covered sector). Length follows the verified evidence and is never padded.
+
+Reports are written by the V2 pipeline (evidence store -> entity tiers and per-entity search -> outline -> verified charts -> grounded section writing -> number policy and source-evidence check -> editorial pass and layout -> methodology and appendices). Inline `[S#]` citations are kept inside the pipeline and removed only when the PDF is rendered; each section ends with a Sources line and the Data Sources appendix lists every cited source once.
+
+Rollback: set `REPORT_PIPELINE_V2=0` and restart the backend to use the previous single-call writer (it is also the automatic fallback when V2 fails). `REPORT_INLINE_CITATIONS=1` renders an audit copy with inline markers. Stages, evidence store and all flags: [ARCHITECTURE.md section 7.5](ARCHITECTURE.md).
+
 ## Tests and checks
 
 Backend tests are kept beside the route/utility modules and in the RAG service. Frontend QA scripts remain under `frontend/scripts/`. Typical checks:
