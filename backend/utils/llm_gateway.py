@@ -91,9 +91,9 @@ class LLMGateway:
         self.tier = str(report_tier or "detailed")
         self.budget = budget if budget is not None else _env_int(
             "GG_V2_LLM_CALL_BUDGET_" + self.tier.upper(), DEFAULT_BUDGETS.get(self.tier, 30))
-        # In-depth reports run 5 calls at once (Stage G runtime: rate-limit retries were 1-3 per run at 3).
+        # 3 calls at once: at 5 (live run G) 16 rate-limit responses and 5 model cooldowns made calls 2-3x slower.
         self.semaphore = asyncio.Semaphore(max(1, concurrency or _env_int(
-            "GG_V2_SECTION_CONCURRENCY", 5 if self.tier == "in_depth" else 3)))
+            "GG_V2_SECTION_CONCURRENCY", 3)))
         self.capture = capture
         self.stats = GatewayStats()
         self._key_cursor = 0  # rotates keys across calls so one key's rate limit is not hit by a long run

@@ -253,3 +253,17 @@ def test_gateway_retries_network_failures_with_backoff_without_cooling_keys(monk
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     result = asyncio.run(gw.generate(purpose="outline", prompt="p", retries=1))
     assert result.ok and calls["n"] == 3 and slept == [5] and gw.stats.network_retries == 1
+
+
+def test_a_stranded_number_fragment_is_removed_and_a_one_character_claim_is_found():
+    from utils.gate_healing import remove_fragments
+    actions = []
+    text = "PMI stayed strong at 58.1 [S9].\n1 [S94]. **Manufacturing PMI:** stayed above 50 [S9]."
+    out = remove_fragments(text, actions)
+    assert out.startswith("PMI stayed strong at 58.1 [S9].") and "\n**Manufacturing PMI:**" in out and actions
+    group = {"claim": "1", "sourceIds": ["S94"], "unmatchedNumericClaims": ["scalar:1"]}
+    audits = {"publicationAudit": {}, "sourceEvidenceAudit": {"mismatchedCitationGroups": [group]}, "scopeCoverageAudit": {}}
+    clean = {"publicationAudit": {}, "sourceEvidenceAudit": {}, "scopeCoverageAudit": {}}
+    healed, _, _, summary = heal("Growth held. Index rose 1 [S94] in October. More text.", [], audits,
+                                 _rerun_factory([clean, clean, clean]))
+    assert not summary["stillFailing"]
