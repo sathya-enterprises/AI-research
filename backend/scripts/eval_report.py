@@ -663,6 +663,9 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     # as a labelled draft, like a live run whose checks found open issues.
     out.setdefault("publicationOutcome", "draft")
     out.setdefault("reportTier", str(capture.get("reportTier") or "detailed"))
+    from utils.boilerplate import resolve_source_count
+    out["report"] = resolve_source_count(out.get("report") or "", out.get("charts") or [], out.get("keyStats") or [],
+                                         out.get("sources") or manifest)
     (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
     # Publication report for the replay: the number gates are the ones V2 ran here (report.py's
     # source-evidence check via the store auditor); report.py's chart/structure gates did not run.

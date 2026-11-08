@@ -24990,6 +24990,9 @@ async def generate_report(request: Request):
                 if not _gate_healing_summary.get("stillFailing"):
                     _v2_unsupported_after_policy = []
                 report_text = _gate_note(report_text, _gate_healing_summary, _v2_meta_for_publication)
+                # Stage I: one cited-source count, from the final Data Sources set.
+                from utils.boilerplate import resolve_source_count as _resolve_count
+                report_text = _resolve_count(report_text, charts, parsed.get("keyStats", []), source_manifest)
             except Exception as _heal_exc:
                 log.warning("Gate healing skipped safely: %s: %s", type(_heal_exc).__name__, str(_heal_exc)[:200])
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)

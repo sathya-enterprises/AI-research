@@ -422,6 +422,11 @@ def fix_heading_runs(markdown: str) -> tuple[str, int]:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)), len(drop)
 
 
+def _inline_citations_shown() -> bool:
+    import os
+    return os.getenv("REPORT_INLINE_CITATIONS", "0") == "1"
+
+
 def how_to_read(*, deep_dives: int, compact: int, has_qtd: bool, has_calculated: bool) -> str:
     parts = [
         "The executive summary and this scorecard give the answer;",
@@ -429,7 +434,8 @@ def how_to_read(*, deep_dives: int, compact: int, has_qtd: bool, has_calculated:
         f"{deep_dives} sector deep-dives follow, each opening with its key figures and takeaways;" if deep_dives else "",
         f"{compact} further sectors are compared in compact sections;" if compact else "",
         "the outlook closes the analysis, and the appendices hold the data tables and the source list.",
-        "Every figure carries a source citation [S#] that resolves to the Data Sources appendix.",
+        ("Every figure carries a source citation [S#] that resolves to the Data Sources appendix."
+         if _inline_citations_shown() else "Each section ends with its sources, listed in full in Data Sources."),
         "Numbers marked 'calculated' were derived from the cited inputs shown beside them." if has_calculated else "",
         "Current-quarter data is labelled 'QTD, partial' and kept apart from completed quarters." if has_qtd else "",
     ]

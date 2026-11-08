@@ -5326,6 +5326,9 @@ def build_html_report(report: str, title: str, question: str, summary: str,
             # (existing source-note style) naming the publishers it cites.
             _section_ids = [sid for sid in _source_ids(body_raw) if sid in _source_registry_map(source_registry)]
             _names = section_source_names(_section_ids, _source_registry_map(source_registry))
+            from utils.boilerplate import NAVIGATION_SECTION_RE
+            if NAVIGATION_SECTION_RE.match(section_title or ""):
+                _names = []  # navigation sections (scorecard, how to read): their tables carry their own Source line
             if _names:
                 body_html += ('<div class="gg-source-note"><span class="gg-source-note-label">Sources:</span> '
                               + " · ".join(html.escape(n) for n in _names) + '</div>')

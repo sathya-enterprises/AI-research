@@ -218,8 +218,11 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
     scorecard = entity_table(columns, sectors, caption="Sector scorecard: verified metrics by sector", min_values=2)
     if scorecard:
         stats["scorecardRows"] = scorecard.count("\n| ") - 1
-        note = how_to_read(deep_dives=sum(1 for e in edited if e.role == "deep_dive"),
-                           compact=sum(1 for e in edited if e.role == "compact"),
+        in_depth = str((outline.meta or {}).get("tier") or "") == "in_depth"
+        # Counts of what exists: entity deep-dives and compact multi-sector comparisons (in-depth only).
+        note = how_to_read(deep_dives=sum(1 for e in edited if in_depth and e.role == "deep_dive" and e.entity),
+                           compact=sum(1 for e in edited if in_depth and e.role == "compact"
+                                       and len(getattr(sections.get(e.section_id), "entities", []) or []) >= 3),
                            has_qtd="QTD, partial" in scorecard or any("QTD" in e.body for e in edited),
                            has_calculated=any("(calculated:" in e.body for e in edited))
         # The table opens the section page (it is one unbreakable block); the reading note follows it.
@@ -257,12 +260,10 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
     kinds = Counter(p.kind for p in store.passages)
     cited_sources = {pid.split(".")[0] for d in drafts for pid in d.cited_passages}
     lines = [
-        f"This report answers: *{question}*. {window_note}".strip(),
-        "",
         f"**Evidence base.** {len(manifest)} sources were retained after relevance and quality screening "
         f"({', '.join(f'{n} {t.replace(chr(95), chr(32))}' for t, n in tiers.most_common())}); {dated} carry a publication date. "
         f"They were split into {len(store.passages)} evidence passages ({', '.join(f'{n} {k.replace(chr(95), chr(32))}' for k, n in kinds.most_common())}). "
-        f"{len(cited_sources)} sources are cited in the analysis.",
+        "{{CITED_SOURCE_COUNT}} sources are cited in the analysis and listed in Data Sources.",
         "",
         "**Reliability scoring.** Each source has a reliability score (0–1): 55% authority tier (regulator/exchange data highest; "
         "personal blogs and pay-to-publish journals lowest; look-alike domains excluded), 25% recency relative to the requested "
@@ -283,10 +284,14 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
                       f"{tier_counts.get('coverage_note', 0)} had neither."]
         if names.get("coverage_note"):
             lines += [f"Not analysed for lack of evidence: {', '.join(names['coverage_note'])}."]
-    if outline.entity_coverage:
-        covered = [r for r in outline.entity_coverage if r["status"] == "covered"]
-        lines += ["", f"**Coverage.** {len(covered)} of {len(outline.entity_coverage)} identified entities had enough evidence "
-                      f"for dedicated analysis."]
+    written = {d.section_id for d in drafts}
+    roles = {s.section_id: s for s in outline.sections}
+    own = [roles[sid].entity for sid in written if sid in roles and roles[sid].role == "deep_dive" and roles[sid].entity]
+    compact = [sid for sid in written if sid in roles and roles[sid].role == "compact"]
+    if own or compact:
+        lines += ["", "**Entity coverage.** " + ("; ".join(x for x in [
+            f"{len(own)} sector(s) have their own section ({', '.join(sorted(own)[:12])})" if own else "",
+            f"{len(compact)} compact comparison section(s) cover further sectors" if compact else ""] if x)) + "."]
     if outline.decisions or failed:
         lines += ["", "**Scope decisions and limitations.**"]
         lines += [f"- {d}" for d in outline.decisions[:20]]
@@ -690,6 +695,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)
     report_md = _source_level(report_md)
     report_md, exhaustive_rewrites = guard_exhaustive_claims(report_md, asks)
+    from utils.leak_gate import remove_leaks
+    report_md, leak_actions = remove_leaks(report_md)  # Stage I: no writer-prompt text reaches the report
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     report_md, charts_out, _ = finalize_figures(report_md, charts_out)
     # Some chart checks depend on the finished text (e.g. a report table that marks
@@ -746,6 +753,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "deadline": {**deadline_log, "target": round(deadline[0] - time.monotonic()) if deadline else None,
                      "hardStop": round(deadline[1] - time.monotonic()) if deadline else None},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
+        "leakGate": leak_actions,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

@@ -403,6 +403,9 @@ def heal(text: str, charts: list, audits: dict, rerun, *, store=None, max_rounds
     Returns (text, charts, audits, summary) where summary has the actions, rounds, qualifiers and
     whatever is still failing (empty when the report may publish)."""
     actions: list[dict] = []
+    from utils.leak_gate import remove_leaks
+    text, leak_actions = remove_leaks(text)  # Stage I: leaked prompt text is removed (hard gate)
+    actions += leak_actions
     cleaned = remove_fragments(text, actions)
     if cleaned != text:
         text = cleaned
