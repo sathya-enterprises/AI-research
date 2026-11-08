@@ -195,9 +195,12 @@ def _official_fta_signature_source(sources: object, cited_ids: set[str] | None =
         host = _source_host(row)
         if not any(host == domain or host.endswith("." + domain) for domain in official_domains):
             continue
+        # The fetched page itself counts, not only the short excerpt kept for display (live run F: the
+        # excerpt of a Lok Sabha answer was an MSME paragraph while its annexure listed the signed FTAs).
         text = " ".join(str(row.get(key) or "") for key in (
             "title", "snippet", "pageContent", "page_content", "publisherEvidenceExcerpt",
-            "publisher_evidence_excerpt", "evidenceExcerpt", "evidence_excerpt",
+            "publisher_evidence_excerpt", "evidenceExcerpt", "evidence_excerpt", "fullContent", "full_content",
+            "_publisherRawFetchedContent", "_publisherStructuredTableEvidence",
         ))
         if agreement_terms.search(text) and signature_terms.search(text):
             return True
