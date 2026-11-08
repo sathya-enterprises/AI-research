@@ -91,3 +91,21 @@ def test_publication_report_lists_each_gate_and_failing_items():
     assert status["Report structure"] == "FAIL" and status["V2 number policy (fact-sheet lookup)"] == "PASS"
     md = render_markdown(report)
     assert "Realty rose 9.99%" in md and "| Source evidence (report.py final check) | FAIL | 1 |" in md
+
+
+def test_final_gate_reconciles_a_sentence_with_an_abbreviation_and_a_calculation_label():
+    from utils.evidence_check import _reconcile_groups
+    store = store_from_passages({"S91.3": {"id": "S91.3", "text": (
+        "Company Free Float Mkt.Cap (INR BN) 1Yr. Return\n"
+        "Sterling and Wilson Renewable Energy Ltd. 54% 72 -52%\nPromoters 64.3 64.3 50.4 49.0 49.0")}})
+    report = ("For example, Sterling and Wilson Renewable Energy Ltd. Saw promoter shareholding fall by -15.3 "
+              "(calculated: 49.0 - 64.3) percentage points, while its stock delivered a 1-year return of -52% [S91].")
+    claim = report[:200]
+    sink = []
+    kept = _reconcile_groups([{"claim": claim, "sourceIds": ["S91"], "unmatchedNumericClaims": ["percent:-52"]}],
+                             report, FactSheet(store.passages), store, sink)
+    assert not kept and sink
+    wrong = report.replace("-52%", "-57%")
+    kept = _reconcile_groups([{"claim": wrong[:200], "sourceIds": ["S91"], "unmatchedNumericClaims": ["percent:-57"]}],
+                             wrong, FactSheet(store.passages), store, [])
+    assert kept  # a value the source does not hold stays flagged

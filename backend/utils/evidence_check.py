@@ -86,9 +86,19 @@ def _fact_supported(sheet, store, claim: str, sources: set[str]) -> bool:
     from utils.fact_sheet import lookup, unit_family
     from utils.number_policy import statistic_tokens
 
+    from utils.number_policy import number_pool, verify_calculation_labels
+
     pids = {p.passage_id for p in store.passages if p.passage_id.split(".")[0].upper() in sources}
+    if not pids:
+        return False
+    # A labelled calculation ("-15.3 (calculated: 49.0 - 64.3)") is checked through its inputs and
+    # arithmetic, exactly as the number policy does; its result is not a reported fact.
+    if "(calculated" in claim:
+        if verify_calculation_labels(claim, number_pool({p.passage_id: p.text for p in store.passages if p.passage_id in pids})):
+            return False
+        claim = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated[^)]*\)", " ", claim)
     tokens = statistic_tokens(claim)
-    if not pids or not tokens:
+    if not tokens:
         return False
     plain = CITE_SRC_RE.sub(" ", claim)
     for token in tokens:
@@ -109,6 +119,13 @@ def _reconcile_groups(groups: list[dict], report_text: str, sheet, store, sink: 
         claim = str(group.get("claim") or "")
         span = _locate(report_text, claim)
         text = report_text[span[0]:span[1]] if span else claim
+        if span and len(text) < 0.6 * len(claim):
+            # An abbreviation ("Ltd. Saw ...") ended the located sentence early: take the claim's
+            # sentence up to its citation, on the same line.
+            line_end = report_text.find("\n", span[0])
+            line = report_text[span[0]:line_end if line_end >= 0 else len(report_text)]
+            cite = re.search(r"\]", line[int(0.6 * len(claim)):])
+            text = line[: int(0.6 * len(claim)) + cite.end()] if cite else line
         sources = {str(s).upper() for s in group.get("sourceIds") or []}
         if not group.get("subjectMismatchTokens") and _fact_supported(sheet, store, text, sources):
             sink.append({"claim": re.sub(r"\s+", " ", CITE_SRC_RE.sub("", text)).strip()[:200],
