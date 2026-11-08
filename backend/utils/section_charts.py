@@ -163,7 +163,10 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         unit = unit_of(period_cols) or ""
     else:
         # Price / index-level columns of different instruments are not comparable: plot the first comparable column.
-        single = next((c for c in numeric_cols if unit_of([c]) is not None and not non_comparable_metric(header[c])), None)
+        # Counts of constituents ("Stocks", "No. of companies") are not a metric to chart either.
+        single = next((c for c in numeric_cols if unit_of([c]) is not None and not non_comparable_metric(header[c])
+                       and not re.match(r"(?i)^\s*(?:stocks?|constituents?|count|no\.?\s*of\b|number of\b|#|companies|members|rank)",
+                                        header[c])), None)
         if single is None:
             return []
         numeric_cols = [single] + [c for c in numeric_cols if c != single]

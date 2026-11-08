@@ -511,6 +511,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         if data_md:
             parts.append(f"## Appendix A — Data Tables\n\n{data_md}")
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
+    # A table cell that is only a dash means "no value"; the chart checks read an em dash as
+    # "explicitly not verified" and then reject charts of the same entity. Leave such cells empty.
+    report_md = re.sub(r"(?m)(?<=\|)[ \t]*[—–][ \t]*(?=\|)", " ", report_md)
     from utils.section_layout import fix_heading_runs
     report_md, layout["headingsRemoved"] = fix_heading_runs(report_md)
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)

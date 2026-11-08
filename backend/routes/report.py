@@ -24809,7 +24809,12 @@ async def generate_report(request: Request):
         # Ensure each visible chart follows a matching explanation or caption.
         # This only moves/removes chart markers and never rewrites report prose
         # or the chart data selected from the prompt and evidence.
-        report_text, charts, _chart_context_meta = cohere_chart_placements(report_text, charts)
+        if _v2_used:
+            # V2 places each chart after the paragraph that interprets it and checks that pairing
+            # (chart/text coherence); moving it here separated charts from their "Figure N" text.
+            _chart_context_meta = {}
+        else:
+            report_text, charts, _chart_context_meta = cohere_chart_placements(report_text, charts)
         if any(_chart_context_meta.get(key) for key in ("movedCharts", "droppedCharts", "duplicateRefsRemoved")):
             _final_chart_gate_changed = True
             if _chart_context_meta.get("droppedCharts"):

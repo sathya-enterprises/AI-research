@@ -70,14 +70,17 @@ def _norm(text: str) -> str:
 def _locate(report_md: str, claim: str) -> tuple[int, int] | None:
     """(start, end) of the sentence / bullet / table row in ``report_md`` that the audit's claim text came from."""
     target = _norm(claim)[:160]
-    if len(target) < 12:
+    if len(target) < 6:
         return None
     for line_match in re.finditer(r"(?m)^.*$", report_md):
         line = line_match.group(0)
         if not line.strip():
             continue
+        # Table rows / bullets: a short claim ("**1-Year** | -0.44%") is the row itself.
         if line.lstrip().startswith(("|", "-", "*", ">")) and target[:60] in _norm(line):
             return line_match.start(), line_match.end()
+        if len(target) < 12:
+            continue  # a short fragment only identifies a table row or bullet, never a prose sentence
         # Whole sentences only: a full stop inside a number ("0.5% to 0.7%") does not end a sentence.
         # The audit's claim text can be a fragment of one (it splits at decimals), so the sentence
         # that CONTAINS the claim fragment is the one removed.
@@ -91,7 +94,7 @@ def _locate(report_md: str, claim: str) -> tuple[int, int] | None:
     return None
 
 
-def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 2) -> tuple[str, list[dict], list[dict]]:
+def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4) -> tuple[str, list[dict], list[dict]]:
     """Drop claims report.py's evidence check flags; returns (text, removed, still_flagged)."""
     removed: list[dict] = []
     flagged: list[dict] = []

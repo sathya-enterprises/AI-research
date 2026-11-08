@@ -180,3 +180,11 @@ def test_checker_reads_tables_signs_and_non_statistics_correctly():
                         "(calculated: 47,955 + 21,745 + 14,116) across 15 sectors [S1].") == []
     # Still strict: a value the source does not hold is flagged.
     assert _flags(table, "FPIs returned with a net investment of +INR 14,112 crore [S1].")
+
+
+def test_short_flagged_table_rows_are_located_and_dash_cells_emptied():
+    from utils.evidence_check import _locate
+    report = "Intro text here [S1].\n\n| Horizon | Return |\n| --- | --- |\n| **1-Year** | -0.44% [S49] |\n"
+    start, end = _locate(report, "**1-Year** | -0.44%")
+    assert report[start:end].startswith("| **1-Year**")
+    assert _locate("Tiny 1 year 0.44 in prose.", "1-Year | 0.44") is None  # a short fragment never removes prose
