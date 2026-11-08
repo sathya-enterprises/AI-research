@@ -353,7 +353,8 @@ them for an audit copy.
 | `GG_V2_ENTITY_SEARCH_CAP` | `24` (in-depth) | per-entity search queries |
 | `GG_V2_MAX_DEEP_DIVES` | `16` | ceiling on sector deep-dives |
 | `GG_V2_LLM_CALL_BUDGET_DETAILED` / `_IN_DEPTH` | `30` / `90` | V2 LLM call budget per report |
-| `GG_V2_SECTION_CONCURRENCY` | `3` | parallel section calls |
+| `GG_V2_SECTION_CONCURRENCY` | `3` detailed, `5` in-depth | parallel LLM calls |
+| `GG_V2_WAVE_SIZE` | `3` detailed, `6` in-depth | sections written per wave (each wave sees summaries of earlier waves) |
 | `GG_V2_SUBSECTION_PLANNER` | `1` | evidence-chosen deep-dive subsections (replays set `0`) |
 | `GG_V2_MODEL_429_COOLDOWN_MS` | `60000` | model cooldown after 429s on two keys |
 | `GG_RESEARCH_CAPTURE` | `0` | `1` = write a research capture (all LLM calls) for offline replay |

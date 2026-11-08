@@ -473,7 +473,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     planned = planned_table[:table_quota] + planned_data
 
     # Sections in waves: each wave sees summaries of completed sections.
-    wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "3") or 3))
+    # In-depth: waves of 6 (fewer barriers; each wave still sees summaries of all earlier waves).
+    wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "6" if tier == "in_depth" else "3") or 3))
     drafts = []
     goals = {s.section_id: f"{s.title}: {s.goal}" for s in analysis}
     import asyncio
