@@ -5255,6 +5255,13 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
             findings.append({"severity": "critical", "issue": "Final PDF chart-evidence validation failed unexpectedly.",
                              "detail": f"{type(exc).__name__}: {str(exc)[:180]}"})
 
+    # Stage I (FIX 3): flattened arrow diagrams and flattened table text in the rendered PDF.
+    try:
+        from utils.flow_text import rendered_flow_findings
+        findings.extend(rendered_flow_findings(rendered_text))
+    except Exception as exc:
+        log.warning("PDF audit: rendered flow check skipped: %s", exc)
+
     return {"status": "FAIL" if findings else "PASS", "blocking": bool(findings),
             "pageCount": page_count, "extractedTextChars": len(rendered_text),
             "nonemptyPages": nonempty_pages, "validationEngine": validation_engine,

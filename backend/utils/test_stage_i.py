@@ -93,3 +93,39 @@ def test_qtd_close_far_from_live_level_and_out_of_range_values_are_blocked():
              "qtd": {"return": 3.0, "close": 40000.0}}]
     findings = check_dataset_rows(rows, live_levels={"NIFTY IT": 36000.0})
     assert rows[0]["qtd"] is None and rows[0]["returns"] == [None, 2.0] and len(findings) == 2
+
+
+# ── FIX 3: text-art diagrams, flattened tables, rendered gate ────────────────────────────────────
+def test_text_art_diagrams_become_sentences_and_bars_are_removed():
+    from utils.flow_text import convert_text_art
+    text = ("Intro [S1].\n- Global Rate Pressures\n- │\n"
+            "- ├─> Elevated Sovereign Yields ──> Higher Term Premiums [S10, S32]\n"
+            "- ├─> Factors: Value ├─> Factors: Quality\n"
+            "IT ████████ 6.2%\n"
+            "The mechanism—higher risk premium → higher oil prices → inflation—is clear [S2].\n"
+            "| A | B |\n| --- | --- |\n| x > y | 1 |\n> [!NOTE] keep > this")
+    out, actions = convert_text_art(text)
+    assert "- Elevated Sovereign Yields, leading to Higher Term Premiums [S10, S32]." in out
+    assert "│" not in out and "Factors: Value" not in out and "████" not in out
+    assert "higher risk premium, leading to higher oil prices, leading to inflation" in out
+    assert "| x > y | 1 |" in out and "> [!NOTE] keep > this" in out and actions
+
+
+def test_headerless_pipe_tables_are_dropped_not_flattened():
+    from utils.markdown_normalizer import _clean_ascii_diagram_frames
+    from utils.flow_text import convert_text_art
+    t = ("Intro.\n\n**Table: X: compared**\n| --- | --- | --- |\n| Metal | -7.34% | +26.36% |\n| Bank | -4.50% | +6.24% |\n"
+         "Source: [S2]\n\nNext.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |")
+    out = _clean_ascii_diagram_frames(t)
+    assert "Metal" not in out and "**Table: X" not in out and "| 1 | 2 |" in out and " — " not in out
+    flat = "**Table: Y**\n--- — --- — ---\nMetal — -7.34% — +26.36%\nBank — -4.50% — +6.24%\nSource: [S2]\nNext."
+    out, _ = convert_text_art(flat)
+    assert out.strip() == "Next."
+
+
+def test_rendered_gate_flags_chains_and_flattened_tables_only():
+    from utils.flow_text import rendered_flow_findings
+    text = ("higher crude → larger dollar demand → weaker rupee\nMetal — -7.34% — +26.36% — +7.96%\n"
+            "Eligibility: trade with > 90% of days\n[S7] India's imports - IndBiz | Economic Division | IndBiz |")
+    issues = [f["issue"] for f in rendered_flow_findings(text)]
+    assert len(issues) == 2 and "arrow" in issues[0] and "table" in issues[1]
