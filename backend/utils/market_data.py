@@ -63,6 +63,8 @@ SECTOR_INDEX_SYMBOLS = [
 SECTOR_QUARTERLY_SYMBOLS = SECTOR_INDEX_SYMBOLS + [
     ("^NSEBANK", "NIFTY BANK"),
     ("^CNXIT", "NIFTY IT"),
+    # Benchmark row: each sector's quarterly return is compared with the Nifty 50 (Stage F charts).
+    ("^NSEI", "NIFTY 50"),
 ]
 
 # Yahoo tickers for several NSE sector indices 404 or return bars that do not
@@ -757,6 +759,9 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
 
             month_closes: dict[tuple[int, int], float] = {}
             history_sources: list[str] = []
+            # Quarter-to-date: the latest monthly bar after the last completed quarter end (its close is
+            # the latest available close of the current, partial quarter). Kept apart from the matrix.
+            latest_after: tuple[tuple[int, int], float] | None = None
             # Primary ticker first, then aliases, each only filling months that
             # are still missing; stop as soon as every quarter end is covered.
             for candidate in [symbol] + SECTOR_YAHOO_ALIASES.get(label, []):
@@ -765,6 +770,9 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
                 async with semaphore:
                     points = await _yf_chart_history(client, candidate, "5y", "1mo")
                 found = month_map(points)
+                later = [key for key in found if key > ends[-1]]
+                if later and latest_after is None:
+                    latest_after = (max(later), found[max(later)])
                 filled = [key for key in ends if key in found and key not in month_closes]
                 if not filled:
                     continue
@@ -805,8 +813,13 @@ async def fetch_sector_quarterly_returns(quarters: int = 8, concurrency: int = 5
             if not any(value is not None for value in returns):
                 log.warning("market_data: monthly bars did not cover requested quarter ends for %s", label)
                 return None
+            qtd = None
+            if latest_after and closes[-1]:
+                (qy, qm), qclose = latest_after
+                qtd = {"from": quarter_labels[-1], "as_of_month": f"{datetime(qy, qm, 1):%b %Y}",
+                       "close": qclose, "return": round((qclose / closes[-1] - 1) * 100, 2)}
             return {
-                "label": label, "quarters": quarter_labels[1:], "returns": returns,
+                "label": label, "quarters": quarter_labels[1:], "returns": returns, "qtd": qtd,
                 "quarter_end_closes": closes[1:], "missing_quarters": missing,
                 "history_source": " + ".join(history_sources) if history_sources else "no verified history provider returned data",
                 "official_quarter_end_closes_recovered": official_recovered,
@@ -856,12 +869,28 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
             label = str(row.get("label") or "Unknown sector")
             complete_rows.append((label, total))
             lines.append(f"{label} compounded return across {quarters[0]} to {quarters[-1]} = {total:+.2f}%")
+    if complete_rows:
+        # The same compounded values as a table, so a chart point can quote its row.
+        lines.append("")
+        lines.append(f"COMPOUNDED RETURN, {quarters[0]} TO {quarters[-1]} (calculated; complete quarter coverage only):")
+        lines.append(f"Sector | Compounded return {quarters[0]} to {quarters[-1]} (%)")
+        lines += [f"{label} | {total:+.2f}%" for label, total in complete_rows]
+        lines.append("")
     provenance = [
         f"{r.get('label')}: {r.get('history_source') or 'provider not recorded'}"
         for r in rows if isinstance(r, dict)
     ]
     if provenance:
         lines.append("History source by index: " + "; ".join(provenance))
+    qtd_rows = [r for r in rows if isinstance(r.get("qtd"), dict)]
+    if qtd_rows:
+        # Current quarter so far: partial, so it is a separate table and never mixed into the matrix.
+        as_of = qtd_rows[0]["qtd"].get("as_of_month") or ""
+        lines.append("")
+        lines.append(f"CURRENT QUARTER TO DATE (QTD, partial; latest monthly close {as_of} vs the {quarters[-1] if quarters else 'last'} quarter-end close):")
+        lines.append(f"Sector | QTD return to {as_of} (%)")
+        for row in qtd_rows:
+            lines.append(f"{row.get('label')} | {row['qtd']['return']:+.2f}%")
     missing = [f"{r['label']}: {', '.join(r['missing_quarters'])}" for r in rows if r.get("missing_quarters")]
     if missing:
         lines.append("Missing observations: " + "; ".join(missing))

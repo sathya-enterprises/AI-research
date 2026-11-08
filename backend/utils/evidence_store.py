@@ -300,6 +300,15 @@ def store_from_passages(passages: dict | list) -> EvidenceStore:
     return store.finalize()
 
 
+def _internal_display_title(url) -> str:
+    try:
+        from routes.source_manifest import _INTERNAL_SOURCE_DISPLAY
+    except Exception:  # pragma: no cover
+        return ""
+    key = str(url or "").removeprefix("internal://").strip("/")
+    return (_INTERNAL_SOURCE_DISPLAY.get(key) or ("",))[0]
+
+
 def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list[dict] | None = None) -> EvidenceStore:
     """Build a store from enriched source rows.
 
@@ -343,6 +352,9 @@ def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list
                     sid = ""
             if not sid:
                 sid = id_for.get("title:" + str(row.get("title") or "").casefold().strip(), "")
+            if not sid and str(row.get("url") or "").startswith("internal://"):
+                # Fetched/calculated datasets: the registry renames them and drops the internal URL.
+                sid = id_for.get("title:" + _internal_display_title(row.get("url")).casefold(), "")
             if not sid or sid in used:
                 continue
         else:
