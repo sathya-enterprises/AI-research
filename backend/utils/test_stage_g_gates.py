@@ -343,3 +343,11 @@ def test_write_section_budget_scale_and_no_extension_under_the_deadline():
     from utils.section_writer import write_section
     params = inspect.signature(write_section).parameters
     assert params["allow_extension"].default is True and params["budget_scale"].default == 1.0
+
+
+def test_entity_named_in_the_paragraph_is_not_inserted_again():
+    from utils.number_policy import apply_number_policy
+    texts = {"S2.1": "| Sector | Q2 FY27 (%) |\n| --- | --- |\n| NIFTY METAL | -7.34% |\n| NIFTY IT | 1.10% |"}
+    body = "The Nifty Metal index has been volatile. Momentum faded, with a -7.34% return in Q2 FY27 [S2.1]."
+    out = apply_number_policy(body, passage_texts=texts, allowed_numbers=set(), section_id="sec-1").body
+    assert "-7.34% return" in out and "for Metal" not in out

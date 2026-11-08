@@ -318,6 +318,20 @@ def _sentences(paragraph: str) -> list[str]:
     return re.split(r"(?<=[.!?])(\s+)(?=[A-Z*\[(\"'₹$])", paragraph)
 
 
+def _paragraph_names(paragraph: str, entity: str) -> bool:
+    """The paragraph names ``entity`` (or one of its sector aliases)."""
+    if not entity:
+        return False
+    try:
+        from utils.chart_titles import _SECTOR_ALIAS_RE
+        pattern = _SECTOR_ALIAS_RE.get(entity)
+        if pattern is not None and pattern.search(paragraph or ""):
+            return True
+    except Exception:
+        pass
+    return bool(re.search(rf"(?i)(?<![A-Za-z]){re.escape(entity)}(?![A-Za-z])", paragraph or ""))
+
+
 def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_numbers: set[str],
                         section_id: str = "", context_entity: str = "") -> PolicyResult:
     """Number check = lookup in the section's fact sheet (value + unit + explicit sign + metric/entity).
@@ -398,6 +412,10 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                                                  "change": f"corrected citation to {right} (the passage holding the value)"})
                         continue
                     found = other if other.status != "absent" else found
+                if found.status == "entity_missing" and _paragraph_names(line, found.fact.entity):
+                    # The paragraph already names the entity ("The Nifty Metal index ... -7.34% in Q2"):
+                    # supported, no "for Metal" insertion (live run H read awkwardly).
+                    continue
                 if found.status == "entity_missing" and not named_entity:
                     unit_match = _UNIT_WORD_RE.match(sentence[end:])
                     end += unit_match.end() if unit_match else 0
