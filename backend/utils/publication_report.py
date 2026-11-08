@@ -97,6 +97,7 @@ def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dic
                    "droppedAfterAssembly": len(charts.get("droppedAfterAssembly") or []), **({"funnel": funnel} if funnel else {})},
         "coverage": meta.get("coverage") or {},
         "selfHealing": healing or {},
+        "deadline": meta.get("deadline") or {},
         "pipelineNote": pipeline_note,
     }
 
@@ -129,6 +130,13 @@ def render_markdown(report: dict) -> str:
         lines += [f"- {k}: {v}" for k, v in funnel.items() if not isinstance(v, (list, dict))]
         for drop in funnel.get("drops") or []:
             lines.append(f"- dropped: {_short(drop, 200)}")
+    deadline = report.get("deadline") or {}
+    if deadline.get("waves"):
+        lines += ["", "## Runtime deadline (in-depth: target 40 min, hard stop 50 min)"]
+        lines += [f"- sections {w['sections']}: {w['mode']} ({w['seconds']} s)" for w in deadline["waves"]]
+        lines.append(f"- extension calls skipped: {deadline.get('extensionsSkipped', 0)}; written concisely: "
+                     f"{', '.join(deadline.get('concise') or []) or 'none'}; transitions call skipped: "
+                     f"{'yes' if deadline.get('transitionsSkipped') else 'no'}")
     healing = report.get("selfHealing") or {}
     if healing:
         from utils.gate_healing import gate_table

@@ -376,8 +376,11 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
                           window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
                           chart_verifier=None, entity_search_stats: dict | None = None,
-                          evidence_auditor=None) -> dict:
+                          evidence_auditor=None, deadline: tuple[float, float] | None = None) -> dict:
+    """``deadline``: (target, hard stop) as time.monotonic() values for the whole report job (in-depth:
+    40 / 50 minutes). V2 keeps ~6 minutes for report.py's checks and the render after it."""
     started = time.perf_counter()
+    deadline_log: dict = {"target": None, "hardStop": None, "waves": [], "extensionsSkipped": 0, "concise": []}
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
     gateway = gateway or LLMGateway(runtime, tier)
@@ -482,17 +485,38 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     drafts = []
     goals = {s.section_id: f"{s.title}: {s.goal}" for s in analysis}
     import asyncio
+    reserve = 6 * 60  # report.py checks, self-healing gates and the render run after V2
+    wave_seconds: list[float] = []
     for start in range(0, len(analysis), wave_size):
         wave = analysis[start:start + wave_size]
         covered = [_covered_line(d) for d in drafts if d.ok]
+        allow_extension, budget_scale, mode = True, 1.0, "full"
+        if deadline:
+            now = time.monotonic()
+            expected = (sum(wave_seconds) / len(wave_seconds)) if wave_seconds else 0.0
+            if now + expected * 0.6 > deadline[1] - reserve:
+                allow_extension, budget_scale, mode = False, 0.5, "concise (hard stop near)"
+            elif now + expected > deadline[0] - reserve:
+                allow_extension, mode = False, "no extension calls (target near)"
+            if mode != "full":
+                log.warning("V2 deadline: sections %d-%d written with %s", start + 1, start + len(wave), mode)
+                if not allow_extension:
+                    deadline_log["extensionsSkipped"] += len(wave)
+                if budget_scale < 1:
+                    deadline_log["concise"] += [s.title for s in wave]
         if progress:
             progress(f"Writing sections {start + 1}-{start + len(wave)} of {len(analysis)}…")
+        wave_started = time.monotonic()
         results = await asyncio.gather(*[
             write_section(gateway, store, sec, [c for c in planned if c.section_id == sec.section_id],
                           question=question, thesis=outline.thesis, already_covered=covered,
-                          other_sections=[g for sid, g in goals.items() if sid != sec.section_id])
+                          other_sections=[g for sid, g in goals.items() if sid != sec.section_id],
+                          allow_extension=allow_extension, budget_scale=budget_scale)
             for sec in wave
         ])
+        wave_seconds.append(time.monotonic() - wave_started)
+        deadline_log["waves"].append({"sections": f"{start + 1}-{start + len(wave)}", "mode": mode,
+                                      "seconds": round(wave_seconds[-1])})
         drafts.extend(results)
     # Chart/text coherence: the paragraph that interprets a figure must be about the
     # chart's own entities and values; otherwise the chart is dropped and the text's
@@ -601,7 +625,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                         entity=entity, summary=d.summary))
     if progress:
         progress("Editing the full report…")
-    edited, editorial = await editorial_pass(edited, gateway=gateway)
+    # Past the hard stop the optional LLM transitions call is skipped (deterministic edits still run).
+    skip_transitions = bool(deadline and time.monotonic() > deadline[1] - 6 * 60)
+    if skip_transitions:
+        deadline_log["transitionsSkipped"] = True
+        log.warning("V2 deadline: editorial transitions call skipped")
+    edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway)
     layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
                                    asks=asks)
     # Agreement list questions ("all the FTAs signed in the past 1 year"): the dated ledger from the
@@ -708,6 +737,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                    "droppedAfterWriting": [{"title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"],
                    "droppedAfterAssembly": dropped_after_assembly,
                    "claims": [{"figure": c.figure_number, "claim": c.claim, "passages": c.passage_ids} for c in used]},
+        # Runtime deadline (Stage H): per wave, what was skipped to stay inside it.
+        "deadline": {**deadline_log, "target": round(deadline[0] - time.monotonic()) if deadline else None,
+                     "hardStop": round(deadline[1] - time.monotonic()) if deadline else None},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
