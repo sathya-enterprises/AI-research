@@ -351,3 +351,18 @@ def test_entity_named_in_the_paragraph_is_not_inserted_again():
     body = "The Nifty Metal index has been volatile. Momentum faded, with a -7.34% return in Q2 FY27 [S2.1]."
     out = apply_number_policy(body, passage_texts=texts, allowed_numbers=set(), section_id="sec-1").body
     assert "-7.34% return" in out and "for Metal" not in out
+
+
+def test_export_drops_a_later_table_repeating_flagged_rows_only():
+    from utils.pdf_export_healing import heal_rendered_duplicates
+    t1 = ("**Table: Group by Months**\n\n| Group | Months | Next month vs NIFTY 50 |\n| --- | --- | --- |\n"
+          "| Top 3 by past 1-month return | 41 | +1.59% / +1.48% / 66% |\n| Bottom 3 by past 1-month return | 41 | 0.00% / -0.06% / 49% |\n"
+          "| Top 3 by past 3-month return | 41 | +0.82% / +0.22% / 54% |")
+    t2 = ("| Strategy | Avg | Median | Win |\n|:--- |:--- |:--- |:--- |\n| **Top 3 by Past 1-Month Return** | +1.59% | +1.48% | 66% |\n"
+          "| **Bottom 3 by Past 1-Month Return** | 0.00% | -0.06% | 49% |\n| **Top 3 by Past 3-Month Return** | +0.82% | +0.22% | 54% |")
+    other = "| Sector | P/E |\n| --- | --- |\n| Auto | 25.1 |\n| IT | 22.0 |\n| Bank | 14.2 |"
+    report = f"## A\n\n{t1}\n\nText.\n\n## B\n\n{other}\n\nMore.\n\n{t2}\n\nEnd."
+    findings = [{"issue": "The final rendered PDF repeats the same numeric observation under different or repeated source attributions.",
+                 "text": "Top 3 by Past 1-Month Return"}]
+    healed, _, actions = heal_rendered_duplicates(report, [], findings)
+    assert healed.count("1.59%") == 1 and "| Auto | 25.1 |" in healed and actions
