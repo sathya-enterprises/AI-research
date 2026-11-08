@@ -6,6 +6,7 @@ import { DefaultChatTransport, type UIMessage } from 'ai';
 import Image from 'next/image';
 import { supabase } from '@/lib/supabaseClient';
 import { loadPdfJs } from '@/lib/pdfjs-browser';
+import { useAuth } from '@/contexts/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Source { title: string; url: string; snippet: string; }
@@ -1912,12 +1913,33 @@ export default function GrowthGradualChat() {
   const [activeId, setActiveId]           = useState<string | null>(null);
   const [messages, setMessages]           = useState<Message[]>([]);
   const [sidebarOpen, setSidebarOpen]     = useState(true);
+  const [sidebarUserMenuOpen, setSidebarUserMenuOpen] = useState(false);
+  const sidebarUserControlRef = useRef<HTMLDivElement | null>(null);
+  const { user, signOut } = useAuth();
 
   // Close sidebar by default on mobile
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
     else setSidebarOpen(true);
   }, [isMobile]);
+
+  useEffect(() => {
+    if (!sidebarUserMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && sidebarUserControlRef.current && !sidebarUserControlRef.current.contains(event.target)) {
+        setSidebarUserMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSidebarUserMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [sidebarUserMenuOpen]);
 
   // Welcome mode: null = home, 'chat' = ask anything, 'attach' = file mode, 'news' = market news
 
@@ -1973,6 +1995,8 @@ export default function GrowthGradualChat() {
   }, []);
 
   const bottomRef      = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const showScrollToBottomRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
   const reportTierMenuRef = useRef<HTMLDivElement>(null);
@@ -2189,6 +2213,9 @@ export default function GrowthGradualChat() {
 
     const sessionId = getOrCreateSessionId();
     setRagIndexing(true);
+    let indexedSuccessfully = false;
+    let indexingErrorMessage = '';
+    const filesToIndex = new Set<string>();
 
     // ── Index attachments directly into rag-service ──
     // Text is already extracted in the browser by processFile(); rag-service
@@ -2196,6 +2223,7 @@ export default function GrowthGradualChat() {
     // Paperly gateway was removed — those services are no longer deployed.)
     try {
       const toIndex = results.filter((f): f is AttachedFile => f !== null && !!f.extractedText);
+      toIndex.forEach(f => filesToIndex.add(f.id));
 
       if (toIndex.length > 0) {
         const docs = await Promise.all(toIndex.map(async f => ({
@@ -2206,58 +2234,72 @@ export default function GrowthGradualChat() {
           file_type: f.type,
         })));
 
-        // ── Index with one automatic retry (handles HF Space cold starts) ──────
-        // HF Spaces sleep after ~15 min idle. Cold start = 60-90s. If the first
-        // attempt returns 0 chunks (timeout or cold start), we wait 8s and retry
-        // once. This covers the most common reason files are silently ignored.
-        const tryIndex = async (): Promise<{ chunks_added?: number; total_chunks?: number; error?: string }> => {
+        // ── Index with one automatic retry for a transient service connection failure ──
+        // Database/schema/credential errors are not retried: they are deterministic
+        // and should be shown immediately instead of looking like a cold start.
+        const tryIndex = async (): Promise<{ chunks_added?: number; total_chunks?: number; error?: string; detail?: string; code?: string; status?: number }> => {
           const r = await fetch('/api/rag/index', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Request-ID': attachmentTraceId },
             body: JSON.stringify({ session_id: sessionId, documents: docs }),
           });
-          return r.json().catch(() => ({}));
+          const payload = await r.json().catch(() => ({}));
+          const body = (payload && typeof payload === 'object') ? payload : {};
+          return {
+            ...body,
+            status: r.status,
+            error: body.error || (typeof body.detail === 'string' ? body.detail : undefined) || (!r.ok ? `RAG service returned HTTP ${r.status}.` : undefined),
+          };
         };
 
-        console.log('[RAG] Indexing', docs.length, 'doc(s) to HF Space...');
+        console.log('[RAG] Indexing', docs.length, 'doc(s) to pgvector-backed RAG service...');
         let d = await tryIndex();
 
-        if ((d.chunks_added ?? 0) === 0 && (d.total_chunks ?? 0) === 0) {
-          // First attempt got 0 chunks — HF Space may have been cold. Wait and retry.
-          console.warn('[RAG] 0 chunks on first attempt — HF Space cold start? Retrying in 8s...');
-          setStatusMsg('File server waking up, retrying…');
+        // Retry only a transient connection failure. A schema/credential/database
+        // error is deterministic and should be surfaced immediately, not hidden
+        // behind an unnecessary eight-second cold-start retry.
+        if (d.code === 'RAG_SERVICE_UNREACHABLE') {
+          console.warn('[RAG] RAG service unreachable on first attempt. Retrying in 8s...');
+          setStatusMsg('Reconnecting to file service…');
           await new Promise(res => setTimeout(res, 8_000));
           d = await tryIndex();
         }
 
         if ((d.chunks_added ?? 0) > 0 || (d.total_chunks ?? 0) > 0) {
+          indexedSuccessfully = true;
           setRagIndexed(true);
           console.log('[RAG] Indexed', d.chunks_added, 'chunks ✅');
         } else {
-          // Both attempts failed — tell the user clearly instead of silent failure
-          console.error('[RAG] Index failed after retry:', d);
-          setAttachedFiles(prev => prev.map(f => ({
+          // Surface the actual service/schema error instead of disguising it as a cold start.
+          indexingErrorMessage = d.error || 'File indexing failed — check that pgvector is configured and the RAG service is healthy.';
+          console.error('[RAG] Index failed:', d);
+          setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
             ...f,
             status: 'failed' as const,
-            error: 'File server unavailable — your file was attached but AI may not read it. Try re-uploading.',
-          })));
+            error: indexingErrorMessage,
+          }) : f));
         }
       } else {
         console.warn('[RAG] No extracted text available to index');
       }
 
     } catch (e) {
+      indexingErrorMessage = e instanceof Error ? e.message : 'File indexing failed unexpectedly.';
       console.warn('[RAG] Direct index failed:', e);
-      setAttachedFiles(prev => prev.map(f => ({
+      setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
         ...f,
-        status: f.status === 'attaching' ? 'failed' as const : f.status,
-        error: f.status === 'attaching' ? 'Upload failed — please try again.' : f.error,
-      })));
+        status: 'failed' as const,
+        error: indexingErrorMessage || 'Upload failed — please try again.',
+      }) : f));
     } finally {
       setRagIndexing(false);
       setStatusMsg('');
       if (results.some(r => r !== null && !!r.extractedText)) {
-        notifyFileReady('Ready to search', 'Your file finished indexing — ask away.');
+        if (indexedSuccessfully) {
+          notifyFileReady('Ready to search', 'Your file finished indexing — ask away.');
+        } else {
+          notifyFileReady('File indexing failed', 'The file is attached, but the AI could not index it. Check the RAG service and pgvector setup.');
+        }
       }
     }
   }, [attachedFiles.length]);
@@ -4855,7 +4897,898 @@ export default function GrowthGradualChat() {
         @media (min-width: 1920px) {
           .chat-shell.gg-premium.gg-full .msg-inner { max-width: 960px; }
         }
-      `}</style>
+
+        /* ── v96 layout fix: keep the welcome content and composer in flow ──
+           The welcome panel used to center a content block taller than the
+           available messages viewport. CSS then overflowed the top of the
+           panel, clipping the heading, while the messages flex item could
+           keep its min-content height and paint behind the bottom composer.
+           Let the messages viewport shrink, and let it own vertical scrolling. */
+        .chat-shell.gg-premium.gg-full,
+        .chat-shell.gg-premium.gg-full .chat-main {
+          box-sizing: border-box;
+          min-height: 0 !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-main {
+          height: 100%;
+          overflow: hidden;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs {
+          flex: 1 1 0% !important;
+          min-height: 0 !important;
+          overflow-x: hidden !important;
+          overflow-y: auto !important;
+          overscroll-behavior-y: contain;
+          scrollbar-gutter: stable;
+        }
+        .chat-shell.gg-premium.gg-full .chat-welcome {
+          box-sizing: border-box;
+          /* Keep intrinsic content height so the parent can scroll the whole
+             welcome panel rather than clipping a nested, centered panel. */
+          flex: 1 0 auto !important;
+          min-height: max-content !important;
+          justify-content: safe center !important;
+          overflow: visible !important;
+          padding-top: clamp(22px, 3.6vh, 38px) !important;
+          padding-bottom: clamp(24px, 3.6vh, 38px) !important;
+          gap: clamp(12px, 1.7vh, 18px) !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-welcome::before {
+          pointer-events: none;
+        }
+        .chat-shell.gg-premium.gg-full .chat-input-area {
+          position: relative;
+          z-index: 3;
+          flex: 0 0 auto !important;
+          box-sizing: border-box;
+        }
+        .chat-shell.gg-premium.gg-full .sugs {
+          max-height: none !important;
+          overflow: visible !important;
+        }
+        @media (max-height: 760px) {
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            justify-content: flex-start !important;
+            padding-top: 18px !important;
+            padding-bottom: 22px !important;
+            gap: 12px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-title {
+            font-size: clamp(28px, 2rem + .5vw, 38px) !important;
+            line-height: 1.12 !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-sub {
+            line-height: 1.45 !important;
+          }
+          .chat-shell.gg-premium.gg-full .sug {
+            min-height: 52px;
+            padding-top: 10px !important;
+            padding-bottom: 10px !important;
+          }
+        }
+
+        /* ── Premium polish layer: consistent interactions and viewport safety ── */
+        .chat-shell.gg-premium.gg-full {
+          --gg-motion-fast: 140ms;
+          --gg-motion-base: 200ms;
+          --gg-ring: 0 0 0 3px rgba(13, 92, 69, .16);
+          background: var(--ed-paper) !important;
+          color: var(--ed-ink-strong);
+        }
+        .chat-shell.gg-premium .topbar-toggle,
+        .chat-shell.gg-premium .new-chat-btn,
+        .chat-shell.gg-premium .conv-item,
+        .chat-shell.gg-premium .sug,
+        .chat-shell.gg-premium .report-btn,
+        .chat-shell.gg-premium .send-btn,
+        .chat-shell.gg-premium .report-tier-trigger {
+          transition-duration: var(--gg-motion-base, 200ms) !important;
+          transition-timing-function: cubic-bezier(.2,.7,.2,1) !important;
+        }
+        .chat-shell.gg-premium .conv-item:focus-visible,
+        .chat-shell.gg-premium .sug:focus-visible,
+        .chat-shell.gg-premium .new-chat-btn:focus-visible,
+        .chat-shell.gg-premium .topbar-toggle:focus-visible,
+        .chat-shell.gg-premium .report-btn:focus-visible,
+        .chat-shell.gg-premium .send-btn:focus-visible,
+        .chat-shell.gg-premium .report-tier-trigger:focus-visible {
+          outline: 2px solid #B78A37 !important;
+          outline-offset: 3px !important;
+          box-shadow: var(--gg-ring) !important;
+        }
+        .chat-shell.gg-premium .conv-item { border-radius: 7px !important; }
+        .chat-shell.gg-premium .conv-item--active {
+          background: rgba(13,92,69,.085) !important;
+          border-left-color: var(--ed-forest) !important;
+        }
+        .chat-shell.gg-premium .chat-topbar {
+          min-height: 60px;
+          border-bottom-color: var(--ed-rule) !important;
+          box-shadow: 0 1px 0 rgba(20,35,29,.025) !important;
+        }
+        .chat-shell.gg-premium .chat-msgs {
+          scrollbar-color: #C8D4CA transparent;
+          scrollbar-width: thin;
+        }
+        .chat-shell.gg-premium .chat-msgs::-webkit-scrollbar { width: 7px; }
+        .chat-shell.gg-premium .chat-msgs::-webkit-scrollbar-thumb {
+          background: #C8D4CA; border: 2px solid transparent; background-clip: padding-box; border-radius: 999px;
+        }
+        .chat-shell.gg-premium .chat-welcome { overflow-anchor: none; }
+        .chat-shell.gg-premium .welcome-intro { width: min(100%, 620px); }
+        .chat-shell.gg-premium .welcome-title { text-wrap: balance; }
+        .chat-shell.gg-premium .welcome-sub { text-wrap: pretty; }
+        .chat-shell.gg-premium .sug { min-width: 0; overflow-wrap: anywhere; }
+        .chat-shell.gg-premium .input-row {
+          border-radius: 13px !important;
+          border-color: #D4DED5 !important;
+          box-shadow: 0 3px 12px rgba(20,43,32,.035) !important;
+        }
+        .chat-shell.gg-premium .input-row:focus-within {
+          border-color: #6D9B7C !important;
+          box-shadow: 0 0 0 3px rgba(13,92,69,.10), 0 4px 14px rgba(20,43,32,.04) !important;
+        }
+        .chat-shell.gg-premium .chat-textarea { line-height: 1.55; }
+        .chat-shell.gg-premium .send-btn:active:not(:disabled),
+        .chat-shell.gg-premium .report-btn:active:not(:disabled),
+        .chat-shell.gg-premium .new-chat-btn:active { transform: translateY(1px) !important; }
+        .chat-shell.gg-premium button:disabled { cursor: not-allowed; opacity: .58; }
+        @media (max-width: 900px) {
+          .chat-shell.gg-premium.gg-full .sidebar { width: clamp(190px, 27vw, 250px); }
+          .chat-shell.gg-premium.gg-full .welcome-title { max-width: 20ch; }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full { border-radius: 0 !important; }
+          .chat-shell.gg-premium.gg-full .chat-topbar { min-height: 54px; padding: 8px 12px; }
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            align-items: stretch;
+            padding: 24px 16px 28px !important;
+            gap: 16px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-kicker { align-self: center; max-width: 100%; }
+          .chat-shell.gg-premium.gg-full .welcome-intro { text-align: center; margin-inline: auto; }
+          .chat-shell.gg-premium.gg-full .welcome-title { font-size: clamp(27px, 7vw, 34px) !important; }
+          .chat-shell.gg-premium.gg-full .welcome-sub { font-size: 13px !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capabilities { gap: 6px !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capability { font-size: 10px !important; padding: 7px 9px !important; }
+          .chat-shell.gg-premium.gg-full .sugs { grid-template-columns: minmax(0, 1fr) !important; width: 100% !important; }
+          .chat-shell.gg-premium.gg-full .sug { min-height: 52px; }
+          .chat-shell.gg-premium.gg-full .chat-input-area { padding: 10px 12px max(10px, env(safe-area-inset-bottom)) !important; }
+        }
+        @media (max-height: 640px) and (min-width: 681px) {
+          .chat-shell.gg-premium.gg-full .chat-welcome {
+            justify-content: flex-start !important;
+            padding-top: 16px !important;
+            padding-bottom: 22px !important;
+            gap: 12px !important;
+          }
+          .chat-shell.gg-premium.gg-full .welcome-title { font-size: clamp(27px, 3vw, 34px) !important; }
+          .chat-shell.gg-premium.gg-full .welcome-capability { padding-block: 6px !important; }
+          .chat-shell.gg-premium.gg-full .sug { min-height: 48px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium .topbar-toggle,
+          .chat-shell.gg-premium .new-chat-btn,
+          .chat-shell.gg-premium .conv-item,
+          .chat-shell.gg-premium .sug,
+          .chat-shell.gg-premium .report-btn,
+          .chat-shell.gg-premium .send-btn { transition: none !important; }
+        }
+
+        /* ── v97 motion + composer layout refinement ───────────────────────
+           Keep the composer geometry stable when Report mode is toggled.
+           Motion should communicate state changes, not attract attention. */
+        .chat-shell.gg-premium .input-row {
+          display: flex !important;
+          align-items: center !important;
+          gap: 8px !important;
+          min-height: 54px !important;
+          padding: 6px !important;
+          box-sizing: border-box !important;
+          transition: border-color 180ms cubic-bezier(.2,.7,.2,1),
+                      box-shadow 180ms cubic-bezier(.2,.7,.2,1),
+                      background-color 180ms ease !important;
+        }
+        .chat-shell.gg-premium .attach-btn {
+          width: 40px !important; min-width: 40px !important;
+          height: 40px !important; min-height: 40px !important;
+          display: inline-flex !important; align-items: center !important; justify-content: center !important;
+          border-radius: 8px !important; flex: 0 0 auto !important;
+        }
+        .chat-shell.gg-premium .chat-textarea {
+          flex: 1 1 auto !important;
+          width: 100% !important; min-width: 0 !important;
+          min-height: 40px !important; max-height: 130px !important;
+          padding: 8px 4px !important; box-sizing: border-box !important;
+          align-self: center !important;
+          transition: color 160ms ease !important;
+        }
+        .chat-shell.gg-premium .report-mode-btn {
+          height: 40px !important; min-height: 40px !important;
+          flex: 0 0 auto !important; padding-inline: 12px !important;
+          border-radius: 8px !important;
+          transition: background-color 160ms ease, border-color 160ms ease,
+                      color 160ms ease, box-shadow 160ms ease, transform 120ms ease !important;
+        }
+        /* Do not use the earlier infinite blue pulse in the premium theme. */
+        .chat-shell.gg-premium .report-mode-btn.is-active {
+          animation: none !important;
+          background: #EEF5EE !important;
+          border-color: #8DAE96 !important;
+          color: var(--ed-forest) !important;
+          box-shadow: inset 3px 0 0 var(--ed-forest) !important;
+        }
+        .chat-shell.gg-premium .report-mode-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+        }
+        .chat-shell.gg-premium .report-mode-btn:active:not(:disabled) {
+          transform: translateY(0) scale(.985);
+        }
+        .chat-shell.gg-premium .send-btn {
+          width: 40px !important; min-width: 40px !important;
+          height: 40px !important; min-height: 40px !important;
+          flex: 0 0 auto !important; border-radius: 8px !important;
+          transition: background-color 160ms ease, border-color 160ms ease,
+                      box-shadow 160ms ease, transform 120ms ease, opacity 160ms ease !important;
+        }
+        .chat-shell.gg-premium .send-btn:not(:disabled):hover {
+          transform: translateY(-1px) !important;
+          box-shadow: 0 5px 14px rgba(13,92,69,.18) !important;
+        }
+        .chat-shell.gg-premium .send-btn:not(:disabled):active {
+          transform: scale(.97) !important;
+        }
+        .chat-shell.gg-premium .report-tier-menu-wrap {
+          flex: 0 0 auto !important;
+          align-self: center !important;
+          animation: ggComposerControlIn 180ms cubic-bezier(.2,.7,.2,1) both;
+        }
+        .chat-shell.gg-premium .report-tier-trigger {
+          height: 40px !important; min-height: 40px !important;
+          min-width: 132px !important; max-width: min(216px, 22vw) !important;
+          border-radius: 7px !important;
+          transition: border-color 160ms ease, background-color 160ms ease,
+                      box-shadow 160ms ease, transform 120ms ease !important;
+        }
+        .chat-shell.gg-premium .report-tier-menu {
+          animation: ggReportMenuIn 170ms cubic-bezier(.2,.7,.2,1) both;
+          transform-origin: bottom left;
+        }
+        .chat-shell.gg-premium .report-tier-menu-item,
+        .chat-shell.gg-premium .report-seg-item,
+        .chat-shell.gg-premium .report-style-card {
+          transition: background-color 150ms ease, border-color 150ms ease,
+                      box-shadow 150ms ease, color 150ms ease, transform 150ms ease;
+        }
+        .chat-shell.gg-premium .report-tier-menu-item:hover,
+        .chat-shell.gg-premium .report-style-card:hover { transform: translateY(-1px); }
+        .chat-shell.gg-premium .input-hint {
+          min-height: 14px;
+          line-height: 1.35;
+          transition: color 160ms ease;
+        }
+        @keyframes ggComposerControlIn {
+          from { opacity: 0; transform: translateX(-5px) scale(.985); }
+          to { opacity: 1; transform: translateX(0) scale(1); }
+        }
+        @keyframes ggReportMenuIn {
+          from { opacity: 0; transform: translateY(5px) scale(.99); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes ggWelcomeItemIn {
+          from { opacity: 0; transform: translateY(7px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .chat-shell.gg-premium.gg-full .welcome-kicker,
+        .chat-shell.gg-premium.gg-full .welcome-intro,
+        .chat-shell.gg-premium.gg-full .welcome-capabilities,
+        .chat-shell.gg-premium.gg-full .sugs {
+          animation: ggWelcomeItemIn 360ms cubic-bezier(.2,.7,.2,1) both;
+        }
+        .chat-shell.gg-premium.gg-full .welcome-intro { animation-delay: 35ms; }
+        .chat-shell.gg-premium.gg-full .welcome-capabilities { animation-delay: 75ms; }
+        .chat-shell.gg-premium.gg-full .sugs { animation-delay: 110ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug { animation: ggWelcomeItemIn 300ms cubic-bezier(.2,.7,.2,1) both; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(1) { animation-delay: 115ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(2) { animation-delay: 145ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(3) { animation-delay: 175ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(4) { animation-delay: 205ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(5) { animation-delay: 235ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(6) { animation-delay: 265ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(7) { animation-delay: 295ms; }
+        .chat-shell.gg-premium.gg-full .sugs .sug:nth-child(8) { animation-delay: 325ms; }
+        @media (max-width: 900px) and (min-width: 681px) {
+          .chat-shell.gg-premium .input-row { gap: 6px !important; }
+          .chat-shell.gg-premium .report-tier-trigger { min-width: 118px !important; max-width: 165px !important; padding-inline: 7px !important; }
+          .chat-shell.gg-premium .report-tier-trigger-value { font-size: 10px !important; }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium .input-row { gap: 5px !important; padding: 5px !important; min-height: 50px !important; }
+          .chat-shell.gg-premium .attach-btn,
+          .chat-shell.gg-premium .send-btn { width: 36px !important; min-width: 36px !important; height: 36px !important; min-height: 36px !important; }
+          .chat-shell.gg-premium .chat-textarea { min-height: 36px !important; padding: 7px 2px !important; font-size: 14px !important; }
+          .chat-shell.gg-premium .report-mode-btn { width: 36px !important; min-width: 36px !important; height: 36px !important; min-height: 36px !important; padding: 0 !important; gap: 0 !important; justify-content: center !important; }
+          .chat-shell.gg-premium .report-tier-trigger { width: 36px !important; min-width: 36px !important; max-width: 36px !important; height: 36px !important; min-height: 36px !important; padding: 0 !important; justify-content: center !important; }
+          .chat-shell.gg-premium .report-tier-trigger-text,
+          .chat-shell.gg-premium .report-tier-trigger-chevron { display: none !important; }
+          .chat-shell.gg-premium .report-tier-trigger-dot { width: 3px !important; height: 18px !important; }
+          .chat-shell.gg-premium .chat-input-area { gap: 5px !important; }
+          .chat-shell.gg-premium .input-hint { font-size: 9px !important; }
+        }
+        @media (max-width: 420px) {
+          .chat-shell.gg-premium .report-mode-btn > span { display: none !important; }
+          .chat-shell.gg-premium .report-mode-btn { width: 36px !important; min-width: 36px !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium .report-tier-menu-wrap,
+          .chat-shell.gg-premium .report-tier-menu,
+          .chat-shell.gg-premium.gg-full .welcome-kicker,
+          .chat-shell.gg-premium.gg-full .welcome-intro,
+          .chat-shell.gg-premium.gg-full .welcome-capabilities,
+          .chat-shell.gg-premium.gg-full .sugs,
+          .chat-shell.gg-premium.gg-full .sugs .sug { animation: none !important; }
+          .chat-shell.gg-premium .input-row,
+          .chat-shell.gg-premium .report-mode-btn,
+          .chat-shell.gg-premium .report-tier-trigger,
+          .chat-shell.gg-premium .report-tier-menu-item,
+          .chat-shell.gg-premium .report-seg-item,
+          .chat-shell.gg-premium .report-style-card,
+          .chat-shell.gg-premium .send-btn { transition: none !important; }
+        }
+
+        /* ── v98: keep the conversation visually grouped when the sidebar
+           collapses. Previously each message row spanned the entire viewport:
+           assistant replies stayed at the far left while user prompts moved to
+           the far right, making one conversation feel split into two columns.
+           Center a shared reading lane and let the sidebar reflow it smoothly. */
+        .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile) {
+          min-width: 0;
+          transition: width 240ms cubic-bezier(.2,.7,.2,1),
+                      flex-basis 240ms cubic-bezier(.2,.7,.2,1),
+                      opacity 150ms ease,
+                      border-color 180ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile).sidebar--closed {
+          width: 0 !important;
+          min-width: 0 !important;
+          flex-basis: 0 !important;
+          border-right-width: 0 !important;
+          opacity: 0;
+          pointer-events: none;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs > .msg-row {
+          width: min(100%, 1120px);
+          max-width: 1120px;
+          margin-inline: auto;
+          box-sizing: border-box;
+          flex: 0 0 auto;
+        }
+        .chat-shell.gg-premium.gg-full .chat-msgs > .chat-welcome {
+          width: min(100%, 1120px);
+          max-width: 1120px;
+          align-self: center;
+          box-sizing: border-box;
+        }
+        .chat-shell.gg-premium.gg-full .topbar-toggle:focus-visible {
+          outline: 2px solid #6D9B7C !important;
+          outline-offset: 2px !important;
+          box-shadow: 0 0 0 3px rgba(13,92,69,.10) !important;
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full .chat-msgs > .msg-row,
+          .chat-shell.gg-premium.gg-full .chat-msgs > .chat-welcome {
+            width: 100%;
+            max-width: 100%;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full > .sidebar:not(.sidebar--mobile) {
+            transition: none !important;
+          }
+        }
+
+        /* v99: clear, recognizable message identity and restrained conversation selection. */
+        .chat-shell.gg-premium.gg-full .msg-avatar {
+          width: 36px !important;
+          height: 36px !important;
+          min-width: 36px !important;
+          margin-top: 2px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          overflow: visible !important;
+          border-radius: 10px !important;
+          border: 1px solid #D8E2DA !important;
+          box-shadow: 0 1px 2px rgba(18, 45, 33, .06) !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-avatar--bot {
+          background: #0D5C45 !important;
+          color: #FFFFFF !important;
+          border-color: #0D5C45 !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-avatar--user {
+          background: #E8ECE9 !important;
+          color: #263A30 !important;
+          border-color: #D5DDD7 !important;
+        }
+        .chat-shell.gg-premium.gg-full .assistant-robot-icon,
+        .chat-shell.gg-premium.gg-full .user-avatar-icon {
+          display: block !important;
+          flex: 0 0 auto !important;
+          opacity: 1 !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-inner { gap: 12px !important; }
+        .chat-shell.gg-premium.gg-full .msg-row--bot .msg-bubble {
+          min-width: 0;
+          border-left-width: 2px !important;
+        }
+        /* ChatGPT-like selected thread: neutral soft-grey surface, no decorative color bar. */
+        .chat-shell.gg-premium.gg-full .conv-item {
+          margin: 2px 8px !important;
+          padding: 9px 10px !important;
+          min-height: 38px;
+          border: 1px solid transparent !important;
+          border-left: 1px solid transparent !important;
+          border-radius: 8px !important;
+          background: transparent !important;
+          color: #3F4542 !important;
+          transform: none !important;
+          box-shadow: none !important;
+          transition: background-color 140ms ease, color 140ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item:hover {
+          background: #F0F2F0 !important;
+          border-color: transparent !important;
+          color: #202522 !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item--active,
+        .chat-shell.gg-premium.gg-full .conv-item--active:hover {
+          background: #E7EAE8 !important;
+          border-color: transparent !important;
+          border-left-color: transparent !important;
+          color: #202522 !important;
+          box-shadow: inset 0 0 0 1px rgba(35, 48, 40, .025) !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item__title,
+        .chat-shell.gg-premium.gg-full .conv-item--active .conv-item__title {
+          color: inherit !important;
+          font-weight: 500 !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item--active .conv-item__icon {
+          opacity: .75 !important;
+          stroke: #4F5A53 !important;
+        }
+        @media (max-width: 767px) {
+          .chat-shell.gg-premium.gg-full .msg-avatar {
+            width: 30px !important;
+            height: 30px !important;
+            min-width: 30px !important;
+            border-radius: 9px !important;
+          }
+          .chat-shell.gg-premium.gg-full .assistant-robot-icon { width: 19px !important; height: 19px !important; }
+          .chat-shell.gg-premium.gg-full .user-avatar-icon { width: 17px !important; height: 17px !important; }
+          .chat-shell.gg-premium.gg-full .msg-inner { gap: 8px !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full .conv-item { transition: none !important; }
+        }
+
+
+        /* v100: editorial restraint pass. Prefer useful hierarchy over decorative effects. */
+        .chat-shell.gg-premium.gg-full {
+          --ed-paper: #F7F8F6;
+          --ed-surface: #FFFFFF;
+          --ed-ink-strong: #202722;
+          --ed-ink: #303833;
+          --ed-ink-soft: #535D56;
+          --ed-muted: #737D76;
+          --ed-rule: #E0E5E1;
+          --ed-rule-soft: #EAEEEB;
+          --ed-tint: #F1F3F1;
+          --ed-forest: #145A43;
+          --ed-forest-hover: #104A37;
+          border-radius: 0 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-main,
+        .chat-shell.gg-premium.gg-full .chat-msgs {
+          background: #F7F8F6 !important;
+        }
+        .chat-shell.gg-premium.gg-full .sidebar {
+          background: #F6F7F5 !important;
+          border-right-color: #E2E6E2 !important;
+        }
+        .chat-shell.gg-premium.gg-full .sidebar-hdr,
+        .chat-shell.gg-premium.gg-full .sidebar-footer {
+          border-color: #E2E6E2 !important;
+        }
+        .chat-shell.gg-premium.gg-full .new-chat-btn {
+          background: #145A43 !important;
+          border: 1px solid #145A43 !important;
+          border-radius: 7px !important;
+          box-shadow: none !important;
+          background-image: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .new-chat-btn:hover {
+          background: #104A37 !important;
+          border-color: #104A37 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item {
+          margin: 2px 8px !important;
+          min-height: 38px !important;
+          padding: 8px 10px !important;
+          border: 1px solid transparent !important;
+          border-radius: 7px !important;
+          background: transparent !important;
+          color: #414842 !important;
+          box-shadow: none !important;
+          transition: background-color 120ms ease, color 120ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item:hover {
+          background: #EEF0EE !important;
+          color: #222923 !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item--active,
+        .chat-shell.gg-premium.gg-full .conv-item--active:hover {
+          background: #E7E9E7 !important;
+          border-color: transparent !important;
+          border-left-color: transparent !important;
+          color: #202722 !important;
+          font-weight: 500 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .conv-item--active .conv-item__title {
+          font-weight: 600 !important;
+        }
+        /* Make a short user message wrap to its content, as in a conversation, rather than a long banner. */
+        .chat-shell.gg-premium.gg-full .msg-row--user .msg-inner {
+          width: fit-content !important;
+          max-width: min(820px, 92%) !important;
+          flex: 0 1 auto !important;
+          padding: 0 14px 0 10px !important;
+          margin-left: auto !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--user .msg-bubble {
+          width: fit-content !important;
+          max-width: min(70ch, calc(100vw - 112px)) !important;
+          flex: 0 1 auto !important;
+          background: transparent !important;
+          border: 0 !important;
+          border-radius: 0 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--user .msg-text {
+          display: block !important;
+          width: auto !important;
+          max-width: 100% !important;
+          padding: 10px 14px !important;
+          background: #145A43 !important;
+          color: #FFFFFF !important;
+          border: 1px solid #145A43 !important;
+          border-radius: 12px 12px 3px 12px !important;
+          line-height: 1.55 !important;
+          box-shadow: none !important;
+          overflow-wrap: anywhere;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--user .msg-ts {
+          padding: 1px 3px 0 !important;
+          color: #7D8981 !important;
+          font-size: 10px !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--bot .msg-inner {
+          max-width: min(900px, 94%) !important;
+          padding-inline: 10px 14px !important;
+          gap: 10px !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-avatar {
+          width: 32px !important;
+          height: 32px !important;
+          min-width: 32px !important;
+          margin-top: 1px !important;
+          border-radius: 8px !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-avatar--bot {
+          background: #145A43 !important;
+          border-color: #145A43 !important;
+          color: #FFFFFF !important;
+        }
+        .chat-shell.gg-premium.gg-full .assistant-robot-icon {
+          width: 19px !important;
+          height: 19px !important;
+          stroke-width: 1.8 !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-avatar--user {
+          background: #EAEEEB !important;
+          border-color: #DCE2DD !important;
+          color: #3D4B42 !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--bot .msg-bubble {
+          background: transparent !important;
+          border: 0 !important;
+          border-radius: 0 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .msg-row--bot .msg-text {
+          width: fit-content;
+          max-width: 100%;
+          padding: 10px 13px !important;
+          border: 1px solid #E3E8E4 !important;
+          border-radius: 3px 10px 10px 10px !important;
+          background: #FFFFFF !important;
+          color: #303833 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .report-wrap { min-width: 0; }
+        .chat-shell.gg-premium.gg-full .report-alert {
+          border-radius: 0 0 5px 5px !important;
+          box-shadow: none !important;
+        }
+        /* Keep the composer calm: one wrapper focus ring, no double outline on the textarea. */
+        .chat-shell.gg-premium.gg-full .input-row {
+          border: 1px solid #D8E0DA !important;
+          border-radius: 10px !important;
+          padding: 5px !important;
+          background: #FFFFFF !important;
+          box-shadow: 0 2px 8px rgba(24, 43, 32, .035) !important;
+          transition: border-color 140ms ease, box-shadow 140ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full .input-row:focus-within {
+          border-color: #8AA895 !important;
+          box-shadow: 0 0 0 2px rgba(20, 90, 67, .075) !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-textarea:focus,
+        .chat-shell.gg-premium.gg-full .chat-textarea:focus-visible {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .send-btn {
+          background: #145A43 !important;
+          background-image: none !important;
+          border: 1px solid #145A43 !important;
+          border-radius: 7px !important;
+          box-shadow: none !important;
+          transition: background-color 140ms ease, border-color 140ms ease, transform 100ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full .send-btn:not(:disabled):hover {
+          background: #104A37 !important;
+          border-color: #104A37 !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .send-btn:disabled {
+          background: #D5DAD6 !important;
+          color: #FFFFFF !important;
+          border-color: #D5DAD6 !important;
+        }
+        .chat-shell.gg-premium.gg-full .welcome-title {
+          background: none !important;
+          -webkit-text-fill-color: currentColor !important;
+          color: #202B24 !important;
+          font-weight: 500 !important;
+          letter-spacing: -.025em !important;
+        }
+        .chat-shell.gg-premium.gg-full .chat-welcome::before { display: none !important; }
+        .chat-shell.gg-premium.gg-full .welcome-kicker {
+          border: 0 !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          box-shadow: none !important;
+          padding: 0 !important;
+          color: #64766A !important;
+          letter-spacing: .12em !important;
+        }
+        .chat-shell.gg-premium.gg-full .welcome-capability {
+          border: 0 !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          box-shadow: none !important;
+          padding: 5px 9px !important;
+          color: #526057 !important;
+        }
+        .chat-shell.gg-premium.gg-full .sug {
+          background: #FFFFFF !important;
+          background-image: none !important;
+          border: 1px solid #E0E5E1 !important;
+          border-radius: 8px !important;
+          box-shadow: none !important;
+          color: #303833 !important;
+          transition: background-color 140ms ease, border-color 140ms ease !important;
+        }
+        .chat-shell.gg-premium.gg-full .sug:hover {
+          background: #F1F4F1 !important;
+          border-color: #CBD7CE !important;
+          box-shadow: none !important;
+          transform: none !important;
+          padding-left: 15px !important;
+        }
+        .chat-shell.gg-premium.gg-full .sug-icon {
+          border-radius: 6px !important;
+          background: #F0F3F0 !important;
+          color: #145A43 !important;
+        }
+        .chat-shell.gg-premium.gg-full .topbar-dot {
+          animation: none !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .report-tier-trigger,
+        .chat-shell.gg-premium.gg-full .report-mode-btn,
+        .chat-shell.gg-premium.gg-full .attach-btn {
+          border-radius: 7px !important;
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full .report-tier-trigger:hover,
+        .chat-shell.gg-premium.gg-full .report-mode-btn:hover,
+        .chat-shell.gg-premium.gg-full .attach-btn:hover {
+          box-shadow: none !important;
+        }
+        .chat-shell.gg-premium.gg-full button:focus-visible,
+        .chat-shell.gg-premium.gg-full .conv-item:focus-visible,
+        .chat-shell.gg-premium.gg-full .report-tier-trigger:focus-visible {
+          outline: 2px solid rgba(20, 90, 67, .45) !important;
+          outline-offset: 2px !important;
+          box-shadow: none !important;
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full .msg-row--user .msg-inner {
+            max-width: 94% !important;
+            padding-inline: 6px !important;
+          }
+          .chat-shell.gg-premium.gg-full .msg-row--user .msg-bubble {
+            max-width: calc(100vw - 92px) !important;
+          }
+          .chat-shell.gg-premium.gg-full .msg-row--bot .msg-inner {
+            max-width: 100% !important;
+            padding-inline: 7px !important;
+          }
+          .chat-shell.gg-premium.gg-full .msg-avatar {
+            width: 29px !important;
+            height: 29px !important;
+            min-width: 29px !important;
+          }
+          .chat-shell.gg-premium.gg-full .assistant-robot-icon { width: 17px !important; height: 17px !important; }
+          .chat-shell.gg-premium.gg-full .welcome-title {
+            background: none !important;
+            font-size: clamp(28px, 7vw, 36px) !important;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full .msg-row { animation: none !important; }
+          .chat-shell.gg-premium.gg-full .input-row,
+          .chat-shell.gg-premium.gg-full .send-btn,
+          .chat-shell.gg-premium.gg-full .conv-item,
+          .chat-shell.gg-premium.gg-full .sug { transition: none !important; }
+        }
+
+        /* ChatGPT-style account + appearance area at the bottom of history. */
+        .chat-shell.gg-premium.gg-full .sidebar-footer {
+          display: flex !important; flex-direction: column; gap: 5px;
+          padding: 8px !important; background: var(--ed-tint) !important;
+          border-top: 1px solid var(--ed-rule) !important; flex-shrink: 0;
+        }
+        .sidebar-appearance-toggle, .sidebar-user-button {
+          width: 100%; min-width: 0; display: flex; align-items: center; gap: 10px;
+          text-align: left; padding: 8px 9px; border: 1px solid transparent;
+          border-radius: 7px; background: transparent; color: var(--ed-ink);
+          cursor: pointer; font-family: inherit; transition: background-color 140ms ease, border-color 140ms ease;
+        }
+        .sidebar-appearance-toggle:hover, .sidebar-user-button:hover { background: rgba(120,130,120,.10); border-color: var(--ed-rule); }
+        .sidebar-appearance-icon { width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center; border: 1px solid var(--ed-rule); border-radius: 6px; color: var(--ed-ink-soft); background: var(--ed-surface); }
+        .sidebar-appearance-copy, .sidebar-user-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+        .sidebar-appearance-copy strong, .sidebar-user-copy strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11.5px; line-height: 1.35; font-weight: 600; color: var(--ed-ink-strong) !important; }
+        .sidebar-appearance-copy small, .sidebar-user-copy small { font-size: 10px; color: var(--ed-muted) !important; line-height: 1.3; }
+        .sidebar-theme-switch { width: 29px; height: 17px; padding: 2px; border-radius: 999px; background: #D5DBD6; flex: 0 0 auto; transition: background-color 160ms ease; }
+        .sidebar-theme-switch span { display: block; width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.13); transition: transform 160ms ease; }
+        .sidebar-theme-switch.is-dark { background: #145A43; }
+        .sidebar-theme-switch.is-dark span { transform: translateX(12px); }
+        .sidebar-account-wrap { position: relative; min-width: 0; }
+        .sidebar-user-button { border-color: var(--ed-rule); background: rgba(255,255,255,.28); }
+        .sidebar-user-avatar { width: 31px; height: 31px; flex: 0 0 31px; display: grid; place-items: center; border-radius: 50%; background: #D6E7DC; color: #20573F; font-size: 12px; font-weight: 700; }
+        .sidebar-user-more { color: var(--ed-muted); flex: 0 0 auto; }
+        .sidebar-user-menu { position: absolute; z-index: 100; left: 0; right: 0; bottom: calc(100% + 7px); padding: 5px; border: 1px solid var(--ed-rule); border-radius: 9px; background: var(--ed-surface); box-shadow: 0 10px 26px rgba(15,23,42,.13); animation: ggPopoverEnter 150ms ease-out both; }
+        .sidebar-user-menu-email { padding: 8px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--ed-muted); border-bottom: 1px solid var(--ed-rule-soft); margin-bottom: 4px; }
+        .sidebar-user-menu button { width: 100%; display: flex; gap: 9px; align-items: center; padding: 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ed-ink); font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1.4; text-align: left; cursor: pointer; }
+        .sidebar-user-menu button:hover { background: rgba(120,130,120,.12); }
+        .sidebar-legal { display: flex; flex-direction: column; gap: 2px; padding: 5px 9px 1px; }
+        .sidebar-legal span:first-child { font-size: 9.5px; color: var(--ed-ink-soft) !important; }
+        .sidebar-legal span:last-child { font-size: 8.5px; color: var(--ed-muted) !important; }
+        .sidebar-appearance-toggle:focus-visible, .sidebar-user-button:focus-visible, .sidebar-user-menu button:focus-visible { outline: 2px solid #8EBCA4; outline-offset: 1px; }
+
+        /* The global navigation strip is hidden only on chat; leave compact mobile category links available. */
+        .chat-shell.gg-premium.gg-full { height: calc(100dvh - 20px) !important; }
+        @media (max-width: 680px) { .chat-shell.gg-premium.gg-full { height: calc(100dvh - 76px) !important; } }
+        @media (min-width: 681px) and (max-width: 767px) { .chat-shell.gg-premium.gg-full { height: calc(100dvh - 20px) !important; } }
+        @media (max-height: 600px) and (min-width: 681px) { .chat-shell.gg-premium.gg-full { height: calc(100dvh - 20px) !important; } }
+        @media (max-height: 600px) and (max-width: 680px) { .chat-shell.gg-premium.gg-full { height: calc(100dvh - 76px) !important; } }
+
+        /* Dark appearance follows the same restrained palette, not pure black. */
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full {
+          --ed-paper: #151a17; --ed-surface: #1c231f; --ed-ink: #dce5dd; --ed-ink-strong: #f0f4f0;
+          --ed-ink-soft: #c0cbc2; --ed-muted: #9aa79d; --ed-rule: #333d35; --ed-rule-soft: #29322c;
+          --ed-tint: #1a211c; --ed-forest: #2b7657; --ed-forest-hover: #358362;
+          background: #151a17 !important; color: #e6ece7 !important; border-color: #303a33 !important;
+        }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-main,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-msgs { background: #151a17 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar { background: #1a211c !important; border-right-color: #303a33 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-hdr,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-footer { background: #1a211c !important; border-color: #303a33 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-logo,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-appearance-icon { background: #202923 !important; border-color: #3a463d !important; color: #c9d6cc !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-brand,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-brand * { color: #edf2ed !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .conv-group-label { color: #9ca99f !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .conv-item { color: #c5d0c7 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .conv-item:hover { background: #252e28 !important; color: #f2f5f2 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .conv-item--active,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .conv-item--active:hover { background: #2b352e !important; color: #f3f6f3 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .new-chat-btn { background: #236b4e !important; border-color: #236b4e !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .new-chat-btn:hover { background: #2c7c5c !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-topbar { background: #1b221d !important; border-bottom-color: #303a33 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .topbar-name { color: #eef3ef !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .topbar-sub { color: #a6b3a9 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .topbar-toggle { background: #222b25 !important; border-color: #38443b !important; color: #cbd7cd !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .msg-row--bot .msg-bubble,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .typing-dots { background: #1e2621 !important; border-color: #343e37 !important; color: #e5ece6 !important; box-shadow: none !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .msg-row--bot .msg-text,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .msg-row--bot .msg-text p { color: #e4ebe5 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .msg-row--user .msg-text { background: #236b4e !important; color: #fff !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .msg-avatar--user { background: #2a332d !important; border-color: #414d44 !important; color: #dce7de !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .welcome-title { color: #edf3ee !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .welcome-sub,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .welcome-kicker { color: #a7b4aa !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .welcome-capability { color: #ccd6ce !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sug { background: #1c231f !important; border-color: #343e37 !important; color: #e0e8e1 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sug:hover { background: #252e28 !important; border-color: #4a5a4d !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sug-icon { background: #29342c !important; color: #8fc8a7 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-input-area { background: #151a17 !important; border-top-color: #303a33 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .input-row { background: #1d251f !important; border-color: #3b483e !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .input-row:focus-within { background: #202923 !important; border-color: #6aa587 !important; box-shadow: 0 0 0 2px rgba(87,157,117,.15) !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-textarea { color: #edf2ee !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .chat-textarea::placeholder { color: #929f95 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .attach-btn,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .report-tier-trigger,
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .report-mode-btn { background: #202923 !important; border-color: #3b483e !important; color: #e0e8e1 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-user-button { background: #202923 !important; border-color: #354137 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-user-avatar { background: #315542 !important; color: #ecf5ee !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-user-menu { background: #1c231f !important; border-color: #39453c !important; box-shadow: 0 10px 28px rgba(0,0,0,.3) !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-user-menu button { color: #e2e9e3 !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-user-menu button:hover { background: #29332c !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-legal span:first-child { color: #bdc8bf !important; }
+        html[data-theme="dark"] .chat-shell.gg-premium.gg-full .sidebar-legal span:last-child { color: #87958a !important; }
+        @media (prefers-reduced-motion: reduce) {
+          .sidebar-appearance-toggle, .sidebar-user-button, .sidebar-user-menu { transition: none !important; animation: none !important; }
+        }
+
+      
+
+        /* Floating jump-to-latest control. Kept outside the scroll viewport so it stays in place. */
+        .chat-shell.gg-premium.gg-full .chat-main { position: relative; }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom {
+          position: absolute; z-index: 8; left: 50%; bottom: 104px;
+          display: grid; place-items: center; width: 38px; height: 38px;
+          padding: 0; border: 1px solid var(--ed-rule, #deded7); border-radius: 50%;
+          background: var(--ed-surface, #fff); color: var(--ed-ink-strong, #202820);
+          box-shadow: 0 3px 12px rgba(18, 30, 23, .14); cursor: pointer;
+          transform: translateX(-50%); animation: ggScrollToBottomIn 140ms ease-out both;
+        }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom:hover {
+          transform: translate(-50%, -2px); box-shadow: 0 5px 15px rgba(18, 30, 23, .18);
+        }
+        .chat-shell.gg-premium.gg-full .chat-scroll-bottom:focus-visible {
+          outline: 2px solid #528269; outline-offset: 3px;
+        }
+        @keyframes ggScrollToBottomIn {
+          from { opacity: 0; transform: translate(-50%, 4px); }
+          to { opacity: 1; transform: translate(-50%, 0); }
+        }
+        @media (max-width: 680px) {
+          .chat-shell.gg-premium.gg-full .chat-scroll-bottom { bottom: 112px; width: 36px; height: 36px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .chat-shell.gg-premium.gg-full .chat-scroll-bottom { animation: none; transition: none; }
+        }
+`}</style>
 
 
       {/* Hidden file input */}
@@ -4970,8 +5903,31 @@ export default function GrowthGradualChat() {
           </div>
 
           <div className="sidebar-footer">
-            <div style={{ fontWeight: 600, color: 'inherit' }}>Growth Gradual LLP</div>
-            <div style={{ fontSize: '9px', opacity: 0.75, marginTop: '2px' }}>Institutional Research · ARN-351151</div>
+
+            <div className="sidebar-account-wrap" ref={sidebarUserControlRef}>
+              <button
+                type="button"
+                className="sidebar-user-button"
+                onClick={() => setSidebarUserMenuOpen(open => !open)}
+                aria-haspopup="menu"
+                aria-expanded={sidebarUserMenuOpen}
+                aria-label={`Account: ${user?.email ?? 'User'}`}
+              >
+                <span className="sidebar-user-avatar">{(user?.email ?? 'U').trim().charAt(0).toUpperCase()}</span>
+                <span className="sidebar-user-copy"><strong>{user?.email ?? 'Account'}</strong><small>Personal account</small></span>
+                <svg className="sidebar-user-more" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+              </button>
+              {sidebarUserMenuOpen && (
+                <div className="sidebar-user-menu" role="menu">
+                  <div className="sidebar-user-menu-email">{user?.email ?? 'Signed in'}</div>
+                  <button type="button" role="menuitem" onClick={async () => { setSidebarUserMenuOpen(false); await signOut(); }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg>
+                    Log out
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="sidebar-legal"><span>Growth Gradual LLP</span><span>Institutional Research · ARN-351151</span></div>
           </div>
         </aside>
 
@@ -4998,7 +5954,14 @@ export default function GrowthGradualChat() {
           {/* Messages */}
           <div className="chat-msgs" onScroll={(event) => {
             const el = event.currentTarget;
-            shouldAutoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+            const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+            const awayFromBottom = distanceFromBottom >= 140;
+            shouldAutoScrollRef.current = !awayFromBottom;
+            // Only schedule a React update when the button actually needs to appear or disappear.
+            if (showScrollToBottomRef.current !== awayFromBottom) {
+              showScrollToBottomRef.current = awayFromBottom;
+              setShowScrollToBottom(awayFromBottom);
+            }
           }}>
             {isEmpty ? (
               <div className="chat-welcome">
@@ -5225,6 +6188,26 @@ export default function GrowthGradualChat() {
             )}
             <div ref={bottomRef}/>
           </div>
+
+          {showScrollToBottom && (
+            <button
+              type="button"
+              className="chat-scroll-bottom"
+              aria-label="Go to the latest message"
+              title="Go to the latest message"
+              onClick={() => {
+                const container = bottomRef.current?.parentElement;
+                if (!container) return;
+                shouldAutoScrollRef.current = true;
+                container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 4v15" />
+                <path d="m6 13 6 6 6-6" />
+              </svg>
+            </button>
+          )}
 
           {/* Input */}
           <div className="chat-input-area">

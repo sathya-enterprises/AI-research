@@ -23673,13 +23673,27 @@ async def generate_report(request: Request):
                         }
                         _data_key = "data" if isinstance(_series.get("data"), list) else "values"
                         _normalized_points = []
-                        for _point in (_series.get(_data_key) or []):
+                        for _point_index, _point in enumerate(_series.get(_data_key) or []):
                             if not isinstance(_point, dict):
                                 _normalized_points.append(_point)
                                 continue
                             _point = dict(_point)
                             _point_key = str(_point.get("label") or _point.get("name") or _point.get("x") or "").strip().casefold()
                             _raw_point = _raw_points_by_label.get(_point_key)
+                            # Chart normalization may clean or reformat labels (for example,
+                            # adding an AMC prefix or changing punctuation). Exact-label lookup
+                            # alone then loses the workbook row quote and causes the evidence
+                            # guard to prune a legitimate deterministic point. Since both lists
+                            # originate from the same server-side workbook chart and retain
+                            # their order, use the same-position raw point as a safe fallback.
+                            if _raw_point is None and _point_index < len(_raw_points):
+                                _positional_point = _raw_points[_point_index]
+                                if isinstance(_positional_point, dict) and (
+                                    _positional_point.get("evidenceQuote")
+                                    or _positional_point.get("sourceSheet")
+                                    or _positional_point.get("sourceRow") is not None
+                                ):
+                                    _raw_point = _positional_point
                             if _raw_point:
                                 for _evidence_key in ("evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow"):
                                     if _raw_point.get(_evidence_key) is not None:

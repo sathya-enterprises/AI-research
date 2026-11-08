@@ -34,7 +34,7 @@ Compatibility note: the project pins sentence-transformers 3.0.1. The CrossEncod
 ## Persistent pgvector setup (required)
 
 1. In Supabase, enable the `vector` extension.
-2. Confirm the already-provisioned Supabase `vector` extension, `public.rag_chunks` table, HNSW cosine index, and `rag_match_chunks` RPC exist. The one-time migration is intentionally omitted from this cleaned source bundle because it has already been applied.
+2. Run `supabase_pgvector.sql` in the Supabase SQL Editor. The migration creates the private `rag_chunks` table, HNSW cosine index, and `rag_match_chunks` RPC.
 3. Configure `SUPABASE_URL` and a **server-only** `SUPABASE_SECRET_KEY` (preferred) or legacy `SUPABASE_SERVICE_ROLE_KEY` in `backend/rag-service/.env`. The service also reads `backend/.env` for local development. Do not place server credentials in frontend variables.
 4. Restart the RAG service and verify `/health` reports `vector_storage.ready: true`.
 
