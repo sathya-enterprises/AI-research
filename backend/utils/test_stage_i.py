@@ -293,3 +293,33 @@ def test_rendered_gate_flags_instructions_and_split_words():
     from utils.flow_text import rendered_flow_findings
     assert split_word_findings("RETURNS IN MON THS", "returns over twelve months") and not split_word_findings("in the", "in the months")
     assert rendered_flow_findings("Metal — -7.34% — +26.36% — +7.96%")
+
+
+# ── FIX 9: smaller items ─────────────────────────────────────────────────────────────────────────
+def test_small_items_are_fixed():
+    from utils.stage_i_gates import fix_small_items, qualify_low_reliability
+    text = ("A examination showed an recovery. First, x. Fourth, y. Fifth, z.\n> [!WATCH] [S2].\n"
+            "> [!WATCH] Rates could rise if oil spikes [S3].\n> [!WATCH] The sector grew 5% last year [S4].\n"
+            "an FII bought a one-off. Growth * rose. A coefficient ($\nho$) of 0.17. Historically\n, it fell.")
+    out, actions = fix_small_items(text)
+    assert "An examination showed a recovery" in out and "First, x. Second, y. Third, z." in out
+    assert "[!WATCH] [S2]" not in out and "> [!WATCH] Rates could rise" in out and "\nThe sector grew 5% last year [S4]." in out
+    assert "an FII bought a one-off" in out and "Growth rose" in out and "(ρ)" in out and "Historically, it fell" in out
+    q, _ = qualify_low_reliability("Credit grew 17.7% [S9]. FIIs sold $53 billion [S49].", {"S9": 0.41, "S49": 0.8})
+    assert "17.7% (reported by a lower-reliability source) [S9]." in q and "$53 billion [S49]." in q
+
+
+def test_side_by_side_bullet_diagrams_are_dropped_but_lists_are_kept():
+    from utils.flow_text import convert_text_art
+    text = ("Intro.\n\n- [ Tight Policy Stance ] [ Monetary Easing ]\n- Repo rate raised • Policy rate cuts delivered\n\n"
+            "- Impact: Liquidity squeeze drives banking Impact: Lower discount rates and\n- more fragments\n\n"
+            "* **Large caps:** ICICI (Market Cap: ₹11 Lakh Cr; EPS: ₹49) trades at 13x [S12] [S12].\n* **PSU Banks:** cheap.")
+    out, actions = convert_text_art(text)
+    assert "Tight Policy" not in out and "Impact:" not in out and "**Large caps:**" in out and "**PSU Banks:**" in out
+
+
+def test_calculated_sources_are_not_labelled_primary_official():
+    from utils.source_list import metadata_parts
+    parts = metadata_parts({"publisher": "Calculated from daily market data", "url": "", "authority_tier": "primary_official",
+                            "reliability_score": 1.0, "reliability_note": "calculated / internal dataset with recorded provenance"})
+    assert not any("Reliability" in p or "Tier" in p for p in parts) and any("Calculated in this report" in p for p in parts)

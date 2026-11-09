@@ -612,6 +612,17 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         allowed_numbers=_number_set(d.summary for d in good), section_id="exec")
     exec_body = exec_policy.body
     exec_unsupported = unsupported_numbers(exec_body, _number_set(d.summary for d in good))
+    try:  # Stage I (FIX 9): headline claims backed only by low-reliability sources are qualified
+        from utils.stage_i_gates import qualify_low_reliability
+        _reliability = {}
+        for _m in manifest or []:
+            try:
+                _reliability[str(_m.get("id") or "").upper()] = float(_m.get("reliability_score") or _m.get("reliabilityScore"))
+            except (TypeError, ValueError):
+                continue
+        exec_body, regime_log["lowReliabilityQualified"] = qualify_low_reliability(exec_body, _reliability)
+    except Exception as exc:
+        log.warning("V2 low-reliability qualifier skipped: %s", type(exc).__name__)
     # Stage I (FIX 4 + dispersion): the executive summary opens with the computed regime statement when
     # its own opening contradicts the regime or omits a sector-specific dispersion finding.
     if regime is not None and exec_body:
@@ -781,6 +792,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 repetition_log.setdefault("takeawaysDropped", []).append(chart.get("title"))
                 chart["takeaway"] = ""
         repetition_log["after"] = repetition_metrics(report_md, charts_out)
+        from utils.stage_i_gates import fix_small_items
+        report_md, repetition_log["smallItems"] = fix_small_items(report_md)
     except Exception as exc:
         log.warning("V2 repetition control skipped: %s", type(exc).__name__)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()

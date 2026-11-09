@@ -69,6 +69,72 @@ def _drop_table_at(lines: list[str], header_index: int) -> list[str]:
     return lines[:start] + lines[j:]
 
 
+_ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth", "Tenth"]
+_ORDINAL_RE = re.compile(r"(?<![\w])(" + "|".join(_ORDINALS) + r"),")
+_FORWARD_RE = re.compile(r"(?i)\b(?:watch|monitor|could|would|may|might|if|unless|risks?|triggers?|signals?|expect\w*|will|ahead|"
+                         r"outlook|depend\w*|hinges?|catalysts?|upside|downside|de-rating|re-rating|test|key level|next)\b")
+
+
+def fix_small_items(report: str) -> tuple[str, list[str]]:
+    """Stage I (FIX 9): a/an before lower-case words, ordinal sequences with gaps ("First ... Fourth"),
+    "What to watch" boxes that are empty or do not look ahead, and a raw "* " bullet inside a sentence."""
+    actions: list[str] = []
+    text = str(report or "")
+    # a / an (lower-case words only: "an FII" and "a one-off" are correct)
+    def _a_an(m):
+        art, word = m.group(1), m.group(2)
+        if word.startswith(("one", "once", "eu", "uni", "use", "usu", "ur")):
+            return m.group(0)
+        new = ("An" if art[0] == "A" else "an")
+        actions.append(f"article: '{m.group(0)}'")
+        return f"{new} {word}"
+    text = re.sub(r"\b([Aa]) ([aeio][a-z]+)\b", _a_an, text)
+
+    def _an_a(m):
+        word = m.group(2)
+        if word.startswith(("hour", "honest", "honou", "heir", "herb")):
+            return m.group(0)
+        actions.append(f"article: '{m.group(0)}'")
+        return ("A" if m.group(1)[0] == "A" else "a") + f" {word}"
+    text = re.sub(r"\b([Aa]n) ([bcdfghjklmnpqrstvwxyz][a-z]+)\b", _an_a, text)
+    # ordinals: renumber each paragraph's sequence in order of appearance
+    paragraphs = text.split("\n")
+    for i, para in enumerate(paragraphs):
+        found = _ORDINAL_RE.findall(para)
+        if len(found) >= 2 and found != _ORDINALS[:len(found)]:
+            counter = iter(_ORDINALS)
+            paragraphs[i] = _ORDINAL_RE.sub(lambda m: next(counter) + ",", para)
+            actions.append(f"ordinals renumbered: {', '.join(found)}")
+    text = "\n".join(paragraphs)
+    # "What to watch": empty -> removed; not forward-looking -> a plain paragraph
+    def _watch(m):
+        body = m.group(1).strip()
+        if not re.sub(r"\[\s*S\d+[^\]]*\]", "", body).strip(" .:-"):
+            actions.append("empty 'What to watch' box removed")
+            return ""
+        if not _FORWARD_RE.search(body):
+            actions.append("'What to watch' label removed from a non-forward-looking paragraph")
+            return body
+        return m.group(0)
+    text = re.sub(r"(?m)^>\s*\[!WATCH(?::[^\]]*)?\]\s*(.*)$", _watch, text)
+    text = re.sub(r"(?m)^>\s*\[!TAKEAWAYS(?::[^\]]*)?\]\s*$", "", text)
+    # LaTeX symbols ("$\\rho$", whose "\\r" may have become a line break) -> the Greek letter
+    greek = {"rho": "\u03c1", "beta": "\u03b2", "alpha": "\u03b1", "sigma": "\u03c3", "mu": "\u03bc", "delta": "\u0394"}
+    text, n = re.subn(r"\$\s*(?:\\|\r?\n)?(rho|beta|alpha|sigma|mu|delta|ho)\s*\$",
+                      lambda m: greek.get(m.group(1), greek["rho"] if m.group(1) == "ho" else m.group(0)), text)
+    if n:
+        actions.append(f"{n} LaTeX symbol(s) written as Greek letters")
+    # a sentence broken before its comma ("Historically\n, sector ...") is joined
+    text, n = re.subn(r"(?<=\w)\n+(?=[,;:]\s)", "", text)
+    if n:
+        actions.append(f"{n} sentence(s) broken before a comma rejoined")
+    # a raw "* " bullet marker inside a sentence ("growth * rose") -> a space
+    text, n = re.subn(r"(?<=[a-z,;]) \* (?=[a-z])", " ", text)
+    if n:
+        actions.append(f"{n} raw bullet marker(s) inside a sentence removed")
+    return text, actions
+
+
 def heal_text(report: str, window_start: date | None = None) -> tuple[str, list[str]]:
     """Run the text gates and their remedies; returns (report, actions)."""
     actions: list[str] = []
@@ -78,6 +144,8 @@ def heal_text(report: str, window_start: date | None = None) -> tuple[str, list[
     from utils.flow_text import convert_text_art
     report, art = convert_text_art(report)
     actions += [f"text_art: {a}" for a in art]
+    report, small = fix_small_items(report)
+    actions += [f"small: {a}" for a in small]
     for finding in reversed(period_findings(report, window_start)):
         report = "\n".join(_drop_table_at(report.split("\n"), finding["line"]))
         actions.append(f"period: dropped an out-of-window table ({finding['caption'] or 'uncaptioned'}, ends {finding['ends']})")
@@ -220,3 +288,24 @@ def rendered_check(payload: dict, *, build, audit, window_start: date | None = N
         summary["actions"] += actions
         log.warning("Stage I rendered check: round %d healed %d item(s)", round_no + 1, len(actions))
     return summary
+
+
+def qualify_low_reliability(section_text: str, reliability: dict[str, float], threshold: float = 0.5) -> tuple[str, list[str]]:
+    """A numeric headline sentence whose cited sources ALL score below ``threshold`` gets a visible
+    qualifier (FIX 9: low-reliability sources must not back headline claims unqualified)."""
+    actions: list[str] = []
+
+    def fix(sentence: str) -> str:
+        groups = re.findall(r"\[(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\]", sentence)
+        ids = {x.split(".")[0].upper() for g in groups for x in re.split(r"\s*[,;]\s*", g)}
+        scores = [reliability[i] for i in ids if i in reliability]
+        if not ids or not scores or not re.search(r"\d", re.sub(r"\[[^\]]*\]", "", sentence)) or max(scores) >= threshold:
+            return sentence
+        if "lower-reliability source" in sentence:
+            return sentence
+        actions.append(f"qualified: {sentence[:120]}")
+        return re.sub(r"(\s*\[[^\]]+\])?([.!?])?\s*$", lambda m: f" (reported by a lower-reliability source){m.group(1) or ''}{m.group(2) or '.'}",
+                      sentence.rstrip(), count=1)
+
+    parts = re.split(r"(?<=[.!?])(\s+)(?=[A-Z])", section_text)
+    return "".join(fix(p) if not p.isspace() else p for p in parts), actions

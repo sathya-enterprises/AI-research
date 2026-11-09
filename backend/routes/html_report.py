@@ -4619,7 +4619,9 @@ def _render_sources_appendix(
             )
         else:
             unresolved = str(source.get("source_status") or source.get("sourceStatus") or "").casefold() == "unresolved"
-            missing_url = "(Source URL unavailable)" if unresolved else "(No public URL supplied)"
+            from utils.source_list import is_calculated as _is_calculated
+            missing_url = ("(Source URL unavailable)" if unresolved else
+                           "(calculated dataset)" if _is_calculated(source) else "(No public URL supplied)")
             link_markup = f'<span class="gg-source-unavailable">{missing_url}</span>'
             if unresolved:
                 link_markup += '<span class="gg-source-status">this citation has not been verified</span>'
@@ -4638,7 +4640,7 @@ def _render_sources_appendix(
             f'<li id="source-{safe_id}" class="gg-source-line"{value_attr}>'
             f'<span class="gg-source-id">[{safe_id}]</span> '
             f'<span class="gg-source-title-text">{safe_title}</span> '
-            f'{link_markup}'
+            f'{link_markup} '
             f'{metadata_markup}'
             f'</li>'
         )

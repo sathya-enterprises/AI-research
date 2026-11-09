@@ -126,10 +126,47 @@ def drop_flattened_tables(lines: list[str]) -> tuple[list[str], int]:
     return [line for n, line in enumerate(lines) if n not in drop], blocks
 
 
+_TWO_COLUMN_RE = re.compile(r"\[\s*(?!S\d)[^\]\[]{3,40}\s*\]\s+\[\s*(?!S\d)[^\]\[]{3,40}\s*\]"  # "[ A ] [ B ]" headers
+                            r"|[^\s\u2502\u2503|>\-]\s+\u2022\s+\S"                                 # "left \u2022 right"
+                            r"|[\u2502\u2503]\s+[\u2502\u2503]\s*\S")                                         # "\u2502 a \u2502 \u2502 b"
+_REPEATED_LABEL_RE = re.compile(r"\b([A-Z][a-z]+):\s.+\s\1:\s")
+
+
+def _two_column_row(row: str) -> bool:
+    if any(ch in row for ch in "├└┣┗") and not re.search(r"[│┃]\s+[│┃]", row):
+        return False  # tree rows are converted line by line (a two-branch row is dropped there)
+    if _TWO_COLUMN_RE.search(row):
+        return True
+    # "Impact: x Impact: y" on a fragment (no sentence punctuation) is two columns side by side
+    return bool(_REPEATED_LABEL_RE.search(row)) and not re.search(r"[.;](?:\s|$)", row)
+
+
+def drop_two_column_groups(lines: list[str]) -> tuple[list[str], int]:
+    """A bullet group holding a side-by-side diagram ("[ A ] [ B ]" headers, "left \u2022 right" rows,
+    "Impact: x Impact: y") cannot be read as a list: the whole group is dropped."""
+    out, i, dropped = [], 0, 0
+    while i < len(lines):
+        if not re.match(r"^\s*[-*]\s", lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and re.match(r"^\s*[-*]\s", lines[j]):
+            j += 1
+        group = lines[i:j]
+        if any(_two_column_row(re.sub(r"^\s*[-*]\s+", "", g)) for g in group):
+            dropped += 1
+        else:
+            out.extend(group)
+        i = j
+    return out, dropped
+
+
 def convert_text_art(text: str) -> tuple[str, list[str]]:
     lines = str(text or "").split("\n")
+    lines, two_col = drop_two_column_groups(lines)
     lines, flattened = drop_flattened_tables(lines)
-    actions_pre = ["dropped a flattened table without a header row"] * flattened
+    actions_pre = ["dropped a flattened table without a header row"] * flattened + ["dropped a side-by-side text diagram (bullets)"] * two_col
     out: list[str] = []
     actions: list[str] = list(actions_pre)
     fence_start: int | None = None

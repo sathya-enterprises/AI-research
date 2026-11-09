@@ -102,7 +102,18 @@ def source_number(source_id: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def is_calculated(source: dict) -> bool:
+    """A dataset computed in this report (no public page): never shown as a 'primary official' source."""
+    url = str(source.get("url") or "")
+    blob = " ".join(str(source.get(k) or "") for k in ("reliability_note", "publisher", "title", "kind", "evidence_origin"))
+    return not url.startswith(("http://", "https://")) and bool(re.search(r"(?i)calculated|internal dataset|growth gradual market data", blob))
+
+
 def metadata_parts(source: dict) -> list[str]:
+    if is_calculated(source):
+        # Stage I: an internal calculated dataset is labelled as such, not "primary official, reliability 1.00".
+        publisher = display_publisher(source)
+        return [x for x in (publisher, "Calculated in this report from the market data named in the title") if x]
     parts = []
     publisher = display_publisher(source)
     if publisher:
