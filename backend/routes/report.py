@@ -25135,6 +25135,58 @@ async def generate_report(request: Request):
                         _prune_resolved_placeholder_findings(item)
             _prune_resolved_placeholder_findings(response_payload.get("geminiAudit", {}))
             _prune_resolved_placeholder_findings(response_payload.get("qualityReview", {}))
+        # Stage I: the rendered-PDF check runs inside the job, before the report is marked published:
+        # the final payload is rendered, audited (routes.pdf's audit + the Stage I gates), healed and
+        # re-rendered up to 3 times; blocking findings that remain keep the report a draft.
+        _stage_i_render = {}
+        if _v2_used and not file_only_report and os.getenv("GG_STAGE_I_RENDERED_CHECK", "1") != "0":
+            try:
+                from utils.stage_i_gates import rendered_check as _rendered_check
+                from routes.pdf import build_pdf as _si_build_pdf, _audit_rendered_pdf_bytes as _si_audit
+                try:
+                    from datetime import date as _si_date
+                    from utils.source_quality import window_start as _si_window
+                    _si_window_start = _si_window(question, _si_date.today())
+                except Exception:
+                    _si_window_start = None
+
+                def _si_build(payload):
+                    return _si_build_pdf(
+                        report=payload.get("report") or "", title=payload.get("title") or "", question=question or "Research Report",
+                        summary=payload.get("summary") or "", key_stats=payload.get("keyStats") or [],
+                        charts=payload.get("charts") or [], file_images=[], web_images=payload.get("images") or [],
+                        theme=payload.get("theme"), sources=payload.get("sources"), presentation=payload.get("presentation"),
+                        report_tier=report_tier)
+
+                def _si_audit_fn(pdf_bytes, payload):
+                    return _si_audit(pdf_bytes, payload.get("report") or "", payload.get("title") or "",
+                                     payload.get("charts") or [], payload.get("sources") or [], question=question)
+
+                def _si_repairs(report_md, charts_list, findings):
+                    from routes.pdf import _remove_exact_duplicate_observation_lines, _repair_rendered_chart_audit
+                    acts = []
+                    report_md2, charts2, meta = _repair_rendered_chart_audit(report_md, charts_list, findings)
+                    if meta.get("changed"):
+                        acts.append(f"chart repair: removed {meta.get('removedCharts', 0)} chart(s), "
+                                    f"pruned {meta.get('prunedPoints', 0)} point(s)")
+                    report_md2, removed = _remove_exact_duplicate_observation_lines(report_md2, findings)
+                    if removed:
+                        acts.append(f"removed {removed} exact duplicate observation line(s)")
+                    return normalize_report_markdown(report_md2), charts2, acts
+
+                _stage_i_render = await asyncio.to_thread(_rendered_check, response_payload, build=_si_build,
+                                                          audit=_si_audit_fn, window_start=_si_window_start,
+                                                          repairs=_si_repairs)
+                if isinstance(_v2_meta_for_publication, dict):
+                    _v2_meta_for_publication.setdefault("chartLint", {})["renderedCheck"] = {
+                        k: (v if k != "blocking" else [str(f.get("issue"))[:160] for f in v]) for k, v in _stage_i_render.items()
+                        if k != "warnings"} | {"warnings": [f"{w.get('issue')} {w.get('text', '')}"[:160]
+                                                            for w in _stage_i_render.get("warnings") or []]}
+                log.info("Report: in-job rendered check - %s page(s), %d healing round(s), %d blocking, %d warning(s)",
+                         _stage_i_render.get("pages"), _stage_i_render.get("rounds", 0),
+                         len(_stage_i_render.get("blocking") or []), len(_stage_i_render.get("warnings") or []))
+            except Exception as _si_exc:
+                log.warning("Report: in-job rendered check skipped: %s", type(_si_exc).__name__)
         _outcome = _classify_publication_outcome(
             final_deterministic_audits, response_payload.get("report", ""),
             (gemini_audit or {}).get("findings") if isinstance(gemini_audit, dict) else None,
@@ -25148,6 +25200,14 @@ async def generate_report(request: Request):
                         "failureSummary": [{"stage": "number_support",
                                             "issue": "Numbers not found in the cited evidence: "
                                                      + ", ".join(str(v) for v in _v2_unsupported_after_policy[:8])}]}
+            response_payload["failedStage"] = _outcome["failedStage"]
+            response_payload["failureSummary"] = _outcome["failureSummary"]
+            response_payload["draftAvailable"] = True
+        if _stage_i_render.get("blocking") and _outcome["outcome"] == "published":
+            _outcome = {**_outcome, "outcome": "draft", "failedStage": "rendered_pdf",
+                        "blockingCategories": ["rendered_pdf"],
+                        "failureSummary": [{"stage": "rendered_pdf", "issue": str(f.get("issue"))[:200]}
+                                           for f in _stage_i_render["blocking"][:8]]}
             response_payload["failedStage"] = _outcome["failedStage"]
             response_payload["failureSummary"] = _outcome["failureSummary"]
             response_payload["draftAvailable"] = True

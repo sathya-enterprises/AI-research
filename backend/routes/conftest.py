@@ -82,3 +82,8 @@ def pytest_collection_modifyitems(config, items):
         reason = KNOWN_FAILURES.get(key)
         if reason:
             item.add_marker(pytest.mark.xfail(reason=reason, strict=False))
+
+
+# Stage I: unit tests do not render PDFs inside the report job.
+import os as _os_stage_i
+_os_stage_i.environ.setdefault("GG_STAGE_I_RENDERED_CHECK", "0")
