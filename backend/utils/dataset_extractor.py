@@ -191,7 +191,15 @@ def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
     years = [int(y) for lab in labels for y in re.findall(r"\b(20\d{2})\b", lab)]
     forecast = any(y > today.year for y in years)
     if forecast and not _FORECAST_RE.search(" ".join([str(ds.get("metric")), str(ds.get("period")), *[s["name"] for s in clean]])):
-        return None, "future periods not labelled as a forecast"
+        # unlabelled future periods are dropped; the observed periods remain a chart when >= 3 are left
+        keep = [i for i, lab in enumerate(labels)
+                if not any(int(y) > today.year for y in re.findall(r"\b(20\d{2})\b", lab))]
+        if len(keep) < 3:
+            return None, "future periods not labelled as a forecast (fewer than 3 observed periods left)"
+        clean = [{**s, "points": [s["points"][i] for i in keep]} for s in clean]
+        labels = [labels[i] for i in keep]
+        years = [int(y) for lab in labels for y in re.findall(r"\b(20\d{2})\b", lab)]
+        forecast = False
     unit = str(ds.get("unit") or "").strip()
     if unit and unit != "%" and unit.casefold() not in low:
         unit = "as reported"  # a unit the passage does not state is never asserted

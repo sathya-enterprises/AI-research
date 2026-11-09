@@ -20715,6 +20715,14 @@ async def generate_report(request: Request):
         search_queries = await _build_multi_angle_search_queries(
             question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
         )
+        try:  # Stage J: a data-seeking angle (year-wise statistics inside the window, official sources)
+            from utils.data_angles import data_angles as _data_angles
+            _extra_angles = _data_angles(question, list(search_queries), tier=report_tier)
+            if _extra_angles:
+                search_queries = list(search_queries) + _extra_angles
+                log.info("Report: added %d data-seeking angle(s): %r", len(_extra_angles), _extra_angles)
+        except Exception as _angle_exc:
+            log.warning("Report: data-seeking angles skipped: %s", type(_angle_exc).__name__)
         if search_queries != [question]:
             log.info("Report: search enriched into %d angle(s): %r",
                       len(search_queries), [q[:100] for q in search_queries])

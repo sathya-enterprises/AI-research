@@ -357,3 +357,13 @@ def test_extracted_datasets_are_verified_against_the_passage():
     chart = to_chart(ds, Passage("S2.3", "S2", text, "narrative", title="EV report"), "EV report", 1)
     assert chart.interpretation.startswith("India went from 0.23% in 2016 to 0.51% in 2018")
     assert all(p["evidenceValue"] in text for s in chart.spec["series"] for p in s["data"])
+
+
+def test_data_seeking_angles():
+    from utils.data_angles import data_angles
+    q = "How has India's electric vehicle market evolved over the past 3 years, and what are the key growth drivers?"
+    angles = data_angles(q, ["India EV policy"], tier="in_depth", today=date(2026, 11, 10))
+    assert len(angles) == 2 and angles[0].startswith("India electric vehicle market year-wise statistics 2023")
+    assert data_angles(q, ["India EV sales statistics by year"], tier="detailed", today=date(2026, 11, 10)) == []
+    since = data_angles("Impacts of semiconductor supply chain shifts since 2022?", ["x"], tier="detailed", today=date(2026, 11, 10))
+    assert "2022 2023 2024 2025 2026" in since[0]
