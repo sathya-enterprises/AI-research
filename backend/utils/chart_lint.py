@@ -221,6 +221,10 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
         return "fewer than 3 distinct values (or all values equal)"
     if spec.get("type") != "heatmap" and len(_series(spec)) == 1 and any(TOTAL_RE.search(l) for l in labels) and len(labels) >= 3:
         return "a Total row is plotted with its components"
+    if vals and all(float(v).is_integer() and 1800 <= v <= 2100 for v in vals):
+        return "the values are years (an attribute such as a founding year, not data)"
+    if sum(1 for l in labels if re.fullmatch(r"\s*\d{1,2}[.)]?\s*", l)) >= max(2, len(labels) // 2):
+        return "the row labels are list numbers, not entities or periods"
     heading = str(passage_text or "")[:400]
     quotes = " ".join(str(p.get("evidenceQuote") or "") for s in _series(spec) for p in _pts(s))
     if EXAMPLE_RE.search(heading) or EXAMPLE_RE.search(quotes):
@@ -300,7 +304,9 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         span = period or (f"{labels[0]} to {labels[-1]}" if labels else "")
         title = f"{metric}{unit_txt}: {a} vs {b} (benchmark)" + (f", {span}" if span else "")
     elif time_axis and labels:
-        title = f"{metric}{unit_txt}, {_short_range(labels[0], labels[-1])}{qtd}"
+        names = [str(x.get("name") or "") for x in series if x.get("name")]
+        who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else "")) if len(names) > 1 else ""
+        title = f"{metric}{unit_txt}{who}, {_short_range(labels[0], labels[-1])}{qtd}"
     else:
         names = [l for l in labels if l]
         bench = [l for l in names if l.casefold() in BENCHMARKS]

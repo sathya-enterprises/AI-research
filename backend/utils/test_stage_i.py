@@ -335,3 +335,25 @@ def test_stacked_tables_are_split_and_amount_spellings_are_one_statistic():
               "Telecommunication inflows were ₹11,065 crore [S1].\n\n## C\n\nLater, Telecom took +₹11,065 crore in buying [S1].")
     capped, _ = cap_headline_stats(report)
     assert "took the figure given in Section 2 in buying" in capped and repetition_metrics(capped)["stats_over_cap"] == 0
+
+
+# ── Stage J: domain-generic dataset extraction ───────────────────────────────────────────────────
+def test_extracted_datasets_are_verified_against_the_passage():
+    from utils.dataset_extractor import verify_dataset, to_chart
+    from utils.evidence_store import Passage
+    text = ("Figure 2: EV Penetration Rate - Global & India 3.08% 3.54% 4.91% 0.23% 0.38% 0.51% 2016 2017 2018\n"
+            "Global EV Penetration India EV Penetration")
+    years = ["2016", "2017", "2018"]
+    good = {"metric": "EV penetration rate", "unit": "%", "x": "time", "series": [
+        {"name": "India", "points": [{"label": y, "value": v} for y, v in zip(years, ["0.23", "0.38", "0.51"])]},
+        {"name": "Global", "points": [{"label": y, "value": v} for y, v in zip(years, ["3.08", "3.54", "4.91"])]}]}
+    ds, reason = verify_dataset(good, text, date(2026, 11, 9))
+    assert ds and not reason
+    bad = {**good, "series": [{"name": "India", "points": [{"label": y, "value": v} for y, v in zip(years, ["0.23", "0.96", "0.51"])]}]}
+    assert "not in the passage" in verify_dataset(bad, text, date(2026, 11, 9))[1]
+    future = {"metric": "EV sales", "unit": "Mn", "x": "time", "series": [{"name": "EV sales", "points": [
+        {"label": y, "value": v} for y, v in [("2028", "0.23"), ("2029", "0.38"), ("2030", "0.51")]]}]}
+    assert "forecast" in verify_dataset(future, text + " 2028 2029 2030", date(2026, 11, 9))[1]
+    chart = to_chart(ds, Passage("S2.3", "S2", text, "narrative", title="EV report"), "EV report", 1)
+    assert chart.interpretation.startswith("India went from 0.23% in 2016 to 0.51% in 2018")
+    assert all(p["evidenceValue"] in text for s in chart.spec["series"] for p in s["data"])

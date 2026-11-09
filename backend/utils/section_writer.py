@@ -379,8 +379,9 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     allowed_passages = {p.passage_id for p in citable}
     passage_numbers = {p.passage_id: _number_set([p.text]) for p in citable}
     passage_texts = {p.passage_id: p.text for p in citable}
+    from utils.section_charts import plain_number
     allowed_numbers = _number_set(p.text for p in citable) | _number_set(
-        f"{v:g}" for f in figures for _, _, v in f.points)
+        f"{v:g} {plain_number(v)}" for f in figures for _, _, v in f.points)
     own_figures = {f.figure_number for f in figures}
     subs = [s for s in section.subsections if s.status == "keep"]
     groups = _chunks(subs) if subs else [[]]

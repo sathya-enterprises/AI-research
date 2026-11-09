@@ -461,6 +461,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     from utils.dataset_charts import build_dataset_charts, preassign
     from utils.section_charts import verify_chart
     dataset_charts, dataset_note = build_dataset_charts(store)
+    # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
+    # flattened tables), code verifies every value and label against the passage.
+    extracted_ids: set[str] = set()
+    if os.getenv("GG_V2_DATASET_EXTRACT", "1") != "0":
+        try:
+            from utils.dataset_extractor import extract_dataset_charts
+            extracted, extract_note = await extract_dataset_charts(
+                store, gateway, question=question, today=today, limit=8 if tier == "in_depth" else 4)
+            dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "extracted": extract_note}
+            extracted_ids = {c.chart_id for c in extracted}
+            dataset_charts = list(dataset_charts) + extracted
+        except Exception as exc:  # extraction must never abort a report
+            log.warning("V2 dataset extraction skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     for chart in dataset_charts:
         reason = verify_chart(chart, "\n".join(store.get(pid).text for pid in chart.passage_ids if store.get(pid)))
         if reason:
@@ -478,6 +491,23 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             continue
         deduped.append(chart)
     candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
+    # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
+    # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).
+    try:
+        from utils.chart_lint import quality_reason
+        _kept = []
+        for chart in candidates:
+            _reason = quality_reason(chart.spec, chr(10).join(
+                store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400])
+            if _reason:
+                chart.status, chart.drop_reason = "dropped", f"quality gate before writing: {_reason}"
+                chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
+                                    "reason": chart.drop_reason})
+            else:
+                _kept.append(chart)
+        candidates = _kept
+    except Exception as exc:
+        log.warning("V2 early chart quality gate skipped: %s", type(exc).__name__)
     # Run the same chart verification the export gates use BEFORE writing, so the
     # writer only interprets charts that will survive to the PDF.
     if chart_verifier and candidates:
@@ -500,6 +530,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # renumbering in document order, so table charts keep the numbers the writer is given.
     data_first = [c for c in candidates if c.interpretation]
     preassign(data_first, analysis, side_charts=DATASET_SIDE_CHARTS.get(tier, 4))
+    if extracted_ids:
+        from utils.dataset_extractor import assign_to_sections
+        assign_to_sections([c for c in data_first if c.chart_id in extracted_ids], analysis)
     table_charts = [c for c in candidates if not c.interpretation]
     assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
     unassigned = [c for c in candidates if not c.section_id]
