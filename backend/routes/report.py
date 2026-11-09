@@ -17274,6 +17274,14 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
             if passage is None:
                 continue
             rows = [ln.strip() for ln in passage.text.splitlines() if " | " in ln]
+            # Stage J: an extracted-dataset chart quotes lines of a page-derived passage (prose or a
+            # chart's data printed as text); those exact quotes are registered too. Snippet passages never.
+            if isinstance(chart, dict) and chart.get("provenance") == "extracted dataset" and passage.kind in {"table", "narrative"}:
+                for series in chart.get("series") or []:
+                    for point in series.get("data") or []:
+                        quote = str(point.get("evidenceQuote") or "").strip()
+                        if quote and quote in passage.text and str(point.get("evidenceSource") or "").upper() == passage.source_id.upper():
+                            rows.append(quote)
             if not rows:
                 continue
             sid = passage.source_id

@@ -90,7 +90,7 @@ def candidate_passages(store, question: str, *, limit: int = 6, window_year: int
     scored = []
     for pid, rel in relevance.items():
         p = store.get(pid)
-        if p is None or p.kind == "calculated":
+        if p is None or p.kind in {"calculated", "search_excerpt"}:
             continue
         profile = _data_profile(str(p.text or ""), window_year)
         if profile is None:
@@ -264,13 +264,21 @@ def to_chart(ds: dict, passage, source_title: str, index: int) -> PlannedChart:
     return chart
 
 
-def clip_to_window(ds: dict, window_year: int | None) -> tuple[dict | None, str]:
-    """A time series keeps only the periods inside the question's window (>= 3 points or it is dropped)."""
-    if not window_year or ds.get("x") != "time":
+def clip_to_window(ds: dict, window_year: int | None, question: str = "") -> tuple[dict | None, str]:
+    """A time series keeps only the periods inside the question's window (>= 3 points or it is dropped).
+    The window test is the chart verifier's own, so a kept point is never rejected later."""
+    if ds.get("x") != "time":
         return ds, ""
-    keep = [i for i, p in enumerate(ds["series"][0]["points"])
-            if all(int(y) >= window_year for y in re.findall(r"\b((?:19|20)\d{2})\b", p["label"])) and
-            re.search(r"\b(?:19|20)\d{2}\b", p["label"])]
+    try:
+        from utils.chart_evidence_audit import _periods_outside_question_window
+
+        def inside(label: str) -> bool:
+            return bool(re.search(r"\b(?:19|20)\d{2}\b", label)) and not _periods_outside_question_window(question, [label], {})
+    except ImportError:  # pragma: no cover
+        def inside(label: str) -> bool:
+            years = re.findall(r"\b((?:19|20)\d{2})\b", label)
+            return bool(years) and all(not window_year or int(y) >= window_year for y in years)
+    keep = [i for i, p in enumerate(ds["series"][0]["points"]) if inside(p["label"])]
     if len(keep) < 3:
         return None, f"fewer than 3 points inside the question's window (from {window_year})"
     clipped = dict(ds)
@@ -310,7 +318,7 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
             note["proposed"] += 1
             clean, reason = verify_dataset(ds if isinstance(ds, dict) else {}, str(passage.text), today_d)
             if clean:
-                clean, reason = clip_to_window(clean, window_year)
+                clean, reason = clip_to_window(clean, window_year, question)
             if not clean:
                 note["rejected"].append({"passage": passage.passage_id, "metric": str((ds or {}).get("metric"))[:80], "reason": reason})
                 continue

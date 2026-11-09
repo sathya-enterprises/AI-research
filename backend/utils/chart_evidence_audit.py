@@ -1015,7 +1015,11 @@ def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
             start_month = current_q_start - count * 3
             end_month = current_q_start + 2  # a "Q4 2026" / "Q3 FY27" label spans the whole current quarter
         elif unit.startswith("year"):
-            start_month = end_month - count * 12 + 1
+            # Stage J: whole calendar years, like quarters: the last N completed years plus the current
+            # year to date ("past 3 years" in Nov 2026 = 2023-2026). A month-exact window (Dec 2023 -
+            # Nov 2026) rejected every whole-year label but two, so no yearly series could pass.
+            start_month = _month_ordinal(today.year - count, 1)
+            end_month = _month_ordinal(today.year, 12)
         elif unit.startswith("week"):
             start_month = _month_ordinal((today - _dt.timedelta(days=count * 7)).year,
                                          (today - _dt.timedelta(days=count * 7)).month)
