@@ -412,7 +412,7 @@ def is_official_passage(passage) -> bool:
     return any(str(getattr(passage, "title", "") or "").startswith(f"{p}: ") for p in OFFICIAL_PUBLISHERS)
 
 
-def official_charts(store) -> list:
+def official_charts(store, question: str = "") -> list:
     """One data-first chart per official dataset table (years where every entity has a value; >= 3)."""
     from utils.dataset_extractor import to_chart
     charts = []
@@ -435,6 +435,14 @@ def official_charts(store) -> list:
             return float(cell.replace(",", ""))
         series = [{"name": name, "points": [{"label": r[0], "value": num(r[i + 1]), "raw": r[i + 1]} for r in rows]}
                   for i, name in enumerate(names)]
+        # absolute quantities on very different scales (China 13.3M vs India 170k) hide the smaller series:
+        # keep the entities the question is about; rates, shares and per-capita values stay comparable
+        relative = re.search(r"%|per |rate|share|ratio|index|years", unit, re.I)
+        peaks = [max(abs(p["value"]) for p in s["points"]) or 1 for s in series]
+        if len(series) > 1 and not relative and max(peaks) / max(min(peaks), 1e-9) > 10:
+            focus = {COUNTRIES[c] for c in mentioned_entities(question)} if question else set()
+            kept = [s for s in series if s["name"] in focus] or series[:1]
+            series = kept
         ds = {"metric": metric, "unit": unit, "x": "time", "period": f"{rows[0][0]}-{rows[-1][0]}",
               "series": series, "forecast": False}
         chart = to_chart(ds, passage, passage.title, 500 + len(charts))

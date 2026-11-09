@@ -466,7 +466,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     extracted_ids: set[str] = set()
     try:  # Stage K: official open datasets (World Bank / IMF / OWID) are data-first charts
         from utils.official_data import official_charts
-        _official = official_charts(store)
+        _official = official_charts(store, question)
         if _official:
             dataset_charts = list(dataset_charts) + _official
             extracted_ids |= {c.chart_id for c in _official}
@@ -480,7 +480,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 store, gateway, question=question, today=today, limit=8 if tier == "in_depth" else 4,
                 queries=[f"{s.title} {s.goal}" for s in analysis])
             dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "extracted": extract_note}
-            extracted_ids = {c.chart_id for c in extracted}
+            extracted_ids |= {c.chart_id for c in extracted}
             dataset_charts = list(dataset_charts) + extracted
         except Exception as exc:  # extraction must never abort a report
             log.warning("V2 dataset extraction skipped: %s: %s", type(exc).__name__, str(exc)[:160])

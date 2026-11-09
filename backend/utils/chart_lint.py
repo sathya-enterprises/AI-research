@@ -316,7 +316,9 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         title = f"{metric}{unit_txt}: {a} vs {b} (benchmark)" + (f", {span}" if span else "")
     elif time_axis and labels:
         names = [str(x.get("name") or "") for x in series if x.get("name")]
-        who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else "")) if len(names) > 1 else ""
+        # the plotted entities are named (one or many), unless the single series just repeats the metric
+        names = [n for n in names if n.casefold() not in metric.casefold() and metric.casefold() not in n.casefold()]
+        who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0])) if names else ""
         title = f"{metric}{unit_txt}{who}, {_short_range(labels[0], labels[-1])}{qtd}"
     else:
         names = [l for l in labels if l]
