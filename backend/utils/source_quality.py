@@ -169,6 +169,14 @@ def source_date(row: dict) -> date | None:
 
 def window_start(question: str, today: date) -> date:
     """Start of the period the question asks about (default: two years back)."""
+    import re as _re
+    since = _re.search(r"(?i)\b(?:since|from|after)\s+(?:the\s+(?:start|beginning)\s+of\s+)?((?:19|20)\d{2})\b(?!\s*(?:to|until|till|through|and|-|–|—)\s*(?:19|20)?\d{2})", str(question or ""))
+    if since and int(since.group(1)) <= today.year:
+        return date(int(since.group(1)), 1, 1)  # Stage J: "since 2022" starts in January 2022
+    span = _re.search(r"(?i)\b(?:from|between)\s+((?:19|20)\d{2})\s*(?:to|until|till|through|and|-|–|—)\s*(?:19|20)\d{2}\b",
+                      str(question or ""))
+    if span and int(span.group(1)) <= today.year:
+        return date(int(span.group(1)), 1, 1)  # "from 2022 to 2024" starts in January 2022
     try:
         from utils.deep_research_coverage import requested_indian_fy_quarters, requested_quarter_count
         periods = requested_indian_fy_quarters(question, today)

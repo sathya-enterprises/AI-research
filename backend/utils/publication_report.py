@@ -99,6 +99,8 @@ def build_publication_report(*, outcome: dict, audits: dict | None, v2_meta: dic
         "selfHealing": healing or {},
         "deadline": meta.get("deadline") or {},
         "pipelineNote": pipeline_note,
+        "stageI": {"leakGate": meta.get("leakGate") or [], "regime": meta.get("regime") or {},
+                   "repetition": meta.get("repetition") or {}, "chartLint": meta.get("chartLint") or {}},
     }
 
 
@@ -149,6 +151,7 @@ def render_markdown(report: dict) -> str:
             lines.append(f"- [{action.get('gate')}] {action.get('action')}: {_short(action.get('detail'), 220)}")
         for q in healing.get("qualifiers") or []:
             lines.append(f"- qualifier shown in the report: {_short(q, 220)}")
+    lines += _stage_i_lines(report.get("stageI") or {})
     coverage = report.get("coverage") or {}
     if coverage.get("note"):
         lines += ["", "## Coverage note", coverage["note"]]
@@ -172,3 +175,50 @@ def save_publication_report(report: dict, capture_path: str | None, fallback_dir
     except OSError as exc:
         log.warning("Publication report could not be saved: %s", type(exc).__name__)
         return None
+
+
+def _stage_i_lines(stage: dict) -> list[str]:
+    """Client-readiness clean-up (Stage I): every automatic removal or rewrite, logged."""
+    if not any(stage.values()):
+        return []
+    out = ["", "## Client-readiness clean-up"]
+    for action in stage.get("leakGate") or []:
+        out.append(f"- leak gate: {_short(action, 220)}")
+    regime = stage.get("regime") or {}
+    if regime.get("computed"):
+        out.append(f"- regime (computed): first half {regime.get('firstHalf')}, second half {regime.get('secondHalf')}; "
+                   f"compounded {regime.get('compounded')}")
+        if regime.get("dispersion"):
+            out.append(f"- regime dispersion: {_short(regime.get('dispersion'), 300)}")
+        if regime.get("thesisRewritten"):
+            out.append(f"- thesis rewritten: {_short(regime.get('thesisReason'), 220)}")
+    for claim in regime.get("claims") or []:
+        out.append(f"- rotation claim {claim.get('action')}: {_short(claim.get('sentence'), 200)} ({_short(claim.get('reason'), 120)})")
+    for label in regime.get("mislabels") or []:
+        out.append(f"- sector label: {_short(label, 200)}")
+    rep = stage.get("repetition") or {}
+    if rep:
+        after = rep.get("after") or {}
+        out.append(f"- repetition: max repeats per statistic {after.get('max_headline_repeats')}, over the cap "
+                   f"{after.get('stats_over_cap')}, duplicate tables {after.get('duplicate_tables')}, "
+                   f"figure boxes echoing the body {after.get('figure_blocks_echoing_body')}")
+        for t in rep.get("tablesRemoved") or []:
+            out.append(f"- table removed ({t.get('reason')}): {_short(t.get('table'), 160)}")
+        for a in rep.get("statCap") or []:
+            out.append(f"- statistic {a.get('stat')}: {a.get('action')} in '{_short(a.get('section'), 60)}'"
+                       + (f" -> {a.get('reference')}" if a.get("reference") else ""))
+        for title in rep.get("takeawaysDropped") or []:
+            out.append(f"- figure takeaway dropped (repeated the body): {_short(title, 120)}")
+    lint = stage.get("chartLint") or {}
+    for d in lint.get("dropped") or []:
+        out.append(f"- chart dropped by the quality gate: {_short(d.get('title'), 120)} ({d.get('reason')})")
+    for f in lint.get("fixed") or []:
+        out.append(f"- chart lint fix: {_short(f, 200)}")
+    inventory = lint.get("inventory") or []
+    if inventory:
+        out += ["", "### Chart inventory", "", "| Figure | Title | Type | X label | Y label | Unit | Period | Source | Lint |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for row in inventory:
+            out.append("| " + " | ".join(str(row.get(k) or "").replace("|", "/") for k in
+                                           ("figure", "title", "type", "x", "y", "unit", "period", "source", "lint")) + " |")
+    return out

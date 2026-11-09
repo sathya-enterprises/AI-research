@@ -14641,6 +14641,7 @@ def _attach_audit_source_evidence(
         try:
             parsed = urlparse(canonical)
             host = (parsed.hostname or "").casefold()
+            host = host[4:] if host.startswith("www.") else host  # Stage J: niti.gov.in == www.niti.gov.in
             path = re.sub(r"/{2,}", "/", unquote(parsed.path or "/")).rstrip("/") or "/"
             path_key = f"{host}{path}"
             query = parsed.query
@@ -17273,6 +17274,14 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
             if passage is None:
                 continue
             rows = [ln.strip() for ln in passage.text.splitlines() if " | " in ln]
+            # Stage J: an extracted-dataset chart quotes lines of a page-derived passage (prose or a
+            # chart's data printed as text); those exact quotes are registered too. Snippet passages never.
+            if isinstance(chart, dict) and chart.get("provenance") == "extracted dataset" and passage.kind in {"table", "narrative"}:
+                for series in chart.get("series") or []:
+                    for point in series.get("data") or []:
+                        quote = str(point.get("evidenceQuote") or "").strip()
+                        if quote and quote in passage.text and str(point.get("evidenceSource") or "").upper() == passage.source_id.upper():
+                            rows.append(quote)
             if not rows:
                 continue
             sid = passage.source_id
@@ -20714,6 +20723,14 @@ async def generate_report(request: Request):
         search_queries = await _build_multi_angle_search_queries(
             question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
         )
+        try:  # Stage J: a data-seeking angle (year-wise statistics inside the window, official sources)
+            from utils.data_angles import data_angles as _data_angles
+            _extra_angles = _data_angles(question, list(search_queries), tier=report_tier)
+            if _extra_angles:
+                search_queries = list(search_queries) + _extra_angles
+                log.info("Report: added %d data-seeking angle(s): %r", len(_extra_angles), _extra_angles)
+        except Exception as _angle_exc:
+            log.warning("Report: data-seeking angles skipped: %s", type(_angle_exc).__name__)
         if search_queries != [question]:
             log.info("Report: search enriched into %d angle(s): %r",
                       len(search_queries), [q[:100] for q in search_queries])
@@ -21026,6 +21043,7 @@ async def generate_report(request: Request):
         and re.search(r"\b(?:stock|equity|share)\s+(?:market|index|indices)\b", question, re.IGNORECASE)
     ))
     if _is_index_question:
+        quotes = []
         try:
             quotes = await fetch_index_quotes()
             quote_source = format_quotes_as_source(quotes)
@@ -21052,6 +21070,15 @@ async def generate_report(request: Request):
                     quarterly_rows = await fetch_sector_quarterly_returns(
                         quarters=requested_quarter_count(question),
                     )
+                    try:  # Stage I: cross-checks block implausible values before they become evidence
+                        from utils.data_sanity import check_dataset_rows
+                        _sanity = check_dataset_rows(quarterly_rows, live_levels={
+                            str(q.get("label") or "").upper(): q.get("price") for q in (quotes or [])
+                            if isinstance(q, dict) and q.get("price")})
+                        if _sanity:
+                            log.warning("Report: dataset sanity blocked %d value(s)", len(_sanity))
+                    except Exception as e:
+                        log.warning("Report: dataset sanity check failed, continuing: %s", e)
                     quarterly_source = format_sector_quarterly_returns_as_source(quarterly_rows)
                     if quarterly_source:
                         sources = [quarterly_source] + sources
@@ -25004,6 +25031,9 @@ async def generate_report(request: Request):
                 if not _gate_healing_summary.get("stillFailing"):
                     _v2_unsupported_after_policy = []
                 report_text = _gate_note(report_text, _gate_healing_summary, _v2_meta_for_publication)
+                # Stage I: one cited-source count, from the final Data Sources set.
+                from utils.boilerplate import resolve_source_count as _resolve_count
+                report_text = _resolve_count(report_text, charts, parsed.get("keyStats", []), source_manifest)
             except Exception as _heal_exc:
                 log.warning("Gate healing skipped safely: %s: %s", type(_heal_exc).__name__, str(_heal_exc)[:200])
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
@@ -25136,6 +25166,59 @@ async def generate_report(request: Request):
                         _prune_resolved_placeholder_findings(item)
             _prune_resolved_placeholder_findings(response_payload.get("geminiAudit", {}))
             _prune_resolved_placeholder_findings(response_payload.get("qualityReview", {}))
+        # Stage I: the rendered-PDF check runs inside the job, before the report is marked published:
+        # the final payload is rendered, audited (routes.pdf's audit + the Stage I gates), healed and
+        # re-rendered up to 3 times; blocking findings that remain keep the report a draft.
+        _stage_i_render = {}
+        if _v2_used and not file_only_report and os.getenv("GG_STAGE_I_RENDERED_CHECK", "1") != "0":
+            try:
+                from utils.stage_i_gates import rendered_check as _rendered_check
+                from routes.pdf import build_pdf as _si_build_pdf, _audit_rendered_pdf_bytes as _si_audit
+                try:
+                    from datetime import date as _si_date
+                    from utils.source_quality import window_start as _si_window
+                    _si_window_start = _si_window(question, _si_date.today())
+                except Exception:
+                    _si_window_start = None
+
+                def _si_build(payload):
+                    from routes.pdf import _trim_furniture_only_middle_pages, _trim_trailing_blank_pages
+                    return _trim_furniture_only_middle_pages(_trim_trailing_blank_pages(_si_build_pdf(
+                        report=payload.get("report") or "", title=payload.get("title") or "", question=question or "Research Report",
+                        summary=payload.get("summary") or "", key_stats=payload.get("keyStats") or [],
+                        charts=payload.get("charts") or [], file_images=[], web_images=payload.get("images") or [],
+                        theme=payload.get("theme"), sources=payload.get("sources"), presentation=payload.get("presentation"),
+                        report_tier=report_tier)))
+
+                def _si_audit_fn(pdf_bytes, payload):
+                    return _si_audit(pdf_bytes, payload.get("report") or "", payload.get("title") or "",
+                                     payload.get("charts") or [], payload.get("sources") or [], question=question)
+
+                def _si_repairs(report_md, charts_list, findings):
+                    from routes.pdf import _remove_exact_duplicate_observation_lines, _repair_rendered_chart_audit
+                    acts = []
+                    report_md2, charts2, meta = _repair_rendered_chart_audit(report_md, charts_list, findings)
+                    if meta.get("changed"):
+                        acts.append(f"chart repair: removed {meta.get('removedCharts', 0)} chart(s), "
+                                    f"pruned {meta.get('prunedPoints', 0)} point(s)")
+                    report_md2, removed = _remove_exact_duplicate_observation_lines(report_md2, findings)
+                    if removed:
+                        acts.append(f"removed {removed} exact duplicate observation line(s)")
+                    return normalize_report_markdown(report_md2), charts2, acts
+
+                _stage_i_render = await asyncio.to_thread(_rendered_check, response_payload, build=_si_build,
+                                                          audit=_si_audit_fn, window_start=_si_window_start,
+                                                          repairs=_si_repairs)
+                if isinstance(_v2_meta_for_publication, dict):
+                    _v2_meta_for_publication.setdefault("chartLint", {})["renderedCheck"] = {
+                        k: (v if k != "blocking" else [str(f.get("issue"))[:160] for f in v]) for k, v in _stage_i_render.items()
+                        if k != "warnings"} | {"warnings": [f"{w.get('issue')} {w.get('text', '')}"[:160]
+                                                            for w in _stage_i_render.get("warnings") or []]}
+                log.info("Report: in-job rendered check - %s page(s), %d healing round(s), %d blocking, %d warning(s)",
+                         _stage_i_render.get("pages"), _stage_i_render.get("rounds", 0),
+                         len(_stage_i_render.get("blocking") or []), len(_stage_i_render.get("warnings") or []))
+            except Exception as _si_exc:
+                log.warning("Report: in-job rendered check skipped: %s", type(_si_exc).__name__)
         _outcome = _classify_publication_outcome(
             final_deterministic_audits, response_payload.get("report", ""),
             (gemini_audit or {}).get("findings") if isinstance(gemini_audit, dict) else None,
@@ -25149,6 +25232,14 @@ async def generate_report(request: Request):
                         "failureSummary": [{"stage": "number_support",
                                             "issue": "Numbers not found in the cited evidence: "
                                                      + ", ".join(str(v) for v in _v2_unsupported_after_policy[:8])}]}
+            response_payload["failedStage"] = _outcome["failedStage"]
+            response_payload["failureSummary"] = _outcome["failureSummary"]
+            response_payload["draftAvailable"] = True
+        if _stage_i_render.get("blocking") and _outcome["outcome"] == "published":
+            _outcome = {**_outcome, "outcome": "draft", "failedStage": "rendered_pdf",
+                        "blockingCategories": ["rendered_pdf"],
+                        "failureSummary": [{"stage": "rendered_pdf", "issue": str(f.get("issue"))[:200]}
+                                           for f in _stage_i_render["blocking"][:8]]}
             response_payload["failedStage"] = _outcome["failedStage"]
             response_payload["failureSummary"] = _outcome["failureSummary"]
             response_payload["draftAvailable"] = True

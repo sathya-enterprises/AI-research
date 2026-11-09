@@ -11,6 +11,16 @@ import re
 import html as _html
 
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
+import logging
+
+_log = logging.getLogger("markdown_normalizer")
+
+
+def _is_pipe_row(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3
+
+
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 _INLINE_SOURCE_ID_RE = re.compile(r"\b(?:S|SRC)\s*[-#]?\s*(\d+)\b", re.IGNORECASE)
 
@@ -382,6 +392,13 @@ def normalize_report_markdown(value: object) -> str:
     normalized = re.sub(r"\]\s+([.,;:!?])", r"]\1", normalized)
     normalized = _strip_generation_control_markers(normalized)
     normalized = _put_visual_placeholders_on_own_lines(normalized)
+    try:  # Stage I: text-art arrows/bars become sentences or are removed (the PDF renders no monospace art)
+        from utils.flow_text import convert_text_art
+        normalized, _art_actions = convert_text_art(normalized)
+        if _art_actions:
+            _log.info("Normalizer: text-art clean-up - %d change(s)", len(_art_actions))
+    except Exception as exc:  # pragma: no cover - never block normalisation
+        _log.warning("Normalizer: text-art clean-up skipped: %s", exc)
     normalized = _clean_ascii_diagram_frames(normalized)
     normalized = _dedupe_repeated_markdown_blocks(normalized)
     normalized = _remove_unverified_metric_placeholders(normalized)
@@ -411,8 +428,36 @@ def _clean_ascii_diagram_frames(text: str) -> str:
             table_end += 1
         markdown_table_lines.update(range(cursor, table_end + 1))
         cursor = table_end + 1
+    # Stage I (FIX 3): a block of two or more pipe rows that is not a valid table (its header row was
+    # lost) is dropped with its "**Table: ...**" caption and "Source:" line, never flattened into
+    # "a — b — c" text. A single stray pipe row is still cleaned as before.
+    drop: set[int] = set()
+    index = 0
+    while index < len(source_lines):
+        if index in markdown_table_lines or not _is_pipe_row(source_lines[index]):
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(source_lines) and end + 1 not in markdown_table_lines and _is_pipe_row(source_lines[end + 1]):
+            end += 1
+        if end > index:
+            drop.update(range(index, end + 1))
+            before = index - 1
+            while before >= 0 and not source_lines[before].strip():
+                before -= 1
+            if before >= 0 and re.match(r"^\s*\*\*Table\b[^\n]*\*\*\s*$", source_lines[before]):
+                drop.add(before)
+            after = end + 1
+            while after < len(source_lines) and not source_lines[after].strip():
+                after += 1
+            if after < len(source_lines) and re.match(r"^\s*\*?Source:", source_lines[after]):
+                drop.add(after)
+            _log.info("Normalizer: dropped a %d-row table without a header row", end - index + 1)
+        index = end + 1
     lines = []
     for index, line in enumerate(source_lines):
+        if index in drop:
+            continue
         if index in markdown_table_lines:
             lines.append(line)
             continue

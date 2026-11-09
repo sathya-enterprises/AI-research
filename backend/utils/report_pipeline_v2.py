@@ -130,7 +130,7 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
-def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None) -> dict:
+def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None, window_start=None) -> dict:
     """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
     from utils.number_policy import apply_number_policy
     from utils.section_charts import _is_qtd, qtd_start_month
@@ -140,7 +140,7 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
 
     start = qtd_start_month(today)
     qtd = (lambda text: _is_qtd(text, start)) if start else None
-    tables = tables_in(store)
+    tables = tables_in(store, window_start)  # Stage I: in-window, dated tables only
     by_id = {t.passage_id: t for t in tables}
     summaries = {d.section_id: d.summary for d in good}
     sections = {s.section_id: s for s in analysis}
@@ -218,8 +218,11 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
     scorecard = entity_table(columns, sectors, caption="Sector scorecard: verified metrics by sector", min_values=2)
     if scorecard:
         stats["scorecardRows"] = scorecard.count("\n| ") - 1
-        note = how_to_read(deep_dives=sum(1 for e in edited if e.role == "deep_dive"),
-                           compact=sum(1 for e in edited if e.role == "compact"),
+        in_depth = str((outline.meta or {}).get("tier") or "") == "in_depth"
+        # Counts of what exists: entity deep-dives and compact multi-sector comparisons (in-depth only).
+        note = how_to_read(deep_dives=sum(1 for e in edited if in_depth and e.role == "deep_dive" and e.entity),
+                           compact=sum(1 for e in edited if in_depth and e.role == "compact"
+                                       and len(getattr(sections.get(e.section_id), "entities", []) or []) >= 3),
                            has_qtd="QTD, partial" in scorecard or any("QTD" in e.body for e in edited),
                            has_calculated=any("(calculated:" in e.body for e in edited))
         # The table opens the section page (it is one unbreakable block); the reading note follows it.
@@ -257,12 +260,10 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
     kinds = Counter(p.kind for p in store.passages)
     cited_sources = {pid.split(".")[0] for d in drafts for pid in d.cited_passages}
     lines = [
-        f"This report answers: *{question}*. {window_note}".strip(),
-        "",
         f"**Evidence base.** {len(manifest)} sources were retained after relevance and quality screening "
         f"({', '.join(f'{n} {t.replace(chr(95), chr(32))}' for t, n in tiers.most_common())}); {dated} carry a publication date. "
         f"They were split into {len(store.passages)} evidence passages ({', '.join(f'{n} {k.replace(chr(95), chr(32))}' for k, n in kinds.most_common())}). "
-        f"{len(cited_sources)} sources are cited in the analysis.",
+        "{{CITED_SOURCE_COUNT}} sources are cited in the analysis and listed in Data Sources.",
         "",
         "**Reliability scoring.** Each source has a reliability score (0–1): 55% authority tier (regulator/exchange data highest; "
         "personal blogs and pay-to-publish journals lowest; look-alike domains excluded), 25% recency relative to the requested "
@@ -283,10 +284,14 @@ def methodology_markdown(*, store, manifest: list[dict], outline, charts: list, 
                       f"{tier_counts.get('coverage_note', 0)} had neither."]
         if names.get("coverage_note"):
             lines += [f"Not analysed for lack of evidence: {', '.join(names['coverage_note'])}."]
-    if outline.entity_coverage:
-        covered = [r for r in outline.entity_coverage if r["status"] == "covered"]
-        lines += ["", f"**Coverage.** {len(covered)} of {len(outline.entity_coverage)} identified entities had enough evidence "
-                      f"for dedicated analysis."]
+    written = {d.section_id for d in drafts}
+    roles = {s.section_id: s for s in outline.sections}
+    own = [roles[sid].entity for sid in written if sid in roles and roles[sid].role == "deep_dive" and roles[sid].entity]
+    compact = [sid for sid in written if sid in roles and roles[sid].role == "compact"]
+    if own or compact:
+        lines += ["", "**Entity coverage.** " + ("; ".join(x for x in [
+            f"{len(own)} sector(s) have their own section ({', '.join(sorted(own)[:12])})" if own else "",
+            f"{len(compact)} compact comparison section(s) cover further sectors" if compact else ""] if x)) + "."]
     if outline.decisions or failed:
         lines += ["", "**Scope decisions and limitations.**"]
         lines += [f"- {d}" for d in outline.decisions[:20]]
@@ -318,16 +323,21 @@ def appendix_sources_markdown(manifest: list[dict], cited: set[str]) -> str:
     return "\n".join(out)
 
 
-def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10, max_rows: int = 30) -> str:
+def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10, max_rows: int = 30,
+                           window_start=None, max_historical: int = 2) -> str:
+    """Stage I (FIX 2): a table whose period ends before the question's window is never mixed with the
+    in-window tables; at most ``max_historical`` such tables appear, in a labelled historical block."""
     from utils.section_charts import merge_continuations
 
     tables = merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"} and p.passage_id in used_passages])
     if not tables:
         return ""
     out = ["Data tables used in the analysis, reproduced from the cited evidence passages."]
+    historical: list[str] = []
     seen_headings: set[str] = set()
     shown = 0
     for p in tables:
+        target = out
         if shown >= max_tables:
             break
         lines = [ln for ln in p.text.splitlines() if ln.strip()]
@@ -344,7 +354,16 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         body_rows = [r for r in rows[1:] if len(r.split("|")) == width]
         if not body_rows:
             continue  # rows that do not fit the header would render an empty table under a bare caption
-        shown += 1
+        if window_start is not None:
+            from utils.period_hygiene import in_window, table_period
+            _label, _end = table_period(heading, [c.strip() for c in rows[0].split("|")], getattr(p, "published", "") or "")
+            if _end is not None and not in_window(_end, window_start):
+                if len([x for x in historical if x.startswith("### ")]) >= max_historical:
+                    log.info("V2 appendix: out-of-window table skipped (%s, ends %s)", heading[:60], _end)
+                    continue
+                target = historical
+        if target is out:
+            shown += 1
         ids = ", ".join(getattr(p, "merged_ids", None) or [p.passage_id])
         # A clear caption: the source's table title without its "TABLE n —" numbering; a
         # too-short title is described from the table's own columns.
@@ -364,12 +383,15 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
             return [c.strip() for c in line.strip().strip("|").split("|")][:max_cols]
 
         head = cells(rows[0])
-        out += ["", f"### {caption} [{ids}]", "", "| " + " | ".join(head) + " |",
-                "| " + " | ".join(["---"] * len(head)) + " |"]
-        out += ["| " + " | ".join(cells(r)) + " |" for r in body_rows]
+        target += ["", f"### {caption} [{ids}]", "", "| " + " | ".join(head) + " |",
+                   "| " + " | ".join(["---"] * len(head)) + " |"]
+        target += ["| " + " | ".join(cells(r)) + " |" for r in body_rows]
         total_cols = len(rows[0].strip().strip("|").split("|"))
         if total_cols > max_cols:
-            out += ["", f"Note: the first {max_cols} of {total_cols} columns are shown; the full table is in the cited source."]
+            target += ["", f"Note: the first {max_cols} of {total_cols} columns are shown; the full table is in the cited source."]
+    if historical:
+        out += ["", f"**Historical reference (before {window_start:%b %Y}; outside the question's window, for context only).**"]
+        out += historical
     return "\n".join(out)
 
 
@@ -393,12 +415,33 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if tiers is None and tier == "in_depth":
         from utils.entity_tiers import entity_tiers
         tiers = entity_tiers(store, tier=tier)
+    # Stage I (FIX 4): the market regime is computed in code from the fetched dataset and given to the
+    # outline and the executive summary as fixed facts; the thesis and rotation claims are checked against it.
+    regime, regime_log = None, {"computed": False, "thesisRewritten": False, "claims": [], "mislabels": []}
+    try:
+        from utils.dataset_charts import find_quarterly_dataset
+        from utils.regime import compute_regime
+        regime = compute_regime(find_quarterly_dataset(store))
+    except Exception as exc:  # never block the report on the regime summary
+        log.warning("V2 regime summary skipped: %s", type(exc).__name__)
+    if regime is not None:
+        regime_log.update(computed=True, firstHalf=regime.first_half, secondHalf=regime.second_half,
+                          compounded=regime.compounded, leaders=regime.leaders, laggards=regime.laggards)
+        window_note = f"{window_note}\n{regime.facts_block()}".strip()
     try:
         outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note,
                                       asks=asks,
                                       tiers=tiers)
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
+    if regime is not None:
+        from utils.regime import thesis_needs_rewrite
+        regime_log["dispersion"] = regime.dispersion_sentence()
+        reason = thesis_needs_rewrite(outline.thesis or "", regime)
+        if reason:
+            log.warning("V2 regime: outline thesis rewritten (%s)", reason)
+            regime_log.update(thesisRewritten=True, thesisReason=reason, originalThesis=(outline.thesis or "")[:400])
+            outline.thesis = regime.thesis_sentence()
     analysis = outline.analysis_sections()
     if len(analysis) < 3:
         raise PipelineV2Error(f"only {len(analysis)} analysis sections have enough evidence")
@@ -418,6 +461,20 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     from utils.dataset_charts import build_dataset_charts, preassign
     from utils.section_charts import verify_chart
     dataset_charts, dataset_note = build_dataset_charts(store)
+    # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
+    # flattened tables), code verifies every value and label against the passage.
+    extracted_ids: set[str] = set()
+    if os.getenv("GG_V2_DATASET_EXTRACT", "1") != "0":
+        try:
+            from utils.dataset_extractor import extract_dataset_charts
+            extracted, extract_note = await extract_dataset_charts(
+                store, gateway, question=question, today=today, limit=8 if tier == "in_depth" else 4,
+                queries=[f"{s.title} {s.goal}" for s in analysis])
+            dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "extracted": extract_note}
+            extracted_ids = {c.chart_id for c in extracted}
+            dataset_charts = list(dataset_charts) + extracted
+        except Exception as exc:  # extraction must never abort a report
+            log.warning("V2 dataset extraction skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     for chart in dataset_charts:
         reason = verify_chart(chart, "\n".join(store.get(pid).text for pid in chart.passage_ids if store.get(pid)))
         if reason:
@@ -435,6 +492,23 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             continue
         deduped.append(chart)
     candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
+    # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
+    # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).
+    try:
+        from utils.chart_lint import quality_reason
+        _kept = []
+        for chart in candidates:
+            _reason = quality_reason(chart.spec, chr(10).join(
+                store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400])
+            if _reason:
+                chart.status, chart.drop_reason = "dropped", f"quality gate before writing: {_reason}"
+                chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
+                                    "reason": chart.drop_reason})
+            else:
+                _kept.append(chart)
+        candidates = _kept
+    except Exception as exc:
+        log.warning("V2 early chart quality gate skipped: %s", type(exc).__name__)
     # Run the same chart verification the export gates use BEFORE writing, so the
     # writer only interprets charts that will survive to the PDF.
     if chart_verifier and candidates:
@@ -457,6 +531,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # renumbering in document order, so table charts keep the numbers the writer is given.
     data_first = [c for c in candidates if c.interpretation]
     preassign(data_first, analysis, side_charts=DATASET_SIDE_CHARTS.get(tier, 4))
+    if extracted_ids:
+        from utils.dataset_extractor import assign_to_sections
+        assign_to_sections([c for c in data_first if c.chart_id in extracted_ids], analysis)
     table_charts = [c for c in candidates if not c.interpretation]
     assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
     unassigned = [c for c in candidates if not c.section_id]
@@ -551,7 +628,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     exec_section = next(s for s in outline.sections if s.kind == "executive_summary")
     summaries = "\n\n".join(f"## {d.title}\n{d.summary}" for d in good if d.summary)
     exec_prompt = (f"QUESTION: {question}\nTHESIS: {outline.thesis}\nLENGTH: about {exec_section.word_budget} words.\n\n"
-                   f"SECTION SUMMARIES:\n{summaries}")
+                   + (f"{regime.facts_block()}\n\n" if regime is not None else "")
+                   + f"SECTION SUMMARIES:\n{summaries}")
     exec_result = await gateway.generate(purpose="executive_summary", section_id="exec", system=EXEC_SYSTEM,
                                          prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120)
     exec_body = (exec_result.text.split(SUMMARY_MARKER)[0].strip() if exec_result.ok else "")
@@ -568,6 +646,33 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         allowed_numbers=_number_set(d.summary for d in good), section_id="exec")
     exec_body = exec_policy.body
     exec_unsupported = unsupported_numbers(exec_body, _number_set(d.summary for d in good))
+    try:  # Stage I (FIX 9): headline claims backed only by low-reliability sources are qualified
+        from utils.stage_i_gates import qualify_low_reliability
+        _reliability = {}
+        for _m in manifest or []:
+            try:
+                _reliability[str(_m.get("id") or "").upper()] = float(_m.get("reliability_score") or _m.get("reliabilityScore"))
+            except (TypeError, ValueError):
+                continue
+        exec_body, regime_log["lowReliabilityQualified"] = qualify_low_reliability(exec_body, _reliability)
+    except Exception as exc:
+        log.warning("V2 low-reliability qualifier skipped: %s", type(exc).__name__)
+    # Stage I (FIX 4 + dispersion): the executive summary opens with the computed regime statement when
+    # its own opening contradicts the regime or omits a sector-specific dispersion finding.
+    if regime is not None and exec_body:
+        from utils.regime import thesis_needs_rewrite
+        opening = exec_body.split("\n\n", 1)[0]
+        reason = thesis_needs_rewrite(opening, regime)
+        if reason:
+            try:
+                from utils.dataset_charts import find_quarterly_dataset
+                data = find_quarterly_dataset(store)
+                cite = next(iter(data.rows.values())).passage_id if data and data.rows else ""
+            except Exception:
+                cite = ""
+            exec_body = regime.thesis_sentence().rstrip(".") + (f" [{cite}]." if cite else ".") + "\n\n" + exec_body
+            regime_log.update(execThesisInserted=True, execThesisReason=reason)
+            log.warning("V2 regime: executive summary opens with the computed regime statement (%s)", reason[:160])
 
     # Figure renumbering in document order (dropped figures leave no gaps).
     used = [c for c in planned if c.status == "referenced"]
@@ -598,8 +703,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         claims_seen.add(re.sub(r"\W+", " ", c.claim).strip().casefold())
         spec = dict(c.spec)
         spec["title"] = f"Figure {c.figure_number}: {spec.get('title')}"
-        spec["takeaway"] = c.claim
-        spec["rationale"] = f"Supports: {c.claim}"[:400] if c.claim else ""
+        # Stage I (FIX 6): the takeaway comes from the plotted values, never the body sentence that
+        # interprets the figure; there is no CONTEXT box ("Supports: <the same sentence>").
+        from utils.repetition import data_takeaway
+        spec["takeaway"] = data_takeaway(spec)
+        spec["rationale"] = ""
         spec["evidencePassages"] = c.passage_ids
         charts_out.append(spec)
     unique_titles(charts_out)
@@ -631,8 +739,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         deadline_log["transitionsSkipped"] = True
         log.warning("V2 deadline: editorial transitions call skipped")
     edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway)
+    try:
+        from utils.source_quality import window_start as _window_start
+        layout_window = _window_start(question, _asks_date.fromisoformat(today[:10]))
+    except Exception:
+        layout_window = None
     layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
-                                   asks=asks)
+                                   asks=asks, window_start=layout_window)
     # Agreement list questions ("all the FTAs signed in the past 1 year"): the dated ledger from the
     # evidence (signing kept apart from entry into force; what official sources verify), placed in the
     # section that answers the list ask.
@@ -673,7 +786,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if tier == "in_depth":
         # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
         # Tables placed in the text that discusses them are not repeated in the appendix.
-        data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"])
+        try:
+            from datetime import date as _ad
+            from utils.source_quality import window_start as _ws
+            _appendix_window = _ws(question, _ad.fromisoformat(today[:10]))
+        except Exception:
+            _appendix_window = None
+        data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"], window_start=_appendix_window)
         if data_md:
             parts.append(f"## Appendix A — Data Tables\n\n{data_md}")
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
@@ -685,6 +804,32 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     report_md = FIGURE_MARKER_RE.sub(lambda m: f"[CHART_{int(m.group(1))}]" if 1 <= int(m.group(1)) <= len(charts_out) else "", report_md)
     report_md = _source_level(report_md)
     report_md, exhaustive_rewrites = guard_exhaustive_claims(report_md, asks)
+    from utils.leak_gate import remove_leaks
+    report_md, leak_actions = remove_leaks(report_md)  # Stage I: no writer-prompt text reaches the report
+    try:
+        from utils.regime import fix_mislabels, heal_rotation_claims
+        report_md, regime_log["mislabels"] = fix_mislabels(report_md)
+        if regime is not None:
+            report_md, regime_log["claims"] = heal_rotation_claims(report_md, regime)
+    except Exception as exc:
+        log.warning("V2 regime checks skipped: %s", type(exc).__name__)
+    # Stage I (FIX 6): each dataset once, a statistic at most twice in the prose, figure boxes not
+    # repeating the body.
+    repetition_log: dict = {}
+    try:
+        from utils.repetition import cap_headline_stats, dedupe_tables, echoes_body, repetition_metrics
+        repetition_log["before"] = repetition_metrics(report_md, charts_out)
+        report_md, repetition_log["tablesRemoved"] = dedupe_tables(report_md, charts_out)
+        report_md, repetition_log["statCap"] = cap_headline_stats(report_md)
+        for chart in charts_out:
+            if chart.get("takeaway") and echoes_body(chart["takeaway"], report_md):
+                repetition_log.setdefault("takeawaysDropped", []).append(chart.get("title"))
+                chart["takeaway"] = ""
+        repetition_log["after"] = repetition_metrics(report_md, charts_out)
+        from utils.stage_i_gates import fix_small_items
+        report_md, repetition_log["smallItems"] = fix_small_items(report_md)
+    except Exception as exc:
+        log.warning("V2 repetition control skipped: %s", type(exc).__name__)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     report_md, charts_out, _ = finalize_figures(report_md, charts_out)
     # Some chart checks depend on the finished text (e.g. a report table that marks
@@ -709,6 +854,40 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             charts_out = [charts_out[i - 1] for i in keep]
             report_md, charts_out, _ = finalize_figures(report_md, charts_out)
             report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
+
+    # Stage I (FIX 8): chart quality gate + CHART LINT (auto-fix titles, axes, units, types, precision,
+    # source lines) before render; a dropped chart's references are rewritten by finalize_figures.
+    chart_lint_log: dict = {}
+    if charts_out:
+        try:
+            from utils.chart_lint import lint_all, run_chart_lint
+            manifest_by_id = {str(m.get("id") or "").upper(): m for m in manifest or [] if isinstance(m, dict)}
+
+            def _passage_text(spec):
+                return "\n".join(store.get(pid).text for pid in spec.get("evidencePassages") or [] if store.get(pid))
+
+            linted, lint_dropped, lint_fix = run_chart_lint(charts_out, passage_text=_passage_text,
+                                                            manifest=manifest_by_id, today=today)
+            if lint_dropped:
+                gone = {d["index"] for d in lint_dropped}
+                keep = [i for i in range(1, len(charts_out) + 1) if i not in gone]
+                remap = {old: new for new, old in enumerate(keep, 1)}
+                report_md = re.sub(r"\[CHART_(\d+)\]", lambda m: f"[CHART_§{remap[int(m.group(1))]}]"
+                                   if int(m.group(1)) in remap else "", report_md).replace("§", "")
+            charts_out = [c for c in linted]
+            report_md, charts_out, _ = finalize_figures(report_md, charts_out)
+            report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
+            inventory, failing = lint_all(charts_out)
+            chart_lint_log = {"dropped": [{"title": d["title"], "reason": d["reason"]} for d in lint_dropped],
+                              "fixed": lint_fix["fixed"], "inventory": inventory, "failing": failing}
+        except Exception as exc:  # the lint must never abort a report
+            log.warning("V2 chart lint skipped: %s: %s", type(exc).__name__, str(exc)[:160])
+    try:  # Stage I (FIX 8): tables have their own "Table N" sequence, a caption and a source
+        from utils.chart_lint import number_tables
+        report_md, table_actions, table_inventory = number_tables(report_md)
+        chart_lint_log.update(tableActions=table_actions, tableInventory=table_inventory)
+    except Exception as exc:
+        log.warning("V2 table numbering skipped: %s: %s", type(exc).__name__, str(exc)[:160])
 
     # Number check = report.py's source-evidence check (value, unit and metric): claims it
     # flags are dropped here, with a log line, before report.py's own check runs. Whatever is
@@ -741,6 +920,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "deadline": {**deadline_log, "target": round(deadline[0] - time.monotonic()) if deadline else None,
                      "hardStop": round(deadline[1] - time.monotonic()) if deadline else None},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
+        "leakGate": leak_actions,
+        "regime": regime_log,
+        "repetition": repetition_log,
+        "chartLint": chart_lint_log,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

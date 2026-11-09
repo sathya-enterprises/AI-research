@@ -215,6 +215,17 @@ def reconcile_final_audit(audits: dict, report_text: str, store) -> list[dict]:
     return overrides
 
 
+def _is_table_header(text: str, pos: int) -> bool:
+    """The line at ``pos`` is a Markdown table header (the next line is the separator row)."""
+    line_start = text.rfind("\n", 0, pos) + 1
+    line_end = text.find("\n", pos)
+    if line_end < 0 or not text[line_start:line_end].lstrip().startswith("|"):
+        return False
+    next_end = text.find("\n", line_end + 1)
+    nxt = text[line_end + 1: next_end if next_end >= 0 else len(text)]
+    return bool(re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", nxt))
+
+
 def _norm(text: str) -> str:
     text = CITE_SRC_RE.sub(" ", re.sub(r"[*_`]", "", str(text or "")))
     return re.sub(r"\W+", " ", text.casefold()).strip()
@@ -311,6 +322,8 @@ def fix_flagged_claims(report_md: str, auditor, *, max_rounds: int = 4, rewriter
             if not span:
                 continue
             start, end = span
+            if _is_table_header(report_md, start):
+                continue  # a table header row is not a claim (Stage I: removing it broke the table)
             snippet = report_md[start:end]
             values = list(group.get("unmatchedNumericClaims") or [])[:6]
             reason = ("cited sources hold the number for a different metric" if group.get("subjectMismatchTokens")

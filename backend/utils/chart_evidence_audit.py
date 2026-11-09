@@ -287,7 +287,12 @@ def _publisher_evidence_verified(source: dict) -> bool:
     manifest_excerpt = bool(str(source.get("evidenceExcerpt") or source.get("evidence_excerpt") or "").strip())
     # A mixed publisher+search source is accepted only when this report's gallery
     # attached a publisher-specific excerpt that was re-matched to fetched page text.
-    origin_ok = origin in {"", "publisher_page", "publisher-page", "publisher_page_crawl", "publisher_page_fetch", "publisher"} or gallery_excerpt_verified or legacy_gallery_excerpt_verified or table_excerpt_verified
+    # Stage J: a fetched page that also has a search snippet ("publisher_page_and_search_extract") is
+    # publisher evidence for its FETCHED PAGE TEXT; _chart_source_text then uses only that text (never
+    # the mixed excerpt), so a search-only sentence still cannot verify a chart point.
+    fetched_page = any(str(source.get(key) or "").strip() for key in ("pageContent", "page_content"))
+    mixed_with_page = origin == "publisher_page_and_search_extract" and fetched_page
+    origin_ok = origin in {"", "publisher_page", "publisher-page", "publisher_page_crawl", "publisher_page_fetch", "publisher"} or gallery_excerpt_verified or legacy_gallery_excerpt_verified or table_excerpt_verified or mixed_with_page
     return status == "ok" and origin_ok and (direct or manifest_excerpt)
 
 
@@ -994,6 +999,13 @@ def _period_ranges(text: object) -> list[tuple[int, int, str]]:
 def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
     """Resolve explicit or relative time limits from the user's request."""
     text = str(question or "")
+    # Stage J: "since 2022" / "from 2022" (open-ended) = January 2022 to the end of the current year,
+    # not "only 2022"
+    since = re.search(r"(?i)\b(?:since|from|after)\s+(?:the\s+(?:start|beginning)\s+of\s+)?((?:19|20)\d{2})\b(?!\s*(?:to|until|till|through|and|-|–|—)\s*(?:19|20)?\d{2})", text)
+    if since:
+        import datetime as _since_dt
+        _today = _since_dt.date.today()
+        return [(_month_ordinal(int(since.group(1)), 1), _month_ordinal(_today.year, 12), since.group(0))]
     relative = re.search(
         r"(?i)\b(last|past|previous|prior|preceding)\s+(\d+)\s+(days?|weeks?|months?|quarters?|years?)\b", text,
     )
@@ -1010,7 +1022,11 @@ def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
             start_month = current_q_start - count * 3
             end_month = current_q_start + 2  # a "Q4 2026" / "Q3 FY27" label spans the whole current quarter
         elif unit.startswith("year"):
-            start_month = end_month - count * 12 + 1
+            # Stage J: whole calendar years, like quarters: the last N completed years plus the current
+            # year to date ("past 3 years" in Nov 2026 = 2023-2026). A month-exact window (Dec 2023 -
+            # Nov 2026) rejected every whole-year label but two, so no yearly series could pass.
+            start_month = _month_ordinal(today.year - count, 1)
+            end_month = _month_ordinal(today.year, 12)
         elif unit.startswith("week"):
             start_month = _month_ordinal((today - _dt.timedelta(days=count * 7)).year,
                                          (today - _dt.timedelta(days=count * 7)).month)

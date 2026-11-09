@@ -5217,7 +5217,10 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
             continue
         # A line whose only numbers are years ("QTD RETURN TO NOV 2026 (%)", a column header shared by
         # two tables) states no observation (Stage G false alarm from a live run).
-        if not re.search(r"\d", re.sub(r"\b(?:19|20)\d{2}\b", "", observation_text)):
+        # Stage I: fiscal-period labels ("Q2 FY27", "FY25", "H1FY27") are period names, not values either.
+        if not re.search(r"\d", re.sub(r"(?i)\b(?:(?:19|20)\d{2}|Q[1-4]\s*FY\s*\d{2,4}|H[12]\s*FY\s*\d{2,4}|FY\s*\d{2,4}E?|Q[1-4]"
+                                       r"|NIFT\s?Y\s*\d{2,3}|SENSEX\s*\d{0,2}|S&P\s*\d{3}|\d+[- ](?:year|month|week|day|quarter)s?)\b",
+                                       "", observation_text)):
             continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)
         normalized = re.sub(r"\bS\d+\b", "", normalized, flags=re.I)
@@ -5254,6 +5257,13 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
         except Exception as exc:
             findings.append({"severity": "critical", "issue": "Final PDF chart-evidence validation failed unexpectedly.",
                              "detail": f"{type(exc).__name__}: {str(exc)[:180]}"})
+
+    # Stage I (FIX 3): flattened arrow diagrams and flattened table text in the rendered PDF.
+    try:
+        from utils.flow_text import rendered_flow_findings
+        findings.extend(rendered_flow_findings(rendered_text))
+    except Exception as exc:
+        log.warning("PDF audit: rendered flow check skipped: %s", exc)
 
     return {"status": "FAIL" if findings else "PASS", "blocking": bool(findings),
             "pageCount": page_count, "extractedTextChars": len(rendered_text),

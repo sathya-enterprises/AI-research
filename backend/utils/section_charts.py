@@ -50,9 +50,17 @@ class PlannedChart:
         head = f"Figure {self.figure_number}: {self.spec.get('title')} (unit: {unit or 'as labelled'}; evidence: {', '.join(self.passage_ids)})"
         rows: dict[str, list[str]] = {}
         for series, column, value in self.points:
-            rows.setdefault(series, []).append(f"{column}={value:g}{unit if unit == '%' else ''}")
+            rows.setdefault(series, []).append(f"{column}={plain_number(value)}{unit if unit == '%' else ''}")
         body = "\n".join(f"  - {name}: {', '.join(cells)}" for name, cells in list(rows.items())[:20])
         return head + "\n" + body
+
+
+def plain_number(value: float) -> str:
+    """2821760.0 -> '2,821,760'; 0.000123 -> '0.000123'; never scientific notation (Stage J)."""
+    value = float(value)
+    if value.is_integer():
+        return f"{int(value):,}"
+    return f"{value:,.6f}".rstrip("0").rstrip(".")
 
 
 def _parse_number(cell: str) -> tuple[float, str] | None:
@@ -91,16 +99,26 @@ def qtd_start_month(today: str | None) -> int | None:
 
 
 def _is_qtd(text: str, qtd_start: int | None) -> bool:
+    """Every period named starts inside the CURRENT quarter (Stage J: later periods are forecasts, not QTD)."""
     if not qtd_start:
         return False
     from utils.chart_evidence_audit import _period_ranges
     ranges = _period_ranges(text)
-    return bool(ranges) and all(start >= qtd_start for start, _end, _label in ranges)
+    return bool(ranges) and all(qtd_start <= start < qtd_start + 3 for start, _end, _label in ranges)
+
+
+def _is_future(text: str, qtd_start: int | None) -> bool:
+    """Every period named starts after the current quarter: the data can only be a forecast or target."""
+    if not qtd_start:
+        return False
+    from utils.chart_evidence_audit import _period_ranges
+    ranges = _period_ranges(text)
+    return bool(ranges) and all(start >= qtd_start + 3 for start, _end, _label in ranges)
 
 
 def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None, *,
                         _only_cols: list[int] | None = None, _only_rows: set[str] | None = None,
-                        _qtd: bool = False) -> list[PlannedChart]:
+                        _qtd: bool = False, _future: bool = False) -> list[PlannedChart]:
     """0–2 charts from one table passage (the best numeric view of the table).
 
     Current-quarter-to-date data (``qtd_start``) is valid evidence but partial: a
@@ -138,7 +156,14 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         numeric_cols = [c for c in numeric_cols if c in _only_cols]
     if not numeric_cols:
         return []
-    if qtd_start and not _qtd and _only_cols is None and _only_rows is None:
+    if qtd_start and not _qtd and not _future and _only_cols is None and _only_rows is None:
+        # future periods (forecasts / targets) are never mixed with observed data
+        future_rows = {r[0] for r in rows if _is_future(r[0], qtd_start)}
+        past_rows = {r[0] for r in rows if r[0] not in future_rows}
+        if future_rows and past_rows:
+            return (charts_from_passage(passage, chart_index, qtd_start, _only_rows=past_rows)
+                    + (charts_from_passage(passage, chart_index, qtd_start, _only_rows=future_rows, _future=True)
+                       if len(future_rows) >= 2 else []))
         qtd_cols = [c for c in numeric_cols if _is_qtd(header[c], qtd_start)]
         done_cols = [c for c in numeric_cols if c not in qtd_cols]
         if qtd_cols and done_cols:
@@ -185,7 +210,9 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         title = data_title(metric=metric, labels=labels[:MAX_BAR_POINTS],
                            period=period_of([metric], heading, labels), unit=unit)
     plotted_periods = [header[c] for c in (period_cols if len(period_cols) >= 2 else numeric_cols[:1])]
-    if _qtd or (qtd_start and (_is_qtd(title, qtd_start) or all(_is_qtd(h, qtd_start) for h in plotted_periods))):
+    if _future or (qtd_start and plotted_periods and all(_is_future(h, qtd_start) for h in plotted_periods)):
+        title = f"{title} (forecast)"
+    elif _qtd or (qtd_start and (_is_qtd(title, qtd_start) or all(_is_qtd(h, qtd_start) for h in plotted_periods))):
         title = f"{title} ({QTD_LABEL})"
     evidence_rows = {r[0]: " | ".join(r) for r in rows}
 

@@ -102,12 +102,41 @@ def source_number(source_id: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def display_date(raw) -> str:
+    """'2025-06-26', 'Jun 26, 2025', '26 June 2025' -> '2025-06-26' (ISO, as before); never a cut string ('Jun 26, 20')."""
+    from datetime import datetime
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y", "%Y/%m/%d", "%d-%m-%Y", "%Y-%m"):
+        for candidate in (text[:10], text[:12], text[:18], text):
+            try:
+                parsed = datetime.strptime(candidate.strip(), fmt)
+                return f"{parsed:%Y-%m-%d}" if fmt != "%Y-%m" else f"{parsed:%Y-%m}"
+            except ValueError:
+                continue
+    import re as _re
+    year = _re.search(r"\b(?:19|20)\d{2}\b", text)
+    return text[:24] if year else ""
+
+
+def is_calculated(source: dict) -> bool:
+    """A dataset computed in this report (no public page): never shown as a 'primary official' source."""
+    url = str(source.get("url") or "")
+    blob = " ".join(str(source.get(k) or "") for k in ("reliability_note", "publisher", "title", "kind", "evidence_origin"))
+    return not url.startswith(("http://", "https://")) and bool(re.search(r"(?i)calculated|internal dataset|growth gradual market data", blob))
+
+
 def metadata_parts(source: dict) -> list[str]:
+    if is_calculated(source):
+        # Stage I: an internal calculated dataset is labelled as such, not "primary official, reliability 1.00".
+        publisher = display_publisher(source)
+        return [x for x in (publisher, "Calculated in this report from the market data named in the title") if x]
     parts = []
     publisher = display_publisher(source)
     if publisher:
         parts.append(publisher)
-    date = str(source.get("publication_date") or "").strip()[:10]
+    date = display_date(source.get("publication_date"))
     parts.append(f"Published: {date}" if date else "Undated")
     tier = str(source.get("authority_tier") or "").replace("_", " ").strip()
     if tier and tier != "unknown":

@@ -569,8 +569,14 @@ def restore_fetched_dataset(store, stages: dict, manifest: list) -> bool:
     store (the registry renamed it). A live run now keeps it, so the replay rebuilds it from the
     captured dataset rows (exactly the rows the live run fetched)."""
     qrows = ((stages.get("calculated_sector_quarterly_dataset") or {}).get("data") or {}).get("rows") or []
-    if not qrows or any(p.kind == "calculated" and "Sector | Q" in p.text for p in store.passages):
+    if not qrows:
         return False
+    # Stage I: the replay rebuilds the dataset with the current formatter (group summary) and the
+    # current data-sanity checks, exactly as a live run would build it from the fetched rows.
+    import copy
+    from utils.data_sanity import check_dataset_rows
+    qrows = copy.deepcopy(qrows)
+    check_dataset_rows(qrows)
     from utils.market_data import format_sector_quarterly_returns_as_source
     source = format_sector_quarterly_returns_as_source(qrows)
     sid = next((str(m.get("id")).upper() for m in manifest if isinstance(m, dict)
@@ -612,11 +618,13 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     _texts: dict[str, list[str]] = {}
     for _p in store.passages:
         _texts.setdefault(_p.source_id, []).append(str(_p.text or ""))
-    _by_url = {str(r.get("url") or "").rstrip("/"): r for r in enriched_rows}
+    def _url_key(u):  # http/https and www. do not make a different page
+        return re.sub(r"^https?://(?:www\.)?", "", str(u or "").strip().rstrip("/").casefold())
+    _by_url = {_url_key(r.get("url")): r for r in enriched_rows}
     verifier_rows = []
     for _m in manifest_rows:
         _sid = str(_m.get("id") or "").upper()
-        _fetched = _by_url.get(str(_m.get("url") or "").rstrip("/"), {})
+        _fetched = _by_url.get(_url_key(_m.get("url")), {})
         _body = "\n\n".join([str(_fetched.get("fullContent") or ""), *_texts.get(_sid, [])]).strip()
         if _body:
             verifier_rows.append({**_fetched, **_m, "id": _sid, "fullContent": _body, "pageContent": _body,
@@ -663,6 +671,9 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     # as a labelled draft, like a live run whose checks found open issues.
     out.setdefault("publicationOutcome", "draft")
     out.setdefault("reportTier", str(capture.get("reportTier") or "detailed"))
+    from utils.boilerplate import resolve_source_count
+    out["report"] = resolve_source_count(out.get("report") or "", out.get("charts") or [], out.get("keyStats") or [],
+                                         out.get("sources") or manifest)
     (run_dir / "v2_replay_result.json").write_text(json.dumps({"result": out, "meta": result["meta"]}, ensure_ascii=False, indent=1), encoding="utf-8")
     # Publication report for the replay: the number gates are the ones V2 ran here (report.py's
     # source-evidence check via the store auditor); report.py's chart/structure gates did not run.
@@ -683,11 +694,35 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     headings = [(len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(report)]
     explained, referenced = charts_explained(report, out.get("charts") or [])
     charts = out.get("charts") or []
+    # Stage I: chart / table / repetition metrics and the per-report chart inventory
+    from utils.chart_lint import lint_all
+    from utils.repetition import repetition_metrics
+    inventory, lint_failing = lint_all(charts)
+    rep_metrics = repetition_metrics(report, charts)
+    chart_lint_meta = result["meta"].get("chartLint") or {}
+    table_numbers = re.findall(r"(?m)^(?:\*\*|#{3,4}\s+)Table (\d+):", report)
+    inv_lines = ["| Figure | Title | Type | X | Y | Unit | Period | Source | Lint |", "|---|---|---|---|---|---|---|---|---|"]
+    inv_lines += ["| " + " | ".join(str(r.get(k) or "").replace("|", "/") for k in
+                                     ("figure", "title", "type", "x", "y", "unit", "period", "source", "lint")) + " |" for r in inventory]
+    (run_dir / "v2_replay_chart_inventory.md").write_text("\n".join(inv_lines), encoding="utf-8")
+    stage_i_metrics = {
+        "v2replay_chart_lint_failing": lint_failing,
+        "v2replay_charts_dropped_quality_gate": len(chart_lint_meta.get("dropped") or []),
+        "v2replay_chart_lint_fixes": len(chart_lint_meta.get("fixed") or []),
+        "v2replay_tables_numbered": len(table_numbers),
+        "v2replay_tables_dropped_no_source": sum(1 for x in chart_lint_meta.get("tableActions") or [] if "dropped" in x),
+        "v2replay_max_repeats_per_stat": rep_metrics["max_headline_repeats"],
+        "v2replay_stats_over_cap": rep_metrics["stats_over_cap"],
+        "v2replay_duplicate_tables": rep_metrics["duplicate_tables"],
+        "v2replay_figure_boxes_echoing_body": rep_metrics["figure_blocks_echoing_body"],
+        "v2replay_duplicate_figure_box_sentences": rep_metrics["duplicate_figure_block_sentences"],
+    }
     metrics = {
         "v2replay_calls_replayed": gateway.stats.calls, "v2replay_missing_calls": len(gateway.missing),
         "v2replay_prompts_changed": len(gateway.prompt_changed),
         "v2replay_words": len(WORD_RE.findall(CITE_RE.sub(" ", MARKER_RE.sub(" ", report)))),
         "v2replay_charts": len(charts),
+        **stage_i_metrics,
         "v2replay_charts_from_datasets": (result["meta"].get("chartFunnel") or {}).get("usedFromFetchedDatasets", 0),
         "v2replay_charts_dropped_after_assembly": len(result["meta"].get("charts", {}).get("droppedAfterAssembly") or []),
         "v2replay_sections_ok": sum(1 for x in result["meta"].get("sections") or [] if x.get("ok")),
