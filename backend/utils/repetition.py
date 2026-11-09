@@ -472,3 +472,38 @@ def near_duplicate_sentences(report: str, threshold: float = 0.6, min_tokens: in
                         break
                 seen.append((title, sentence, tokens))
     return pairs
+
+
+_FIG_INTRO_RE = re.compile(r"^\s*(?:As\s+)?Figure\s+(\d+)\s+(?:shows|illustrates|presents|displays|depicts|compares|tracks|plots|highlights)\b",
+                           re.I)
+
+
+def drop_caption_restatements(report: str, charts: list | None, threshold: float = 0.5) -> tuple[str, list[str]]:
+    """A "Figure N shows ..." sentence that only restates the chart's own title (word overlap >= threshold and
+    no number of its own beyond the title's) is removed: the caption already says it, and across deep-dives
+    the same template sentence makes the report repetitive (Stage K cohesion)."""
+    titles = {}
+    for chart in charts or []:
+        m = re.match(r"^\s*Figure\s+(\d+)\s*:\s*(.*)$", str(chart.get("title") or "")) if isinstance(chart, dict) else None
+        if m:
+            titles[int(m.group(1))] = m.group(2)
+    actions: list[str] = []
+    lines = str(report or "").split(chr(10))
+    for i, line in enumerate(lines):
+        if not _is_prose(line) or "Figure" not in line:
+            continue
+        kept = []
+        for sentence in _sentences(line):
+            m = _FIG_INTRO_RE.match(sentence)
+            title = titles.get(int(m.group(1))) if m else None
+            if title:
+                body = _CITE_RE.sub("", sentence[m.end():])
+                mine = _tokens(body) - {"the", "of", "and", "to", "from", "in", "for", "a", "an", "its", "with", "between"}
+                theirs = _tokens(title)
+                own_numbers = set(re.findall(r"\d+(?:\.\d+)?", body)) - set(re.findall(r"\d+(?:\.\d+)?", title))
+                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers:
+                    actions.append(f"caption restatement removed: {sentence.strip()[:120]}")
+                    continue
+            kept.append(sentence)
+        lines[i] = " ".join(kept)
+    return chr(10).join(lines), actions

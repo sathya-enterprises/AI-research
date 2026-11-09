@@ -836,6 +836,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         repetition_log["before"] = repetition_metrics(report_md, charts_out)
         report_md, repetition_log["tablesRemoved"] = dedupe_tables(report_md, charts_out)
         report_md, repetition_log["statCap"] = cap_headline_stats(report_md)
+        from utils.repetition import drop_caption_restatements
+        report_md, repetition_log["captionRestatements"] = drop_caption_restatements(report_md, charts_out)
         for chart in charts_out:
             if chart.get("takeaway") and echoes_body(chart["takeaway"], report_md):
                 repetition_log.setdefault("takeawaysDropped", []).append(chart.get("title"))

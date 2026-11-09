@@ -426,3 +426,12 @@ def test_official_data_plan_is_validated_against_the_catalog():
     plan, note = asyncio.run(plan_datasets("India EV adoption", _Gateway(), today=date(2026, 11, 10), limit=3))
     assert plan == [{"id": "owid.ev_car_share", "entities": ["IND", "WLD"], "why": ""}]
     assert note["rejected"] == [{"id": "made.up", "reason": "not in the catalog"}]
+
+
+def test_caption_restatements_are_removed_but_interpretations_kept():
+    from utils.repetition import drop_caption_restatements
+    charts = [{"title": "Figure 5: Quarterly return (%): Nifty Bank vs Nifty 50 (benchmark), Q3 FY25 to Q2 FY27"}]
+    report = ("## Bank\n\nFigure 5 shows the quarterly returns of the Nifty Bank index compared to the Nifty 50 from Q3 FY25 "
+              "to Q2 FY27. As Figure 5 shows, Nifty Bank beat the Nifty 50 in 4 of 8 quarters, peaking at +11.09% [S2].")
+    out, actions = drop_caption_restatements(report, charts)
+    assert "Figure 5 shows the quarterly returns" not in out and "beat the Nifty 50 in 4 of 8 quarters" in out and len(actions) == 1
