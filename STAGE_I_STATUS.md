@@ -73,3 +73,40 @@ utils.report_pipeline_v2.PipelineV2Error: outline call failed: ConnectError mode
 | live_20261108_h_c_in_depth | missing calls 0 | pages 115 rounds 1 blocking 0 warnings 0 | 26 PASS, 0 FAIL |  |
 
 --replay-gates over all 21 captures: every one would publish, 0 hard findings after healing.
+
+---
+
+# Stage J — multi-domain live testing and generalisation (10 Nov 2026)
+
+Goal: check that the engine works beyond the sector-rotation prompt, and fix what does not generalise.
+
+## Live runs (detailed tier)
+
+| Run | Prompt | Outcome | Checklist | Charts | What it showed |
+|---|---|---|---|---|---|
+| j_ev | India EV market, past 3 years | published, 19 pp | 26/26 | 0 | Only stock-market questions had a data layer; incidental tables were junk ("Founding Year", "1., 2., 3.", forecasts tagged "QTD") |
+| j_ev2 – j_ev5 | same | published | — | 0 | Each run exposed one more blocker (below) |
+| j_ev6 | same | published, 18 pp | — | 2 | First verified charts; they came from a teaser table whose rows the source marks "Forecast" → quality rule added, these charts are now dropped |
+| j_semi | Semiconductor supply-chain shifts since 2022 | published, 23 pp | 26/26 | 0 | "since 2022" was read as "only 2022"; evidence has single figures, not series |
+
+## Root causes found and fixed
+
+| # | Problem (domain-wide) | Fix | Commit |
+|---|---|---|---|
+| 1 | No structured data outside the stock-market path | `utils/dataset_extractor.py`: model proposes series from relevant, data-dense, in-window page passages (BM25 vs question + outline); code accepts only when every value and label is in the passage AND the value→label mapping is checkable (contiguous run aligned to a printed period run, or label words beside the value); unstated units become "as reported"; clipped to the verifier's own window | c7fe088, 98aa36d, 530f743, e9aba89, 898034e |
+| 2 | The chart verifier ignored 32 of 36 fetched pages (origin "publisher_page_and_search_extract") | such a source is verified against its fetched page text only (never the mixed excerpt) | 98aa36d |
+| 3 | `niti.gov.in` ≠ `www.niti.gov.in` split a source from its page | URL matching ignores "www." (live and replay) | 98aa36d |
+| 4 | Extracted charts quoting prose / PDF chart text were never registered as chart evidence | their exact quotes are registered when they come from page-derived passages (never search snippets) | 898034e |
+| 5 | "past N years" accepted only N−1 whole years; "since 2022" meant only 2022 | windows in whole calendar years (like quarters); "since/from YEAR" = Jan YEAR – end of current year | 898034e, a4b2c49 |
+| 6 | Retrieval never asked for data | `utils/data_angles.py`: one (detailed) / two (in-depth) data-seeking search angles for year-wise statistics inside the window, skipped when an angle already asks for data | e9aba89 |
+| 7 | Misleading data | quality gate drops template/teaser tables ("$#%") and values the source labels as forecasts (unless the chart says forecast); future periods never "QTD"; no scientific notation; year-valued attributes and list-number labels dropped before writing | c7fe088, 6a00835 |
+
+Regression: the Stage H in-depth and detailed replays still pass 26/26. Tests: 1201 passed, 15 xfailed.
+
+## Verdict on the architecture
+
+The pipeline stages (retrieval → evidence store → outline → data-first charts → grounded writing → number policy → gates → in-job rendered check) generalise: every new-domain report published and passed all 26 checks. What does **not** generalise yet is the **data layer**: charts appear only when the fetched pages contain clean, in-window series. The extractor now finds and verifies such series wherever they exist, and refuses to chart anything it cannot verify (this is why the EV and semiconductor reports have no charts: their evidence held single figures, older series, or forecast teaser tables).
+
+## Recommended next stage (not started)
+
+Structured-data connectors for authoritative open datasets, used like `market_data` is for NSE indices: World Bank / IMF / OECD indicators, UN Comtrade trade flows, US FRED and Census, India data.gov.in / RBI DBIE / MOSPI, and sector sources with public tables (e.g. VAHAN registrations). The outline names the core metrics; a connector fetches the series for the window; the series enters the evidence store as a calculated/official dataset and flows through the existing data-first charts, sanity checks and verification.
