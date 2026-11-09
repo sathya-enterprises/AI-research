@@ -50,7 +50,12 @@ def _fmt(value: float, raw: str, unit: str) -> str:
     return text + ("%" if unit == "%" else "")
 
 
+TOTAL_RE = re.compile(r"(?i)^\s*(?:grand\s+)?total\b|^\s*(?:all|overall|aggregate)\s*$")
+
+
 def data_takeaway(spec: dict) -> str:
+    """A takeaway from the plotted values; '' when the data cannot support one (all values equal,
+    fewer than 3 distinct values)."""
     series = [s for s in (spec.get("series") or []) if isinstance(s, dict)]
     unit = str(spec.get("unit") or ("%" if "%" in str(spec.get("yLabel") or "") else ""))
     kind = str(spec.get("type") or "")
@@ -60,20 +65,21 @@ def data_takeaway(spec: dict) -> str:
             wins = sum(1 for (_, x, _), (_, y, _) in zip(a, b) if x > y)
             gaps = [(la, x - y) for (la, x, _), (_, y, _) in zip(a, b)]
             widest = max(gaps, key=lambda g: abs(g[1]))
+            unit_gap = "pp" if unit == "%" else ""
             return (f"{series[0].get('name')} beat {series[1].get('name')} in {wins} of {len(a)} periods; "
-                    f"the widest gap was {widest[1]:+.2f} pp in {widest[0]}.")
+                    f"the widest gap was {widest[1]:+.2f} {unit_gap} in {widest[0]}.").replace("  ", " ")
     if len(series) == 1:
-        pts = _points(series[0])
-        if len(pts) >= 3:
-            if kind in {"line", "area", "spline", "step_line"}:
-                first, last = pts[0], pts[-1]
-                peak = max(pts, key=lambda p: p[1])
-                return (f"{_fmt(first[1], first[2], unit)} in {first[0]}, {_fmt(last[1], last[2], unit)} in {last[0]}; "
-                        f"peak {_fmt(peak[1], peak[2], unit)} in {peak[0]}.")
-            hi, lo = max(pts, key=lambda p: p[1]), min(pts, key=lambda p: p[1])
-            spread = hi[1] - lo[1]
-            gap = f"; spread {spread:.2f} pp" if unit == "%" else ""
-            return f"Highest: {hi[0]} ({_fmt(hi[1], hi[2], unit)}); lowest: {lo[0]} ({_fmt(lo[1], lo[2], unit)}){gap}."
+        pts = [p for p in _points(series[0]) if not TOTAL_RE.search(p[0])]  # a Total is not a component
+        if len({round(p[1], 4) for p in pts}) < 3:
+            return ""
+        if kind in {"line", "area", "spline", "step_line"}:
+            first, last = pts[0], pts[-1]
+            peak = max(pts, key=lambda p: p[1])
+            return (f"{_fmt(first[1], first[2], unit)} in {first[0]}, {_fmt(last[1], last[2], unit)} in {last[0]}; "
+                    f"peak {_fmt(peak[1], peak[2], unit)} in {peak[0]}.")
+        hi, lo = max(pts, key=lambda p: p[1]), min(pts, key=lambda p: p[1])
+        gap = f"; spread {hi[1] - lo[1]:.2f} pp" if unit == "%" else ""
+        return f"Highest: {hi[0]} ({_fmt(hi[1], hi[2], unit)}); lowest: {lo[0]} ({_fmt(lo[1], lo[2], unit)}){gap}."
     return ""
 
 
@@ -175,51 +181,204 @@ def _norm_stat(raw: str) -> str:
     return re.sub(r"\s+", " ", raw.replace("−", "-")).strip().casefold()
 
 
-def cap_headline_stats(report: str, cap: int = 2) -> tuple[str, list[dict]]:
+_ENTITY_RE = re.compile(r"\b(?:Nifty\s+)?[A-Z][A-Za-z&]+(?:\s+[A-Z][A-Za-z&]+){0,3}\b")
+_STOP_ENTITIES = {"The", "This", "These", "That", "While", "However", "In", "As", "At", "By", "Over", "With", "From", "During",
+                  "Despite", "Although", "Looking", "Meanwhile", "First", "Second", "Third", "Fourth", "Fifth", "Sixth"}
+
+
+def _sections(lines: list[str]) -> list[tuple[int, int, str]]:
+    """(start, end, title) of each H2 section; the text before the first H2 is section 0."""
+    starts = [(i, line.lstrip("# ").strip()) for i, line in enumerate(lines) if re.match(r"^##\s+\S", line)]
+    out = []
+    if not starts or starts[0][0] > 0:
+        out.append((0, starts[0][0] if starts else len(lines), ""))
+    for k, (i, title) in enumerate(starts):
+        out.append((i, starts[k + 1][0] if k + 1 < len(starts) else len(lines), title))
+    return out
+
+
+def _entities(sentence: str) -> set[str]:
+    return {m.group(0) for m in _ENTITY_RE.finditer(_CITE_RE.sub("", sentence)) if m.group(0) not in _STOP_ENTITIES}
+
+
+_GENERIC = {"growth", "return", "returns", "gain", "gains", "rate", "high", "level", "index", "sector", "sectors", "quarter",
+            "year", "percent", "recorded", "reached", "posted", "approximately", "about", "around", "with", "from", "during",
+            "while", "which", "this", "that", "their", "remained", "stood", "hitting", "rising", "increase", "nifty", "same",
+            "window", "period", "against", "compared", "over", "into", "after", "before", "since", "than", "also", "only"}
+
+
+def _context(sentence: str, start: int, end: int) -> set[str]:
+    before = re.findall(r"[a-z]{4,}", sentence[:start].casefold())[-5:]
+    after = re.findall(r"[a-z]{4,}", sentence[end:].casefold())[:3]
+    return {w for w in before + after if w not in _GENERIC}
+
+
+class _Facts:
+    """Mentions of one statistic are the same fact when their context words overlap."""
+
+    def __init__(self):
+        self.clusters: dict[str, list[dict]] = {}
+
+    def key(self, stat: str, context: set[str]) -> tuple[str, int]:
+        clusters = self.clusters.setdefault(stat, [])
+        for i, c in enumerate(clusters):
+            if c["words"] & context or (not context and not c["words"]):
+                c["words"] |= context
+                return stat, i
+        clusters.append({"words": set(context)})
+        return stat, len(clusters) - 1
+
+
+def _sentences(line: str) -> list[str]:
+    return re.split(r"(?<=[.!?])\s+(?=[A-Z\[(*\"'])", line)
+
+
+def _owns(title: str, sentence: str, pos: int | None = None) -> bool:
+    """A section whose title names an entity of the sentence (a deep-dive) keeps that entity's numbers."""
+    head = re.split(r"[:—-]", str(title or ""), maxsplit=1)[0]
+    words = {w for w in re.findall(r"[A-Za-z&]{2,}", head) if w.casefold() not in {"the", "and", "sector", "deep", "dive", "nifty"}}
+    window = sentence if pos is None else sentence[max(0, pos - 60):pos + 25]  # the entity next to the number
+    return bool(words) and any(re.search(rf"\b{re.escape(w)}\b", window) for w in words)
+
+
+def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_section_cut: float = 0.1,
+                       restatement: float = 0.45) -> tuple[str, list[dict]]:
+    """At most ``cap`` mentions of the same precise statistic (same number, same metric context) in the
+    body prose; the executive summary may add ``exec_extra``. Over the cap, in this order:
+      1) a parenthetical that only restates the number is removed;
+      2) a sentence that restates the first mention (token overlap >= ``restatement``) becomes a
+         cross-reference "(See Section N, <title>.)" - unless it holds the section's only mention of
+         one of its entities, or the section would lose more than ``max_section_cut`` of its words;
+      3) otherwise the sentence stays and the number becomes "the figure given in Section N".
+    Nothing else is deleted, so entity mentions and section length are kept.
+    """
     lines = str(report or "").split("\n")
-    seen: Counter = Counter()
-    actions: list[dict] = []
+    sections = _sections(lines)
+    numbered = [sec for sec in sections if sec[2]]
+    section_no = {id(sec): i for i, sec in enumerate(numbered, 1)}
+    section_of = {i: k for k, sec in enumerate(sections) for i in range(sec[0], sec[1])}
+    # pre-pass: a deep-dive that owns a fact keeps its mention, so other sections get one slot fewer
+    pre = _Facts()
+    owned: Counter = Counter()
     for n, line in enumerate(lines):
         if not _is_prose(line):
             continue
-        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z\[(*\"'])", line)
-        out_sentences = []
+        title = sections[section_of.get(n, 0)][2]
+        for sentence in _sentences(line):
+            for m in _STAT_RE.finditer(sentence):
+                key = pre.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end()))
+                if _owns(title, sentence, m.start()):
+                    owned[key] += 1
+    facts = _Facts()
+    seen: Counter = Counter()
+    first_at: dict = {}
+    actions: list[dict] = []
+    cut_words: Counter = Counter()
+    section_words = Counter({k: sum(len(lines[i].split()) for i in range(sec[0], sec[1]) if _is_prose(lines[i]))
+                             for k, sec in enumerate(sections)})
+
+    def ref_for(k_origin: int) -> tuple[int, str]:
+        sec = sections[k_origin]
+        return section_no.get(id(sec), 0), sec[2]
+
+    for n, line in enumerate(lines):
+        if not _is_prose(line):
+            continue
+        k = section_of.get(n, 0)
+        title = sections[k][2]
+        limit = cap + (exec_extra if re.match(r"(?i)executive summary", title) else 0)
+        sentences = _sentences(line)
+        out = []
         for sentence in sentences:
-            stats = [_norm_stat(m.group(0)) for m in _STAT_RE.finditer(sentence)]
-            over = [s for s in stats if seen[s] >= cap]
+            mentions = [(m, facts.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end())))
+                        for m in _STAT_RE.finditer(sentence)]
+            over = [(m, key) for m, key in mentions
+                    if seen[key] >= (limit if _owns(title, sentence, m.start()) else max(1, limit - min(owned[key], 1)))
+                    and first_at.get(key, (k,))[0] != k]
             new = sentence
             if over:
-                # 1) a parenthetical that only restates the number goes
-                for stat in set(over):
-                    pattern = re.compile(r"\s*\((?:[^()]{0,30}?)" + re.escape(stat).replace(r"\ ", r"\s*") + r"(?:[^()]{0,20}?)\)", re.I)
-                    new, k = pattern.subn("", new)
-                    if k:
-                        actions.append({"stat": stat, "action": "removed a repeated parenthetical"})
-                remaining = [_norm_stat(m.group(0)) for m in _STAT_RE.finditer(new)]
-                # 2) a sentence whose statistics are all over-cap repeats goes
-                if remaining and all(seen[s] >= cap for s in remaining) and not re.search(r"\b(?:Figure|Table)\s+\d", new):
-                    actions.append({"stat": ", ".join(sorted(set(remaining))), "action": "removed a repeated sentence",
-                                    "sentence": sentence.strip()[:200]})
-                    new = ""
-            for s in [_norm_stat(m.group(0)) for m in _STAT_RE.finditer(new)]:
-                seen[s] += 1
+                # 1) parentheticals
+                for m, key in over:
+                    pattern = re.compile(r"\s*\((?:[^()]{0,30}?)" + re.escape(m.group(0)) + r"(?:[^()]{0,20}?)\)")
+                    new, hits = pattern.subn("", new)
+                    if hits:
+                        actions.append({"stat": key[0], "action": "removed a repeated parenthetical", "section": title})
+                left = [(m, key) for m, key in over if m.group(0) in new]
+                if left:
+                    origin_k, origin_sentence, _ = first_at[left[0][1]]
+                    number, origin_title = ref_for(origin_k)
+                    rest = " ".join(lines[i] for i in range(sections[k][0], sections[k][1]) if i != n and _is_prose(lines[i]))
+                    rest += " " + " ".join(x for x in sentences if x is not sentence)
+                    lone_entity = any(e not in rest for e in _entities(new))
+                    words = len(new.split())
+                    overlap = (len(_tokens(new) & _tokens(origin_sentence)) / max(1, len(_tokens(new) | _tokens(origin_sentence))))
+                    all_over = all(seen[key] >= limit for _, key in [(m, kk) for m, kk in mentions if m.group(0) in new])
+                    if number and all_over and overlap >= restatement and not lone_entity and \
+                            cut_words[k] + words <= max_section_cut * max(section_words[k], 1) and \
+                            not re.search(r"\b(?:Figure|Table)\s+\d", new):
+                        ref = f"(See Section {number}, {origin_title}.)"
+                        actions.append({"stat": left[0][1][0], "action": "replaced a restatement by a cross-reference",
+                                        "section": title, "sentence": sentence.strip()[:200], "reference": ref})
+                        cut_words[k] += words
+                        new = ref
+                    elif number:
+                        # 3) keep the sentence; the repeated number points back to where it is given
+                        for m, key in left:
+                            o_no, _ = ref_for(first_at[key][0])
+                            if not o_no or _owns(title, sentence, m.start()):
+                                continue
+                            new = re.sub(r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?" + re.escape(m.group(0)),
+                                         f"the figure given in Section {o_no}", new, count=1)
+                            actions.append({"stat": key[0], "action": "number replaced by a section reference",
+                                            "section": title, "sentence": sentence.strip()[:200], "reference": f"Section {o_no}"})
+            is_exec = limit > cap
+            for m, key in mentions:
+                if m.group(0) in new:
+                    if not is_exec:  # the executive summary's mention is the allowed extra one
+                        seen[key] += 1
+                    # references point at the first BODY mention; the executive summary is a fallback
+                    if not is_exec and (key not in first_at or first_at[key][2]):
+                        if key not in first_at or first_at[key][2]:
+                            first_at[key] = (k, new, False)
+                    elif key not in first_at:
+                        first_at[key] = (k, new, True)
             if new.strip():
-                out_sentences.append(new)
-        bullet = re.match(r"^\s*(?:[-*]|\d+[.)])\s+", line)
-        joined = " ".join(out_sentences)
-        if not joined.strip() or (bullet and not joined.strip()[len(bullet.group(0).strip()):].strip()):
-            lines[n] = ""
-        else:
-            lines[n] = joined
+                out.append(new)
+        merged = []
+        for x in out:
+            if not (merged and x.startswith("(See Section") and merged[-1] == x):
+                merged.append(x)
+        joined = " ".join(merged)
+        lines[n] = "" if (not joined.strip() or re.match(r"^\s*(?:[-*]|\d+[.)])\s*$", joined)) else joined
     if actions:
         log.info("Repetition: headline-statistic cap applied %d time(s)", len(actions))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)), actions
 
 
+def fact_counts(report: str) -> Counter:
+    """Mentions per fact (statistic + metric context) in the body prose, executive summary excluded."""
+    lines = str(report or "").split("\n")
+    facts = _Facts()
+    counts: Counter = Counter()
+    for sec in _sections(lines):
+        if re.match(r"(?i)executive summary", sec[2]):
+            continue
+        for line in lines[sec[0]:sec[1]]:
+            if not _is_prose(line):
+                continue
+            for sentence in _sentences(line):
+                for m in _STAT_RE.finditer(sentence):
+                    counts[facts.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end()))] += 1
+    return counts
+
+
 # ── metrics ──────────────────────────────────────────────────────────────────────────────────────
 def repetition_metrics(report: str, charts: list | None = None) -> dict:
     lines = str(report or "").split("\n")
-    counts = Counter(_norm_stat(m.group(0)) for line in lines if _is_prose(line) for m in _STAT_RE.finditer(line))
+    sections = _sections(lines)
+    body_lines = [line for sec in sections if not re.match(r"(?i)executive summary", sec[2])
+                  for line in lines[sec[0]:sec[1]] if _is_prose(line)]
+    counts = Counter({f"{k[0]}#{k[1]}": v for k, v in fact_counts(report).items()})
     top = counts.most_common(1)[0] if counts else ("", 0)
     blocks = []
     for c in charts or []:

@@ -42,7 +42,7 @@ def heal_rendered_duplicates(report: str, charts: list, findings: list[dict]) ->
             title = re.sub(r"^\s*Figure\s+\d+\s*:\s*", "", str(charts[i].get("title") or "this chart"))
             for key in ("takeaway", "rationale", "caption", "subtitle"):
                 if target in _norm(charts[i].get(key)):
-                    charts[i][key] = f"Shows {title}." if key != "rationale" else f"Supports: the data in {title}."
+                    charts[i][key] = f"Shows {title}." if key != "rationale" else ""
             actions.append(f"figure {i + 1}: own caption instead of a repeated one")
         # 2) The same table (header + rows) twice: drop the later copy.
         lines = report.split("\n")

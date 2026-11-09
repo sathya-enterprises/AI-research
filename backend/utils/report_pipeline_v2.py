@@ -624,8 +624,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         claims_seen.add(re.sub(r"\W+", " ", c.claim).strip().casefold())
         spec = dict(c.spec)
         spec["title"] = f"Figure {c.figure_number}: {spec.get('title')}"
-        spec["takeaway"] = c.claim
-        spec["rationale"] = f"Supports: {c.claim}"[:400] if c.claim else ""
+        # Stage I (FIX 6): the takeaway comes from the plotted values, never the body sentence that
+        # interprets the figure; there is no CONTEXT box ("Supports: <the same sentence>").
+        from utils.repetition import data_takeaway
+        spec["takeaway"] = data_takeaway(spec)
+        spec["rationale"] = ""
         spec["evidencePassages"] = c.passage_ids
         charts_out.append(spec)
     unique_titles(charts_out)
@@ -725,6 +728,21 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             report_md, regime_log["claims"] = heal_rotation_claims(report_md, regime)
     except Exception as exc:
         log.warning("V2 regime checks skipped: %s", type(exc).__name__)
+    # Stage I (FIX 6): each dataset once, a statistic at most twice in the prose, figure boxes not
+    # repeating the body.
+    repetition_log: dict = {}
+    try:
+        from utils.repetition import cap_headline_stats, dedupe_tables, echoes_body, repetition_metrics
+        repetition_log["before"] = repetition_metrics(report_md, charts_out)
+        report_md, repetition_log["tablesRemoved"] = dedupe_tables(report_md, charts_out)
+        report_md, repetition_log["statCap"] = cap_headline_stats(report_md)
+        for chart in charts_out:
+            if chart.get("takeaway") and echoes_body(chart["takeaway"], report_md):
+                repetition_log.setdefault("takeawaysDropped", []).append(chart.get("title"))
+                chart["takeaway"] = ""
+        repetition_log["after"] = repetition_metrics(report_md, charts_out)
+    except Exception as exc:
+        log.warning("V2 repetition control skipped: %s", type(exc).__name__)
     report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
     report_md, charts_out, _ = finalize_figures(report_md, charts_out)
     # Some chart checks depend on the finished text (e.g. a report table that marks
@@ -783,6 +801,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
         "leakGate": leak_actions,
         "regime": regime_log,
+        "repetition": repetition_log,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

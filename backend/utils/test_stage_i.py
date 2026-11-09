@@ -170,3 +170,36 @@ def test_sector_mislabels_are_corrected():
     assert "defensive FMCG names" in out and "IT, an export-driven sector" in out
     assert "Defensive sectors like Nifty Pharma" in out and "Sectors like Nifty Realty and Nifty FMCG" in out
     assert "It remained defensive." in out and len(actions) == 3
+
+
+# ── FIX 6: repetition ────────────────────────────────────────────────────────────────────────────
+def test_data_takeaway_is_computed_and_skips_equal_values_and_totals():
+    from utils.repetition import data_takeaway
+    bars = {"type": "bar", "unit": "%", "series": [{"name": "r", "data": [
+        {"label": "Metal", "value": 26.36, "evidenceValue": "+26.36%"}, {"label": "FMCG", "value": -26.33, "evidenceValue": "-26.33%"},
+        {"label": "IT", "value": 1.0}]}]}
+    assert data_takeaway(bars) == "Highest: Metal (+26.36%); lowest: FMCG (-26.33%); spread 52.69 pp."
+    flat = {"type": "bar", "series": [{"name": "Months", "data": [{"label": x, "value": 41} for x in "abcd"]}]}
+    assert data_takeaway(flat) == ""
+    total = {"type": "bar", "series": [{"name": "g", "data": [{"label": "Total", "value": 21664}, {"label": "Bank", "value": 258},
+                                                               {"label": "MFs", "value": 16756}, {"label": "Insurance", "value": 4000}]}]}
+    assert "Total" not in data_takeaway(total)
+
+
+def test_duplicate_tables_are_removed_once():
+    from utils.repetition import dedupe_tables
+    table = "| Sector | Q1 | Q2 |\n| --- | --- | --- |\n| Metal | +1.10% | +2.20% |\n| Bank | +3.30% | -4.40% |"
+    report = f"## A\n\n**Table: One**\n{table}\nSource: [S2]\n\n## B\n\n**Table: Two**\n{table}\nSource: [S2]\n\nText."
+    out, removed = dedupe_tables(report, [])
+    assert out.count("| Metal |") == 1 and "**Table: Two**" not in out and len(removed) == 1 and "Text." in out
+
+
+def test_headline_stat_cap_keeps_sentences_and_points_back():
+    from utils.repetition import cap_headline_stats, repetition_metrics
+    report = ("## Executive Summary\n\nCredit growth reached 17.7% [S1].\n\n## Macro\n\nSystemic credit growth reached 17.7% in June [S1].\n\n"
+              "## Bank: Credit\n\nBank credit growth stayed at 17.7% this year [S1].\n\n## Outlook\n\n"
+              "Looking ahead, credit growth of 17.7% supports lenders such as PSU banks [S1]. Deposits lag (17.7% credit growth) [S1].")
+    out, actions = cap_headline_stats(report)
+    assert "PSU banks" in out and "the figure given in Section 2" in out  # sentence kept, number points back
+    assert "Bank credit growth stayed at 17.7%" in out                     # the deep-dive keeps its own number
+    assert repetition_metrics(out)["stats_over_cap"] == 0 and actions
