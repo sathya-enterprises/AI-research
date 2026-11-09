@@ -367,3 +367,25 @@ def test_data_seeking_angles():
     assert data_angles(q, ["India EV sales statistics by year"], tier="detailed", today=date(2026, 11, 10)) == []
     since = data_angles("Impacts of semiconductor supply chain shifts since 2022?", ["x"], tier="detailed", today=date(2026, 11, 10))
     assert "2022 2023 2024 2025 2026" in since[0]
+
+
+def test_question_windows_since_and_past_years():
+    from utils.chart_evidence_audit import _periods_outside_question_window as outside
+    from utils.source_quality import window_start
+    q = "Impacts of semiconductor supply chain shifts since 2022?"
+    assert window_start(q, date(2026, 11, 10)) == date(2022, 1, 1)
+    assert outside(q, ["2021"], {}) and not outside(q, ["2022"], {}) and not outside(q, ["2025"], {})
+    assert window_start("trends from 2022 to 2024", date(2026, 11, 10)) == date(2022, 1, 1)
+    p3 = "How has the market evolved over the past 3 years?"
+    assert outside(p3, ["2022"], {}) and not outside(p3, ["2023"], {}) and not outside(p3, ["2024"], {})
+
+
+def test_quality_gate_drops_teaser_tables_and_unlabelled_forecasts():
+    from utils.chart_lint import quality_reason
+    def chart(quote, title="Sales"):
+        return {"type": "line", "title": title, "series": [{"name": "x", "data": [
+            {"label": str(y), "value": v, "evidenceQuote": quote.format(y=y, v=v)} for y, v in [(2023, 1), (2024, 2), (2025, 3)]]}]}
+    assert "placeholders" in quality_reason(chart("{y} | $ {v} Mn | $#% | x"), "")
+    assert "forecast" in quality_reason(chart("{y} | {v} | Forecast"), "")
+    assert quality_reason(chart("{y} | {v} | Forecast", "Sales (forecast)"), "") == ""
+    assert quality_reason(chart("In {y} sales were {v} units"), "") == ""

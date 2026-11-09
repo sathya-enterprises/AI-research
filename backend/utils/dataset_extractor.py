@@ -43,7 +43,8 @@ PASSAGE {pid} (source: {source}):
 Return JSON: {{"datasets": [{{"metric": "<what is measured, e.g. 'EV penetration rate'>", "unit": "<%, units, Rs crore, ...>",
  "x": "time" | "category", "period": "<the period or as-of date the data covers, '' if none>",
  "series": [{{"name": "<series name, e.g. 'India'>", "points": [{{"label": "<as printed>", "value": "<number as printed>"}}]}}]}}]}}
-At most 2 datasets, at most 4 series each, only data relevant to the QUESTION. Return {{"datasets": []}} when unsure."""
+At most 2 datasets, at most 4 series each, only data relevant to the QUESTION. Every series needs at least 3 points
+(single figures, two-way splits and growth rates are not datasets). Return {{"datasets": []}} when unsure."""
 
 
 def _numbers(text: str) -> set[float]:

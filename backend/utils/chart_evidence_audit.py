@@ -999,6 +999,13 @@ def _period_ranges(text: object) -> list[tuple[int, int, str]]:
 def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
     """Resolve explicit or relative time limits from the user's request."""
     text = str(question or "")
+    # Stage J: "since 2022" / "from 2022" (open-ended) = January 2022 to the end of the current year,
+    # not "only 2022"
+    since = re.search(r"(?i)\b(?:since|from|after)\s+(?:the\s+(?:start|beginning)\s+of\s+)?((?:19|20)\d{2})\b(?!\s*(?:to|until|till|through|and|-|–|—)\s*(?:19|20)?\d{2})", text)
+    if since:
+        import datetime as _since_dt
+        _today = _since_dt.date.today()
+        return [(_month_ordinal(int(since.group(1)), 1), _month_ordinal(_today.year, 12), since.group(0))]
     relative = re.search(
         r"(?i)\b(last|past|previous|prior|preceding)\s+(\d+)\s+(days?|weeks?|months?|quarters?|years?)\b", text,
     )
