@@ -326,10 +326,14 @@ async def fetch_dataset(client, item: dict, *, start_year: int, today: date) -> 
     if len(years) < 2:
         return None
     fetcher = {"wb": _fetch_wb, "imf": _fetch_imf, "owid": _fetch_owid}[entry.connector]
-    try:
-        raw = await fetcher(client, entry, item["entities"], years)
-    except Exception as exc:
-        log.warning("Official data: %s fetch failed (%s)", entry.id, type(exc).__name__)
+    raw = None
+    for attempt in (1, 2):
+        try:
+            raw = await fetcher(client, entry, item["entities"], years)
+            break
+        except Exception as exc:
+            log.warning("Official data: %s fetch failed (%s, attempt %d)", entry.id, type(exc).__name__, attempt)
+    if raw is None:
         return None
     raw = {name: vals for name, vals in raw.items() if len(vals) >= 2}
     if not raw:
@@ -339,7 +343,27 @@ async def fetch_dataset(client, item: dict, *, start_year: int, today: date) -> 
     if len(observed) < 3:
         return None
     series = {name: [vals.get(y) for y in observed] for name, vals in raw.items()}
-    return Dataset(entry=entry, years=observed, series=series, retrieved=today.isoformat(), latest=observed[-1])
+    ds = Dataset(entry=entry, years=observed, series=series, retrieved=today.isoformat(), latest=observed[-1])
+    return scale_dataset(ds)
+
+
+def scale_dataset(ds: Dataset) -> Dataset:
+    """Very large values are shown in billions / millions (232,906,639,404 US$ -> 232.91 US$ billion), so
+    tables and chart labels stay readable; the unit says so."""
+    peak = max((abs(v) for vals in ds.series.values() for v in vals if v is not None), default=0)
+    unit = ds.entry.unit
+    if peak >= 1e9:
+        factor, word = 1e9, "billion"
+    elif peak >= 1e7:
+        factor, word = 1e6, "million"
+    else:
+        return ds
+    from dataclasses import replace
+    new_unit = (unit.replace("US$", f"US$ {word}") if "US$" in unit else f"{unit}, {word}" if unit else word)
+    ds.entry = replace(ds.entry, unit=new_unit)
+    ds.series = {n: [None if v is None else round(v / factor, 2) for v in vals] for n, vals in ds.series.items()}
+    ds.notes.append(f"values divided by {factor:,.0f}")
+    return ds
 
 
 def _fmt(value: float | None, unit: str) -> str:
@@ -390,7 +414,7 @@ async def official_sources(question: str, gateway, *, today: date, tier: str) ->
     plan, plan_note = await plan_datasets(question, gateway, today=today, limit=limit)
     note["plan"], note["planNote"] = plan, plan_note
     rows: list[dict] = []
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True,
+    async with httpx.AsyncClient(timeout=45, follow_redirects=True,
                                  headers={"User-Agent": "GrowthGradual-Research/1.0 (official open data)"}) as client:
         import asyncio
         results = await asyncio.gather(*[fetch_dataset(client, item, start_year=start_year, today=today) for item in plan])

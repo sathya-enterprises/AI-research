@@ -274,6 +274,8 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     time_axis = is_time_axis(labels)
     unit = str(spec.get("unitLabel") or "").strip() or infer_unit(spec, passage_text)  # a dataset's own unit wins
     metric = metric_name(spec)
+    if unit and metric.casefold().endswith(f"({unit.casefold()})"):
+        metric = metric[: -len(unit) - 2].rstrip()  # "High-technology exports (current US$)" + "(current US$)"
     source_titles = " ".join(str((manifest or {}).get(sid, {}).get("title") or "") for sid in _ids(spec))
     if re.fullmatch(r"Q[1-4] 20\d{2}", metric):  # a period used as the metric name
         period_label = fy_label(metric)
