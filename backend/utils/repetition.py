@@ -501,7 +501,9 @@ def drop_caption_restatements(report: str, charts: list | None, threshold: float
                 mine = _tokens(body) - {"the", "of", "and", "to", "from", "in", "for", "a", "an", "its", "with", "between"}
                 theirs = _tokens(title)
                 own_numbers = set(re.findall(r"\d+(?:\.\d+)?", body)) - set(re.findall(r"\d+(?:\.\d+)?", title))
-                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers:
+                fig = m.group(1)
+                others = len(re.findall(rf"\bFigure\s+{fig}\b", report)) - 1  # another sentence still points to it
+                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers and others >= 1:
                     actions.append(f"caption restatement removed: {sentence.strip()[:120]}")
                     continue
             kept.append(sentence)
