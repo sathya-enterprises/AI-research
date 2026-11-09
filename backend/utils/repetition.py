@@ -22,7 +22,8 @@ from collections import Counter
 log = logging.getLogger("repetition")
 
 _NUM_RE = re.compile(r"[+\-−]?\d+(?:,\d{3})*(?:\.\d+)?")
-_STAT_RE = re.compile(r"(?<![\w.])(?:[+\-−]?\d+\.\d+%|(?:₹|Rs\.?\s?|\$|US\$)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:lakh crore|crore|trillion|billion|million|bn|cr))?)")
+_STAT_RE = re.compile(r"(?<![\w.])(?:[+\-−]?\d+\.\d+%|(?:₹|Rs\.?\s?|\$|US\$)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:lakh crore|crore|trillion|billion|million|bn|cr))?"
+                      r"|\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\s?(?:lakh crore|crore|Cr)\b)")
 _CITE_RE = re.compile(r"\s*\[\s*S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*\s*\]")
 _SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}")
 
@@ -178,7 +179,12 @@ def _is_prose(line: str) -> bool:
 
 
 def _norm_stat(raw: str) -> str:
-    return re.sub(r"\s+", " ", raw.replace("−", "-")).strip().casefold()
+    text = re.sub(r"\s+", " ", raw.replace("−", "-")).strip().casefold()
+    text = re.sub(r"^(?:rs\.?\s?|₹)\s?", "₹", text)
+    text = re.sub(r"\bcr$", "crore", text)
+    if re.match(r"^\d", text) and "crore" in text:
+        text = "₹" + text  # "11,065 crore" and "₹11,065 crore" are the same statistic
+    return text
 
 
 _ENTITY_RE = re.compile(r"\b(?:Nifty\s+)?[A-Z][A-Za-z&]+(?:\s+[A-Z][A-Za-z&]+){0,3}\b")
@@ -207,6 +213,11 @@ _GENERIC = {"growth", "return", "returns", "gain", "gains", "rate", "high", "lev
             "window", "period", "against", "compared", "over", "into", "after", "before", "since", "than", "also", "only"}
 
 
+_ALIASES = {"telecommunication": "telecom", "information technology": "it", "pharmaceutical": "pharma",
+            "automobile": "auto", "metals & mining": "metal", "real estate": "realty", "psu banks": "psu bank",
+            "financial service": "financial services", "fast moving consumer good": "fmcg"}
+
+
 def _context(sentence: str, start: int, end: int) -> set[str]:
     before = re.findall(r"[a-z]{4,}", sentence[:start].casefold())[-5:]
     after = re.findall(r"[a-z]{4,}", sentence[end:].casefold())[:3]
@@ -216,12 +227,14 @@ def _context(sentence: str, start: int, end: int) -> set[str]:
     near = []
     for m in re.finditer(r"\b[A-Z][A-Za-z&]+(?:\s+(?:[A-Z][A-Za-z&]+|\d{2,3}\b))*", sentence[lo:start]):
         name = m.group(0)
-        at_sentence_start = lo + m.start() == 0 or sentence[:lo + m.start()].rstrip().endswith((".", ":", "*"))
+        at_sentence_start = lo + m.start() == 0 or sentence[:lo + m.start()].rstrip().endswith((".", "*"))
         if name in _STOP_ENTITIES or (at_sentence_start and " " not in name) or re.fullmatch(r"(?:YoY|QTD|FY\d+|Q[1-4])", name):
             continue
         near.append(name)
     if near:
-        words.add("@" + re.sub(r"\s+", " ", near[-1]).casefold())
+        name = re.sub(r"s$", "", re.sub(r"\s+", " ", near[-1]).casefold())
+        name = _ALIASES.get(re.sub(r"^nifty ", "", name), re.sub(r"^nifty ", "", name))
+        words.add("@" + name)
     return words
 
 
@@ -352,7 +365,10 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                             if not o_no or _owns(title, sentence, m.start()):
                                 continue
                             where = "above" if first_at[key][0] == k else f"in Section {o_no}"
-                            new = re.sub(r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?" + re.escape(m.group(0)),
+                            new = re.sub(r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?(?:[+\-−]\s?(?=[₹$\d]))?"
+                                         r"(?:₹\s?)?(?:[+\-−](?=\d))?" + re.escape(m.group(0).lstrip("₹+-− ")) if m.group(0)[:1] in "₹+-−"
+                                         else r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?(?:[+\-−]\s?(?=[₹$\d]))?(?:₹\s?)?"
+                                         + re.escape(m.group(0)),
                                          f"the figure given {where}", new, count=1)
                             actions.append({"stat": key[0], "action": "number replaced by a section reference",
                                             "section": title, "sentence": sentence.strip()[:200], "reference": f"Section {o_no}"})

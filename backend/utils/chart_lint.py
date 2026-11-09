@@ -550,7 +550,8 @@ def number_tables(report: str) -> tuple[str, list[str], list[dict]]:
             i += 1
             continue
         j = i + 2
-        while j < len(lines) and lines[j].strip().startswith("|"):
+        # two tables stacked without a blank line: the block ends before the next header + separator
+        while j < len(lines) and lines[j].strip().startswith("|") and not (j + 1 < len(lines) and _SEP_ROW_RE.match(lines[j + 1])):
             j += 1
         block = lines[i:j]
         # caption: the nearest non-blank line before the table

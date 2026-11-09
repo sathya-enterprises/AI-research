@@ -119,7 +119,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     add(8, "Every chart passes CHART LINT", failing == 0, f"{failing} failing of {len(charts)}")
     generic = re.findall(r"(?i)\band \d+ others?\b|Values \(%\)", pdf)
     add(8, "No generic chart titles in the PDF", not generic, generic[:3] or "none")
-    table_nos = [int(n) for n in re.findall(r"\*\*Table (\d+):", report) + re.findall(r"(?m)^#{3,4} Table (\d+):", report)]
+    table_nos = [int(n) for n in re.findall(r"(?m)^\s*(?:\*\*|#{3,4}\s+)Table (\d+):", report)]  # document order
     from utils.repetition import _tables
     total_tables = len(_tables(report.split(chr(10))))
     add(8, "Tables numbered 1..N, separately from figures",

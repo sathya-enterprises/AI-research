@@ -323,3 +323,15 @@ def test_calculated_sources_are_not_labelled_primary_official():
     parts = metadata_parts({"publisher": "Calculated from daily market data", "url": "", "authority_tier": "primary_official",
                             "reliability_score": 1.0, "reliability_note": "calculated / internal dataset with recorded provenance"})
     assert not any("Reliability" in p or "Tier" in p for p in parts) and any("Calculated in this report" in p for p in parts)
+
+
+def test_stacked_tables_are_split_and_amount_spellings_are_one_statistic():
+    from utils.chart_lint import number_tables
+    from utils.repetition import cap_headline_stats, repetition_metrics
+    stacked = "Text [S1].\n\n| A | B |\n| --- | --- |\n| x | 1 |\n| C | D |\n| --- | --- |\n| y | 2 |\nSource: [S1]"
+    out, _, inventory = number_tables(stacked)
+    assert len(inventory) == 2 and "**Table 2:" in out
+    report = ("## Executive Summary\n\nX.\n\n## A\n\nTelecom saw +11,065 Cr of inflows [S1].\n\n## B\n\n"
+              "Telecommunication inflows were ₹11,065 crore [S1].\n\n## C\n\nLater, Telecom took +₹11,065 crore in buying [S1].")
+    capped, _ = cap_headline_stats(report)
+    assert "took the figure given in Section 2 in buying" in capped and repetition_metrics(capped)["stats_over_cap"] == 0
