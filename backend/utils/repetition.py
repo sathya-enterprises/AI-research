@@ -210,7 +210,19 @@ _GENERIC = {"growth", "return", "returns", "gain", "gains", "rate", "high", "lev
 def _context(sentence: str, start: int, end: int) -> set[str]:
     before = re.findall(r"[a-z]{4,}", sentence[:start].casefold())[-5:]
     after = re.findall(r"[a-z]{4,}", sentence[end:].casefold())[:3]
-    return {w for w in before + after if w not in _GENERIC}
+    words = {w for w in before + after if w not in _GENERIC}
+    # the entity named right before the number ("Nifty 50 declined 5.2%", "NIFTY FMCG (-26.33%)")
+    lo = max(0, start - 80)
+    near = []
+    for m in re.finditer(r"\b[A-Z][A-Za-z&]+(?:\s+(?:[A-Z][A-Za-z&]+|\d{2,3}\b))*", sentence[lo:start]):
+        name = m.group(0)
+        at_sentence_start = lo + m.start() == 0 or sentence[:lo + m.start()].rstrip().endswith((".", ":", "*"))
+        if name in _STOP_ENTITIES or (at_sentence_start and " " not in name) or re.fullmatch(r"(?:YoY|QTD|FY\d+|Q[1-4])", name):
+            continue
+        near.append(name)
+    if near:
+        words.add("@" + re.sub(r"\s+", " ", near[-1]).casefold())
+    return words
 
 
 class _Facts:
@@ -220,12 +232,21 @@ class _Facts:
         self.clusters: dict[str, list[dict]] = {}
 
     def key(self, stat: str, context: set[str]) -> tuple[str, int]:
+        """Same fact: shared context words, and not two different entities named right before the number."""
         clusters = self.clusters.setdefault(stat, [])
+        ents = {w for w in context if w.startswith("@")}
+        words = context - ents
         for i, c in enumerate(clusters):
-            if c["words"] & context or (not context and not c["words"]):
-                c["words"] |= context
+            if ents and c["ents"]:
+                if ents & c["ents"]:  # the same number for the same entity: the same fact
+                    c["words"] |= words
+                    return stat, i
+                continue
+            if c["words"] & words or (not words and not c["words"]):
+                c["words"] |= words
+                c["ents"] |= ents
                 return stat, i
-        clusters.append({"words": set(context)})
+        clusters.append({"words": set(words), "ents": set(ents)})
         return stat, len(clusters) - 1
 
 
@@ -234,11 +255,14 @@ def _sentences(line: str) -> list[str]:
 
 
 def _owns(title: str, sentence: str, pos: int | None = None) -> bool:
-    """A section whose title names an entity of the sentence (a deep-dive) keeps that entity's numbers."""
-    head = re.split(r"[:—-]", str(title or ""), maxsplit=1)[0]
-    words = {w for w in re.findall(r"[A-Za-z&]{2,}", head) if w.casefold() not in {"the", "and", "sector", "deep", "dive", "nifty"}}
-    window = sentence if pos is None else sentence[max(0, pos - 60):pos + 25]  # the entity next to the number
-    return bool(words) and any(re.search(rf"\b{re.escape(w)}\b", window) for w in words)
+    """A section whose title names an entity of the sentence (a deep-dive) keeps that entity's numbers.
+    The entity is the whole title phrase ("Capital Goods", not "Capital"), next to the number."""
+    head = re.split(r"[:\u2014]|\s-\s", str(title or ""), maxsplit=1)[0]
+    phrases = [re.sub(r"(?i)\b(?:the|sector|deep[- ]dive|nifty)\b", "", ph).strip()
+               for ph in re.split(r"\s+and\s+|,\s*|\s*&\s*|\s*/\s*", head)]
+    phrases = [ph for ph in phrases if len(ph) >= 2]
+    window = sentence if pos is None else sentence[max(0, pos - 60):pos + 25]
+    return any(re.search(rf"\b{re.escape(ph)}\b", window, flags=re.I if len(ph) > 3 else 0) for ph in phrases)
 
 
 def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_section_cut: float = 0.1,
@@ -333,10 +357,12 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                             actions.append({"stat": key[0], "action": "number replaced by a section reference",
                                             "section": title, "sentence": sentence.strip()[:200], "reference": f"Section {o_no}"})
             is_exec = limit > cap
+            counted: set = set()
             for m, key in mentions:
                 if m.group(0) in new:
-                    if not is_exec:  # the executive summary's mention is the allowed extra one
+                    if not is_exec and key not in counted:  # once per sentence; the exec summary is the extra one
                         seen[key] += 1
+                        counted.add(key)
                     # references point at the first BODY mention; the executive summary is a fallback
                     if not is_exec and (key not in first_at or first_at[key][2]):
                         if key not in first_at or first_at[key][2]:
@@ -368,8 +394,10 @@ def fact_counts(report: str) -> Counter:
             if not _is_prose(line):
                 continue
             for sentence in _sentences(line):
-                for m in _STAT_RE.finditer(sentence):
-                    counts[facts.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end()))] += 1
+                keys = {facts.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end()))
+                        for m in _STAT_RE.finditer(sentence)}
+                for key in keys:  # a fact counts once per sentence (a calculation may repeat its inputs)
+                    counts[key] += 1
     return counts
 
 

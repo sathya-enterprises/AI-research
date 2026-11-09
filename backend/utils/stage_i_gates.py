@@ -294,8 +294,6 @@ def rendered_check(payload: dict, *, build, audit, window_start: date | None = N
                         new, _ = convert_text_art(line + "\n")
                         report = report.replace(line, new.rstrip("\n"))
                         actions.append("rewrote a rendered arrow chain")
-        report, more = heal_text(report, window_start, payload.get("charts") or [])
-        actions += more
         report, charts, dup_actions = heal_rendered_duplicates(report, payload.get("charts") or [], blocking)
         actions += dup_actions
         if repairs is not None:  # the export path's own repairs (chart-audit repair, exact duplicate lines)
@@ -304,6 +302,9 @@ def rendered_check(payload: dict, *, build, audit, window_start: date | None = N
                 actions += more
             except Exception as exc:
                 log.warning("Stage I rendered check: export repairs failed (%s)", type(exc).__name__)
+        # the text gates + final repetition / table-numbering pass run LAST, on the repaired text
+        report, more = heal_text(report, window_start, charts)
+        actions += more
         if not actions:
             break
         payload["report"], payload["charts"] = report, charts

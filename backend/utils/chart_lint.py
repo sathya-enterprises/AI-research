@@ -259,7 +259,13 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     time_axis = is_time_axis(labels)
     unit = infer_unit(spec, passage_text)
     metric = metric_name(spec)
-    if not unit and re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings", f"{passage_text[:600]} {old_rest}"):
+    source_titles = " ".join(str((manifest or {}).get(sid, {}).get("title") or "") for sid in _ids(spec))
+    if re.fullmatch(r"Q[1-4] 20\d{2}", metric):  # a period used as the metric name
+        period_label = fy_label(metric)
+        metric = "Quarterly return"
+        unit = unit or ("%" if spec.get("unit") == "%" or "%" in str(spec.get("yLabel") or "") else unit)
+        spec["_period"] = period_label
+    if not unit and re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings", f"{passage_text[:600]} {old_rest} {source_titles}"):
         vals = _values(spec)
         if vals and all(0 < v < 200 for v in vals):
             metric, unit = (f"P/E ratio, {metric}" if metric.casefold() not in {"p/e", "pe", "p/e ratio"} else "P/E ratio"), "x"
@@ -278,7 +284,7 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
             spec["type"], kind = "horizontal_bar", "horizontal_bar"
             fixes.append("ranking shown as a sorted horizontal bar")
     # title
-    period = _period_from_title(spec.get("title") or "") or _as_of(spec, manifest or {})
+    period = spec.pop("_period", "") or _period_from_title(spec.get("title") or "") or _as_of(spec, manifest or {})
     qtd = " (QTD, partial)" if re.search(r"(?i)\bQTD\b|quarter-to-date", old_rest) else ""
     if kind == "heatmap":
         rows = spec.get("rows") or []
