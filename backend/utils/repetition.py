@@ -444,6 +444,31 @@ def repetition_metrics(report: str, charts: list | None = None) -> dict:
                 dup_tables += 1
             else:
                 kept.append(bag)
-    return {"max_headline_repeats": top[1], "max_headline_stat": top[0], "stats_over_cap": sum(1 for v in counts.values() if v > 2),
+    near = len(near_duplicate_sentences(report))
+    return {"near_duplicate_sentences": near, "max_headline_repeats": top[1], "max_headline_stat": top[0], "stats_over_cap": sum(1 for v in counts.values() if v > 2),
             "duplicate_figure_block_sentences": dup_blocks, "figure_blocks_echoing_body": echo,
             "duplicate_tables": dup_tables, "tables": len(tables)}
+
+
+def near_duplicate_sentences(report: str, threshold: float = 0.6, min_tokens: int = 10) -> list[tuple[str, str, str, str]]:
+    """Sentence pairs in DIFFERENT body sections whose word sets overlap >= ``threshold`` (Jaccard):
+    the same point made twice, or one template repeated across sections (cohesion metric, Stage K)."""
+    lines = str(report or "").split(chr(10))
+    seen: list[tuple[str, str, set]] = []
+    pairs = []
+    for start, end, title in _sections(lines):
+        if re.match(r"(?i)executive summary", title):
+            continue
+        for line in lines[start:end]:
+            if not _is_prose(line):
+                continue
+            for sentence in _sentences(line):
+                tokens = _tokens(sentence)
+                if len(tokens) < min_tokens:
+                    continue
+                for other_title, other_sentence, other_tokens in seen:
+                    if other_title != title and len(tokens & other_tokens) / len(tokens | other_tokens) >= threshold:
+                        pairs.append((other_title, other_sentence[:160], title, sentence[:160]))
+                        break
+                seen.append((title, sentence, tokens))
+    return pairs

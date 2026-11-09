@@ -100,6 +100,10 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     add(6, "Max mentions per statistic in body prose <= 2", metrics["max_headline_repeats"] <= 2,
         f"max {metrics['max_headline_repeats']} ({metrics['max_headline_stat']}), over cap {metrics['stats_over_cap']}")
     add(6, "No duplicate tables", metrics["duplicate_tables"] == 0, f"{metrics['duplicate_tables']} of {metrics['tables']}")
+    from utils.repetition import near_duplicate_sentences
+    near = near_duplicate_sentences(report)
+    add(6, "Cohesion: at most 5 near-duplicate sentences across sections", len(near) <= 5,
+        f"{len(near)} pair(s)" + (f"; e.g. '{near[0][3][:80]}'" if near else ""))
     add(6, "Figure boxes do not repeat the body; no CONTEXT 'Supports:'",
         metrics["figure_blocks_echoing_body"] == 0 and not re.search(r"(?i)\bcontext\s*\n?\s*supports:", pdf),
         f"echoing {metrics['figure_blocks_echoing_body']}, duplicate box sentences {metrics['duplicate_figure_block_sentences']}")

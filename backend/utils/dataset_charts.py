@@ -176,12 +176,26 @@ def interpret_sector(data: QuarterlyDataset, label: str, cols: list[int]) -> str
     worst = min(vals, key=lambda v: v[1])
     cite = _cite([row.passage_id] + ([bench.passage_id] if bench else []))
     parts = []
+    # Stage K: the same facts in one of three phrasings (chosen by the sector's position), so ten deep-dives
+    # do not repeat one sentence template word for word.
+    variant = list(data.rows).index(label) % 3 if label in data.rows else 0
     if bench is not None:
         beats = sum(1 for i in cols if row.values[i] > bench.values[i])
-        parts.append(f"{name} returned more than the Nifty 50 in {beats} of the {len(cols)} completed quarters shown.")
+        n = len(cols)
         bi, wi = data.quarters.index(best[0]), data.quarters.index(worst[0])
-        parts.append(f"Its strongest quarter was {best[0]}, when {name} returned {best[2]} against {bench.raw[bi]} for the "
-                     f"Nifty 50, and its weakest was {worst[0]}, at {worst[2]} against {bench.raw[wi]} {cite}.")
+        b_best, b_worst = bench.raw[bi], bench.raw[wi]
+        if variant == 0:
+            parts.append(f"{name} returned more than the Nifty 50 in {beats} of the {n} completed quarters shown.")
+            parts.append(f"Its strongest quarter was {best[0]}, when {name} returned {best[2]} against {b_best} for the "
+                         f"Nifty 50, and its weakest was {worst[0]}, at {worst[2]} against {b_worst} {cite}.")
+        elif variant == 1:
+            parts.append(f"Over the {n} completed quarters, {name} beat the Nifty 50 {beats} times.")
+            parts.append(f"The best quarter for {name} was {best[0]} ({best[2]}, with the Nifty 50 at {b_best}); the worst was "
+                         f"{worst[0]} ({worst[2]}, with the Nifty 50 at {b_worst}) {cite}.")
+        else:
+            parts.append(f"In {beats} of {n} completed quarters, {name} finished ahead of the Nifty 50.")
+            parts.append(f"{best[0]} was its peak at {best[2]} (Nifty 50: {b_best}), while {worst[0]} was its low point "
+                         f"at {worst[2]} (Nifty 50: {b_worst}) {cite}.")
     else:
         parts.append(f"{name}'s strongest quarter was {best[0]} ({best[2]}) and its weakest {worst[0]} ({worst[2]}) {cite}.")
     q = data.qtd.get(label)
