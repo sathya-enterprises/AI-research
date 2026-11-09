@@ -294,7 +294,7 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                         for m in _STAT_RE.finditer(sentence)]
             over = [(m, key) for m, key in mentions
                     if seen[key] >= (limit if _owns(title, sentence, m.start()) else max(1, limit - min(owned[key], 1)))
-                    and first_at.get(key, (k,))[0] != k]
+                    ]
             new = sentence
             if over:
                 # 1) parentheticals
@@ -313,7 +313,7 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                     words = len(new.split())
                     overlap = (len(_tokens(new) & _tokens(origin_sentence)) / max(1, len(_tokens(new) | _tokens(origin_sentence))))
                     all_over = all(seen[key] >= limit for _, key in [(m, kk) for m, kk in mentions if m.group(0) in new])
-                    if number and all_over and overlap >= restatement and not lone_entity and \
+                    if number and origin_k != k and all_over and overlap >= restatement and not lone_entity and \
                             cut_words[k] + words <= max_section_cut * max(section_words[k], 1) and \
                             not re.search(r"\b(?:Figure|Table)\s+\d", new):
                         ref = f"(See Section {number}, {origin_title}.)"
@@ -321,14 +321,15 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                                         "section": title, "sentence": sentence.strip()[:200], "reference": ref})
                         cut_words[k] += words
                         new = ref
-                    elif number:
+                    elif number or origin_k == k:
                         # 3) keep the sentence; the repeated number points back to where it is given
                         for m, key in left:
                             o_no, _ = ref_for(first_at[key][0])
                             if not o_no or _owns(title, sentence, m.start()):
                                 continue
+                            where = "above" if first_at[key][0] == k else f"in Section {o_no}"
                             new = re.sub(r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?" + re.escape(m.group(0)),
-                                         f"the figure given in Section {o_no}", new, count=1)
+                                         f"the figure given {where}", new, count=1)
                             actions.append({"stat": key[0], "action": "number replaced by a section reference",
                                             "section": title, "sentence": sentence.strip()[:200], "reference": f"Section {o_no}"})
             is_exec = limit > cap

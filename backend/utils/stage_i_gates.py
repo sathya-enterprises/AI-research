@@ -118,6 +118,18 @@ def fix_small_items(report: str) -> tuple[str, list[str]]:
         return m.group(0)
     text = re.sub(r"(?m)^>\s*\[!WATCH(?::[^\]]*)?\]\s*(.*)$", _watch, text)
     text = re.sub(r"(?m)^>\s*\[!TAKEAWAYS(?::[^\]]*)?\]\s*$", "", text)
+    # calendar quarter labels in prose ("Q4 2025" = Oct-Dec 2025) -> the report's fiscal labels ("Q3 FY26");
+    # tables quote their source rows and keep their own labels
+    from utils.period_hygiene import fy_label
+    out_lines, converted = [], 0
+    for line in text.split("\n"):
+        if not line.lstrip().startswith(("|", "#")):
+            line, k = re.subn(r"\bQ([1-4]) (20\d{2})\b", lambda m: fy_label(m.group(0)), line)
+            converted += k
+        out_lines.append(line)
+    text = "\n".join(out_lines)
+    if converted:
+        actions.append(f"{converted} calendar quarter label(s) written as fiscal quarters")
     # LaTeX symbols ("$\\rho$", whose "\\r" may have become a line break) -> the Greek letter
     greek = {"rho": "\u03c1", "beta": "\u03b2", "alpha": "\u03b1", "sigma": "\u03c3", "mu": "\u03bc", "delta": "\u0394"}
     text, n = re.subn(r"\$\s*(?:\\|\r?\n)?(rho|beta|alpha|sigma|mu|delta|ho)\s*\$",

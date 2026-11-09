@@ -692,11 +692,35 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     headings = [(len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(report)]
     explained, referenced = charts_explained(report, out.get("charts") or [])
     charts = out.get("charts") or []
+    # Stage I: chart / table / repetition metrics and the per-report chart inventory
+    from utils.chart_lint import lint_all
+    from utils.repetition import repetition_metrics
+    inventory, lint_failing = lint_all(charts)
+    rep_metrics = repetition_metrics(report, charts)
+    chart_lint_meta = result["meta"].get("chartLint") or {}
+    table_numbers = re.findall(r"(?m)^(?:\*\*|#{3,4}\s+)Table (\d+):", report)
+    inv_lines = ["| Figure | Title | Type | X | Y | Unit | Period | Source | Lint |", "|---|---|---|---|---|---|---|---|---|"]
+    inv_lines += ["| " + " | ".join(str(r.get(k) or "").replace("|", "/") for k in
+                                     ("figure", "title", "type", "x", "y", "unit", "period", "source", "lint")) + " |" for r in inventory]
+    (run_dir / "v2_replay_chart_inventory.md").write_text("\n".join(inv_lines), encoding="utf-8")
+    stage_i_metrics = {
+        "v2replay_chart_lint_failing": lint_failing,
+        "v2replay_charts_dropped_quality_gate": len(chart_lint_meta.get("dropped") or []),
+        "v2replay_chart_lint_fixes": len(chart_lint_meta.get("fixed") or []),
+        "v2replay_tables_numbered": len(table_numbers),
+        "v2replay_tables_dropped_no_source": sum(1 for x in chart_lint_meta.get("tableActions") or [] if "dropped" in x),
+        "v2replay_max_repeats_per_stat": rep_metrics["max_headline_repeats"],
+        "v2replay_stats_over_cap": rep_metrics["stats_over_cap"],
+        "v2replay_duplicate_tables": rep_metrics["duplicate_tables"],
+        "v2replay_figure_boxes_echoing_body": rep_metrics["figure_blocks_echoing_body"],
+        "v2replay_duplicate_figure_box_sentences": rep_metrics["duplicate_figure_block_sentences"],
+    }
     metrics = {
         "v2replay_calls_replayed": gateway.stats.calls, "v2replay_missing_calls": len(gateway.missing),
         "v2replay_prompts_changed": len(gateway.prompt_changed),
         "v2replay_words": len(WORD_RE.findall(CITE_RE.sub(" ", MARKER_RE.sub(" ", report)))),
         "v2replay_charts": len(charts),
+        **stage_i_metrics,
         "v2replay_charts_from_datasets": (result["meta"].get("chartFunnel") or {}).get("usedFromFetchedDatasets", 0),
         "v2replay_charts_dropped_after_assembly": len(result["meta"].get("charts", {}).get("droppedAfterAssembly") or []),
         "v2replay_sections_ok": sum(1 for x in result["meta"].get("sections") or [] if x.get("ok")),
