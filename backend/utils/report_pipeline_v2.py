@@ -418,8 +418,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
     if regime is not None:
-        from utils.regime import contradicted_rotation
-        reason = contradicted_rotation(outline.thesis or "", regime)
+        from utils.regime import thesis_needs_rewrite
+        regime_log["dispersion"] = regime.dispersion_sentence()
+        reason = thesis_needs_rewrite(outline.thesis or "", regime)
         if reason:
             log.warning("V2 regime: outline thesis rewritten (%s)", reason)
             regime_log.update(thesisRewritten=True, thesisReason=reason, originalThesis=(outline.thesis or "")[:400])
@@ -594,6 +595,22 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         allowed_numbers=_number_set(d.summary for d in good), section_id="exec")
     exec_body = exec_policy.body
     exec_unsupported = unsupported_numbers(exec_body, _number_set(d.summary for d in good))
+    # Stage I (FIX 4 + dispersion): the executive summary opens with the computed regime statement when
+    # its own opening contradicts the regime or omits a sector-specific dispersion finding.
+    if regime is not None and exec_body:
+        from utils.regime import thesis_needs_rewrite
+        opening = exec_body.split("\n\n", 1)[0]
+        reason = thesis_needs_rewrite(opening, regime)
+        if reason:
+            try:
+                from utils.dataset_charts import find_quarterly_dataset
+                data = find_quarterly_dataset(store)
+                cite = next(iter(data.rows.values())).passage_id if data and data.rows else ""
+            except Exception:
+                cite = ""
+            exec_body = regime.thesis_sentence().rstrip(".") + (f" [{cite}]." if cite else ".") + "\n\n" + exec_body
+            regime_log.update(execThesisInserted=True, execThesisReason=reason)
+            log.warning("V2 regime: executive summary opens with the computed regime statement (%s)", reason[:160])
 
     # Figure renumbering in document order (dropped figures leave no gaps).
     used = [c for c in planned if c.status == "referenced"]

@@ -203,3 +203,17 @@ def test_headline_stat_cap_keeps_sentences_and_points_back():
     assert "PSU banks" in out and "the figure given in Section 2" in out  # sentence kept, number points back
     assert "Bank credit growth stayed at 17.7%" in out                     # the deep-dive keeps its own number
     assert repetition_metrics(out)["stats_over_cap"] == 0 and actions
+
+
+def test_regime_dispersion_makes_the_thesis_sector_specific():
+    from utils.regime import compute_regime, thesis_needs_rewrite
+    data = _dataset({"NIFTY METAL": [10, 8, 4, 2], "NIFTY REALTY": [-6, -5, -4, -3],
+                     "NIFTY PHARMA": [3, 4, 5, 6], "NIFTY FMCG": [-5, -6, -7, -8], "NIFTY 50": [1, 1, 1, 1]})
+    regime = compute_regime(data)
+    d = regime.dispersion
+    assert d["sectorSpecific"] and d["largestRange"] > d["gap"]
+    thesis = regime.thesis_sentence()
+    assert "sector-specific factors rather than a group-wide" in thesis and "Nifty Metal" in thesis and "Nifty FMCG" in thesis
+    assert "compounded over the window: cyclical sectors" in thesis
+    assert thesis_needs_rewrite("Leadership rotated from cyclicals to defensives.", regime)
+    assert not thesis_needs_rewrite(thesis, regime)

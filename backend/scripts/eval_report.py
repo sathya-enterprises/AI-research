@@ -569,8 +569,14 @@ def restore_fetched_dataset(store, stages: dict, manifest: list) -> bool:
     store (the registry renamed it). A live run now keeps it, so the replay rebuilds it from the
     captured dataset rows (exactly the rows the live run fetched)."""
     qrows = ((stages.get("calculated_sector_quarterly_dataset") or {}).get("data") or {}).get("rows") or []
-    if not qrows or any(p.kind == "calculated" and "Sector | Q" in p.text for p in store.passages):
+    if not qrows:
         return False
+    # Stage I: the replay rebuilds the dataset with the current formatter (group summary) and the
+    # current data-sanity checks, exactly as a live run would build it from the fetched rows.
+    import copy
+    from utils.data_sanity import check_dataset_rows
+    qrows = copy.deepcopy(qrows)
+    check_dataset_rows(qrows)
     from utils.market_data import format_sector_quarterly_returns_as_source
     source = format_sector_quarterly_returns_as_source(qrows)
     sid = next((str(m.get("id")).upper() for m in manifest if isinstance(m, dict)

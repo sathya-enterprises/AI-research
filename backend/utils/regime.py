@@ -85,6 +85,33 @@ class Regime:
     qtd: dict[str, float] = field(default_factory=dict)
     qtd_as_of: str = ""
     members: dict[str, list[str]] = field(default_factory=dict)
+    member_compounded: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    @property
+    def dispersion(self) -> dict:
+        """Within-group range of compounded returns vs the gap between the group averages. When the
+        largest within-group range exceeds the between-group gap, returns were sector-specific."""
+        ranges = {}
+        for g, vals in self.member_compounded.items():
+            if len(vals) >= 2:
+                best = max(vals.items(), key=lambda kv: kv[1])
+                worst = min(vals.items(), key=lambda kv: kv[1])
+                ranges[g] = {"best": best[0], "bestValue": best[1], "worst": worst[0], "worstValue": worst[1],
+                             "range": round(best[1] - worst[1], 2)}
+        values = list(self.compounded.values())
+        gap = round(max(values) - min(values), 2) if len(values) >= 2 else 0.0
+        largest = max((r["range"] for r in ranges.values()), default=0.0)
+        return {"ranges": ranges, "gap": gap, "largestRange": largest, "sectorSpecific": bool(ranges) and largest > gap}
+
+    def dispersion_sentence(self) -> str:
+        d = self.dispersion
+        parts = [f"within {g} sectors, {_pretty(r['best'])} {r['bestValue']:+.2f}% vs {_pretty(r['worst'])} {r['worstValue']:+.2f}% "
+                 f"(a {r['range']:.2f} pp range)" for g, r in d["ranges"].items()]
+        if d["sectorSpecific"]:
+            return ("Returns were driven by sector-specific factors rather than a group-wide cyclical-versus-defensive rotation: "
+                    + "; ".join(parts) + f", against a gap of {d['gap']:.2f} pp between the group averages.")
+        return (f"The gap between the group averages ({d['gap']:.2f} pp) exceeds the spread inside each group ("
+                + "; ".join(parts) + "), so the group-level reading holds.")
 
     @property
     def rotation(self) -> tuple[str, str] | None:
@@ -110,6 +137,7 @@ class Regime:
         lines.append(f"- Leaders (compounded): {', '.join(f'{_pretty(k)} {v:+.2f}%' for k, v in self.leaders)}.")
         lines.append(f"- Laggards (compounded): {', '.join(f'{_pretty(k)} {v:+.2f}%' for k, v in self.laggards)}.")
         lines.append(f"- Leadership by half of the window: first half {self.first_half}, second half {self.second_half}.")
+        lines.append(f"- Dispersion: {self.dispersion_sentence()}")
         if self.qtd:
             lines.append(f"- Quarter to date ({self.qtd_as_of}, partial): "
                          + ", ".join(f"{g} {v:+.2f}%" for g, v in self.qtd.items()) + ".")
@@ -124,6 +152,13 @@ class Regime:
                  f"leadership was {self.second_half if self.second_half != 'mixed' else 'mixed'} in the second half")
         lead = f"; {_pretty(best[0])} led ({best[1]:+.2f}%) and {_pretty(worst[0])} lagged ({worst[1]:+.2f}%)" if best and worst else ""
         bench = f", against {_pretty(BENCHMARK)} at {self.benchmark_compounded:+.2f}%" if self.benchmark_compounded is not None else ""
+        if self.dispersion["sectorSpecific"]:
+            # the group statement is kept only for the half-window leadership, with the compounded group
+            # numbers next to it so it cannot be read as a group-wide rotation
+            half = (f"by half of the window, group leadership moved from {rot[0]} to {rot[1]} sectors" if rot else
+                    f"group leadership in the second half was {self.second_half}")
+            return (f"From {self.quarters[0]} to {self.quarters[-1]}, {self.dispersion_sentence()[0].lower()}"
+                    f"{self.dispersion_sentence()[1:]} {half[0].upper()}{half[1:]} (compounded over the window: {comp}{bench}).")
         return (f"From {self.quarters[0]} to {self.quarters[-1]}, {trend}: compounded, {comp}{bench}{lead}.")
 
 
@@ -184,7 +219,9 @@ def compute_regime(data) -> Regime | None:
     return Regime(quarters=list(data.quarters), group_returns=group_returns, benchmark=benchmark, lead=lead,
                   compounded=compounded, benchmark_compounded=compounded_by_sector.get(BENCHMARK),
                   leaders=sectors[:3], laggards=sectors[::-1][:3], first_half=half_lead(0, half),
-                  second_half=half_lead(half, n), qtd=qtd, qtd_as_of=data.qtd_as_of, members=members)
+                  second_half=half_lead(half, n), qtd=qtd, qtd_as_of=data.qtd_as_of, members=members,
+                  member_compounded={g: {m: compounded_by_sector[m] for m in labels if m in compounded_by_sector}
+                                     for g, labels in members.items()})
 
 
 # ── checks on prose ──────────────────────────────────────────────────────────────────────────────
@@ -318,3 +355,16 @@ def fix_mislabels(text: str) -> tuple[str, list[str]]:
     # a sentence that now starts with the lower-case remainder of a dropped label keeps its capital
     text = re.sub(r"(^|[.!?]\s+|\n)(sectors|plays|names|segments|stocks)\b", lambda m: m.group(1) + m.group(2).capitalize(), text)
     return text, actions
+
+
+def thesis_needs_rewrite(thesis: str, regime: Regime) -> str:
+    """A reason when the thesis contradicts the regime or omits a sector-specific dispersion finding."""
+    reason = contradicted_rotation(thesis or "", regime)
+    if reason:
+        return reason
+    if regime.dispersion["sectorSpecific"] and not re.search(r"(?i)sector[- ]specific|dispersion|within[- ]group|"
+                                                              r"rather than a (?:broad|group)", thesis or ""):
+        return ("the data show sector-specific returns (largest within-group range "
+                f"{regime.dispersion['largestRange']:.2f} pp > {regime.dispersion['gap']:.2f} pp between groups); "
+                "the thesis states a group-wide reading")
+    return ""

@@ -914,13 +914,15 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
         # Current quarter so far: partial, so it is a separate table and never mixed into the matrix.
         as_of = qtd_rows[0]["qtd"].get("as_of_date") or qtd_rows[0]["qtd"].get("as_of_month") or ""
         lines.append("")
-        lines.append(f"CURRENT QUARTER TO DATE (QTD, partial; latest monthly close {as_of} vs the {quarters[-1] if quarters else 'last'} quarter-end close):")
+        lines.append(f"CURRENT QUARTER TO DATE (QTD, partial; latest close {as_of} vs the {quarters[-1] if quarters else 'last'} quarter-end close):")
         lines.append(f"Sector | QTD return to {as_of} (%)")
         for row in qtd_rows:
             lines.append(f"{row.get('label')} | {row['qtd']['return']:+.2f}%")
     missing = [f"{r['label']}: {', '.join(r['missing_quarters'])}" for r in rows if r.get("missing_quarters")]
     if missing:
         lines.append("Missing observations: " + "; ".join(missing))
+    if complete_rows:  # last, so the passages before it keep their ids
+        lines += [""] + _group_summary_lines(complete_rows, quarters)
     # The canonical source registry intentionally strips internal:// URLs and
     # only carries compact evidence fields into chart auditing. Preserve the
     # complete quarter matrix as chartEvidenceExcerpt so numeric chart points
@@ -1001,3 +1003,33 @@ async def fetch_company_ohlc(stocks: list[dict], range_str: str = "1y", interval
             })
     log.info("market_data: fetched %s OHLC for %d/%d company symbol(s)", interval, len(out), len(rows))
     return out
+
+
+def _group_summary_lines(complete_rows: list[tuple[str, float]], quarters: list[str]) -> list[str]:
+    """Equal-weight sector-group averages of the compounded returns, each group's best and worst member
+    and its within-group range, and the gap between the group averages (Stage I: the regime summary
+    and the thesis quote these, so they are part of the auditable dataset)."""
+    try:
+        from utils.regime import groups
+    except Exception:
+        return []
+    by_label = {label.upper(): value for label, value in complete_rows}
+    rows, averages = [], {}
+    for name, members in groups().items():
+        vals = {m: by_label[m] for m in members if m in by_label}
+        if len(vals) < 2:
+            continue
+        avg = sum(vals.values()) / len(vals)
+        averages[name] = avg
+        best = max(vals.items(), key=lambda kv: kv[1])
+        worst = min(vals.items(), key=lambda kv: kv[1])
+        rows.append(f"{name.capitalize()} ({len(vals)} indices) | {avg:+.2f}% | {best[0]} {best[1]:+.2f}% | "
+                    f"{worst[0]} {worst[1]:+.2f}% | {best[1] - worst[1]:.2f} pp")
+    if len(averages) < 2:
+        return []
+    gap = max(averages.values()) - min(averages.values())
+    return [f"SECTOR GROUP SUMMARY, {quarters[0]} TO {quarters[-1]} (calculated; equal-weight average of the member "
+            f"indices' compounded returns; IT is in neither group):",
+            "Group | Compounded return (%) | Best member | Worst member | Within-group range",
+            *rows,
+            f"Gap between the group averages = {gap:.2f} pp", ""]
