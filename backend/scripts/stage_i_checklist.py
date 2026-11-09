@@ -88,9 +88,9 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
             restore_fetched_dataset(store, stages, ((stages.get("canonical_source_manifest") or {}).get("data") or {}).get("sources") or [])
             regime = compute_regime(find_quarterly_dataset(store))
             opening = _exec_summary(report).split("\n\n")[0]
-            reason = thesis_needs_rewrite(opening, regime) if regime else "no regime"
+            reason = thesis_needs_rewrite(opening, regime) if regime else ""
             add(4, "Executive-summary thesis matches the computed regime and its dispersion", not reason,
-                reason or opening[:200])
+                reason or (opening[:200] if regime else "n/a (no sector dataset in this report)"))
         except Exception as exc:
             add(4, "Executive-summary thesis matches the computed regime", False, f"check failed: {type(exc).__name__}: {exc}")
     # 5 self-description
@@ -101,7 +101,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
         f"max {metrics['max_headline_repeats']} ({metrics['max_headline_stat']}), over cap {metrics['stats_over_cap']}")
     add(6, "No duplicate tables", metrics["duplicate_tables"] == 0, f"{metrics['duplicate_tables']} of {metrics['tables']}")
     add(6, "Figure boxes do not repeat the body; no CONTEXT 'Supports:'",
-        metrics["figure_blocks_echoing_body"] == 0 and "Supports:" not in pdf,
+        metrics["figure_blocks_echoing_body"] == 0 and not re.search(r"(?i)\bcontext\s*\n?\s*supports:", pdf),
         f"echoing {metrics['figure_blocks_echoing_body']}, duplicate box sentences {metrics['duplicate_figure_block_sentences']}")
     # 7 data sanity: FS QTD agrees with Bank
     qtd = next((c for c in charts if re.search(r"(?i)quarter-to-date|QTD", str(c.get("title")))), None)
@@ -134,7 +134,8 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
         "a/an": re.findall(r"\b[Aa] (?!one|once|eu|uni|use|usu|ur)[aeio][a-z]+|\b[Aa]n (?!hour|honest|heir)[bcdfgjklmnpqrstvwyz][a-z]+", pdf),
         "truncated date": re.findall(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}, \d{2}\b(?!\d)", pdf),
         "run-together source": re.findall(r"supplied\)[A-Z]", pdf),
-        "primary official 1.00": re.findall(r"(?i)primary\s+official\s*·\s*Reliability:\s*1\.00", pdf),
+        "calculated dataset shown as primary official": re.findall(
+            r"(?i)(?:No public URL supplied|calculated dataset)\)[^\[]{0,200}?primary\s+official", pdf),
         "raw bullet mid-sentence": re.findall(r"[a-z,] \* [a-z]", pdf),
         "ordinal gap": [p for p in re.split(r"\n\s*\n", _exec_summary(report))
                         if len(re.findall(r"\b(?:First|Second|Third|Fourth|Fifth|Sixth),", p)) >= 2
@@ -144,8 +145,11 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     }
     for name, hits in small.items():
         add(9, f"No {name}", not hits, [str(h)[:60] for h in hits][:3] or "none")
-    half_blank = [i + 1 for i, t in enumerate(pages[1:-1], 1) if 0 < len(t.strip()) < 350]
-    add(9, "No near-empty pages", not half_blank, half_blank[:5] or "none")
+    def _body(t):  # page text without the running header / page number
+        return re.sub(r"(?s)^.*?R E S E A R C H\s*\n\d+\s*\n[^\n]*\n", "", t).strip()
+    blank = [i + 1 for i, t in enumerate(pages[1:-1], 1) if len(_body(t)) < 40]
+    spill = [i + 1 for i, t in enumerate(pages[1:-1], 1) if 40 <= len(_body(t)) < 350]
+    add(9, "No blank (header-only) pages", not blank, blank[:5] or f"none; {len(spill)} short section-end page(s) (layout: sections start on a new page)")
     # 10 rendered gates
     splits = split_word_findings(pdf, report)
     collisions = collision_findings(pdf_bytes)

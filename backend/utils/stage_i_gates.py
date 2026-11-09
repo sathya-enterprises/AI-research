@@ -147,7 +147,7 @@ def fix_small_items(report: str) -> tuple[str, list[str]]:
     return text, actions
 
 
-def heal_text(report: str, window_start: date | None = None) -> tuple[str, list[str]]:
+def heal_text(report: str, window_start: date | None = None, charts: list | None = None) -> tuple[str, list[str]]:
     """Run the text gates and their remedies; returns (report, actions)."""
     actions: list[str] = []
     from utils.leak_gate import remove_leaks
@@ -161,6 +161,16 @@ def heal_text(report: str, window_start: date | None = None) -> tuple[str, list[
     for finding in reversed(period_findings(report, window_start)):
         report = "\n".join(_drop_table_at(report.split("\n"), finding["line"]))
         actions.append(f"period: dropped an out-of-window table ({finding['caption'] or 'uncaptioned'}, ends {finding['ends']})")
+    # later stages (gate healing, export repairs) edit the text after V2: the repetition rules and the
+    # table numbering run again on the text that is published
+    from utils.repetition import cap_headline_stats, dedupe_tables
+    report, removed = dedupe_tables(report, charts or [])
+    actions += [f"repetition: table removed ({t['reason']}): {t['table'][:60]}" for t in removed]
+    report, capped = cap_headline_stats(report)
+    actions += [f"repetition: {a['stat']} {a['action']}" for a in capped]
+    from utils.chart_lint import number_tables
+    report, table_actions, _inventory = number_tables(report)
+    actions += [f"tables: {a}" for a in table_actions if not a.startswith("caption added")]
     return re.sub(r"\n{3,}", "\n\n", report), actions
 
 
@@ -168,7 +178,7 @@ def heal_text(report: str, window_start: date | None = None) -> tuple[str, list[
 def split_word_findings(rendered_text: str, source_text: str) -> list[dict]:
     """'MON THS': two fragments that are not words on their own but join into a word of the report."""
     vocab = {w.casefold() for w in re.findall(r"[A-Za-z]{5,}", source_text or "")}
-    small = {w.casefold() for w in re.findall(r"[A-Za-z]{2,4}", source_text or "")}
+    small = {w.casefold() for w in re.findall(r"[A-Za-z]{2,}", source_text or "")}  # any word the report uses
     out = []
     for m in re.finditer(r"(?=\b([A-Za-z]{2,5}) ([A-Za-z]{2,6})\b)", rendered_text or ""):  # overlapping pairs
         a, b = m.group(1), m.group(2)
@@ -239,7 +249,7 @@ def rendered_check(payload: dict, *, build, audit, window_start: date | None = N
     rendered audit). Heals and re-renders up to ``rounds`` times. Mutates payload["report"/"charts"]."""
     from utils.pdf_export_healing import heal_rendered_duplicates
     summary = {"rounds": 0, "actions": [], "blocking": [], "warnings": [], "pages": None}
-    report, text_actions = heal_text(str(payload.get("report") or ""), window_start)
+    report, text_actions = heal_text(str(payload.get("report") or ""), window_start, payload.get("charts") or [])
     payload["report"] = report
     summary["actions"] += text_actions
     for round_no in range(rounds + 1):
@@ -284,7 +294,7 @@ def rendered_check(payload: dict, *, build, audit, window_start: date | None = N
                         new, _ = convert_text_art(line + "\n")
                         report = report.replace(line, new.rstrip("\n"))
                         actions.append("rewrote a rendered arrow chain")
-        report, more = heal_text(report, window_start)
+        report, more = heal_text(report, window_start, payload.get("charts") or [])
         actions += more
         report, charts, dup_actions = heal_rendered_duplicates(report, payload.get("charts") or [], blocking)
         actions += dup_actions

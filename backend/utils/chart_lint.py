@@ -259,6 +259,10 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     time_axis = is_time_axis(labels)
     unit = infer_unit(spec, passage_text)
     metric = metric_name(spec)
+    if not unit and re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings", f"{passage_text[:600]} {old_rest}"):
+        vals = _values(spec)
+        if vals and all(0 < v < 200 for v in vals):
+            metric, unit = (f"P/E ratio, {metric}" if metric.casefold() not in {"p/e", "pe", "p/e ratio"} else "P/E ratio"), "x"
     if not unit:
         unit = infer_unit({"yLabel": metric, "series": []}, passage_text)
     unit_txt = f" ({unit})" if unit else ""
@@ -600,6 +604,18 @@ def number_tables(report: str) -> tuple[str, list[str], list[dict]]:
         inventory.append({"table": f"Table {number}", "title": title, "columns": len(block[0].strip().strip("|").split("|")),
                           "rows": max(0, len(block) - 2), "source": source_text.strip()[:100]})
         i = j
+    # an orphan caption (its table was removed by a later stage) is dropped
+    cleaned: list[str] = []
+    for n, line in enumerate(out):
+        if re.match(r"^\s*\*\*(?:Table|Figure)(?:\s+\d+)?:\s*.+\*\*\s*$", line) or re.match(r"^\s*#{3,4}\s+Table \d+:", line):
+            k = n + 1
+            while k < len(out) and not out[k].strip():
+                k += 1
+            if not (k < len(out) and out[k].strip().startswith("|")) and "Table" in line[:12]:
+                actions.append(f"orphan table caption removed: {line.strip()[:60]}")
+                continue
+        cleaned.append(line)
+    out = cleaned
     text = "\n".join(out)
     text = re.sub(r"\bTable (\d+)\b(?!:)", lambda m: f"Table {mapping[int(m.group(1))]}" if int(m.group(1)) in mapping
                   else ("the table" if int(m.group(1)) > number else m.group(0)), text)

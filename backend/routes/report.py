@@ -25151,12 +25151,13 @@ async def generate_report(request: Request):
                     _si_window_start = None
 
                 def _si_build(payload):
-                    return _si_build_pdf(
+                    from routes.pdf import _trim_furniture_only_middle_pages, _trim_trailing_blank_pages
+                    return _trim_furniture_only_middle_pages(_trim_trailing_blank_pages(_si_build_pdf(
                         report=payload.get("report") or "", title=payload.get("title") or "", question=question or "Research Report",
                         summary=payload.get("summary") or "", key_stats=payload.get("keyStats") or [],
                         charts=payload.get("charts") or [], file_images=[], web_images=payload.get("images") or [],
                         theme=payload.get("theme"), sources=payload.get("sources"), presentation=payload.get("presentation"),
-                        report_tier=report_tier)
+                        report_tier=report_tier)))
 
                 def _si_audit_fn(pdf_bytes, payload):
                     return _si_audit(pdf_bytes, payload.get("report") or "", payload.get("title") or "",
