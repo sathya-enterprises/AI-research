@@ -488,6 +488,7 @@ def drop_caption_restatements(report: str, charts: list | None, threshold: float
         if m:
             titles[int(m.group(1))] = m.group(2)
     actions: list[str] = []
+    pending_ref = [""]
     lines = str(report or "").split(chr(10))
     for i, line in enumerate(lines):
         if not _is_prose(line) or "Figure" not in line:
@@ -503,9 +504,22 @@ def drop_caption_restatements(report: str, charts: list | None, threshold: float
                 own_numbers = set(re.findall(r"\d+(?:\.\d+)?", body)) - set(re.findall(r"\d+(?:\.\d+)?", title))
                 fig = m.group(1)
                 others = len(re.findall(rf"\bFigure\s+{fig}\b", report)) - 1  # another sentence still points to it
-                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers and others >= 1:
-                    actions.append(f"caption restatement removed: {sentence.strip()[:120]}")
-                    continue
+                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers:
+                    if others >= 1:
+                        actions.append(f"caption restatement removed: {sentence.strip()[:120]}")
+                        continue
+                    # the only reference: drop the restatement and carry "(Figure N)" into the next sentence
+                    later = [x for x in _sentences(line) if x is not sentence]
+                    nxt = next((j for j, x in enumerate(later) if line.index(x) > line.index(sentence)), None) if later else None
+                    if nxt is not None:
+                        pending_ref[0] = f"Figure {fig}"
+                        actions.append(f"caption restatement folded into the next sentence: {sentence.strip()[:120]}")
+                        continue
+            if pending_ref[0]:
+                ref = pending_ref[0]
+                pending_ref[0] = ""
+                sentence = re.sub(r"(\s*(?:\[[^\]]+\])?\s*)([.!?])?\s*$", lambda mm: f" ({ref}){mm.group(1)}{mm.group(2) or '.'}",
+                                  sentence.rstrip(), count=1)
             kept.append(sentence)
         lines[i] = " ".join(kept)
     return chr(10).join(lines), actions
