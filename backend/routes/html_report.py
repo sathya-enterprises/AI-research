@@ -1795,6 +1795,8 @@ window.__ggCharts.push({{ id: "{canvas_id}", config: {json.dumps(chart_config)} 
         numeric_values = [_to_num(value) for dataset in datasets for value in (dataset.get("data") or [])]
         if capacity_axis and numeric_values and all(value >= 0 for value in numeric_values):
             chart_config["options"].setdefault("scales", {}).setdefault("y", {})["beginAtZero"] = True
+    if isinstance(chart.get("decimals"), int):
+        chart_config["options"]["ggDecimals"] = max(0, min(int(chart["decimals"]), 4))
     if ctype in {"stacked_bar", "stacked_area"}:
         chart_config["options"].setdefault("scales", {}).setdefault("x", {})["stacked"] = True
         chart_config["options"].setdefault("scales", {}).setdefault("y", {})["stacked"] = True
@@ -1860,6 +1862,10 @@ def _render_chart_block(
         r".{0,80}\b(?:provides?|offers?|effectively|clearly|clean|readable|purpose-built|is\s+used|helps|allows|compares|shows|displays|visuali[sz]es)\b",
         str(chart.get("rationale") or ""),
     ):
+        rationale = ""
+    # Stage I: a rationale that justifies the chart type ("chronological series, so a line ...") is not content.
+    if rationale and re.search(r"(?i)chronological series|so a (?:line|bar)\b|chart type|visual form|best fit|is the right visual",
+                               str(chart.get("rationale") or "")):
         rationale = ""
     if rationale and rationale.strip() != generic_rationale:
         bits.append(f'<div class="gg-chart-note gg-chart-note--why"><span class="gg-chart-note-label">Context</span>{_inline_md(str(chart.get("rationale") or ""), source_registry)}</div>')
@@ -2639,16 +2645,18 @@ def _markdown_to_html(
             # rendered inside the table block so the caption cannot be separated from it.
             _table_caption = None
             if para_buf:
-                _cap = re.fullmatch(r"\*\*Table:\s*(.+?)\*\*", para_buf[-1].strip())
+                _cap = re.fullmatch(r"\*\*Table(\s+\d+)?:\s*(.+?)\*\*", para_buf[-1].strip())
                 if _cap:
-                    _table_caption = _cap.group(1).strip()
+                    # Stage I: "Table N: caption" keeps its number (tables have their own sequence)
+                    _table_caption = (f"Table{_cap.group(1)}: " if _cap.group(1) else "") + _cap.group(2).strip()
                     para_buf.pop()
             elif out:
                 # The normaliser puts a blank line before tables, so the caption was already
                 # emitted as its own paragraph: take it back and use it as the table title.
-                _cap = re.fullmatch(r'<p class="gg-reveal[^"]*"[^>]*><strong>Table:\s*(.+?)</strong></p>', out[-1].strip())
+                _cap = re.fullmatch(r'<p class="gg-reveal[^"]*"[^>]*><strong>Table(\s+\d+)?:\s*(.+?)</strong></p>', out[-1].strip())
                 if _cap:
-                    _table_caption = html.unescape(re.sub(r"<[^>]+>", "", _cap.group(1))).strip()
+                    _table_caption = ((f"Table{_cap.group(1)}: " if _cap.group(1) else "")
+                                      + html.unescape(re.sub(r"<[^>]+>", "", _cap.group(2))).strip())
                     out.pop()
             flush_para(); close_list()
             rows = []
@@ -3768,7 +3776,10 @@ document.addEventListener('DOMContentLoaded', function () {
             if (!isFinite(val) || val === 0) return;
             var pos = el.tooltipPosition ? el.tooltipPosition() : {x:0,y:0};
             ctx.save(); ctx.fillStyle = '#2b344d'; ctx.font = '600 9px system-ui'; ctx.textAlign = 'center';
-            var txt = Math.abs(val) >= 1000 ? (val/1000).toFixed(1) + 'k' : (Number.isInteger(val) ? String(val) : val.toFixed(1));
+            var dec = (chart.options && typeof chart.options.ggDecimals === 'number') ? chart.options.ggDecimals : 1;
+            var txt = (Math.abs(val) >= 1000 && dec < 1) ? (val/1000).toFixed(1) + 'k'
+              : (Math.abs(val) >= 1000 ? val.toLocaleString('en-IN', {maximumFractionDigits: dec})
+              : (Number.isInteger(val) ? String(val) : val.toFixed(dec)));
             ctx.fillText(txt, pos.x, pos.y - 7); ctx.restore();
           });
         });

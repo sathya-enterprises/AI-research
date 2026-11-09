@@ -323,16 +323,21 @@ def appendix_sources_markdown(manifest: list[dict], cited: set[str]) -> str:
     return "\n".join(out)
 
 
-def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10, max_rows: int = 30) -> str:
+def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10, max_rows: int = 30,
+                           window_start=None, max_historical: int = 2) -> str:
+    """Stage I (FIX 2): a table whose period ends before the question's window is never mixed with the
+    in-window tables; at most ``max_historical`` such tables appear, in a labelled historical block."""
     from utils.section_charts import merge_continuations
 
     tables = merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"} and p.passage_id in used_passages])
     if not tables:
         return ""
     out = ["Data tables used in the analysis, reproduced from the cited evidence passages."]
+    historical: list[str] = []
     seen_headings: set[str] = set()
     shown = 0
     for p in tables:
+        target = out
         if shown >= max_tables:
             break
         lines = [ln for ln in p.text.splitlines() if ln.strip()]
@@ -349,7 +354,16 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         body_rows = [r for r in rows[1:] if len(r.split("|")) == width]
         if not body_rows:
             continue  # rows that do not fit the header would render an empty table under a bare caption
-        shown += 1
+        if window_start is not None:
+            from utils.period_hygiene import in_window, table_period
+            _label, _end = table_period(heading, [c.strip() for c in rows[0].split("|")], getattr(p, "published", "") or "")
+            if _end is not None and not in_window(_end, window_start):
+                if len([x for x in historical if x.startswith("### ")]) >= max_historical:
+                    log.info("V2 appendix: out-of-window table skipped (%s, ends %s)", heading[:60], _end)
+                    continue
+                target = historical
+        if target is out:
+            shown += 1
         ids = ", ".join(getattr(p, "merged_ids", None) or [p.passage_id])
         # A clear caption: the source's table title without its "TABLE n —" numbering; a
         # too-short title is described from the table's own columns.
@@ -369,12 +383,15 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
             return [c.strip() for c in line.strip().strip("|").split("|")][:max_cols]
 
         head = cells(rows[0])
-        out += ["", f"### {caption} [{ids}]", "", "| " + " | ".join(head) + " |",
-                "| " + " | ".join(["---"] * len(head)) + " |"]
-        out += ["| " + " | ".join(cells(r)) + " |" for r in body_rows]
+        target += ["", f"### {caption} [{ids}]", "", "| " + " | ".join(head) + " |",
+                   "| " + " | ".join(["---"] * len(head)) + " |"]
+        target += ["| " + " | ".join(cells(r)) + " |" for r in body_rows]
         total_cols = len(rows[0].strip().strip("|").split("|"))
         if total_cols > max_cols:
-            out += ["", f"Note: the first {max_cols} of {total_cols} columns are shown; the full table is in the cited source."]
+            target += ["", f"Note: the first {max_cols} of {total_cols} columns are shown; the full table is in the cited source."]
+    if historical:
+        out += ["", f"**Historical reference (before {window_start:%b %Y}; outside the question's window, for context only).**"]
+        out += historical
     return "\n".join(out)
 
 
@@ -724,7 +741,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if tier == "in_depth":
         # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
         # Tables placed in the text that discusses them are not repeated in the appendix.
-        data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"])
+        try:
+            from datetime import date as _ad
+            from utils.source_quality import window_start as _ws
+            _appendix_window = _ws(question, _ad.fromisoformat(today[:10]))
+        except Exception:
+            _appendix_window = None
+        data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"], window_start=_appendix_window)
         if data_md:
             parts.append(f"## Appendix A — Data Tables\n\n{data_md}")
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
@@ -785,6 +808,40 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             report_md, charts_out, _ = finalize_figures(report_md, charts_out)
             report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
 
+    # Stage I (FIX 8): chart quality gate + CHART LINT (auto-fix titles, axes, units, types, precision,
+    # source lines) before render; a dropped chart's references are rewritten by finalize_figures.
+    chart_lint_log: dict = {}
+    if charts_out:
+        try:
+            from utils.chart_lint import lint_all, run_chart_lint
+            manifest_by_id = {str(m.get("id") or "").upper(): m for m in manifest or [] if isinstance(m, dict)}
+
+            def _passage_text(spec):
+                return "\n".join(store.get(pid).text for pid in spec.get("evidencePassages") or [] if store.get(pid))
+
+            linted, lint_dropped, lint_fix = run_chart_lint(charts_out, passage_text=_passage_text,
+                                                            manifest=manifest_by_id, today=today)
+            if lint_dropped:
+                gone = {d["index"] for d in lint_dropped}
+                keep = [i for i in range(1, len(charts_out) + 1) if i not in gone]
+                remap = {old: new for new, old in enumerate(keep, 1)}
+                report_md = re.sub(r"\[CHART_(\d+)\]", lambda m: f"[CHART_§{remap[int(m.group(1))]}]"
+                                   if int(m.group(1)) in remap else "", report_md).replace("§", "")
+            charts_out = [c for c in linted]
+            report_md, charts_out, _ = finalize_figures(report_md, charts_out)
+            report_md = re.sub(r"\n{3,}", "\n\n", report_md).strip()
+            inventory, failing = lint_all(charts_out)
+            chart_lint_log = {"dropped": [{"title": d["title"], "reason": d["reason"]} for d in lint_dropped],
+                              "fixed": lint_fix["fixed"], "inventory": inventory, "failing": failing}
+        except Exception as exc:  # the lint must never abort a report
+            log.warning("V2 chart lint skipped: %s: %s", type(exc).__name__, str(exc)[:160])
+    try:  # Stage I (FIX 8): tables have their own "Table N" sequence, a caption and a source
+        from utils.chart_lint import number_tables
+        report_md, table_actions, table_inventory = number_tables(report_md)
+        chart_lint_log.update(tableActions=table_actions, tableInventory=table_inventory)
+    except Exception as exc:
+        log.warning("V2 table numbering skipped: %s: %s", type(exc).__name__, str(exc)[:160])
+
     # Number check = report.py's source-evidence check (value, unit and metric): claims it
     # flags are dropped here, with a log line, before report.py's own check runs. Whatever is
     # still flagged stays flagged (the report is then a draft); nothing is hidden.
@@ -819,6 +876,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "leakGate": leak_actions,
         "regime": regime_log,
         "repetition": repetition_log,
+        "chartLint": chart_lint_log,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

@@ -217,3 +217,79 @@ def test_regime_dispersion_makes_the_thesis_sector_specific():
     assert "compounded over the window: cyclical sectors" in thesis
     assert thesis_needs_rewrite("Leadership rotated from cyclicals to defensives.", regime)
     assert not thesis_needs_rewrite(thesis, regime)
+
+
+# ── FIX 8: chart quality gate, lint, tables ──────────────────────────────────────────────────────
+def _bar(title, labels, values, x="Sector", y="Change %", raw=None):
+    return {"type": "bar", "title": title, "xLabel": x, "yLabel": y, "sourceIds": ["S11"], "series": [{"name": y, "data": [
+        {"label": l, "value": v, "evidenceValue": (raw or {}).get(l, f"{v:+.2f}%")} for l, v in zip(labels, values)]}]}
+
+
+def test_chart_quality_gate_drops_meaningless_charts():
+    from utils.chart_lint import run_chart_lint
+    flat = _bar("Figure 1: Months: a, b and 2 others", list("abcd"), [41, 41, 41, 41], y="Months")
+    total = _bar("Figure 2: Gross Purchases: Bank and 3 others", ["Total", "Bank", "MFs", "Insurance"], [21664, 258, 16756, 4000])
+    good = _bar("Figure 3: Change %: Fin Services, Banks, Pharma and 9 others", ["Fin Services", "Banks", "Pharma", "IT"], [2.57, 2.27, 1.1, -0.3])
+    dup = _bar("Figure 4: 1 Week (%): Nifty (Benchmark) and 3 others", ["Fin Services", "Banks", "Pharma", "IT"], [2.57, 2.27, 1.1, -0.3])
+    example = _bar("Figure 5: 1-month return: Banks, IT, FMCG and 1 other", ["Banks", "IT", "FMCG", "Pharma"], [2, -1, 3, 4])
+    kept, dropped, _ = run_chart_lint([flat, total, good, dup, example],
+                                      passage_text=lambda s: "Example datasets show 1-month returns" if "Figure 5" in s["title"] else "")
+    assert [d["index"] for d in dropped] == [1, 2, 4, 5] and len(kept) == 1
+
+
+def test_chart_lint_fixes_titles_axes_types_and_sources():
+    from utils.chart_lint import lint_all, run_chart_lint
+    manifest = {"S11": {"publisher": "strota.in", "title": "Sector Flow Today", "publisher_page_modified_at": "2026-11-06"}}
+    chart = _bar("Figure 1: Change %: Fin Services, Banks, Pharma and 9 others",
+                 ["Fin Services", "Banks", "NIFTY 50", "Pharma", "IT"], [2.57, 2.27, 0.5, 1.1, -0.3])
+    kept, _, log = run_chart_lint([chart], manifest=manifest, today="2026-11-08")
+    c = kept[0]
+    assert c["type"] == "horizontal_bar" and [p["value"] for p in c["series"][0]["data"]] == sorted([2.57, 2.27, 0.5, 1.1, -0.3], reverse=True)
+    assert "and 9 others" not in c["title"] and "4 sectors and the Nifty 50 benchmark" in c["title"] and "(%)" in c["title"]
+    assert c["yLabel"] == "Change (%)" and c["decimals"] == 2 and "updated 06 Nov 2026 [S11]" in c["source"]
+    rows, failing = lint_all(kept)
+    assert failing == 0 and rows[0]["lint"] == "PASS"
+    series = _bar("Figure 2: FII net: 21 Oct 2026, 22 Oct 2026 and 3 others", ["21 Oct 2026", "22 Oct 2026", "23 Oct 2026"],
+                  [1022.32, -3458.7, 887.65], x="Date", y="FII net",
+                  raw={"21 Oct 2026": "1,022.32", "22 Oct 2026": "-3,458.70", "23 Oct 2026": "887.65"})
+    kept, _, _ = run_chart_lint([series], manifest=manifest, today="2026-11-08")
+    assert kept[0]["title"] == "Figure 2: FII net (₹ crore), 21-23 Oct 2026" and lint_all(kept)[1] == 0
+
+
+def test_heatmap_gets_fiscal_labels_and_a_real_title():
+    from utils.chart_lint import lint_all, run_chart_lint
+    heat = {"type": "heatmap", "title": "Figure 1: Values (%): NIFTY AUTO, NIFTY FMCG, NIFTY METAL and 1 others, Q4 2024 to Q3 2025",
+            "unit": "%", "sourceIds": ["S2"], "rows": ["NIFTY AUTO", "NIFTY FMCG", "NIFTY METAL", "NIFTY 50"],
+            "columns": ["Q4 2024", "Q1 2025", "Q2 2025", "Q3 2025"], "values": [[1, 2, 3, 4], [5, 6, 7, 8], [9, 1, 2, 3], [4, 5, 6, 7]]}
+    kept, _, _ = run_chart_lint([heat], manifest={"S2": {"publisher": "Calculated from daily market data"}}, today="2026-11-08")
+    h = kept[0]
+    assert h["columns"][0] == "Q3 FY25" and h["rows"][0] == "Nifty Auto"
+    assert h["title"] == "Figure 1: Quarterly return (%): 3 NSE sector indices and the Nifty 50 benchmark, Q3 FY25 to Q2 FY26"
+    assert lint_all(kept)[1] == 0
+
+
+def test_tables_are_numbered_separately_and_need_a_source():
+    from utils.chart_lint import number_tables
+    report = ("As Table 2 shows, flows rose [S4].\n\n**Figure 2: Flows by month**\n| Month | Net |\n| --- | --- |\n| Oct | 5 |\n\n"
+              "Text without a cite.\n\n| Company | Price |\n| --- | --- |\n| A | 1 |\n\n"
+              "Values were mixed [S7].\n\n| Index | Value |\n| --- | --- |\n| X | 2 |\n\n| A | B |\n| --- | --- |\n| [[UNSUPPORTED_CALC]] | 1 |")
+    out, actions, inventory = number_tables(report)
+    assert "**Table 1: Flows by month**" in out and "Figure 2: Flows" not in out and "As Table 1 shows" in out
+    assert "| Company |" not in out and "[[UNSUPPORTED" not in out
+    assert "**Table 2: Value, by index**" in out and "Source: [S7]" in out and len(inventory) == 2
+
+
+# ── FIX 2 / gates: periods and rendered text ─────────────────────────────────────────────────────
+def test_period_gate_drops_out_of_window_tables_but_not_since_years():
+    from utils.stage_i_gates import heal_text
+    report = ("## A\n\n### Sectoral Indices performance in April, 2024 [S22]\n\n| Index | 1M |\n| --- | --- |\n| IT | 2% |\n\n"
+              "### The falls inside each sector [S59]\n\n| Sector | Deepest fall since 2012 |\n| --- | --- |\n| IT | -30% |")
+    out, actions = heal_text(report, date(2024, 10, 1))
+    assert "April, 2024" not in out and "Deepest fall since 2012" in out and any(a.startswith("period") for a in actions)
+
+
+def test_rendered_gate_flags_instructions_and_split_words():
+    from utils.stage_i_gates import split_word_findings
+    from utils.flow_text import rendered_flow_findings
+    assert split_word_findings("RETURNS IN MON THS", "returns over twelve months") and not split_word_findings("in the", "in the months")
+    assert rendered_flow_findings("Metal — -7.34% — +26.36% — +7.96%")
