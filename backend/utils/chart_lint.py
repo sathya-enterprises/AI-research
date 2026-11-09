@@ -29,6 +29,8 @@ log = logging.getLogger("chart_lint")
 
 BENCHMARKS = {"nifty 50", "nifty", "nifty (benchmark)", "nifty50", "sensex", "nifty 50 (benchmark)"}
 TOTAL_RE = re.compile(r"(?i)^\s*(?:grand\s+)?total\b|^\s*(?:all|overall|aggregate)\s*$")
+PLACEHOLDER_RE = re.compile(r"\$#%|#%|\bXX+%?|\[(?:value|x|data|number)\]|\{\{[^}]*\}\}|lorem ipsum", re.I)
+FORECAST_ROW_RE = re.compile(r"(?i)\b(?:forecast|projected|projection|estimated?|expected)\b|\b20\d{2}\s?[EeFfPp]\b")
 EXAMPLE_RE = re.compile(r"(?i)\b(?:example|examples|illustrative|illustration|sample|hypothetical|for instance|e\.g\.)\b")
 _MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*"
 _TIME_RE = re.compile(rf"(?i)^\s*(?:\d{{1,2}}\s+{_MONTHS}\s+\d{{4}}|{_MONTHS}\s+\d{{2,4}}|Q[1-4]\s*(?:FY)?\s*'?\d{{2,4}}|"
@@ -229,6 +231,14 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
     quotes = " ".join(str(p.get("evidenceQuote") or "") for s in _series(spec) for p in _pts(s))
     if EXAMPLE_RE.search(heading) or EXAMPLE_RE.search(quotes):
         return "the data comes from an example / illustrative table"
+    point_quotes = [str(p.get("evidenceQuote") or "") for s in _series(spec) for p in _pts(s)]
+    # Stage J: a teaser / template table ("$#%", "XX%", "[value]") is not reliable data
+    if any(PLACEHOLDER_RE.search(q) for q in point_quotes):
+        return "the source table contains template placeholders (unreliable data)"
+    # Stage J: values the source itself labels as forecasts / estimates are never shown as observed data
+    flagged = sum(1 for q in point_quotes if FORECAST_ROW_RE.search(q))
+    if point_quotes and flagged * 2 >= len(point_quotes) and not re.search(r"(?i)forecast|projection|estimate", str(spec.get("title"))):
+        return "the source labels these values as forecasts / estimates"
     mine = sorted(round(v, 4) for v in vals)
     for other in earlier or []:
         if mine == other:
