@@ -119,6 +119,7 @@ class LLMGateway:
             result = LLMResult(ok=False, error="no_attempt")
             tried: set[tuple[str, str]] = set()
             backoff = [4, 8, 16]  # exponential; extra tries after network failures and HTTP 5xx only
+            rate_backoff = [int(x) for x in os.getenv("GG_V2_RATE_LIMIT_BACKOFF", "20,40").split(",") if x.strip().isdigit()]
             attempt = 0
             while True:
                 attempt += 1
@@ -137,6 +138,15 @@ class LLMGateway:
                     self.stats.network_retries += 1
                     log.warning("V2 LLM %s/%s: transient failure (%s); retrying in %ds", purpose, section_id or "-",
                                 str(result.error or "")[:60], delay)
+                    await asyncio.sleep(delay)
+                    tried.clear()
+                    continue
+                # Stage K: every key/model rate-limited (HTTP 429) - per-minute limits clear quickly, so wait and
+                # retry twice (20 s, 40 s) before giving up; a daily-quota failure still fails (and is labelled)
+                if str(result.error or "").startswith("http_429") and rate_backoff:
+                    delay = rate_backoff.pop(0)
+                    self.stats.network_retries += 1
+                    log.warning("V2 LLM %s/%s: rate-limited on every key; retrying in %ds", purpose, section_id or "-", delay)
                     await asyncio.sleep(delay)
                     tried.clear()
                     continue
