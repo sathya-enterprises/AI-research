@@ -435,3 +435,12 @@ def test_caption_restatements_are_removed_but_interpretations_kept():
               "to Q2 FY27. As Figure 5 shows, Nifty Bank beat the Nifty 50 in 4 of 8 quarters, peaking at +11.09% [S2].")
     out, actions = drop_caption_restatements(report, charts)
     assert "Figure 5 shows the quarterly returns" not in out and "beat the Nifty 50 in 4 of 8 quarters" in out and len(actions) == 1
+
+
+def test_same_number_for_different_subjects_is_not_one_fact():
+    from utils.repetition import cap_headline_stats
+    report = ("## Executive Summary\n\nX.\n\n## A\n\nGlobal measles coverage reached 86.00% in 2019 [S1].\n\n"
+              "## B\n\nMeasles coverage fell from 86.00% in 2019 to 83.00% in 2020 [S1].\n\n"
+              "## C\n\nGlobal DTP3 coverage dropped from 86.00% in 2019 to 81.00% in 2021 [S1].")
+    out, actions = cap_headline_stats(report)
+    assert "DTP3 coverage dropped from 86.00%" in out and not actions

@@ -225,7 +225,7 @@ def _context(sentence: str, start: int, end: int) -> set[str]:
     # the entity named right before the number ("Nifty 50 declined 5.2%", "NIFTY FMCG (-26.33%)")
     lo = max(0, start - 80)
     near = []
-    for m in re.finditer(r"\b[A-Z][A-Za-z&]+(?:\s+(?:[A-Z][A-Za-z&]+|\d{2,3}\b))*", sentence[lo:start]):
+    for m in re.finditer(r"\b[A-Z][A-Za-z0-9&.]*[A-Za-z0-9](?:\s+(?:[A-Z][A-Za-z0-9&]+|\d{2,3}\b))*", sentence[lo:start]):
         name = m.group(0)
         at_sentence_start = lo + m.start() == 0 or sentence[:lo + m.start()].rstrip().endswith((".", "*"))
         if name in _STOP_ENTITIES or (at_sentence_start and " " not in name) or re.fullmatch(r"(?:YoY|QTD|FY\d+|Q[1-4])", name):
@@ -255,6 +255,15 @@ class _Facts:
                     c["words"] |= words
                     return stat, i
                 continue
+            # only one side names an entity: the same fact only if that entity's name is in the other's context
+            # (Stage K: "DTP3 coverage 86%" is not "measles coverage 86%"; "Telecom ... 11,065" is "Telecom saw 11,065")
+            one_sided = (ents or c["ents"]) and not (ents and c["ents"])
+            if one_sided:
+                named = {w.lstrip("@") for w in (ents or c["ents"])}
+                other = c["words"] if ents else words
+                if not any(all(tok in other for tok in re.findall(r"[a-z0-9]{4,}", n)) and re.findall(r"[a-z0-9]{4,}", n)
+                           for n in named):
+                    continue
             if c["words"] & words or (not words and not c["words"]):
                 c["words"] |= words
                 c["ents"] |= ents
