@@ -75,6 +75,23 @@ _FORWARD_RE = re.compile(r"(?i)\b(?:watch|monitor|could|would|may|might|if|unles
                          r"outlook|depend\w*|hinges?|catalysts?|upside|downside|de-rating|re-rating|test|key level|next)\b")
 
 
+_IMPLICIT_FIRST_RE = re.compile(r"(?i)\b(?:the\s+)?(?:most\s+(?:significant|important|striking)|main|primary|key|first|central)\s+"
+                                r"(?:finding|point|driver|cause|reason|factor|change|shift|takeaway|conclusion)\b")
+
+
+def ordinal_sequence_ok(paragraph: str) -> bool:
+    """Ordinal words count on without gaps; the run starts at First, or at Second after an implicit first item."""
+    found = _ORDINAL_RE.findall(paragraph or "")
+    if len(found) < 2:
+        return True
+    start = _ORDINALS.index(found[0])
+    if found != _ORDINALS[start:start + len(found)]:
+        return False
+    if start == 0:
+        return True
+    return start == 1 and bool(_IMPLICIT_FIRST_RE.search(paragraph.split(found[0] + ",")[0]))
+
+
 def fix_small_items(report: str) -> tuple[str, list[str]]:
     """Stage I (FIX 9): a/an before lower-case words, ordinal sequences with gaps ("First ... Fourth"),
     "What to watch" boxes that are empty or do not look ahead, and a raw "* " bullet inside a sentence."""
@@ -97,15 +114,17 @@ def fix_small_items(report: str) -> tuple[str, list[str]]:
         actions.append(f"article: '{m.group(0)}'")
         return ("A" if m.group(1)[0] == "A" else "a") + f" {word}"
     text = re.sub(r"\b([Aa]n) ([bcdfghjklmnpqrstvwxyz][a-z]+)\b", _an_a, text)
-    # ordinals: renumber each paragraph's sequence in order of appearance
-    paragraphs = text.split("\n")
-    for i, para in enumerate(paragraphs):
+    # ordinals: each paragraph (blank-line separated) counts on without gaps; a run may start at "Second"
+    # when an implicit first item precedes it ("The most significant finding is ...")
+    blocks = re.split(r"(\n\s*\n)", text)
+    for i, para in enumerate(blocks):
         found = _ORDINAL_RE.findall(para)
-        if len(found) >= 2 and found != _ORDINALS[:len(found)]:
-            counter = iter(_ORDINALS)
-            paragraphs[i] = _ORDINAL_RE.sub(lambda m: next(counter) + ",", para)
+        if len(found) >= 2 and not ordinal_sequence_ok(para):
+            start = 1 if _IMPLICIT_FIRST_RE.search(para.split(found[0] + ",")[0]) else 0
+            counter = iter(_ORDINALS[start:])
+            blocks[i] = _ORDINAL_RE.sub(lambda m: next(counter) + ",", para)
             actions.append(f"ordinals renumbered: {', '.join(found)}")
-    text = "\n".join(paragraphs)
+    text = "".join(blocks)
     # "What to watch": empty -> removed; not forward-looking -> a plain paragraph
     def _watch(m):
         body = m.group(1).strip()

@@ -246,7 +246,7 @@ def test_chart_lint_fixes_titles_axes_types_and_sources():
     c = kept[0]
     assert c["type"] == "horizontal_bar" and [p["value"] for p in c["series"][0]["data"]] == sorted([2.57, 2.27, 0.5, 1.1, -0.3], reverse=True)
     assert "and 9 others" not in c["title"] and "4 sectors and the Nifty 50 benchmark" in c["title"] and "(%)" in c["title"]
-    assert c["yLabel"] == "Change (%)" and c["decimals"] == 2 and "updated 06 Nov 2026 [S11]" in c["source"]
+    assert c["yLabel"] == "Change (%)" and c["decimals"] == 2 and "updated 06 Nov 2026 [S11]" in c["sourceLine"]
     rows, failing = lint_all(kept)
     assert failing == 0 and rows[0]["lint"] == "PASS"
     series = _bar("Figure 2: FII net: 21 Oct 2026, 22 Oct 2026 and 3 others", ["21 Oct 2026", "22 Oct 2026", "23 Oct 2026"],
@@ -389,3 +389,58 @@ def test_quality_gate_drops_teaser_tables_and_unlabelled_forecasts():
     assert "forecast" in quality_reason(chart("{y} | {v} | Forecast"), "")
     assert quality_reason(chart("{y} | {v} | Forecast", "Sales (forecast)"), "") == ""
     assert quality_reason(chart("In {y} sales were {v} units"), "") == ""
+
+
+# ── Stage K: official open data ──────────────────────────────────────────────────────────────────
+def test_official_dataset_becomes_a_cited_source_and_a_verified_chart():
+    from utils.evidence_store import EvidenceStore
+    from utils.official_data import CATALOG, Dataset, as_source, official_charts
+    ds = Dataset(entry=CATALOG["owid.ev_stocks"], years=[2023, 2024, 2025],
+                 series={"India": [150390.0, 260000.0, 410000.0], "World": [40e6, 58e6, 78e6]}, retrieved="2026-11-10", latest=2025)
+    row = as_source(ds)
+    assert row["url"] == "https://ourworldindata.org/grapher/electric-car-stocks" and row["publisher"] == "Our World in Data"
+    assert "Year | India | World" in row["pageContent"] and "2024 | 260,000 | 58,000,000" in row["pageContent"]
+    store = EvidenceStore()
+    store.add_source("S1", {**row, "id": "S1"})
+    store.finalize()
+    charts = official_charts(store)
+    assert len(charts) == 1 and charts[0].spec["provenance"] == "official dataset"
+    assert charts[0].interpretation.startswith("India went from 150,390 cars in 2023 to 410,000 cars in 2025")
+    assert all(p["evidenceQuote"].startswith(p["label"]) for s in charts[0].spec["series"] for p in s["data"])
+
+
+def test_official_data_plan_is_validated_against_the_catalog():
+    import asyncio
+    from utils.official_data import plan_datasets
+
+    class _Result:
+        ok = True
+        def json(self):
+            return {"datasets": [{"id": "owid.ev_car_share", "entities": ["IND", "WLD", "XXX"]},
+                                 {"id": "made.up", "entities": ["IND"]}]}
+
+    class _Gateway:
+        async def generate(self, **_):
+            return _Result()
+
+    plan, note = asyncio.run(plan_datasets("India EV adoption", _Gateway(), today=date(2026, 11, 10), limit=3))
+    assert plan == [{"id": "owid.ev_car_share", "entities": ["IND", "WLD"], "why": ""}]
+    assert note["rejected"] == [{"id": "made.up", "reason": "not in the catalog"}]
+
+
+def test_caption_restatements_are_removed_but_interpretations_kept():
+    from utils.repetition import drop_caption_restatements
+    charts = [{"title": "Figure 5: Quarterly return (%): Nifty Bank vs Nifty 50 (benchmark), Q3 FY25 to Q2 FY27"}]
+    report = ("## Bank\n\nFigure 5 shows the quarterly returns of the Nifty Bank index compared to the Nifty 50 from Q3 FY25 "
+              "to Q2 FY27. As Figure 5 shows, Nifty Bank beat the Nifty 50 in 4 of 8 quarters, peaking at +11.09% [S2].")
+    out, actions = drop_caption_restatements(report, charts)
+    assert "Figure 5 shows the quarterly returns" not in out and "beat the Nifty 50 in 4 of 8 quarters" in out and len(actions) == 1
+
+
+def test_same_number_for_different_subjects_is_not_one_fact():
+    from utils.repetition import cap_headline_stats
+    report = ("## Executive Summary\n\nX.\n\n## A\n\nGlobal measles coverage reached 86.00% in 2019 [S1].\n\n"
+              "## B\n\nMeasles coverage fell from 86.00% in 2019 to 83.00% in 2020 [S1].\n\n"
+              "## C\n\nGlobal DTP3 coverage dropped from 86.00% in 2019 to 81.00% in 2021 [S1].")
+    out, actions = cap_headline_stats(report)
+    assert "DTP3 coverage dropped from 86.00%" in out and not actions

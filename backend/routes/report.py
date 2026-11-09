@@ -21574,6 +21574,27 @@ async def generate_report(request: Request):
             "rows": quarterly_rows,
         })
 
+    # Stage K: official open data (World Bank, IMF WEO, Our World in Data) for every web-researched report.
+    # Added AFTER page fetching (the fetcher would replace the table with the dataset page's HTML) and
+    # BEFORE source ids are assigned, so these are ordinary cited, verified sources.
+    if not file_only_report and os.getenv("GG_OFFICIAL_DATA", "1") != "0":
+        try:
+            from datetime import date as _od_date
+            from utils.llm_gateway import LLMGateway as _OdGateway
+            from utils.official_data import official_sources as _official_sources
+            _od_rows, _od_note = await _official_sources(
+                question, _OdGateway(_sys.modules[__name__], report_tier, budget=2),
+                today=_od_date.today(), tier=report_tier)
+            if _od_rows:
+                _od_urls = {str(r.get("url") or "").rstrip("/") for r in _od_rows}
+                enriched = list(_od_rows) + [r for r in (enriched or [])
+                                             if str((r or {}).get("url") or "").rstrip("/") not in _od_urls]
+            record_research_stage("official_datasets", {**_od_note, "rows": [
+                {k: v for k, v in r.items() if k in ("title", "url", "publisher", "officialDataset", "fullContent")}
+                for r in _od_rows]})
+        except Exception as _od_exc:  # official data must never abort a report
+            log.warning("Report: official data skipped: %s: %s", type(_od_exc).__name__, str(_od_exc)[:160])
+
     # Rescue and crawler additions can reintroduce URL aliases after the first
     # deduplication pass. Collapse them again immediately before assigning IDs,
     # so one RBI publication cannot appear as multiple S# sources/observations.
@@ -22311,7 +22332,7 @@ async def generate_report(request: Request):
             from utils.report_pipeline_v2 import run_pipeline_v2
             _v2_today = _v2_date.today()
             from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
-            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier) if report_tier == "in_depth" else None
+            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question) if report_tier == "in_depth" else None
             _v2_entity_stats: dict = {}
             if _v2_tiers:
                 record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
@@ -22320,8 +22341,15 @@ async def generate_report(request: Request):
                 from utils.entity_research import plan_entity_queries, run_entity_search, search_cap
                 from utils.source_quality import assess_sources as _assess_sources
                 from routes.chat import exa_search_multi as _entity_exa_search
-                _window_label = f"last {requested_quarter_count(question)} quarters"
-                _entity_plan = plan_entity_queries(_v2_tiers, cap=search_cap(report_tier), window=_window_label)
+                from utils.report_outline import is_market_topic as _is_market_topic
+                if _is_market_topic(question):
+                    _window_label = f"last {requested_quarter_count(question)} quarters"
+                else:  # Stage K: a year window for a non-market topic ("2015 2016 ... 2026")
+                    from utils.data_angles import window_years as _window_years
+                    _wy = _window_years(question, _v2_today)
+                    _window_label = f"{_wy[0]}-{_wy[-1]}" if _wy else ""
+                _entity_plan = plan_entity_queries(_v2_tiers, cap=search_cap(report_tier), window=_window_label,
+                                                   question=question)
                 if _entity_plan:
                     _report_progress("writing", f"Researching {len({e for e, _ in _entity_plan})} under-covered entities…", 68)
 
@@ -22344,7 +22372,7 @@ async def generate_report(request: Request):
                         source_manifest = build_source_registry(enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
                         record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
                         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                                  "sourceSummary": evidence_store.source_summary(),

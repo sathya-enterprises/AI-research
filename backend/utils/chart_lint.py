@@ -170,6 +170,7 @@ def metric_name(spec: dict) -> str:
         y = str(_series(spec)[0].get("name") if _series(spec) else "") or y
     y = re.sub(r"\s*\((?:%|[^)]*(?:cr|crore|rs|₹|x|bn|billion|score)[^)]*)\)\s*$", "", y, flags=re.I)
     y = re.sub(r"\s*\(%\)", "", y)
+    y = re.sub(r"\s*\([^()]*%[^()]*\)\s*$", "", y)  # "Real GDP growth (annual %)" -> "Real GDP growth"
     y = case_label(y).replace("*", "").strip(" :")
     y = re.sub(r"\s*%\s*$", "", y)
     y = _PERIOD_IN_METRIC_RE.sub("", y).strip(" ,:")
@@ -271,8 +272,10 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         spec["rows"] = [case_label(r) for r in spec.get("rows") or []]
     labels = _labels(spec)
     time_axis = is_time_axis(labels)
-    unit = infer_unit(spec, passage_text)
+    unit = str(spec.get("unitLabel") or "").strip() or infer_unit(spec, passage_text)  # a dataset's own unit wins
     metric = metric_name(spec)
+    if unit and metric.casefold().endswith(f"({unit.casefold()})"):
+        metric = metric[: -len(unit) - 2].rstrip()  # "High-technology exports (current US$)" + "(current US$)"
     source_titles = " ".join(str((manifest or {}).get(sid, {}).get("title") or "") for sid in _ids(spec))
     if re.fullmatch(r"Q[1-4] 20\d{2}", metric):  # a period used as the metric name
         period_label = fy_label(metric)
@@ -315,7 +318,9 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         title = f"{metric}{unit_txt}: {a} vs {b} (benchmark)" + (f", {span}" if span else "")
     elif time_axis and labels:
         names = [str(x.get("name") or "") for x in series if x.get("name")]
-        who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else "")) if len(names) > 1 else ""
+        # the plotted entities are named (one or many), unless the single series just repeats the metric
+        names = [n for n in names if n.casefold() not in metric.casefold() and metric.casefold() not in n.casefold()]
+        who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0])) if names else ""
         title = f"{metric}{unit_txt}{who}, {_short_range(labels[0], labels[-1])}{qtd}"
     else:
         names = [l for l in labels if l]
@@ -351,7 +356,8 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     # source line
     note = source_line(spec, manifest or {})
     if note:
-        spec["source"] = note
+        # the human source line lives in its own field: utils.source_ids normalises "source" to S# ids
+        spec["sourceLine"] = note
     return spec, fixes
 
 
@@ -412,6 +418,8 @@ def source_line(spec: dict, manifest: dict) -> str:
             name = publisher or title or "Published source"
             if publisher and title and publisher.casefold() not in title.casefold():
                 name = f"{publisher}, {title[:90]}"
+            elif publisher and title and title.startswith(f"{publisher}: "):
+                name = title[:110]  # an official dataset: "World Bank: GDP growth (annual %), 2023-2025"
         labels = _labels(spec)
         period = _period_from_title(spec.get("title") or "")
         date = _source_date(row) if row else _source_date({})
@@ -457,7 +465,7 @@ def lint_chart(spec: dict, seen_titles: set[str] | None = None) -> list[str]:
         issues.append("categories drawn as a line")
     if spec.get("rationale") and _RATIONALE_TYPE_RE.search(str(spec.get("rationale"))):
         issues.append("chart-type rationale text")
-    src = str(spec.get("source") or "")
+    src = str(spec.get("sourceLine") or spec.get("source") or "")
     if not src.strip() or re.fullmatch(r"(?i)\s*calculated\s*", src) or not re.search(r"\[S\d+\]", src):
         issues.append("source line missing or only 'Calculated'")
     elif not re.search(r"(?i)\b(?:as of|updated|retrieved|covering)\b", src):
@@ -474,7 +482,7 @@ def inventory_row(spec: dict, issues: list[str]) -> dict:
     return {"figure": prefix.strip(" :") or "-", "title": rest, "type": spec.get("type"), "x": spec.get("xLabel"),
             "y": spec.get("yLabel"), "unit": spec.get("unit") or "", "period": _period_from_title(spec.get("title") or "")
             or (lambda l: f"{l[0]} to {l[-1]}" if l and is_time_axis(l) else "")(_labels(spec)),
-            "source": str(spec.get("source") or "")[:120], "lint": "PASS" if not issues else "FAIL: " + "; ".join(issues)}
+            "source": str(spec.get("sourceLine") or spec.get("source") or "")[:120], "lint": "PASS" if not issues else "FAIL: " + "; ".join(issues)}
 
 
 def unique_titles(charts: list[dict]) -> list[str]:
@@ -485,7 +493,7 @@ def unique_titles(charts: list[dict]) -> list[str]:
         prefix, rest = strip_figure(chart.get("title") or "")
         key = rest.casefold()
         if key in seen:
-            src = re.sub(r"\s*\[S\d+\]", "", str(chart.get("source") or "")).split(";")[0].split(",")[0].strip()
+            src = re.sub(r"\s*\[S\d+\]", "", str(chart.get("sourceLine") or chart.get("source") or "")).split(";")[0].split(",")[0].strip()
             extra = f" ({src})" if src else f" (view {seen[key] + 1})"
             chart["title"] = prefix + rest + extra
             fixes.append(f"duplicate title made unique: {rest[:60]}{extra}")

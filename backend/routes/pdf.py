@@ -5219,7 +5219,10 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
         # two tables) states no observation (Stage G false alarm from a live run).
         # Stage I: fiscal-period labels ("Q2 FY27", "FY25", "H1FY27") are period names, not values either.
         if not re.search(r"\d", re.sub(r"(?i)\b(?:(?:19|20)\d{2}|Q[1-4]\s*FY\s*\d{2,4}|H[12]\s*FY\s*\d{2,4}|FY\s*\d{2,4}E?|Q[1-4]"
-                                       r"|NIFT\s?Y\s*\d{2,3}|SENSEX\s*\d{0,2}|S&P\s*\d{3}|\d+[- ](?:year|month|week|day|quarter)s?)\b",
+                                       r"|NIFT\s?Y\s*\d{2,3}|SENSEX\s*\d{0,2}|S&P\s*\d{3}|\d+[- ](?:year|month|week|day|quarter)s?"
+                                       # Stage K: a full date ("06 Nov 2026", "Nov 6, 2026") in a column header is a period
+                                       r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}"
+                                       r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d{2})\b",
                                        "", observation_text)):
             continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)

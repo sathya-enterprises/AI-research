@@ -225,7 +225,7 @@ def _context(sentence: str, start: int, end: int) -> set[str]:
     # the entity named right before the number ("Nifty 50 declined 5.2%", "NIFTY FMCG (-26.33%)")
     lo = max(0, start - 80)
     near = []
-    for m in re.finditer(r"\b[A-Z][A-Za-z&]+(?:\s+(?:[A-Z][A-Za-z&]+|\d{2,3}\b))*", sentence[lo:start]):
+    for m in re.finditer(r"\b[A-Z][A-Za-z0-9&.]*[A-Za-z0-9](?:\s+(?:[A-Z][A-Za-z0-9&]+|\d{2,3}\b))*", sentence[lo:start]):
         name = m.group(0)
         at_sentence_start = lo + m.start() == 0 or sentence[:lo + m.start()].rstrip().endswith((".", "*"))
         if name in _STOP_ENTITIES or (at_sentence_start and " " not in name) or re.fullmatch(r"(?:YoY|QTD|FY\d+|Q[1-4])", name):
@@ -255,6 +255,15 @@ class _Facts:
                     c["words"] |= words
                     return stat, i
                 continue
+            # only one side names an entity: the same fact only if that entity's name is in the other's context
+            # (Stage K: "DTP3 coverage 86%" is not "measles coverage 86%"; "Telecom ... 11,065" is "Telecom saw 11,065")
+            one_sided = (ents or c["ents"]) and not (ents and c["ents"])
+            if one_sided:
+                named = {w.lstrip("@") for w in (ents or c["ents"])}
+                other = c["words"] if ents else words
+                if not any(all(tok in other for tok in re.findall(r"[a-z0-9]{4,}", n)) and re.findall(r"[a-z0-9]{4,}", n)
+                           for n in named):
+                    continue
             if c["words"] & words or (not words and not c["words"]):
                 c["words"] |= words
                 c["ents"] |= ents
@@ -444,6 +453,82 @@ def repetition_metrics(report: str, charts: list | None = None) -> dict:
                 dup_tables += 1
             else:
                 kept.append(bag)
-    return {"max_headline_repeats": top[1], "max_headline_stat": top[0], "stats_over_cap": sum(1 for v in counts.values() if v > 2),
+    near = len(near_duplicate_sentences(report))
+    return {"near_duplicate_sentences": near, "max_headline_repeats": top[1], "max_headline_stat": top[0], "stats_over_cap": sum(1 for v in counts.values() if v > 2),
             "duplicate_figure_block_sentences": dup_blocks, "figure_blocks_echoing_body": echo,
             "duplicate_tables": dup_tables, "tables": len(tables)}
+
+
+def near_duplicate_sentences(report: str, threshold: float = 0.6, min_tokens: int = 10) -> list[tuple[str, str, str, str]]:
+    """Sentence pairs in DIFFERENT body sections whose word sets overlap >= ``threshold`` (Jaccard):
+    the same point made twice, or one template repeated across sections (cohesion metric, Stage K)."""
+    lines = str(report or "").split(chr(10))
+    seen: list[tuple[str, str, set]] = []
+    pairs = []
+    for start, end, title in _sections(lines):
+        if re.match(r"(?i)executive summary", title):
+            continue
+        for line in lines[start:end]:
+            if not _is_prose(line):
+                continue
+            for sentence in _sentences(line):
+                tokens = _tokens(sentence)
+                if len(tokens) < min_tokens:
+                    continue
+                for other_title, other_sentence, other_tokens in seen:
+                    if other_title != title and len(tokens & other_tokens) / len(tokens | other_tokens) >= threshold:
+                        pairs.append((other_title, other_sentence[:160], title, sentence[:160]))
+                        break
+                seen.append((title, sentence, tokens))
+    return pairs
+
+
+_FIG_INTRO_RE = re.compile(r"^\s*(?:As\s+)?Figure\s+(\d+)\s+(?:shows|illustrates|presents|displays|depicts|compares|tracks|plots|highlights)\b",
+                           re.I)
+
+
+def drop_caption_restatements(report: str, charts: list | None, threshold: float = 0.5) -> tuple[str, list[str]]:
+    """A "Figure N shows ..." sentence that only restates the chart's own title (word overlap >= threshold and
+    no number of its own beyond the title's) is removed: the caption already says it, and across deep-dives
+    the same template sentence makes the report repetitive (Stage K cohesion)."""
+    titles = {}
+    for chart in charts or []:
+        m = re.match(r"^\s*Figure\s+(\d+)\s*:\s*(.*)$", str(chart.get("title") or "")) if isinstance(chart, dict) else None
+        if m:
+            titles[int(m.group(1))] = m.group(2)
+    actions: list[str] = []
+    pending_ref = [""]
+    lines = str(report or "").split(chr(10))
+    for i, line in enumerate(lines):
+        if not _is_prose(line) or "Figure" not in line:
+            continue
+        kept = []
+        for sentence in _sentences(line):
+            m = _FIG_INTRO_RE.match(sentence)
+            title = titles.get(int(m.group(1))) if m else None
+            if title:
+                body = _CITE_RE.sub("", sentence[m.end():])
+                mine = _tokens(body) - {"the", "of", "and", "to", "from", "in", "for", "a", "an", "its", "with", "between"}
+                theirs = _tokens(title)
+                own_numbers = set(re.findall(r"\d+(?:\.\d+)?", body)) - set(re.findall(r"\d+(?:\.\d+)?", title))
+                fig = m.group(1)
+                others = len(re.findall(rf"\bFigure\s+{fig}\b", report)) - 1  # another sentence still points to it
+                if mine and len(mine & theirs) / len(mine) >= threshold and not own_numbers:
+                    if others >= 1:
+                        actions.append(f"caption restatement removed: {sentence.strip()[:120]}")
+                        continue
+                    # the only reference: drop the restatement and carry "(Figure N)" into the next sentence
+                    later = [x for x in _sentences(line) if x is not sentence]
+                    nxt = next((j for j, x in enumerate(later) if line.index(x) > line.index(sentence)), None) if later else None
+                    if nxt is not None:
+                        pending_ref[0] = f"Figure {fig}"
+                        actions.append(f"caption restatement folded into the next sentence: {sentence.strip()[:120]}")
+                        continue
+            if pending_ref[0]:
+                ref = pending_ref[0]
+                pending_ref[0] = ""
+                sentence = re.sub(r"(\s*(?:\[[^\]]+\])?\s*)([.!?])?\s*$", lambda mm: f" ({ref}){mm.group(1)}{mm.group(2) or '.'}",
+                                  sentence.rstrip(), count=1)
+            kept.append(sentence)
+        lines[i] = " ".join(kept)
+    return chr(10).join(lines), actions

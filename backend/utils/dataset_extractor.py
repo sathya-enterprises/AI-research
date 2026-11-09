@@ -91,7 +91,8 @@ def candidate_passages(store, question: str, *, limit: int = 6, window_year: int
     scored = []
     for pid, rel in relevance.items():
         p = store.get(pid)
-        if p is None or p.kind in {"calculated", "search_excerpt"}:
+        if p is None or p.kind in {"calculated", "search_excerpt"} or str(p.title or "").startswith(
+                ("World Bank: ", "International Monetary Fund: ", "Our World in Data: ")):  # official data has its own charts
             continue
         profile = _data_profile(str(p.text or ""), window_year)
         if profile is None:
@@ -254,7 +255,8 @@ def to_chart(ds: dict, passage, source_title: str, index: int) -> PlannedChart:
     metric = ds["metric"] or series[0]["name"]
     title = f"{metric}" + (f" ({unit})" if unit else " (as reported)") + (" (forecast)" if ds.get("forecast") else "")
     spec = {"type": kind, "title": title, "xLabel": "Year" if ds["x"] == "time" else "Category",
-            "yLabel": f"{metric}" + (f" ({unit})" if unit else " (as reported)"), "unit": "%" if unit.strip() == "%" else "",
+            "yLabel": f"{metric}" + (f" ({unit})" if unit else " (as reported)"), "unit": "%" if "%" in unit else "",
+            "unitLabel": unit if unit and unit != "as reported" else "",
             "series": series, "source": [passage.source_id], "sourceIds": [passage.source_id],
             "evidenceBasis": "reported", "provenance": "extracted dataset",
             "basisNote": f"Values copied from evidence passage {passage.passage_id} ({source_title[:80]}); every value checked against the passage."}
@@ -357,3 +359,10 @@ def assign_to_sections(charts: list[PlannedChart], sections: list) -> None:
                 best, best_score = s, score
         if best is not None and best_score >= 2:
             chart.section_id = best.section_id
+        elif sections:
+            # Stage K: a verified data-first chart always gets a home - the overview-type analysis section
+            # (not a single-entity deep-dive) with the fewest charts so far
+            load = {s.section_id: sum(1 for c in charts if c.section_id == s.section_id) for s in sections}
+            pool = [s for s in sections if getattr(s, "role", "") != "deep_dive"] or list(sections)
+            target = min(pool, key=lambda s: (load[s.section_id], pool.index(s)))
+            chart.section_id = target.section_id

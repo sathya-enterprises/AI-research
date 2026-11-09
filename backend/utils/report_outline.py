@@ -48,6 +48,23 @@ DEEP_DIVE_SUBSECTIONS = (
     ("Valuation and earnings", "valuation multiples versus history and the earnings trajectory"),
     ("Drivers, risks and outlook", "the drivers behind the moves, the main risks and what to watch"),
 )
+# Stage K: generic subsections for a non-market topic's deep-dive (countries, companies, technologies, policies ...)
+GENERIC_DEEP_DIVE_SUBSECTIONS = (
+    ("Current state and trends", "where it stands now and how it changed over the window, with the data"),
+    ("Drivers and causes", "what explains the change: policies, technology, costs, demand, events"),
+    ("Comparisons", "how it compares with peers, regions or benchmarks"),
+    ("Risks and outlook", "the main risks, open questions and what to watch"),
+)
+_MARKET_TOPIC_RE = re.compile(r"(?i)\b(?:stock|equit|shares?\b|share market|nifty|sensex|s&p|nasdaq|dow jones|indices|index funds?|"
+                              r"sector rotation|portfolio|fund flows|fpi|fii|dii|ipo|valuation|earnings season|bond yields?|"
+                              r"mutual funds?|investors?)")
+
+
+def is_market_topic(question: str) -> bool:
+    """Financial-market questions keep the market-specific planning language; every other topic gets neutral wording."""
+    return bool(_MARKET_TOPIC_RE.search(str(question or ""))) if question else True
+
+
 MIN_LEAF_PASSAGES = 3
 MIN_LEAF_SOURCES = 2
 MIN_ENTITY_PASSAGES = 2
@@ -134,12 +151,31 @@ def tiers_block(tiers: dict | None) -> str:
 def outline_prompt(question: str, tier: str, overview: str, today: str, window_note: str,
                    tiers: dict | None = None, rejection: str = "", asks_block: str = "") -> tuple[str, str]:
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
+    market = is_market_topic(question)
     system = (
-        "You are the research director planning an evidence-grounded investment research report. "
+        f"You are the research director planning an evidence-grounded {'investment ' if market else ''}research report. "
         "You plan structure only; you do not write the report. Use only what the listed sources and tables can support. "
         "Return valid JSON only."
     )
-    if tier == "in_depth":
+    if tier == "in_depth" and not market:
+        structure = (
+            "ENTITY-FIRST PLAN (Deep Research):\n"
+            "1. First list every natural ENTITY this topic is made of and that the sources actually cover (for example each "
+            "country or region, company, technology, product segment, programme or policy). Use the names as they appear in "
+            "the sources; give aliases.\n"
+            "2. List the DIMENSIONS the entities are compared on (the measures and themes the sources report).\n"
+            f"3. Plan {rules['sections']} analysis sections (at least {MIN_ANALYSIS_SECTIONS['in_depth']}):\n"
+            "   a. ONE section per DEEP-DIVE entity listed below - never combine two DEEP-DIVE entities in one section "
+            "(role \"deep_dive\", \"entity\" set, title starting with the entity name) with 2-4 subsections chosen from what "
+            "THAT entity's evidence covers; do NOT give every entity the same subsection set. An entity with thin evidence "
+            "gets fewer subsections.\n"
+            "   b. 1-3 COMPACT comparison sections (role \"compact\") that together name EVERY compact entity in \"entities\".\n"
+            "   c. At least 4 cross-cutting sections (role \"cross_cutting\") chosen for THIS topic, for example: background "
+            "and context, the data trends, drivers and causes, policy and regulation, comparisons, risks/scenarios and outlook. "
+            "Every cross-cutting section has 2-5 subsections."
+            + tiers_block(tiers)
+        )
+    elif tier == "in_depth":
         structure = (
             "ENTITY-FIRST PLAN (Deep Research):\n"
             "1. First list every natural ENTITY this topic is made of and that the sources actually cover (for example each "
@@ -162,6 +198,7 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             f"Plan {rules['sections']} analysis sections that answer the question as one argument: context, the main evidence, "
             "the drivers, comparisons, risks and an outlook/implications section. Subsections are optional (use 0-3 per section)."
         )
+    query_hint = "index names, metric names, periods" if market else "names, metric names, periods"
     prompt = f"""QUESTION: {question}
 TODAY: {today}
 {window_note}
@@ -173,7 +210,7 @@ REPORT TIER: {tier}
 Sections must not overlap: give each a distinct goal. The thesis is the report's single central claim, phrased so the
 evidence can support or qualify it.
 For every section and subsection give 2-4 search queries made of words likely to appear in the sources (index names,
-metric names, periods), not generic phrases.
+{query_hint}), not generic phrases.
 
 EVIDENCE AVAILABLE:
 {overview}
@@ -441,7 +478,8 @@ def validate_outline(sections: list[Section], tier: str, tiers: dict | None) -> 
     return errors
 
 
-def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decisions: list[str]) -> list[Section]:
+def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decisions: list[str],
+                   question: str = "") -> list[Section]:
     """Deterministically add what the LLM outline still omitted after its retry (each addition logged)."""
     if not tiers or tier != "in_depth":
         return sections
@@ -457,10 +495,12 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
     for entity in qualifying:
         if _has_own_deep_dive(sections, entity, qualifying):
             continue
-        sec = Section(section_id=f"sec-{next_id}", title=f"{entity.name}: Sector Deep-Dive", role="deep_dive",
+        market = is_market_topic(question)
+        sec = Section(section_id=f"sec-{next_id}", title=f"{entity.name}: {'Sector ' if market else ''}Deep-Dive", role="deep_dive",
                       entity=entity.name, entities=[entity.name], goal=f"Full analysis of {entity.name} over the window",
-                      queries=[f"{entity.name} sector", f"Nifty {entity.name} returns"])
-        for j, (sub_title, sub_goal) in enumerate(DEEP_DIVE_SUBSECTIONS, 1):
+                      queries=([f"{entity.name} sector", f"Nifty {entity.name} returns"] if market
+                               else [entity.name, f"{entity.name} {' '.join(str(question).split()[:8])}"]))
+        for j, (sub_title, sub_goal) in enumerate(DEEP_DIVE_SUBSECTIONS if market else GENERIC_DEEP_DIVE_SUBSECTIONS, 1):
             sec.subsections.append(Section(section_id=f"{sec.section_id}.{j}", title=sub_title, goal=sub_goal,
                                            queries=[f"{entity.name} {sub_title.lower()}"], entities=[entity.name]))
         sections.append(sec)
@@ -468,9 +508,12 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
         decisions.append(f"Added deep-dive section for '{entity.name}' (validator: the outline omitted it).")
     missing = [e for e in tiers.get("compact", []) if not any(_mentions(s, e) for s in sections)]
     if missing:
-        sections.append(Section(section_id=f"sec-{next_id}", title="Other Sectors: Compact Comparison", role="compact",
-                                entities=[e.name for e in missing], goal="Compare the sectors with data but thin commentary",
-                                queries=[" ".join(e.name for e in missing[:8]), "sector returns comparison"]))
+        market = is_market_topic(question)
+        sections.append(Section(section_id=f"sec-{next_id}", title=f"Other {'Sectors' if market else 'Entities'}: Compact Comparison",
+                                role="compact", entities=[e.name for e in missing],
+                                goal=f"Compare the {'sectors' if market else 'entities'} with data but thin commentary",
+                                queries=[" ".join(e.name for e in missing[:8]),
+                                         "sector returns comparison" if market else "comparison data"]))
         decisions.append(f"Added compact comparison section for {len(missing)} entities the outline omitted.")
     return sections
 
@@ -537,7 +580,7 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         raise OutlineError(f"outline returned {len(sections)} usable sections")
     remaining = validate_outline(sections, tier, tiers)
     if remaining:
-        sections = repair_outline(sections, tier, tiers, decisions)
+        sections = repair_outline(sections, tier, tiers, decisions, question=question)
         for error in validate_outline(sections, tier, tiers):
             decisions.append(f"Outline still below the structural minimum after repair: {error}.")
     if asks is not None and asks.asks:

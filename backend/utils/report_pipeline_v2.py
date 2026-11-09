@@ -414,7 +414,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         window_note = f"{window_note}\n{asks.window_note}".strip()
     if tiers is None and tier == "in_depth":
         from utils.entity_tiers import entity_tiers
-        tiers = entity_tiers(store, tier=tier)
+        tiers = entity_tiers(store, tier=tier, question=question)
     # Stage I (FIX 4): the market regime is computed in code from the fetched dataset and given to the
     # outline and the executive summary as fixed facts; the thesis and rotation claims are checked against it.
     regime, regime_log = None, {"computed": False, "thesisRewritten": False, "claims": [], "mislabels": []}
@@ -464,6 +464,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
     # flattened tables), code verifies every value and label against the passage.
     extracted_ids: set[str] = set()
+    try:  # Stage K: official open datasets (World Bank / IMF / OWID) are data-first charts
+        from utils.official_data import official_charts
+        _official = official_charts(store, question)
+        if _official:
+            dataset_charts = list(dataset_charts) + _official
+            extracted_ids |= {c.chart_id for c in _official}
+            dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "official": len(_official)}
+    except Exception as exc:
+        log.warning("V2 official-data charts skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     if os.getenv("GG_V2_DATASET_EXTRACT", "1") != "0":
         try:
             from utils.dataset_extractor import extract_dataset_charts
@@ -471,7 +480,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 store, gateway, question=question, today=today, limit=8 if tier == "in_depth" else 4,
                 queries=[f"{s.title} {s.goal}" for s in analysis])
             dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "extracted": extract_note}
-            extracted_ids = {c.chart_id for c in extracted}
+            extracted_ids |= {c.chart_id for c in extracted}
             dataset_charts = list(dataset_charts) + extracted
         except Exception as exc:  # extraction must never abort a report
             log.warning("V2 dataset extraction skipped: %s: %s", type(exc).__name__, str(exc)[:160])
@@ -491,6 +500,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                 "reason": chart.drop_reason})
             continue
         deduped.append(chart)
+    try:  # Stage K: an official dataset already has its data-first chart; its table is not re-charted per column
+        from utils.official_data import is_official_passage
+        deduped = [c for c in deduped if not any(store.get(pid) is not None and is_official_passage(store.get(pid))
+                                                  for pid in c.passage_ids)]
+    except Exception as exc:
+        log.warning("V2 official-table filter skipped: %s", type(exc).__name__)
     candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
     # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
     # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).
@@ -821,6 +836,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         repetition_log["before"] = repetition_metrics(report_md, charts_out)
         report_md, repetition_log["tablesRemoved"] = dedupe_tables(report_md, charts_out)
         report_md, repetition_log["statCap"] = cap_headline_stats(report_md)
+        from utils.repetition import drop_caption_restatements
+        report_md, repetition_log["captionRestatements"] = drop_caption_restatements(report_md, charts_out)
         for chart in charts_out:
             if chart.get("takeaway") and echoes_body(chart["takeaway"], report_md):
                 repetition_log.setdefault("takeawaysDropped", []).append(chart.get("title"))

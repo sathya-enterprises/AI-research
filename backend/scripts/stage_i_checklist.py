@@ -42,7 +42,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     from utils.flow_text import rendered_flow_findings
     from utils.leak_gate import INSTRUCTION_RE
     from utils.repetition import repetition_metrics
-    from utils.stage_i_gates import collision_findings, period_findings, split_word_findings
+    from utils.stage_i_gates import collision_findings, ordinal_sequence_ok as _ordinal_ok, period_findings, split_word_findings
 
     report = str(result.get("report") or "")
     charts = [c for c in result.get("charts") or [] if isinstance(c, dict)]
@@ -100,6 +100,10 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     add(6, "Max mentions per statistic in body prose <= 2", metrics["max_headline_repeats"] <= 2,
         f"max {metrics['max_headline_repeats']} ({metrics['max_headline_stat']}), over cap {metrics['stats_over_cap']}")
     add(6, "No duplicate tables", metrics["duplicate_tables"] == 0, f"{metrics['duplicate_tables']} of {metrics['tables']}")
+    from utils.repetition import near_duplicate_sentences
+    near = near_duplicate_sentences(report)
+    add(6, "Cohesion: at most 5 near-duplicate sentences across sections", len(near) <= 5,
+        f"{len(near)} pair(s)" + (f"; e.g. '{near[0][3][:80]}'" if near else ""))
     add(6, "Figure boxes do not repeat the body; no CONTEXT 'Supports:'",
         metrics["figure_blocks_echoing_body"] == 0 and not re.search(r"(?i)\bcontext\s*\n?\s*supports:", pdf),
         f"echoing {metrics['figure_blocks_echoing_body']}, duplicate box sentences {metrics['duplicate_figure_block_sentences']}")
@@ -137,10 +141,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
         "calculated dataset shown as primary official": re.findall(
             r"(?i)(?:No public URL supplied|calculated dataset)\)[^\[]{0,200}?primary\s+official", pdf),
         "raw bullet mid-sentence": re.findall(r"[a-z,] \* [a-z]", pdf),
-        "ordinal gap": [p for p in re.split(r"\n\s*\n", _exec_summary(report))
-                        if len(re.findall(r"\b(?:First|Second|Third|Fourth|Fifth|Sixth),", p)) >= 2
-                        and re.findall(r"\b(First|Second|Third|Fourth|Fifth|Sixth),", p)
-                        != ["First", "Second", "Third", "Fourth", "Fifth", "Sixth"][:len(re.findall(r"\b(?:First|Second|Third|Fourth|Fifth|Sixth),", p))]],
+        "ordinal gap": [p for p in re.split(r"\n\s*\n", _exec_summary(report)) if not _ordinal_ok(p)],
         "empty What to watch": re.findall(r"(?m)^>\s*\[!WATCH[^\]]*\]\s*(?:\[S[^\]]*\])?\s*\.?\s*$", report),
     }
     for name, hits in small.items():
