@@ -1849,7 +1849,7 @@ def _render_chart_block(
     rationale = "" if inline_gallery else html.escape(str(chart.get("rationale") or "").strip())
     takeaway = html.escape(str(chart.get("takeaway") or "").strip())
     source_value = source_override if source_override is not None else (
-        chart.get("source") or chart.get("sourceNote") or chart.get("sources") or chart.get("sourceIds")
+        chart.get("sourceLine") or chart.get("source") or chart.get("sourceNote") or chart.get("sources") or chart.get("sourceIds")
     )
     generic_rationale = "This view isolates the relationship that is most decision-useful in the underlying evidence."
     generic_takeaway = "The figure makes the key comparison, trend, threshold, or distribution visible without relying on color alone."

@@ -352,7 +352,8 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     # source line
     note = source_line(spec, manifest or {})
     if note:
-        spec["source"] = note
+        # the human source line lives in its own field: utils.source_ids normalises "source" to S# ids
+        spec["sourceLine"] = note
     return spec, fixes
 
 
@@ -460,7 +461,7 @@ def lint_chart(spec: dict, seen_titles: set[str] | None = None) -> list[str]:
         issues.append("categories drawn as a line")
     if spec.get("rationale") and _RATIONALE_TYPE_RE.search(str(spec.get("rationale"))):
         issues.append("chart-type rationale text")
-    src = str(spec.get("source") or "")
+    src = str(spec.get("sourceLine") or spec.get("source") or "")
     if not src.strip() or re.fullmatch(r"(?i)\s*calculated\s*", src) or not re.search(r"\[S\d+\]", src):
         issues.append("source line missing or only 'Calculated'")
     elif not re.search(r"(?i)\b(?:as of|updated|retrieved|covering)\b", src):
@@ -477,7 +478,7 @@ def inventory_row(spec: dict, issues: list[str]) -> dict:
     return {"figure": prefix.strip(" :") or "-", "title": rest, "type": spec.get("type"), "x": spec.get("xLabel"),
             "y": spec.get("yLabel"), "unit": spec.get("unit") or "", "period": _period_from_title(spec.get("title") or "")
             or (lambda l: f"{l[0]} to {l[-1]}" if l and is_time_axis(l) else "")(_labels(spec)),
-            "source": str(spec.get("source") or "")[:120], "lint": "PASS" if not issues else "FAIL: " + "; ".join(issues)}
+            "source": str(spec.get("sourceLine") or spec.get("source") or "")[:120], "lint": "PASS" if not issues else "FAIL: " + "; ".join(issues)}
 
 
 def unique_titles(charts: list[dict]) -> list[str]:
@@ -488,7 +489,7 @@ def unique_titles(charts: list[dict]) -> list[str]:
         prefix, rest = strip_figure(chart.get("title") or "")
         key = rest.casefold()
         if key in seen:
-            src = re.sub(r"\s*\[S\d+\]", "", str(chart.get("source") or "")).split(";")[0].split(",")[0].strip()
+            src = re.sub(r"\s*\[S\d+\]", "", str(chart.get("sourceLine") or chart.get("source") or "")).split(";")[0].split(",")[0].strip()
             extra = f" ({src})" if src else f" (view {seen[key] + 1})"
             chart["title"] = prefix + rest + extra
             fixes.append(f"duplicate title made unique: {rest[:60]}{extra}")

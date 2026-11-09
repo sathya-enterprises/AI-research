@@ -246,7 +246,7 @@ def test_chart_lint_fixes_titles_axes_types_and_sources():
     c = kept[0]
     assert c["type"] == "horizontal_bar" and [p["value"] for p in c["series"][0]["data"]] == sorted([2.57, 2.27, 0.5, 1.1, -0.3], reverse=True)
     assert "and 9 others" not in c["title"] and "4 sectors and the Nifty 50 benchmark" in c["title"] and "(%)" in c["title"]
-    assert c["yLabel"] == "Change (%)" and c["decimals"] == 2 and "updated 06 Nov 2026 [S11]" in c["source"]
+    assert c["yLabel"] == "Change (%)" and c["decimals"] == 2 and "updated 06 Nov 2026 [S11]" in c["sourceLine"]
     rows, failing = lint_all(kept)
     assert failing == 0 and rows[0]["lint"] == "PASS"
     series = _bar("Figure 2: FII net: 21 Oct 2026, 22 Oct 2026 and 3 others", ["21 Oct 2026", "22 Oct 2026", "23 Oct 2026"],

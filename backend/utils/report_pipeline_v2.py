@@ -500,6 +500,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                 "reason": chart.drop_reason})
             continue
         deduped.append(chart)
+    try:  # Stage K: an official dataset already has its data-first chart; its table is not re-charted per column
+        from utils.official_data import is_official_passage
+        deduped = [c for c in deduped if not any(store.get(pid) is not None and is_official_passage(store.get(pid))
+                                                  for pid in c.passage_ids)]
+    except Exception as exc:
+        log.warning("V2 official-table filter skipped: %s", type(exc).__name__)
     candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
     # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
     # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).

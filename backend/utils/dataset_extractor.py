@@ -359,3 +359,10 @@ def assign_to_sections(charts: list[PlannedChart], sections: list) -> None:
                 best, best_score = s, score
         if best is not None and best_score >= 2:
             chart.section_id = best.section_id
+        elif sections:
+            # Stage K: a verified data-first chart always gets a home - the overview-type analysis section
+            # (not a single-entity deep-dive) with the fewest charts so far
+            load = {s.section_id: sum(1 for c in charts if c.section_id == s.section_id) for s in sections}
+            pool = [s for s in sections if getattr(s, "role", "") != "deep_dive"] or list(sections)
+            target = min(pool, key=lambda s: (load[s.section_id], pool.index(s)))
+            chart.section_id = target.section_id
