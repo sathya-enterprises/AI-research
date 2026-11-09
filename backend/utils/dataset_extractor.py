@@ -129,26 +129,30 @@ def _mapping_verified(points: list[dict], text: str) -> bool:
         if [round(t, 4) for t in tokens[i:i + n]] == [round(v, 4) for v in values]:
             if any(run == labels for run in period_runs):
                 return True
-    lines = (text or "").splitlines()
-    # flattened tables: one line holding several rows - split on "| |" row boundaries too
-    rows = [seg for ln in lines for seg in re.split(r"\|\s+\|(?=\s*[^\s|-])", ln)]
+    # a table row or a sentence: every significant word of the label is within ~120 characters of the
+    # value, and that window is prose / a row (not a dump of numbers, where words and values are far apart)
+    body = text or ""
     for p in points:
-        label = p["label"].casefold()
+        words = [w for w in re.findall(r"[a-z0-9]+", p["label"].casefold())
+                 if len(w) >= 3 and w not in _LABEL_STOP] or re.findall(r"[a-z0-9]+", p["label"].casefold())
         ok = False
-        for row in rows:
-            low = row.casefold()
-            if len(row) > 300 or label not in low:
-                continue  # a long run of numbers (a chart dump) does not tie a value to a label
-            at = low.find(label)
-            for m in _NUM_RE.finditer(row):
-                if _value(m.group(0)) == p["value"] and abs(m.start() - at) <= 60 and m.group(0).strip() != p["label"]:
-                    ok = True
-                    break
-            if ok:
+        for m in _NUM_RE.finditer(body):
+            if _value(m.group(0)) != p["value"] or m.group(0).strip() == p["label"]:
+                continue
+            window = body[max(0, m.start() - 120):m.end() + 120]
+            numeric_share = len(_NUM_RE.findall(window)) / max(1, len(window.split()))
+            if numeric_share > 0.6:
+                continue  # a run of numbers: a value is not tied to a word here
+            low = window.casefold()
+            if all(re.search(rf"\b{re.escape(w)}", low) for w in words):
+                ok = True
                 break
         if not ok:
             return False
     return True
+
+
+_LABEL_STOP = {"the", "and", "for", "with", "from", "total", "sales", "share", "units"}
 
 
 def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
