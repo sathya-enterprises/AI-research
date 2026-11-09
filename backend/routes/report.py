@@ -22332,7 +22332,7 @@ async def generate_report(request: Request):
             from utils.report_pipeline_v2 import run_pipeline_v2
             _v2_today = _v2_date.today()
             from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
-            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier) if report_tier == "in_depth" else None
+            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question) if report_tier == "in_depth" else None
             _v2_entity_stats: dict = {}
             if _v2_tiers:
                 record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
@@ -22341,8 +22341,15 @@ async def generate_report(request: Request):
                 from utils.entity_research import plan_entity_queries, run_entity_search, search_cap
                 from utils.source_quality import assess_sources as _assess_sources
                 from routes.chat import exa_search_multi as _entity_exa_search
-                _window_label = f"last {requested_quarter_count(question)} quarters"
-                _entity_plan = plan_entity_queries(_v2_tiers, cap=search_cap(report_tier), window=_window_label)
+                from utils.report_outline import is_market_topic as _is_market_topic
+                if _is_market_topic(question):
+                    _window_label = f"last {requested_quarter_count(question)} quarters"
+                else:  # Stage K: a year window for a non-market topic ("2015 2016 ... 2026")
+                    from utils.data_angles import window_years as _window_years
+                    _wy = _window_years(question, _v2_today)
+                    _window_label = f"{_wy[0]}-{_wy[-1]}" if _wy else ""
+                _entity_plan = plan_entity_queries(_v2_tiers, cap=search_cap(report_tier), window=_window_label,
+                                                   question=question)
                 if _entity_plan:
                     _report_progress("writing", f"Researching {len({e for e, _ in _entity_plan})} under-covered entities…", 68)
 
@@ -22365,7 +22372,7 @@ async def generate_report(request: Request):
                         source_manifest = build_source_registry(enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
                         record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
                         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                                  "sourceSummary": evidence_store.source_summary(),

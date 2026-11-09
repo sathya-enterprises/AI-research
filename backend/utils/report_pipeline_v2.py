@@ -414,7 +414,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         window_note = f"{window_note}\n{asks.window_note}".strip()
     if tiers is None and tier == "in_depth":
         from utils.entity_tiers import entity_tiers
-        tiers = entity_tiers(store, tier=tier)
+        tiers = entity_tiers(store, tier=tier, question=question)
     # Stage I (FIX 4): the market regime is computed in code from the fetched dataset and given to the
     # outline and the executive summary as fixed facts; the thesis and rotation claims are checked against it.
     regime, regime_log = None, {"computed": False, "thesisRewritten": False, "claims": [], "mislabels": []}

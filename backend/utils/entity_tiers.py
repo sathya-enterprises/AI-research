@@ -110,7 +110,105 @@ def _pattern(entity: EntityEvidence) -> re.Pattern:
     return re.compile(rf"(?<![A-Za-z]){'(?:' + alts + ')'}(?![A-Za-z])", flags)
 
 
-def discover_entities(store, *, max_entities: int = 40) -> list[EntityEvidence]:
+_REGIONS = ("Sub-Saharan Africa", "Africa", "South Asia", "East Asia", "Southeast Asia", "South-East Asia", "Latin America",
+            "Middle East", "North Africa", "Eastern Mediterranean", "Western Pacific", "Americas", "Europe", "Central Asia",
+            "North America", "South America", "Caribbean", "Oceania")
+_TEXT_ENTITY_STOP = {"The", "This", "These", "That", "In", "On", "For", "From", "With", "And", "But", "However", "While",
+                     "According", "Figure", "Table", "Source", "Sources", "Report", "Section", "Data", "Note", "January",
+                     "February", "March", "April", "May", "June", "July", "August", "September", "October", "November",
+                     "December", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Since",
+                     "During", "After", "Before", "Between", "Although", "Despite", "Overall", "Globally", "Global",
+                     "World", "COVID", "Covid", "Executive Summary", "Key", "New", "Total", "Our World", "World Bank",
+                     "Our World in Data", "International Monetary Fund", "PDF", "URL", "API", "CEO", "GDP", "USD", "INR"}
+
+
+_GENERIC_ACRONYMS = {"TABLE", "OEM", "OEMS", "CEO", "CFO", "API", "PDF", "URL", "FAQ", "USD", "INR", "GDP", "YOY", "QTD", "YTD",
+                     "CAGR", "FY", "CY", "EV", "EVS", "AI", "IT", "US", "UK", "EU", "UN", "NA", "ID", "KPI", "ROI", "R&D"}
+# publishers / statistical and governing bodies: usually the SOURCE of the data, not a subject of the report
+_BODIES = {"WHO", "UNICEF", "World Bank", "IMF", "IEA", "OECD", "WTO", "UNCTAD", "NITI", "NITI Aayog", "PIB", "MHI", "RBI",
+           "SEBI", "Ministry", "Government", "Government of India", "Member States", "Statista", "Reuters", "Bloomberg"}
+_PLACE_QUESTION_RE = re.compile(r"(?i)\b(?:regions?|countries|country|nations?|continents?)\b")
+_PLACE_ALIASES = {"United States": {"U.S.", "US", "USA", "United States of America"}, "United Kingdom": {"UK", "U.K.", "Britain"},
+                  "European Union": {"EU", "E.U."}, "South Korea": {"Korea", "Republic of Korea"}, "China": {"PRC"}}
+
+
+def _stem_words(text: str) -> set[str]:
+    return {w[:-1] if len(w) > 4 and w.endswith("s") else w for w in re.findall(r"[a-z0-9]+", str(text or "").casefold())}
+
+
+def discover_text_entities(store, question: str = "", *, min_sources: int = 3, max_entities: int = 24) -> list[EntityEvidence]:
+    """Stage K: entities of a non-market topic from the TEXT (countries, regions, recurring named entities such as
+    programmes, policies, companies or technologies), counted only when at least ``min_sources`` independent sources
+    discuss them. Publishers / statistical bodies are at most compact; places come first when the question asks
+    about countries or regions. Market topics keep the table-based discovery (sector names)."""
+    try:
+        from utils.official_data import COUNTRIES
+        places = [n for n in COUNTRIES.values() if n not in {"World"}] + list(_REGIONS)
+    except Exception:  # pragma: no cover
+        places = list(_REGIONS)
+    q_stems = _stem_words(question)
+    place_first = bool(_PLACE_QUESTION_RE.search(str(question or "")))
+    counts: dict[str, set[str]] = {}
+    for passage in store.passages:
+        if passage.kind in {"calculated"}:
+            continue
+        text = str(passage.text or "")
+        for name in places:
+            variants = [name, *_PLACE_ALIASES.get(name, ())]
+            if any(re.search(rf"(?<![A-Za-z]){re.escape(v)}(?![A-Za-z])", text) for v in variants):
+                counts.setdefault(name, set()).add(passage.source_id)
+        for m in re.finditer(r"\b(?:[A-Z]{2,6}\d?|[A-Z][a-z]+)(?:(?:\s+(?:of|and|for|the)\s+|\s+)(?:[A-Z]{2,6}\d?|[A-Z][a-z]+)){0,4}\b", text):
+            name = m.group(0).strip()
+            first = name.split()[0]
+            if (name in _TEXT_ENTITY_STOP or first in _TEXT_ENTITY_STOP or len(name) < 3 or name.upper() in _GENERIC_ACRONYMS
+                    or (" " not in name and not name.isupper())):  # a single capitalised word is usually a sentence start
+                continue
+            counts.setdefault(name, set()).add(passage.source_id)
+    # case duplicates ("INDIA" / "India") fold into the mixed-case form; fragments of a longer name are dropped
+    folded: dict[str, set[str]] = {}
+    for name, sources in counts.items():
+        key = next((k for k in folded if k.casefold() == name.casefold()), None)
+        if key is None:
+            folded[name] = set(sources)
+        else:
+            folded[key] |= sources
+            if name[1:].islower() or not key[1:].islower():
+                folded[name] = folded.pop(key)
+    names = sorted(folded, key=lambda n: -len(folded[n]))
+    qualifying = [n for n in names if len(folded[n]) >= min_sources]
+    keep = []
+    for name in qualifying:
+        if any(name != other and re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", other)
+               and len(folded[other]) >= 0.6 * len(folded[name]) for other in qualifying):
+            continue  # "CHIPS" inside "CHIPS and Science Act"
+        if name not in places and _stem_words(name) <= q_stems:
+            continue  # the topic itself ("Electric Vehicles" in an EV question)
+        if name in places and not place_first and _stem_words(name) <= q_stems:
+            continue  # the question's own scope ("India" in "India's EV market") is not an entity within it
+        keep.append(name)
+    keep.sort(key=lambda n: (0 if (place_first and n in places) else 1, -len(folded[n])))
+    out: list[EntityEvidence] = []
+    for name in keep[:max_entities]:
+        entity = EntityEvidence(name=name, aliases=set(_PLACE_ALIASES.get(name, ())))
+        pattern = _pattern(entity)
+        for passage in store.passages:
+            if passage.kind in {"table", "calculated"}:
+                continue
+            mentions = len(pattern.findall(passage.text))
+            if mentions:
+                entity.text_passages.add(passage.passage_id)
+                if mentions >= 2 and passage.reliability >= GOOD_RELIABILITY:
+                    entity.good_text_sources.add(passage.source_id)
+        if name in places and place_first and len(entity.good_text_sources) < DEEP_DIVE_SOURCES:
+            # a place the question asks about qualifies with 2 good sources (most sources name places once)
+            entity.good_text_sources |= {passage.source_id for passage in store.passages
+                                         if passage.passage_id in entity.text_passages}
+        entity.aliases.add("__body__" if name in _BODIES else "")
+        out.append(entity)
+    return out
+
+
+def discover_entities(store, *, max_entities: int = 40, question: str = "") -> list[EntityEvidence]:
     found: dict[str, EntityEvidence] = {}
     for passage in store.passages:
         if passage.kind not in {"table", "calculated"}:
@@ -152,6 +250,12 @@ def discover_entities(store, *, max_entities: int = 40) -> list[EntityEvidence]:
     # discussed in text (survey parameters and constituents appear only in tables).
     if sum(1 for k in found if k in SYNONYMS) >= 6:
         found = {k: e for k, e in found.items() if k in SYNONYMS or e.good_text_sources}
+    if question:
+        from utils.report_outline import is_market_topic
+        if not is_market_topic(question):
+            for entity in discover_text_entities(store, question):
+                if entity.name not in found:
+                    found[entity.name] = entity
     ranked = sorted(found.values(), key=lambda e: (-len(e.good_text_sources), -len(e.table_passages), e.name))
     return ranked[:max_entities]
 
@@ -168,8 +272,11 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
             other != own and re.search(rf"(?<![a-z]){re.escape(own)}(?![a-z])", other) for other in names)
 
     for entity in entities:
+        is_body = "__body__" in entity.aliases or entity.name in _BODIES
+        entity.aliases.discard("__body__")
+        entity.aliases.discard("")
         if (len(entity.good_text_sources) >= DEEP_DIVE_SOURCES and len(tiers["deep_dive"]) < max_deep_dives
-                and not ambiguous(entity)):
+                and not ambiguous(entity) and not is_body):
             entity.tier = "deep_dive"
         elif entity.table_passages or entity.good_text_sources:
             entity.tier = "compact"
@@ -179,7 +286,7 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
     return tiers
 
 
-def entity_tiers(store, *, tier: str = "in_depth") -> dict[str, list[EntityEvidence]]:
+def entity_tiers(store, *, tier: str = "in_depth", question: str = "") -> dict[str, list[EntityEvidence]]:
     # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
     # ceiling (ranked by evidence) that keeps the report within the LLM call budget.
     import os
@@ -187,7 +294,11 @@ def entity_tiers(store, *, tier: str = "in_depth") -> dict[str, list[EntityEvide
         max_deep = int(os.getenv("GG_V2_MAX_DEEP_DIVES", "16")) if tier == "in_depth" else 3
     except ValueError:
         max_deep = 16 if tier == "in_depth" else 3
-    return assign_tiers(discover_entities(store), max_deep_dives=max_deep)
+    if question and tier == "in_depth":
+        from utils.report_outline import is_market_topic
+        if not is_market_topic(question):
+            max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
+    return assign_tiers(discover_entities(store, question=question), max_deep_dives=max_deep)
 
 
 def tier_summary(tiers: dict[str, list[EntityEvidence]]) -> dict:

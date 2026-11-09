@@ -33,19 +33,34 @@ def search_cap(tier: str) -> int:
         return 24
 
 
-def plan_entity_queries(tiers: dict, *, cap: int, window: str = "") -> list[tuple[str, str]]:
+GENERIC_QUERY_TEMPLATES = (
+    "{name} {topic} {window}",
+    "{name} {topic} statistics data {window}",
+    "{name} {topic} policy drivers challenges",
+)
+
+
+def plan_entity_queries(tiers: dict, *, cap: int, window: str = "", question: str = "") -> list[tuple[str, str]]:
     """(entity, query) pairs: compact entities first (most table evidence), then the weakest deep-dives."""
     if cap <= 0 or not tiers:
         return []
     compact = sorted(tiers.get("compact", []), key=lambda e: (-len(e.table_passages), -len(e.good_text_sources), e.name))
     weak_deep = sorted((e for e in tiers.get("deep_dive", []) if len(e.good_text_sources) < 5),
                        key=lambda e: len(e.good_text_sources))
+    templates, topic = QUERY_TEMPLATES, ""
+    if question:
+        from utils.report_outline import is_market_topic
+        if not is_market_topic(question):
+            from utils.data_angles import subject_terms
+            templates = GENERIC_QUERY_TEMPLATES
+            topic = " ".join(t for t in subject_terms(question, limit=5))
     plan = []
     for entity in compact + weak_deep:
-        for template in QUERY_TEMPLATES:
+        for template in templates:
             if len(plan) >= cap:
                 return plan
-            plan.append((entity.name, " ".join(template.format(name=entity.name, window=window).split())))
+            text = template.format(name=entity.name, window=window, topic=topic.replace(entity.name, "").strip())
+            plan.append((entity.name, " ".join(text.split())))
     return plan
 
 
