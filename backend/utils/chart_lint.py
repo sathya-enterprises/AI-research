@@ -170,6 +170,7 @@ def metric_name(spec: dict) -> str:
         y = str(_series(spec)[0].get("name") if _series(spec) else "") or y
     y = re.sub(r"\s*\((?:%|[^)]*(?:cr|crore|rs|₹|x|bn|billion|score)[^)]*)\)\s*$", "", y, flags=re.I)
     y = re.sub(r"\s*\(%\)", "", y)
+    y = re.sub(r"\s*\([^()]*%[^()]*\)\s*$", "", y)  # "Real GDP growth (annual %)" -> "Real GDP growth"
     y = case_label(y).replace("*", "").strip(" :")
     y = re.sub(r"\s*%\s*$", "", y)
     y = _PERIOD_IN_METRIC_RE.sub("", y).strip(" ,:")
@@ -271,7 +272,7 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         spec["rows"] = [case_label(r) for r in spec.get("rows") or []]
     labels = _labels(spec)
     time_axis = is_time_axis(labels)
-    unit = infer_unit(spec, passage_text)
+    unit = str(spec.get("unitLabel") or "").strip() or infer_unit(spec, passage_text)  # a dataset's own unit wins
     metric = metric_name(spec)
     source_titles = " ".join(str((manifest or {}).get(sid, {}).get("title") or "") for sid in _ids(spec))
     if re.fullmatch(r"Q[1-4] 20\d{2}", metric):  # a period used as the metric name
@@ -412,6 +413,8 @@ def source_line(spec: dict, manifest: dict) -> str:
             name = publisher or title or "Published source"
             if publisher and title and publisher.casefold() not in title.casefold():
                 name = f"{publisher}, {title[:90]}"
+            elif publisher and title and title.startswith(f"{publisher}: "):
+                name = title[:110]  # an official dataset: "World Bank: GDP growth (annual %), 2023-2025"
         labels = _labels(spec)
         period = _period_from_title(spec.get("title") or "")
         date = _source_date(row) if row else _source_date({})

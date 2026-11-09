@@ -389,3 +389,40 @@ def test_quality_gate_drops_teaser_tables_and_unlabelled_forecasts():
     assert "forecast" in quality_reason(chart("{y} | {v} | Forecast"), "")
     assert quality_reason(chart("{y} | {v} | Forecast", "Sales (forecast)"), "") == ""
     assert quality_reason(chart("In {y} sales were {v} units"), "") == ""
+
+
+# ── Stage K: official open data ──────────────────────────────────────────────────────────────────
+def test_official_dataset_becomes_a_cited_source_and_a_verified_chart():
+    from utils.evidence_store import EvidenceStore
+    from utils.official_data import CATALOG, Dataset, as_source, official_charts
+    ds = Dataset(entry=CATALOG["owid.ev_stocks"], years=[2023, 2024, 2025],
+                 series={"India": [150390.0, 260000.0, 410000.0], "World": [40e6, 58e6, 78e6]}, retrieved="2026-11-10", latest=2025)
+    row = as_source(ds)
+    assert row["url"] == "https://ourworldindata.org/grapher/electric-car-stocks" and row["publisher"] == "Our World in Data"
+    assert "Year | India | World" in row["pageContent"] and "2024 | 260,000 | 58,000,000" in row["pageContent"]
+    store = EvidenceStore()
+    store.add_source("S1", {**row, "id": "S1"})
+    store.finalize()
+    charts = official_charts(store)
+    assert len(charts) == 1 and charts[0].spec["provenance"] == "official dataset"
+    assert charts[0].interpretation.startswith("India went from 150,390 cars in 2023 to 410,000 cars in 2025")
+    assert all(p["evidenceQuote"].startswith(p["label"]) for s in charts[0].spec["series"] for p in s["data"])
+
+
+def test_official_data_plan_is_validated_against_the_catalog():
+    import asyncio
+    from utils.official_data import plan_datasets
+
+    class _Result:
+        ok = True
+        def json(self):
+            return {"datasets": [{"id": "owid.ev_car_share", "entities": ["IND", "WLD", "XXX"]},
+                                 {"id": "made.up", "entities": ["IND"]}]}
+
+    class _Gateway:
+        async def generate(self, **_):
+            return _Result()
+
+    plan, note = asyncio.run(plan_datasets("India EV adoption", _Gateway(), today=date(2026, 11, 10), limit=3))
+    assert plan == [{"id": "owid.ev_car_share", "entities": ["IND", "WLD"], "why": ""}]
+    assert note["rejected"] == [{"id": "made.up", "reason": "not in the catalog"}]

@@ -87,3 +87,4 @@ def pytest_collection_modifyitems(config, items):
 # Stage I: unit tests do not render PDFs inside the report job.
 import os as _os_stage_i
 _os_stage_i.environ.setdefault("GG_STAGE_I_RENDERED_CHECK", "0")
+_os_stage_i.environ.setdefault("GG_OFFICIAL_DATA", "0")  # Stage K: unit tests never call the open-data APIs

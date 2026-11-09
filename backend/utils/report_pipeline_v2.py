@@ -464,6 +464,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
     # flattened tables), code verifies every value and label against the passage.
     extracted_ids: set[str] = set()
+    try:  # Stage K: official open datasets (World Bank / IMF / OWID) are data-first charts
+        from utils.official_data import official_charts
+        _official = official_charts(store)
+        if _official:
+            dataset_charts = list(dataset_charts) + _official
+            extracted_ids |= {c.chart_id for c in _official}
+            dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "official": len(_official)}
+    except Exception as exc:
+        log.warning("V2 official-data charts skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     if os.getenv("GG_V2_DATASET_EXTRACT", "1") != "0":
         try:
             from utils.dataset_extractor import extract_dataset_charts

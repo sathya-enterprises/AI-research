@@ -21574,6 +21574,27 @@ async def generate_report(request: Request):
             "rows": quarterly_rows,
         })
 
+    # Stage K: official open data (World Bank, IMF WEO, Our World in Data) for every web-researched report.
+    # Added AFTER page fetching (the fetcher would replace the table with the dataset page's HTML) and
+    # BEFORE source ids are assigned, so these are ordinary cited, verified sources.
+    if not file_only_report and os.getenv("GG_OFFICIAL_DATA", "1") != "0":
+        try:
+            from datetime import date as _od_date
+            from utils.llm_gateway import LLMGateway as _OdGateway
+            from utils.official_data import official_sources as _official_sources
+            _od_rows, _od_note = await _official_sources(
+                question, _OdGateway(_sys.modules[__name__], report_tier, budget=2),
+                today=_od_date.today(), tier=report_tier)
+            if _od_rows:
+                _od_urls = {str(r.get("url") or "").rstrip("/") for r in _od_rows}
+                enriched = list(_od_rows) + [r for r in (enriched or [])
+                                             if str((r or {}).get("url") or "").rstrip("/") not in _od_urls]
+            record_research_stage("official_datasets", {**_od_note, "rows": [
+                {k: v for k, v in r.items() if k in ("title", "url", "publisher", "officialDataset", "fullContent")}
+                for r in _od_rows]})
+        except Exception as _od_exc:  # official data must never abort a report
+            log.warning("Report: official data skipped: %s: %s", type(_od_exc).__name__, str(_od_exc)[:160])
+
     # Rescue and crawler additions can reintroduce URL aliases after the first
     # deduplication pass. Collapse them again immediately before assigning IDs,
     # so one RBI publication cannot appear as multiple S# sources/observations.
