@@ -42,7 +42,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
     from utils.flow_text import rendered_flow_findings
     from utils.leak_gate import INSTRUCTION_RE
     from utils.repetition import repetition_metrics
-    from utils.stage_i_gates import collision_findings, period_findings, split_word_findings
+    from utils.stage_i_gates import collision_findings, ordinal_sequence_ok as _ordinal_ok, period_findings, split_word_findings
 
     report = str(result.get("report") or "")
     charts = [c for c in result.get("charts") or [] if isinstance(c, dict)]
@@ -141,10 +141,7 @@ def checklist(result: dict, pdf_bytes: bytes, capture: dict | None = None, today
         "calculated dataset shown as primary official": re.findall(
             r"(?i)(?:No public URL supplied|calculated dataset)\)[^\[]{0,200}?primary\s+official", pdf),
         "raw bullet mid-sentence": re.findall(r"[a-z,] \* [a-z]", pdf),
-        "ordinal gap": [p for p in re.split(r"\n\s*\n", _exec_summary(report))
-                        if len(re.findall(r"\b(?:First|Second|Third|Fourth|Fifth|Sixth),", p)) >= 2
-                        and re.findall(r"\b(First|Second|Third|Fourth|Fifth|Sixth),", p)
-                        != ["First", "Second", "Third", "Fourth", "Fifth", "Sixth"][:len(re.findall(r"\b(?:First|Second|Third|Fourth|Fifth|Sixth),", p))]],
+        "ordinal gap": [p for p in re.split(r"\n\s*\n", _exec_summary(report)) if not _ordinal_ok(p)],
         "empty What to watch": re.findall(r"(?m)^>\s*\[!WATCH[^\]]*\]\s*(?:\[S[^\]]*\])?\s*\.?\s*$", report),
     }
     for name, hits in small.items():
