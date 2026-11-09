@@ -110,3 +110,58 @@ The pipeline stages (retrieval → evidence store → outline → data-first cha
 ## Recommended next stage (not started)
 
 Structured-data connectors for authoritative open datasets, used like `market_data` is for NSE indices: World Bank / IMF / OECD indicators, UN Comtrade trade flows, US FRED and Census, India data.gov.in / RBI DBIE / MOSPI, and sector sources with public tables (e.g. VAHAN registrations). The outline names the core metrics; a connector fetches the series for the window; the series enters the evidence store as a calculated/official dataset and flows through the existing data-first charts, sanity checks and verification.
+
+---
+
+# Stage K — a research engine for every topic (10 Nov 2026)
+
+Goal (user): one pipeline that does everything correctly from data to report for ANY topic - proper charts, no
+duplication or repetition, a cohesive report.
+
+## What was built
+
+| Area | Change | Module / commit |
+|---|---|---|
+| Data layer | Official open-data connectors (World Bank WDI, IMF WEO, Our World in Data; free, keyless APIs). One LLM call plans up to 3 (detailed) / 5 (in-depth) datasets from a curated catalog of 72 indicators (economy, trade, energy, EVs, health, technology, climate, agriculture...); code validates every id and country; keyword fallback. Each dataset becomes an ordinary cited source (publisher, public dataset URL, year-by-year table retrieved from the publisher's API) and a data-first chart. Large values scaled to billions/millions; one retry on API timeouts | `utils/official_data.py` - ef6aca1, 1958aef, dc5be45 |
+| Charts | Official charts always placed (assignment fallback); official tables not re-charted per column; absolute series on very different scales keep the question's entities; titles name the entity and keep the dataset's own unit; human source line kept in `sourceLine` (source ids normalisation no longer wipes it) | 0ce692d, 1958aef |
+| Cohesion | Chart interpretations vary their phrasing; "Figure N shows <its own title>" sentences removed or folded into the next sentence as "(Figure N)"; writer prompt is domain-neutral and asks for the data's pattern; near-duplicate-sentence metric + checklist row | 8d9f146, 3697aa9, 5aaeeba, f8d1d10 |
+| Planning | Outline prompt and outline repair are domain-aware (market topics keep sector/flows/valuation language; any other topic gets neutral entities, cross-cutting themes and deep-dive subsections) | ffba731 |
+| Small fixes | Dates in column headers are not numeric observations (rendered audit); ordinal sequences judged per paragraph with an implicit first item allowed | 0ce692d, d56e4f7 |
+
+## Live verification (detailed tier, final code unless noted)
+
+| Topic | Official data | Charts | Outcome | Checklist (27 checks) |
+|---|---|---|---|---|
+| India EV market, past 3 years (k3_ev) | OWID EV sales, share, stock | 3 | published, 24 pp | 27/27 |
+| Semiconductor supply-chain shifts since 2022 (k4_semi) | World Bank high-tech exports (US$ bn, % of manuf. exports), FDI | 3 | published, 16 pp | 27/27 (after the ordinal fix) |
+| Global childhood vaccination since 2015 (k3_vacc) | OWID measles coverage (India, Nigeria, US, World) | 1 | published, 11 pp | 27/27 |
+| Client prompt 1, sector rotation (k2_sector) | none needed (NSE dataset) | 5 | published, 28 pp | 27/27 |
+
+Offline regression: Stage H in-depth and detailed replays pass (in-depth near-duplicates 10 -> 4).
+Tests: 1204 passed, 15 xfailed.
+
+## Limits
+
+* The catalog is curated (72 indicators); a topic with no matching indicator gets charts only from verified page data.
+* Country-level open data is annual; quarterly or company-level series still come from web pages (verified extractor).
+* Very new data (the current year) is often not yet in World Bank / OWID; IMF values for the current and future years are projections and are excluded.
+
+## Stage K, part 2 — depth and correctness for any topic (in-depth)
+
+| Finding (live in-depth vaccination run) | Fix | Commit |
+|---|---|---|
+| In-depth reports outside finance had no entities (the finder only knew NSE sector names) → no deep-dives, no per-entity searches, 4 of 12 sections, 18 pages | Text-based entity discovery for non-market topics: countries/regions (with aliases such as U.S./US), recurring named entities from >= 3 sources; publishers never deep-dives; the topic and its own scope excluded; places first when the question asks about countries/regions; at most 8 deep-dives; neutral per-entity search queries with a year window | ecd93cb |
+| Outline prompt, outline repair and the writer prompt assumed a stock-market report | Domain-aware planning (market topics keep sector/flows/valuation language) | ffba731, f8d1d10 |
+| The statistic cap merged two facts sharing a number (measles 86% / DTP3 86%) and replaced one with a reference to the other | Entities may contain digits; a one-sided entity must appear in the other context | 8dfe831 |
+| Every Gemini key/model returned 429 → V2 could not run, labelled fallback draft | The gateway waits out a rate limit (20 s, 40 s) before failing | 66c4981 |
+
+Entity discovery on saved captures (no LLM): semiconductors → United States, China, European Union, Taiwan, CHIPS Act;
+vaccination → WHO regions + United States, India, Nigeria, DTP3; EV → DRIVE Scheme, PLI, CMVR, China, US, Uttar Pradesh;
+sector rotation → unchanged (Bank, IT, Metal, ...).
+
+**Pending:** the confirming in-depth vaccination run (k2_vacc_deep) ran into exhausted Gemini quota and a degraded
+network (Exa timeouts, research-library DB disconnects, many 403s) after ~16 live runs that day; it was correctly labelled
+a fallback draft. Re-run it once the quota resets:
+`python <scratchpad>/tools/run_live.py diagnostics/eval_runs/live_<date>_vacc_deep in_depth "How have global childhood vaccination rates changed since 2015, and what explains the differences between regions?"`
+
+Tests: 1205 passed, 15 xfailed.
