@@ -287,7 +287,12 @@ def _publisher_evidence_verified(source: dict) -> bool:
     manifest_excerpt = bool(str(source.get("evidenceExcerpt") or source.get("evidence_excerpt") or "").strip())
     # A mixed publisher+search source is accepted only when this report's gallery
     # attached a publisher-specific excerpt that was re-matched to fetched page text.
-    origin_ok = origin in {"", "publisher_page", "publisher-page", "publisher_page_crawl", "publisher_page_fetch", "publisher"} or gallery_excerpt_verified or legacy_gallery_excerpt_verified or table_excerpt_verified
+    # Stage J: a fetched page that also has a search snippet ("publisher_page_and_search_extract") is
+    # publisher evidence for its FETCHED PAGE TEXT; _chart_source_text then uses only that text (never
+    # the mixed excerpt), so a search-only sentence still cannot verify a chart point.
+    fetched_page = any(str(source.get(key) or "").strip() for key in ("pageContent", "page_content"))
+    mixed_with_page = origin == "publisher_page_and_search_extract" and fetched_page
+    origin_ok = origin in {"", "publisher_page", "publisher-page", "publisher_page_crawl", "publisher_page_fetch", "publisher"} or gallery_excerpt_verified or legacy_gallery_excerpt_verified or table_excerpt_verified or mixed_with_page
     return status == "ok" and origin_ok and (direct or manifest_excerpt)
 
 

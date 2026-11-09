@@ -618,11 +618,13 @@ def replay_v2(capture: dict, run_dir: Path, rerender: bool) -> dict:
     _texts: dict[str, list[str]] = {}
     for _p in store.passages:
         _texts.setdefault(_p.source_id, []).append(str(_p.text or ""))
-    _by_url = {str(r.get("url") or "").rstrip("/"): r for r in enriched_rows}
+    def _url_key(u):  # http/https and www. do not make a different page
+        return re.sub(r"^https?://(?:www\.)?", "", str(u or "").strip().rstrip("/").casefold())
+    _by_url = {_url_key(r.get("url")): r for r in enriched_rows}
     verifier_rows = []
     for _m in manifest_rows:
         _sid = str(_m.get("id") or "").upper()
-        _fetched = _by_url.get(str(_m.get("url") or "").rstrip("/"), {})
+        _fetched = _by_url.get(_url_key(_m.get("url")), {})
         _body = "\n\n".join([str(_fetched.get("fullContent") or ""), *_texts.get(_sid, [])]).strip()
         if _body:
             verifier_rows.append({**_fetched, **_m, "id": _sid, "fullContent": _body, "pageContent": _body,

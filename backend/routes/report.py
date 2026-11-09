@@ -14641,6 +14641,7 @@ def _attach_audit_source_evidence(
         try:
             parsed = urlparse(canonical)
             host = (parsed.hostname or "").casefold()
+            host = host[4:] if host.startswith("www.") else host  # Stage J: niti.gov.in == www.niti.gov.in
             path = re.sub(r"/{2,}", "/", unquote(parsed.path or "/")).rstrip("/") or "/"
             path_key = f"{host}{path}"
             query = parsed.query

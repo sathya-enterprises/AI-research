@@ -63,21 +63,40 @@ def _value(raw) -> float | None:
         return None
 
 
-def candidate_passages(store, question: str, *, limit: int = 6) -> list:
-    """Data-dense, relevant, non-calculated passages, best first."""
-    q_words = {w for w in re.findall(r"[a-z]{4,}", question.casefold())}
+def _data_profile(text: str, window_year: int | None) -> tuple[int, int, int] | None:
+    """(numbers, periods, in-window periods) or None when the passage is not data or is all before the window."""
+    nums = len(_NUM_RE.findall(text))
+    period_labels = set(_PERIOD_RE.findall(text))
+    years = {int(y) for lab in period_labels for y in re.findall(r"(?:19|20)\d{2}", lab)}
+    if window_year and years and max(years) < window_year:
+        return None  # every period it names is before the question's window
+    this_year = date.today().year
+    in_window = sum(1 for y in years if (not window_year or y >= window_year) and y <= this_year)
+    # recent prose with yearly figures ("2.27 million in CY2025, 1.95 million in CY2024") qualifies too
+    if nums < 10 and not (nums >= 6 and in_window >= 3):
+        return None
+    return nums, len(period_labels), in_window
+
+
+def candidate_passages(store, question: str, *, limit: int = 6, window_year: int | None = None,
+                       queries: list[str] | None = None) -> list:
+    """Relevant (BM25 x reliability, against the question and the outline's sections), data-dense passages
+    with periods inside the question's window first; at most 2 per source."""
+    relevance: dict[str, float] = {}
+    for query in [question, *(queries or [])]:
+        for passage, score in store.search(query, k=40, max_per_source=4):
+            relevance[passage.passage_id] = max(relevance.get(passage.passage_id, 0.0), float(score))
+    top = max(relevance.values(), default=1.0) or 1.0
     scored = []
-    for p in store.passages:
-        if p.kind == "calculated":
+    for pid, rel in relevance.items():
+        p = store.get(pid)
+        if p is None or p.kind == "calculated":
             continue
-        text = str(p.text or "")
-        nums = len(_NUM_RE.findall(text))
-        periods = len(set(_PERIOD_RE.findall(text)))
-        if nums < 10:
+        profile = _data_profile(str(p.text or ""), window_year)
+        if profile is None:
             continue
-        overlap = len(q_words & set(re.findall(r"[a-z]{4,}", text.casefold())))
-        reliability = float(getattr(p, "reliability", 0.5) or 0.5)
-        score = min(nums, 60) / 60 + min(periods, 8) / 8 + overlap / max(3, len(q_words)) + reliability
+        nums, periods, in_window = profile
+        score = rel / top * 2 + min(nums, 40) / 40 * 0.5 + min(periods, 8) / 8 * 0.5 + min(in_window, 4) / 4
         scored.append((score, p))
     scored.sort(key=lambda sp: -sp[0])
     picked, seen_sources = [], {}
@@ -89,6 +108,47 @@ def candidate_passages(store, question: str, *, limit: int = 6) -> list:
         if len(picked) >= limit:
             break
     return picked
+
+
+def _mapping_verified(points: list[dict], text: str) -> bool:
+    """The label -> value mapping is checkable in code: either the values form a contiguous run of numbers
+    in the passage in the stated order (a chart's data printed as text), or each value sits on the same
+    line as its own label (a table row)."""
+    tokens = []
+    for raw in _NUM_RE.findall(text or ""):
+        v = _value(raw)
+        if v is not None:
+            tokens.append(v)
+    values = [p["value"] for p in points]
+    labels = [p["label"].strip() for p in points]
+    n = len(values)
+    # a chart printed as text: the values are a contiguous run AND the labels are a printed run of
+    # exactly n period labels ("2014 2015 ... 2024"), so the value -> period alignment is certain
+    period_runs = [run.split() for run in re.findall(r"(?:\b(?:19|20)\d{2}\b[ \t]+){2,}\b(?:19|20)\d{2}\b", text or "")]
+    for i in range(0, max(0, len(tokens) - n) + 1):
+        if [round(t, 4) for t in tokens[i:i + n]] == [round(v, 4) for v in values]:
+            if any(run == labels for run in period_runs):
+                return True
+    lines = (text or "").splitlines()
+    # flattened tables: one line holding several rows - split on "| |" row boundaries too
+    rows = [seg for ln in lines for seg in re.split(r"\|\s+\|(?=\s*[^\s|-])", ln)]
+    for p in points:
+        label = p["label"].casefold()
+        ok = False
+        for row in rows:
+            low = row.casefold()
+            if len(row) > 300 or label not in low:
+                continue  # a long run of numbers (a chart dump) does not tie a value to a label
+            at = low.find(label)
+            for m in _NUM_RE.finditer(row):
+                if _value(m.group(0)) == p["value"] and abs(m.start() - at) <= 60 and m.group(0).strip() != p["label"]:
+                    ok = True
+                    break
+            if ok:
+                break
+        if not ok:
+            return False
+    return True
 
 
 def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
@@ -115,6 +175,8 @@ def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
             pts.append({"label": label, "value": v, "raw": str(p.get("value"))})
         if len(pts) < 3:
             return None, "fewer than 3 points"
+        if not _mapping_verified(pts, text):
+            return None, f"cannot verify which value belongs to which label in series {str(s.get('name'))[:40]!r}"
         clean.append({"name": str(s.get("name") or ds.get("metric") or "Value").strip(), "points": pts})
     labels = [p["label"] for p in clean[0]["points"]]
     if any([p["label"] for p in s["points"]] != labels for s in clean[1:]):
@@ -126,7 +188,10 @@ def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
     forecast = any(y > today.year for y in years)
     if forecast and not _FORECAST_RE.search(" ".join([str(ds.get("metric")), str(ds.get("period")), *[s["name"] for s in clean]])):
         return None, "future periods not labelled as a forecast"
-    return {"metric": str(ds.get("metric") or "").strip(), "unit": str(ds.get("unit") or "").strip(),
+    unit = str(ds.get("unit") or "").strip()
+    if unit and unit != "%" and unit.casefold() not in low:
+        unit = "as reported"  # a unit the passage does not state is never asserted
+    return {"metric": str(ds.get("metric") or "").strip(), "unit": unit,
             "x": "time" if ds.get("x") == "time" or len(years) >= len(labels) * 0.8 else "category",
             "period": str(ds.get("period") or "").strip(), "series": clean, "forecast": forecast}, ""
 
@@ -144,7 +209,8 @@ def _interpretation(ds: dict) -> str:
     pct = unit.strip() == "%"
 
     def f(v):
-        return f"{v:g}%" if pct else f"{v:,.2f}".rstrip("0").rstrip(".") + (f" {unit}" if unit else "")
+        shown = unit if unit and unit != "as reported" else ""
+        return f"{v:g}%" if pct else f"{v:,.2f}".rstrip("0").rstrip(".") + (f" {shown}" if shown else "")
     parts = []
     for s in ds["series"]:
         pts = s["points"]
@@ -173,9 +239,9 @@ def to_chart(ds: dict, passage, source_title: str, index: int) -> PlannedChart:
     kind = ("line" if not multi else "grouped_bar") if ds["x"] == "time" else ("grouped_bar" if multi else "horizontal_bar")
     unit = ds["unit"]
     metric = ds["metric"] or series[0]["name"]
-    title = f"{metric}" + (f" ({unit})" if unit else "") + (" (forecast)" if ds.get("forecast") else "")
+    title = f"{metric}" + (f" ({unit})" if unit else " (as reported)") + (" (forecast)" if ds.get("forecast") else "")
     spec = {"type": kind, "title": title, "xLabel": "Year" if ds["x"] == "time" else "Category",
-            "yLabel": f"{metric}" + (f" ({unit})" if unit else ""), "unit": "%" if unit.strip() == "%" else "",
+            "yLabel": f"{metric}" + (f" ({unit})" if unit else " (as reported)"), "unit": "%" if unit.strip() == "%" else "",
             "series": series, "source": [passage.source_id], "sourceIds": [passage.source_id],
             "evidenceBasis": "reported", "provenance": "extracted dataset",
             "basisNote": f"Values copied from evidence passage {passage.passage_id} ({source_title[:80]}); every value checked against the passage."}
@@ -186,14 +252,34 @@ def to_chart(ds: dict, passage, source_title: str, index: int) -> PlannedChart:
     return chart
 
 
-async def extract_dataset_charts(store, gateway, *, question: str, today: str, limit: int = 6) -> tuple[list[PlannedChart], dict]:
+def clip_to_window(ds: dict, window_year: int | None) -> tuple[dict | None, str]:
+    """A time series keeps only the periods inside the question's window (>= 3 points or it is dropped)."""
+    if not window_year or ds.get("x") != "time":
+        return ds, ""
+    keep = [i for i, p in enumerate(ds["series"][0]["points"])
+            if all(int(y) >= window_year for y in re.findall(r"\b((?:19|20)\d{2})\b", p["label"])) and
+            re.search(r"\b(?:19|20)\d{2}\b", p["label"])]
+    if len(keep) < 3:
+        return None, f"fewer than 3 points inside the question's window (from {window_year})"
+    clipped = dict(ds)
+    clipped["series"] = [{**s, "points": [s["points"][i] for i in keep]} for s in ds["series"]]
+    return clipped, ""
+
+
+async def extract_dataset_charts(store, gateway, *, question: str, today: str, limit: int = 6,
+                                 queries: list[str] | None = None) -> tuple[list[PlannedChart], dict]:
     """Propose (LLM) + verify (code). Returns (charts, funnel note)."""
     note = {"passages": 0, "proposed": 0, "accepted": 0, "rejected": []}
     today_d = date.fromisoformat(today[:10])
     charts: list[PlannedChart] = []
     seen_values: list[list[float]] = []
     import asyncio
-    passages = candidate_passages(store, question, limit=limit)
+    try:  # the question's time window: series are clipped to it (never mixed with older periods)
+        from utils.source_quality import window_start
+        window_year = window_start(question, today_d).year
+    except Exception:
+        window_year = None
+    passages = candidate_passages(store, question, limit=limit, window_year=window_year, queries=queries)
     note["passages"] = len(passages)
 
     def _title(passage) -> str:
@@ -211,16 +297,27 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
         for ds in (data or {}).get("datasets") or [] if isinstance(data, dict) else []:
             note["proposed"] += 1
             clean, reason = verify_dataset(ds if isinstance(ds, dict) else {}, str(passage.text), today_d)
+            if clean:
+                clean, reason = clip_to_window(clean, window_year)
             if not clean:
                 note["rejected"].append({"passage": passage.passage_id, "metric": str((ds or {}).get("metric"))[:80], "reason": reason})
                 continue
-            values = sorted(p["value"] for s in clean["series"] for p in s["points"])
-            if values in seen_values:
-                note["rejected"].append({"passage": passage.passage_id, "metric": clean["metric"][:80], "reason": "duplicate of an earlier dataset"})
-                continue
-            seen_values.append(values)
             charts.append(to_chart(clean, passage, title, len(charts) + 1))
             note["accepted"] += 1
+    # a dataset whose every series repeats a series of a richer dataset is dropped (keep the richer one)
+    def _series_values(chart):
+        return [tuple(round(p[2], 4) for p in chart.points if p[0] == name)
+                for name in dict.fromkeys(p[0] for p in chart.points)]
+    kept: list[PlannedChart] = []
+    for chart in sorted(charts, key=lambda c: -len(_series_values(c))):
+        mine = _series_values(chart)
+        if any(all(sv in _series_values(other) for sv in mine) for other in kept):
+            note["rejected"].append({"passage": ",".join(chart.passage_ids), "metric": str(chart.spec.get("title"))[:80],
+                                     "reason": "repeats a series of a richer dataset"})
+            note["accepted"] -= 1
+            continue
+        kept.append(chart)
+    charts = [c for c in charts if c in kept]
     log.info("Dataset extractor: %d passage(s), %d proposed, %d accepted", note["passages"], note["proposed"], note["accepted"])
     return charts, note
 
