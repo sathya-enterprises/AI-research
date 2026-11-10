@@ -20812,9 +20812,26 @@ async def generate_report(request: Request):
         search_queries = await _build_multi_angle_search_queries(
             question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
         )
+        _extra_angles = []
+        try:  # Stage M: the measures the report must quantify -> data-seeking searches (any topic)
+            if os.getenv("GG_MEASURE_PLAN", "1") != "0":
+                from datetime import date as _mp_date
+                from utils.llm_gateway import LLMGateway as _MpGateway
+                from utils.measure_plan import measure_queries as _measure_queries, plan_measures as _plan_measures
+                _measure_plan = await _plan_measures(question, _MpGateway(_sys.modules[__name__], report_tier, budget=1),
+                                                     today=_mp_date.today(), tier=report_tier)
+                record_research_stage("measure_plan", _measure_plan.to_dict())
+                if _measure_plan.method == "llm":
+                    _extra_angles = _measure_queries(_measure_plan, question, today=_mp_date.today(), tier=report_tier,
+                                                     existing=list(search_queries))
+        except Exception as _mp_exc:
+            log.warning("Report: measure plan skipped: %s", type(_mp_exc).__name__)
+        if _extra_angles:
+            search_queries = list(search_queries) + _extra_angles
+            log.info("Report: added %d measure search(es): %r", len(_extra_angles), _extra_angles)
         try:  # Stage J: a data-seeking angle (year-wise statistics inside the window, official sources)
             from utils.data_angles import data_angles as _data_angles
-            _extra_angles = _data_angles(question, list(search_queries), tier=report_tier)
+            _extra_angles = [] if _extra_angles else _data_angles(question, list(search_queries), tier=report_tier)
             if _extra_angles:
                 search_queries = list(search_queries) + _extra_angles
                 log.info("Report: added %d data-seeking angle(s): %r", len(_extra_angles), _extra_angles)
@@ -21680,9 +21697,10 @@ async def generate_report(request: Request):
             from datetime import date as _od_date
             from utils.llm_gateway import LLMGateway as _OdGateway
             from utils.official_data import official_sources as _official_sources
+            _mp = locals().get("_measure_plan")
             _od_rows, _od_note = await _official_sources(
                 question, _OdGateway(_sys.modules[__name__], report_tier, budget=2),
-                today=_od_date.today(), tier=report_tier)
+                today=_od_date.today(), tier=report_tier, measures=_mp.brief() if _mp is not None else "")
             if _od_rows:
                 _od_urls = {str(r.get("url") or "").rstrip("/") for r in _od_rows}
                 enriched = list(_od_rows) + [r for r in (enriched or [])

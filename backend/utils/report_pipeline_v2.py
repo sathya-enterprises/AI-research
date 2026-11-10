@@ -473,6 +473,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
                                                      today=today)
     table_chart_count = len(candidates) + len(chart_drops)
+    series_warnings: list[dict] = []  # Stage M: sudden breaks in otherwise stable series (kept, said out loud)
     # Data first (Stage F): charts planned from fetched datasets before writing; they go through
     # the same verification below and are placed in their own sector's deep-dive.
     from utils.dataset_charts import build_dataset_charts, preassign
@@ -534,6 +535,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         for chart in candidates:
             _reason = quality_reason(chart.spec, chr(10).join(
                 store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400], _earlier)
+            if not _reason:  # Stage M: shape checks (place, unit) - any topic
+                from utils.series_checks import chart_data_problem
+                _reason = chart_data_problem(chart.spec, question)
             if not _reason:
                 # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
                 from collections import Counter as _Counter
@@ -580,9 +584,20 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # mention is placed with that sentence instead of being dropped (charts are the report's backbone).
     try:
         from utils.chart_story import interpret_chart
+        from utils.series_checks import jump_warnings
         for chart in candidates:
             if not chart.interpretation and not chart.reading:
                 chart.reading = interpret_chart(chart.spec, chart.passage_ids)
+            # Stage M: a sudden break in an otherwise stable series is kept but said out loud
+            _warnings = jump_warnings(chart.spec)
+            if _warnings:
+                chart.spec["dataWarnings"] = _warnings
+                series_warnings.append({"title": chart.spec.get("title"), "warnings": _warnings})
+                note = "Note: " + "; ".join(_warnings) + "."
+                if chart.reading:
+                    chart.reading = f"{chart.reading} {note}"
+                if chart.interpretation:
+                    chart.interpretation = f"{chart.interpretation} {note}"
     except Exception as exc:
         log.warning("V2 chart interpretation skipped: %s", type(exc).__name__)
     # Fetched-dataset charts are placed first (a deep-dive gets its own sector's chart) and come on
@@ -844,6 +859,14 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     note = coverage_note(asks)
     if note:
         method = f"**{note.split(':', 1)[0]}.** {note.split(':', 1)[1].strip()}\n\n{method}"
+    try:  # Stage M: figures that different sources give differently for the same measure and period
+        from utils.disagreements import disagreement_note, find_disagreements
+        disagreements = find_disagreements("\n\n".join(parts))
+        if disagreements:
+            method = f"{method}\n\n{disagreement_note(disagreements)}"
+    except Exception as exc:
+        disagreements = []
+        log.warning("V2 disagreement check skipped: %s", type(exc).__name__)
     parts.append(f"## Methodology and Evidence Base\n\n{method}")
     if tier == "in_depth":
         # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
@@ -991,6 +1014,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         "chartTarget": _chart_target(tier, outline, used),
+        "seriesWarnings": series_warnings,
+        "sourceDisagreements": disagreements,
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
         "chartFunnel": {
             "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,
