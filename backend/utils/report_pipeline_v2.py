@@ -354,6 +354,12 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         body_rows = [r for r in rows[1:] if len(r.split("|")) == width]
         if not body_rows:
             continue  # rows that do not fit the header would render an empty table under a bare caption
+        from utils.table_quality import clean_rows, table_problem
+        body_rows = clean_rows(rows[0], body_rows)
+        _problem = table_problem(rows[0], body_rows)
+        if _problem:  # Stage L: an unreadable table is not reproduced
+            log.info("V2 appendix: table %s left out (%s)", p.passage_id, _problem)
+            continue
         if window_start is not None:
             from utils.period_hygiene import in_window, table_period
             _label, _end = table_period(heading, [c.strip() for c in rows[0].split("|")], getattr(p, "published", "") or "")

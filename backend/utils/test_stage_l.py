@@ -168,3 +168,13 @@ def test_near_duplicate_chart_values_flagged():
     spec = {"type": "bar", "series": [{"name": "x", "data": [{"label": f"Sector {c}", "value": v} for c, v in zip("ABCDEF", [5, 7, 9, 11, 13, 15])]}]}
     earlier = [sorted([5.0, 7.0, 9.0, 11.0, 13.0, 21.0])]
     assert "nearly the same values" in quality_reason(spec, "", earlier)
+
+
+def test_unreadable_tables_are_not_shown():
+    from utils.table_quality import clean_rows, table_problem
+    assert table_problem("REALTY | 21.77", ["--- | ---", "PHOENIXLTD | Phoenix Mills Ltd."])
+    assert table_problem("TATASTEEL | TATA STEEL LTD. | METALS & MINING | 17.04", ["HINDALCO | Hindalco | Metals | 15.69"])
+    assert table_problem("Economy | (US$ billion and Per cent of GDP) | US$ billion", ["USA | 5 | 3"])
+    assert table_problem("Sector | 2023 | 2024", ["IT | 1 | 2"]) == ""
+    assert table_problem("Sector | Net Flow (₹ cr)", ["IT | 10,915"]) == ""
+    assert clean_rows("Trigger | Why", ["US yields | Reduces the pull", "DLF | DLF Ltd."]) == ["US yields | Reduces the pull"]

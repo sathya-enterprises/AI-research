@@ -136,6 +136,11 @@ def tables_in(store, window_start=None) -> list[Table]:
             table = parse_table(passage)
             if not table:
                 continue
+            from utils.table_quality import table_problem
+            _problem = table_problem(" | ".join(map(str, table.header)), [" | ".join(map(str, r)) for r in table.rows])
+            if _problem:  # Stage L: a page table without a real header row is not laid out
+                _log.info("Layout: table %s left out (%s)", table.passage_id, _problem)
+                continue
             if not in_window(table.period_end, window_start):
                 _log.info("Layout: table %s left out (period %s, window starts %s)", table.passage_id,
                           table.period_label or "undated", window_start)
