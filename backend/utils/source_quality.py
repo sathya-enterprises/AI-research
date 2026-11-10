@@ -182,6 +182,13 @@ def window_start(question: str, today: date) -> date:
         periods = requested_indian_fy_quarters(question, today)
         if periods:
             return periods[0][1]
+        # Stage L: one window for every module. "past 10 years" is the 120 months to today - the
+        # same window the methodology note and the chart verifier use (the quarter count below is
+        # capped at 12 quarters for data fetches, which cut tables to 3 years while the title said 10).
+        from utils.question_asks import month_window
+        span = month_window(question, today)
+        if span:
+            return span[0]
         quarters = requested_quarter_count(question, today, default=8)
     except Exception:  # pragma: no cover - import safety
         quarters = 8

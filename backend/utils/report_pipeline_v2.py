@@ -512,9 +512,27 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     try:
         from utils.chart_lint import quality_reason
         _kept = []
+        _earlier: list = []  # Stage L: the same data from a second publisher is not a second chart
+        _tables_seen: list = []
         for chart in candidates:
             _reason = quality_reason(chart.spec, chr(10).join(
-                store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400])
+                store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400], _earlier)
+            if not _reason:
+                # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
+                from collections import Counter as _Counter
+                _nums = _Counter(f"{float(x):g}" for x in re.findall(r"\d+(?:\.\d+)?", chr(10).join(
+                    store.get(pid).text for pid in chart.passage_ids if store.get(pid)).replace(",", "")))
+                _srcs = set(chart.source_ids or [])
+                if sum(_nums.values()) >= 8 and any(
+                        not (_srcs & other_srcs)
+                        and sum((_nums & other).values()) >= 0.8 * min(sum(_nums.values()), sum(other.values()))
+                        for other_srcs, other in _tables_seen):
+                    _reason = "the same table as an earlier chart, from another source"
+                else:
+                    _tables_seen.append((_srcs, _nums))
+            if not _reason:
+                _earlier.append(sorted(round(v, 4) for s_ in chart.spec.get("series") or [] for v in
+                                       [float(p_.get("value") or 0) for p_ in s_.get("data") or []]))
             if _reason:
                 chart.status, chart.drop_reason = "dropped", f"quality gate before writing: {_reason}"
                 chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
@@ -541,6 +559,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             else:
                 kept.append(chart)
         candidates = kept
+    # Stage L: every verified chart carries a reading of its own data, so a chart the writer does not
+    # mention is placed with that sentence instead of being dropped (charts are the report's backbone).
+    try:
+        from utils.chart_story import interpret_chart
+        for chart in candidates:
+            if not chart.interpretation and not chart.reading:
+                chart.reading = interpret_chart(chart.spec, chart.passage_ids)
+    except Exception as exc:
+        log.warning("V2 chart interpretation skipped: %s", type(exc).__name__)
     # Fetched-dataset charts are placed first (a deep-dive gets its own sector's chart) and come on
     # top of the per-section limit for table charts; they are numbered from 101 until the final
     # renumbering in document order, so table charts keep the numbers the writer is given.
@@ -620,13 +647,16 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             continue
         paragraph = _figure_paragraph(body_of.get(chart.section_id, ""), chart.figure_number) or chart.claim
         reason = text_chart_mismatch(paragraph, dict(chart.spec))
-        if reason and chart.interpretation:
+        if reason and (chart.interpretation or chart.reading):
             # A fetched-dataset chart is not dropped: its own interpretation (from the plotted rows)
             # is placed right after the figure, so the chart sits next to a paragraph about it.
             draft = next((d for d in drafts if d.section_id == chart.section_id), None)
             marker = f"[[FIGURE {chart.figure_number}]]"
             if draft is not None and marker in draft.body:
-                draft.body = draft.body.replace(marker, f"{marker}\n\nAs Figure {chart.figure_number} shows, {chart.interpretation}", 1)
+                _text = chart.interpretation or chart.reading
+                if chart.reading and not chart.interpretation and _text[:2] != _text[:2].upper():
+                    _text = _text[0].lower() + _text[1:]
+                draft.body = draft.body.replace(marker, f"{marker}\n\nAs Figure {chart.figure_number} shows, {_text}", 1)
                 body_of[chart.section_id] = draft.body
                 chart_text_mismatches.append({"title": chart.spec.get("title"), "reason": reason, "claim": chart.claim[:200],
                                               "action": "kept; dataset interpretation placed next to the figure"})

@@ -691,6 +691,15 @@ def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple
     return report, kept, removed
 
 
+_ACCOUNTING_NEG_RE = re.compile(r"\(\s*(\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+\.\d+|\d{4,})\s*\)")
+
+
+def _accounting(text: object) -> str:
+    """Stage L: accounting negatives "(146,048.38)" read as "-146,048.38" (financial tables print
+    losses / outflows this way; every such chart point used to fail verification)."""
+    return _ACCOUNTING_NEG_RE.sub(lambda m: "-" + m.group(1), str(text or ""))
+
+
 def _quote_supports(value: object, evidence_value: object, quote: object, source_text: str) -> bool:
     """A point is supported when its exact quoted source line is in the source text and holds the value."""
     quote = str(quote or "").strip()
@@ -698,7 +707,7 @@ def _quote_supports(value: object, evidence_value: object, quote: object, source
         return False
     if _norm_quote(quote) not in _norm_quote(source_text):
         return False
-    shown = str(evidence_value or "").strip() or str(value or "").strip()
+    shown = _accounting(str(evidence_value or "").strip() or str(value or "").strip())
     if not _number_is_in(shown, quote):
         return False
     if str(evidence_value or "").strip() and value is not None:
@@ -709,10 +718,11 @@ def _quote_supports(value: object, evidence_value: object, quote: object, source
             # workbook evidence still govern whether the scale is acceptable.
             # Publishers often print a typographic minus (U+2212) or en dash;
             # float() rejects both, which silently failed every negative point.
-            plotted_text = str(value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% ")
-            evidence_text = str(evidence_value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% ")
-            plotted = abs(float(plotted_text))
-            quoted = abs(float(evidence_text))
+            plotted_text = str(value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% xX")
+            evidence_text = _accounting(evidence_value).replace(",", "").replace("−", "-").replace("–", "-").strip().rstrip("% xX")
+            # Stage L: a quoted cell keeps its currency sign and unit ("₹89058 cr", "$1.2 bn")
+            plotted = abs(float(_NUMBER.fullmatch(plotted_text).group(1)) if _NUMBER.fullmatch(plotted_text) else float(plotted_text))
+            quoted = abs(float(_NUMBER.fullmatch(evidence_text).group(1)) if _NUMBER.fullmatch(evidence_text) else float(evidence_text))
         except ValueError:
             return False
         if quoted == 0:
@@ -730,8 +740,8 @@ def _source_ids(chart: dict) -> list[str]:
 
 def _number_is_in(value: object, evidence: str) -> bool:
     # Typographic minus (U+2212) / en dash: treat as "-" on both sides.
-    value = str(value or "").replace("−", "-").replace("–", "-")
-    evidence = str(evidence or "").replace("−", "-").replace("–", "-")
+    value = _accounting(str(value or "").replace("−", "-").replace("–", "-").strip())
+    evidence = _accounting(str(evidence or "").replace("−", "-").replace("–", "-"))
     parsed = _NUMBER.fullmatch(value.strip())
     if not parsed:
         return False
@@ -739,7 +749,9 @@ def _number_is_in(value: object, evidence: str) -> bool:
         target = float(parsed.group(1).replace(",", ""))
     except ValueError:
         return False
-    values = re.findall(r"(?<![A-Za-z0-9])[-+]?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d*)?|\.\d+)(?![A-Za-z0-9])", evidence)
+    # Stage L: a multiple printed with its unit ("20.2x", "1.5X") is the same number.
+    values = re.findall(r"(?<![A-Za-z0-9])[-+]?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d*)?|\.\d+)(?:[xX](?![A-Za-z0-9]))?(?![A-Za-z0-9])", evidence)
+    values = [v.rstrip("xX") for v in values]
     for raw in values:
         try:
             observed = float(raw.replace(",", ""))

@@ -242,6 +242,8 @@ def _canon_metric(y: str) -> str:
 
 def metric_name(spec: dict) -> str:
     y = str(spec.get("yLabel") or "")
+    if re.fullmatch(r"(?i)\s*(?:₹|rs\.?|inr|us\$|\$)?\s*(?:crore|cr|lakh|bn|billion|mn|million|x|%)?\s*", y) and spec.get("metric"):
+        y = str(spec.get("metric"))
     if not y or y.casefold() in {"value", "values", "return (%)"} and len(_series(spec)) == 1:
         y = str(_series(spec)[0].get("name") if _series(spec) else "") or y
     y = re.sub(r"\s*\((?:%|[^)]*(?:cr|crore|rs|₹|x|bn|billion|score)[^)]*)\)\s*$", "", y, flags=re.I)
@@ -267,7 +269,10 @@ def entity_noun(spec: dict, n: int) -> str:
              "dii entity": "DII entities", "it sub-segment": "IT sub-segments"}
     noun = table.get(x)
     if not noun:
-        noun = (x + "s") if x and not x.endswith("s") else (x or "items")
+        if x and re.search(r"[^aeiou]y$", x):
+            noun = x[:-1] + "ies"
+        else:
+            noun = (x + "s") if x and not x.endswith("s") else (x or "items")
     if n == 1:
         noun = re.sub(r"(?:ies)$", "y", noun) if noun.endswith("ies") else noun.rstrip("s")
     return noun
@@ -320,6 +325,11 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
     for other in earlier or []:
         if mine == other:
             return "the same values as an earlier chart"
+        if len(mine) >= 5 and len(other) >= 5:
+            from collections import Counter
+            shared = sum((Counter(mine) & Counter(other)).values())
+            if shared >= 0.8 * min(len(mine), len(other)):
+                return "nearly the same values as an earlier chart (the same data from another source)"
     return ""
 
 

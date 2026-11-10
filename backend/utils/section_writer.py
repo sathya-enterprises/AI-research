@@ -483,10 +483,11 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     # Fetched-dataset charts the text did not interpret keep their place: the figure goes at the end of
     # the section with its deterministic interpretation (built from the plotted rows), next to it.
     for fig in figures:
-        if fig.status != "referenced" and getattr(fig, "interpretation", "") and bodies:
+        if fig.status != "referenced" and (getattr(fig, "interpretation", "") or getattr(fig, "reading", "")) and bodies:
             n = fig.figure_number
-            text = fig.interpretation
-            if re.match(r"(?:Compounded|In)\b", text):
+            text = getattr(fig, "interpretation", "") or getattr(fig, "reading", "")
+            if re.match(r"(?:Compounded|In)\b", text) or (
+                    not getattr(fig, "interpretation", "") and text[:2] != text[:2].upper()):
                 text = text[0].lower() + text[1:]
             bodies[-1] = f"{bodies[-1].rstrip()}\n\n[[FIGURE {n}]]\n\nAs Figure {n} shows, {text}"
             fig.status, fig.drop_reason = "referenced", ""

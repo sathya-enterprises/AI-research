@@ -106,3 +106,65 @@ def test_broken_heading_table_row_and_data_source_line_repaired():
     out, _ = repair_broken_lines(text)
     assert "#### FII Positioning and Underweight Allocations" in out
     assert "| **Indian Pension Funds** | Restricted |" in out and "Source: [S83.13]" in out and "Data Source" not in out
+
+
+def test_time_rows_become_series_per_column_and_split_by_granularity():
+    from types import SimpleNamespace
+    from utils.section_charts import charts_from_passage
+    text = ("TABLE 1 — Flows\nCalendar Month | FPI Flows Secondary | FPI Flows Primary | FPI Flows Equity\n"
+            "Calendar 2022 (₹ Crore) | (146,048.38) | 24,608.94 | (121,439.44)\n"
+            "Calendar 2023 (₹ Crore) | 1,27,759.75 | 43,347.14 | 1,71,106.89\n"
+            "Calendar 2024 (₹ Crore) | (1,21,210.21) | 1,21,637.15 | 426.94\n"
+            "Jan-2025 (₹ Crore) | (81,903.72) | 3,876.78 | (78,026.94)\n"
+            "Feb-2025 (₹ Crore) | (41,748.97) | 7,174.62 | (34,574.35)\n"
+            "Mar-2025 (₹ Crore) | (6,027.77) | 2,055.16 | (3,972.61)\n"
+            "Total for 2025 (₹ Crore) | (2,31,990.59) | 73,583.09 | (1,58,407.50)")
+    passage = SimpleNamespace(passage_id="S15.1", source_id="S15", text=text, kind="table", merged_ids=None)
+    charts = charts_from_passage(passage, 1, None)
+    assert len(charts) == 2  # yearly and monthly rows apart; the Total row is not plotted
+    yearly = charts[0].spec
+    assert [s["name"] for s in yearly["series"]] == ["Secondary", "Primary"]  # Equity = their sum, dropped
+    assert yearly["metric"] == "FPI Flows"
+    assert [p["label"] for p in yearly["series"][0]["data"]] == ["2022", "2023", "2024"]
+    assert yearly["series"][0]["data"][0]["value"] == -146048.38
+
+
+def test_accounting_negative_and_multiple_suffix_verify():
+    from utils.chart_evidence_audit import _quote_supports
+    q = "Calendar 2022 (₹ Crore) | (146,048.38) | 24,608.94"
+    assert _quote_supports(-146048.38, "(146,048.38)", q, q)
+    q2 = "Tue, 10 Nov 2026 | ₹10.1t | 20.2x | 35.6x"
+    assert _quote_supports(20.2, "20.2x", q2, q2)
+    q3 = "MAX HEALTHCARE | ₹89058 cr | 12.4%"
+    assert _quote_supports(89058.0, "₹89058 cr", q3, q3)
+
+
+def test_every_chart_gets_a_data_reading():
+    from utils.chart_story import interpret_chart
+    spec = {"type": "horizontal_bar", "yLabel": "Net FII Flow (Rs crore)", "series": [{"name": "Net FII Flow", "data": [
+        {"label": "January", "value": -35962, "evidenceValue": "-35,962"},
+        {"label": "February", "value": 22615, "evidenceValue": "+22,615"},
+        {"label": "March", "value": -117775, "evidenceValue": "-1,17,775"}]}]}
+    text = interpret_chart(spec, ["S35.1"])
+    assert text == ("1 of the 3 values shown was positive: February was highest at +₹22,615 crore and March lowest at "
+                    "-₹1,17,775 crore [S35.1].")
+    line = {"type": "line", "unit": "x", "series": [{"name": "PE", "data": [
+        {"label": "10 Nov 2026", "value": 20.2, "evidenceValue": "20.2x"},
+        {"label": "07 Sep 2025", "value": 38.8, "evidenceValue": "38.8x"},
+        {"label": "26 Mar 2025", "value": 34, "evidenceValue": "34x"}]}]}
+    assert interpret_chart(line, ["S77.1"]).startswith("PE went from 34x on 26 Mar 2025 to 20.2x on 10 Nov 2026")
+
+
+def test_one_window_for_past_n_years():
+    import datetime
+    from utils.source_quality import window_start
+    today = datetime.date(2026, 11, 10)
+    assert window_start("flows in the past 10 years", today) == datetime.date(2016, 11, 10)
+    assert window_start("since 2022", today) == datetime.date(2022, 1, 1)
+
+
+def test_near_duplicate_chart_values_flagged():
+    from utils.chart_lint import quality_reason
+    spec = {"type": "bar", "series": [{"name": "x", "data": [{"label": str(i), "value": v} for i, v in enumerate([5, 7, 9, 11, 13, 15])]}]}
+    earlier = [sorted([5.0, 7.0, 9.0, 11.0, 13.0, 21.0])]
+    assert "nearly the same values" in quality_reason(spec, "", earlier)
