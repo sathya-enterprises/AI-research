@@ -2436,6 +2436,8 @@ def _markdown_to_html(
 ) -> str:
     """Small safe Markdown renderer with native tables/charts/images."""
     md = normalize_report_markdown(md)
+    from utils.reader_text import reader_text
+    md = reader_text(md)  # Stage L: internal calculation labels are not shown to readers
     lines = md.replace("\r\n", "\n").split("\n")
     out: list[str] = []
     list_mode: str | None = None

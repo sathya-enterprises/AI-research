@@ -39,3 +39,19 @@ def test_finished_fortnight_is_not_qtd():
     assert not _is_qtd("Oct 2026", start)
     assert _is_qtd("Nov 2026", start) and _is_qtd("Q3 FY27", start)
     assert _is_qtd("Oct 2026", int(start))  # a bare quarter start keeps the old rule
+
+
+def test_calculation_labels_hidden_from_readers():
+    from utils.reader_text import reader_text
+    assert reader_text("a 32.9% (calculated: change from 2230 to 2964)% increase.") == "a 32.9% increase."
+    assert reader_text("moved 14.16 (calculated: 17.06 - 2.90)% faster") == "moved 14.16% faster"
+    assert reader_text("an investment of 500 (calculated: 5500 - 5000) to 5,500 crore.") == "an investment of 5,000 to 5,500 crore."
+    assert reader_text("gap of -15.3 (calculated: 49.0 - 64.3) points") == "gap of -15.3 points"
+
+
+def test_entity_rewrite_only_touches_prose():
+    from utils.evidence_check import _is_prose
+    assert not _is_prose("$0 $400M $800M $1,200M")
+    assert not _is_prose("Healthcare [$$$$$$$$$$$$$$] $809 million")
+    assert not _is_prose("0% 15% 30%")
+    assert _is_prose("Healthcare received $809 million of net inflows in July 2026 from foreign investors.")

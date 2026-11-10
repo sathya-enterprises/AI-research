@@ -258,6 +258,16 @@ def _locate(report_md: str, claim: str) -> tuple[int, int] | None:
     return None
 
 
+def _is_prose(text: str) -> bool:
+    """A sentence with words, not a run of numbers ("0% 15% 30%", "$0 $400M $800M") or a text-art bar."""
+    t = str(text or "")
+    if re.search(r"\[[$#*=|█▇■-]{3,}\s*\]|[█▇■]{2,}", t):
+        return False
+    words = re.findall(r"[A-Za-z]{3,}", t)
+    numbers = re.findall(r"\d[\d,.]*", t)
+    return len(words) >= 5 and len(numbers) <= len(words)
+
+
 def fact_rewriter(store):
     """Rewrite a flagged claim to what the evidence supports, when it can be done without guessing:
     the claimed value IS in a cited source, on a row/sentence whose entity the claim does not name
@@ -267,6 +277,8 @@ def fact_rewriter(store):
     sheet = FactSheet(store.passages)
 
     def rewrite(snippet: str, group: dict) -> str | None:
+        if not _is_prose(snippet):
+            return None  # Stage L: axis ticks / text-art bars / number lists are not sentences to rewrite
         cited = {str(s).upper() for s in group.get("sourceIds") or []}
         text = snippet
         changed = False
@@ -282,7 +294,7 @@ def fact_rewriter(store):
                 continue
             raw = next((f.raw for f in facts), "")
             number = re.escape(raw.lstrip("+-−–").strip())
-            match = re.search(rf"{number}\s?(?:%|crore|cr|lakh crore|trillion|billion|million|bn|mn|x)?", text)
+            match = re.search(rf"(?<![\w.]){number}\s?(?:%|crore|cr|lakh crore|trillion|billion|million|bn|mn|x)?(?![\w%])", text)
             if not match:
                 continue
             text = f"{text[:match.end()]} for {entity}{text[match.end():]}"
