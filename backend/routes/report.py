@@ -21367,6 +21367,15 @@ async def generate_report(request: Request):
     # not consume publisher-page slots: the tier limit applies to web pages only.
     _internal_rows = [s for s in sources if str((s or {}).get("url") or "").startswith("internal://")]
     _web_rows = [s for s in sources if not str((s or {}).get("url") or "").startswith("internal://")]
+    try:  # Stage L: topic connectors put the topic's official data pages first in the fetch queue
+        from utils.topic_sources import seed_rows as _seed_rows
+        _seeds = _seed_rows(question, existing_urls={str((s or {}).get("url") or "") for s in _web_rows})
+        if _seeds:
+            log.info("Report: topic connectors queued %d official data page(s): %s", len(_seeds),
+                     ", ".join(s["title"] for s in _seeds))
+            _web_rows = _seeds + _web_rows
+    except Exception as _seed_exc:
+        log.warning("Report: topic connectors skipped: %s", type(_seed_exc).__name__)
     _enrich_queue = _internal_rows + _web_rows[:ENRICH_SOURCE_COUNT]
     enriched_raw = list(await asyncio.gather(
         *[enrich(s, i) for i, s in enumerate(_enrich_queue)]
@@ -22467,6 +22476,33 @@ async def generate_report(request: Request):
                                                                  "sourceSummary": evidence_store.source_summary(),
                                                                  "passages": {p.passage_id: p.to_dict() for p in evidence_store.passages}})
                     record_research_stage("entity_search", _v2_entity_stats)
+                # Stage L: data-gap agent (GG_ANTIGRAVITY_AGENT=1): deep-dives without any data table get one
+                # bounded agent task that returns official pages; the pages are fetched and gated here like
+                # any search result (the agent's own text is never used).
+                try:
+                    from utils.gap_agent import data_gaps as _data_gaps, find_data_pages as _find_data_pages
+                    _gaps = _data_gaps(_v2_tiers, question) if _os.getenv("GG_ANTIGRAVITY_AGENT", "0") == "1" else []
+                    if _gaps:
+                        _report_progress("writing", f"Looking for official data on {len(_gaps)} entities…", 68)
+                        _leads, _agent_note = await _find_data_pages(_gaps, question, window=_window_label)
+                        _known = {str(r.get("url") or "").rstrip("/").casefold() for r in enriched}
+                        _lead_rows = [{"url": l["url"], "title": f"{l['entity']} data page", "snippet": l["quote"],
+                                       "provider": "gap_agent"} for l in _leads
+                                      if l["url"].rstrip("/").casefold() not in _known][:8]
+                        if _lead_rows:
+                            _fetched = [r for r in await asyncio.gather(*[enrich(r, i) for i, r in enumerate(_lead_rows)])
+                                        if isinstance(r, dict) and str(r.get("pageFetchStatus") or "") == "ok"]
+                            _fetched = _filter_relevant_sources(_fetched, question, intent, report_tier=report_tier)
+                            _agent_note["pagesKept"] = len(_fetched)
+                            if _fetched:
+                                enriched = _dedupe_enriched_sources(enriched + _fetched)
+                                source_manifest = build_source_registry(enriched, source_documents)
+                                from utils.evidence_store import build_evidence_store as _rebuild_store
+                                evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
+                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                        record_research_stage("gap_agent", _agent_note)
+                except Exception as _gap_exc:
+                    log.warning("Report: data-gap agent skipped: %s", type(_gap_exc).__name__)
                 record_research_stage("entity_tiers", _tier_summary(_v2_tiers))
 
             def _v2_chart_preverify(specs: list[dict], report_text: str = "") -> list[str]:

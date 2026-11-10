@@ -206,3 +206,44 @@ def test_fred_annual_averages_use_complete_years_only():
     monthly += "2025-01-01,4.33\n2025-02-01,.\n"
     assert fred_annual_averages(monthly, [2024, 2025]) == {2024: 5.07}
     assert CATALOG["fred.usd_inr"].publisher.startswith("FRED") and "annual average" in CATALOG["fred.brent"].unit
+
+
+def test_topic_connectors_queue_official_pages(monkeypatch):
+    from utils.topic_sources import seed_rows
+    monkeypatch.setenv("GG_TOPIC_SEEDS", "1")
+    rows = seed_rows("Have FIIs fled India?")
+    assert rows and all(r["provider"] == "topic_connector" for r in rows) and "nsdl" in rows[0]["url"]
+    assert seed_rows("EV adoption in Europe") == []
+    monkeypatch.setenv("GG_TOPIC_SEEDS", "0")
+    assert seed_rows("Have FIIs fled India?") == []
+
+
+def test_gap_agent_parses_leads_and_stays_off_by_default(monkeypatch):
+    import asyncio
+    from utils.entity_tiers import EntityEvidence
+    from utils.gap_agent import data_gaps, find_data_pages, parse_leads
+    tiers = {"deep_dive": [EntityEvidence(name="Auto"), EntityEvidence(name="IT", table_passages={"S1.1"})]}
+    gaps = data_gaps(tiers, "q")
+    assert [g["entity"] for g in gaps] == ["Auto"]
+    text = "ITEM 1 | https://www.siam.in/statistics.aspx | 2024-25 sales 2,49,01,000\nnoise\nITEM 1 | https://www.siam.in/statistics.aspx | dup"
+    assert parse_leads(text, gaps) == [{"url": "https://www.siam.in/statistics.aspx", "entity": "Auto",
+                                        "quote": "2024-25 sales 2,49,01,000"}]
+    monkeypatch.setenv("GG_ANTIGRAVITY_AGENT", "0")
+    leads, note = asyncio.run(find_data_pages(gaps, "q"))
+    assert leads == [] and note["enabled"] is False
+
+
+def test_gap_agent_quota_error_skips_the_step(monkeypatch):
+    import asyncio
+    from utils.gap_agent import find_data_pages
+    monkeypatch.setenv("GG_ANTIGRAVITY_AGENT", "1")
+
+    class Resp:
+        status_code = 429
+
+    class Client:
+        async def post(self, *a, **k):
+            return Resp()
+
+    leads, note = asyncio.run(find_data_pages([{"entity": "Auto", "need": "x"}], "q", api_key="k", client=Client()))
+    assert leads == [] and note["skipped"] == "agent returned HTTP 429"

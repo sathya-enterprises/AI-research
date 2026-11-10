@@ -89,3 +89,5 @@ import os as _os_stage_i
 _os_stage_i.environ.setdefault("GG_STAGE_I_RENDERED_CHECK", "0")
 _os_stage_i.environ.setdefault("GG_OFFICIAL_DATA", "0")  # Stage K: unit tests never call the open-data APIs
 _os_stage_i.environ.setdefault("GG_V2_RATE_LIMIT_BACKOFF", "")  # Stage K: unit tests never wait out simulated 429s
+_os_stage_i.environ.setdefault("GG_TOPIC_SEEDS", "0")  # Stage L: unit tests never queue topic-connector pages
+_os_stage_i.environ.setdefault("GG_ANTIGRAVITY_AGENT", "0")  # Stage L: unit tests never call the gap agent

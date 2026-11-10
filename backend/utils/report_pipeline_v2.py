@@ -42,7 +42,10 @@ MAX_CHARTS = {"detailed": 10, "in_depth": 36}
 CHARTS_PER_SECTION = {"detailed": 2, "in_depth": 3}
 # All charts in the report (fetched-dataset + table charts): a detailed report has a 32-page cap,
 # and its layout fills ~28 pages without charts, so it carries at most 6 (Stage F target >= 5).
-MAX_TOTAL_CHARTS = {"detailed": 6, "in_depth": 36}
+MAX_TOTAL_CHARTS = {"detailed": 10, "in_depth": 36}  # Stage L: detailed raised from 6 (reports read text-heavy)
+# Stage L: the chart count a report should reach (recorded per run; deep-dives without a chart are listed
+# as data gaps - the input of the topic connectors / gap agent).
+CHART_TARGET = {"detailed": 8, "in_depth": 18}
 DATASET_SIDE_CHARTS = {"detailed": 2, "in_depth": 4}
 
 
@@ -399,6 +402,14 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         out += ["", f"**Historical reference (before {window_start:%b %Y}; outside the question's window, for context only).**"]
         out += historical
     return "\n".join(out)
+
+
+def _chart_target(tier: str, outline, used: list) -> dict:
+    """Stage L: chart count against the tier target, and the deep-dive sections that carry no chart."""
+    target = CHART_TARGET.get(tier, 8)
+    with_chart = {c.section_id for c in used if getattr(c, "section_id", "")}
+    gaps = [s.title for s in outline.sections if getattr(s, "role", "") == "deep_dive" and s.section_id not in with_chart]
+    return {"target": target, "used": len(used), "met": len(used) >= target, "deepDivesWithoutChart": gaps}
 
 
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
@@ -979,6 +990,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "chartLint": chart_lint_log,
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
+        "chartTarget": _chart_target(tier, outline, used),
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
         "chartFunnel": {
             "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,
