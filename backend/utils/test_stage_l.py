@@ -55,3 +55,54 @@ def test_entity_rewrite_only_touches_prose():
     assert not _is_prose("Healthcare [$$$$$$$$$$$$$$] $809 million")
     assert not _is_prose("0% 15% 30%")
     assert _is_prose("Healthcare received $809 million of net inflows in July 2026 from foreign investors.")
+
+
+_BARS = """Healthcare took $809 million, behind Consumer Services ($1,063 million) and ahead of Consumer Durables ($768 million), Metals & Mining ($512 million) and IT ($352 million) [S36.2].
+
+```
+                        NET FPI INFLOWS BY SECTOR (JULY 2026)
+  Consumer Services     [$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$] $1,063 million
+  Healthcare            [$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$] $809 million
+  Consumer Durables     [$$$$$$$$$$$$$$$$$$$$$$$$$$$$$] $768 million
+  Metals & Mining       [$$$$$$$$$$$$$$$$$$$] $512 million
+  Information Tech.     [$$$$$$$$$$$$] $352 million
+                        +--------------------+--------------------+
+                        $0                   $400M                $800M                $1,200M
+```
+
+Next paragraph."""
+
+_BOX = """Sector revenue nearly tripled over the decade [S72.8].
+
+```
+                               AGGREGATE SECTOR FINANCIALS
+┌──────────────────────────┬───────────────┬───────────────┐
+│ Metric                   │ FY16          │ FY26          │
+├──────────────────────────┼───────────────┼───────────────┤
+│ Aggregate Sector Revenue │ ~₹2.25 lakh crore │ ~₹6.28 lakh crore │
+│ Aggregate Sector PAT     │ ₹27,420 crore │ ₹82,904 crore │
+└──────────────────────────┴───────────────┴───────────────┘
+```
+"""
+
+
+def test_text_art_bars_dropped_when_text_gives_the_numbers():
+    from utils.text_art_fences import resolve_fences
+    out, actions = resolve_fences(_BARS)
+    assert "$$$" not in out and "$400M" not in out and "```" not in out and "Next paragraph." in out
+    assert actions == ["dropped text art whose numbers the text already gives"]
+
+
+def test_box_drawn_table_becomes_a_sourced_markdown_table():
+    from utils.text_art_fences import resolve_fences
+    out, _ = resolve_fences(_BOX)
+    assert "| Metric | FY16 | FY26 |" in out and "| Aggregate Sector PAT | ₹27,420 crore | ₹82,904 crore |" in out
+    assert "**Table: Aggregate sector financials**" in out and "Source: [S72.8]" in out and "┌" not in out
+
+
+def test_broken_heading_table_row_and_data_source_line_repaired():
+    from utils.text_art_fences import repair_broken_lines
+    text = "#### FII Positioning and Under\nweight Allocations\n\n| **\nIndian Pension Funds** | Restricted |\n\n*Data Source: [S83.13]*"
+    out, _ = repair_broken_lines(text)
+    assert "#### FII Positioning and Underweight Allocations" in out
+    assert "| **Indian Pension Funds** | Restricted |" in out and "Source: [S83.13]" in out and "Data Source" not in out

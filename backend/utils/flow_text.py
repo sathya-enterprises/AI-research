@@ -163,12 +163,15 @@ def drop_two_column_groups(lines: list[str]) -> tuple[list[str], int]:
 
 
 def convert_text_art(text: str) -> tuple[str, list[str]]:
+    from utils.text_art_fences import repair_broken_lines, resolve_fences
+    text, fence_actions = resolve_fences(text)  # Stage L: fenced text art handled as whole blocks
+    text, line_actions = repair_broken_lines(text)
     lines = str(text or "").split("\n")
     lines, two_col = drop_two_column_groups(lines)
     lines, flattened = drop_flattened_tables(lines)
     actions_pre = ["dropped a flattened table without a header row"] * flattened + ["dropped a side-by-side text diagram (bullets)"] * two_col
     out: list[str] = []
-    actions: list[str] = list(actions_pre)
+    actions: list[str] = list(fence_actions) + list(line_actions) + list(actions_pre)
     fence_start: int | None = None
     fence_changed = False
     for line in lines:

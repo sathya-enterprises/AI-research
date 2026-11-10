@@ -236,7 +236,17 @@ _FENCE_RE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\n?(.*?)```", re.S)
 
 
 def unfence(body: str) -> str:
-    """Render code blocks as a Markdown table (pipe rows), a bullet list (several lines) or plain text."""
+    """Render code blocks as a Markdown table (pipe rows), a bullet list (several lines) or plain text.
+
+    Stage L: text art (bars, box tables, trees, panels) is resolved first as whole blocks
+    (utils/text_art_fences.py) - a real table becomes a sourced Markdown table, art whose numbers the
+    text already gives is dropped; only what is left falls through to the line rules below."""
+    try:
+        from utils.text_art_fences import resolve_fences
+        body, _ = resolve_fences(body)
+    except Exception:  # pragma: no cover - the fallback below still removes the fences
+        pass
+
     def repl(match: re.Match) -> str:
         lines = [ln.rstrip() for ln in match.group(1).strip().splitlines() if ln.strip()]
         if not lines:
