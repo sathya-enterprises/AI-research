@@ -185,3 +185,10 @@ Diagnosis from the live in-depth FII report (71 pages, 4 charts): the losses wer
 Offline replay of the FII capture (no API calls): charts 4 → 11 (FPI secondary/primary/debt by year and by month, H1 CY26 monthly net flows, P/E history, sector flows, hospital market caps…); 0 text-art bars, box tables, code fences or "figure given in Section N". The replay cannot show text written around the new charts (the writer responses are the captured ones); a live run does.
 
 Tests: 1209 passed, 15 xfailed. Next: the cross-domain live test set (markets, EV, semiconductors, health, a policy topic, one new topic) scored on chart count vs target, verified data points, repetition, layout and pages.
+
+## Stage M — domain-neutral planning and data checks (10 Nov 2026)
+
+- `utils/measure_plan.py`: one LLM call per report lists the measures the question needs (any topic; validated by code, keyword fallback); each measure becomes data-seeking searches (statistics by year, then data tables) and the brief for the official-data planner. GG_MEASURE_PLAN=0 turns it off. In-depth adds up to 8 searches (was 2), detailed up to 4.
+- `utils/series_checks.py`: a single-place chart about a country the question does not ask about is dropped (US sector P/E in an India report); magnitudes impossible for the unit are dropped (RBI 2022 table, "US$ billion" values in lakhs); one sudden break in an otherwise stable level series is kept and flagged in the chart's reading (World Bank market cap 136% -> 267% of GDP). Warnings are recorded as `seriesWarnings`.
+- `utils/disagreements.py`: the methodology lists figures that different sources give for the same subject, measure and period ("Where sources disagree", both values with citations); deliberately strict - no false notes on the FII replay. Recorded as `sourceDisagreements`.
+- FII replay: 9 charts, all on topic (the off-topic and garbled ones are gone), 1 break flagged, 0 disagreement notes. Tests: 1215 passed.
