@@ -416,6 +416,24 @@ def _mentions(section: Section, entity) -> bool:
     return any(re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", hay) for n in names if len(n) >= 2)
 
 
+_SUB_ALIASES = {"Utilities": ["utility", "power", "electricity", "water", "gas distribution"],
+                "Realty": ["real estate", "property", "reit"], "Metal": ["metals", "steel", "aluminium", "mining"],
+                "Auto": ["automobile", "automotive", "vehicle", "ev"], "IT": ["information technology", "software"],
+                "Telecom": ["telecommunication", "telecom", "arpu"], "FMCG": ["consumer staples", "fmcg"]}
+
+
+def _sub_about(sub: Section, entity) -> bool:
+    """A subsection is about ``entity``: its title, goal or entities name it or one of its synonyms."""
+    try:
+        from utils.chart_titles import SYNONYMS
+        extra = list(SYNONYMS.get(entity.name, ())) + _SUB_ALIASES.get(entity.name, [])
+    except Exception:  # pragma: no cover
+        extra = _SUB_ALIASES.get(entity.name, [])
+    names = {entity.name.casefold(), *[a.casefold() for a in getattr(entity, "aliases", ())], *[x.casefold() for x in extra]}
+    hay = f"{sub.title} {sub.goal} {' '.join(sub.entities)}".casefold()
+    return any(re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", hay) for n in names if len(n) >= 3)
+
+
 def _headline_entities(section: Section, entities: list) -> list:
     """Qualifying entities a section is ABOUT (its title and entity field), most specific match wins:
     "PSU Bank: ..." is about PSU Bank, not also about Bank."""
@@ -487,11 +505,34 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
     qualifying = list(tiers.get("deep_dive", []))
     # Split merged deep-dives: the section keeps one sector, the others get their own sections below.
     for sec, covered in merged_deep_dives(sections, tiers):
-        keep = next((e for e in covered if e.name == sec.entity), covered[0])
+        # Stage L: each subsection goes to the sector it is about ("Power Generation and Distribution"
+        # is a Utilities subsection); the section keeps the sector most of its subsections are about,
+        # and the other sectors get new sections WITH their subsections (the old split left power
+        # analysis under a "Media:" heading).
+        about = {e.name: [x for x in sec.subsections if _sub_about(x, e)] for e in covered}
+        keep = max(covered, key=lambda e: (len(about[e.name]), e.name == sec.entity))
         rest = sec.title.split(":", 1)[1].strip() if ":" in sec.title else "Sector Deep-Dive"
         decisions.append(f"Split merged deep-dive '{sec.title}' ({', '.join(e.name for e in covered)}): "
                          f"each qualifying sector gets its own section.")
+        moved: dict[str, list] = {}
+        for x in list(sec.subsections):
+            owners = [e for e in covered if x in about[e.name]]
+            if owners and keep not in owners:
+                moved.setdefault(owners[0].name, []).append(x)
+                sec.subsections.remove(x)
+        if not re.search(rf"(?i)\b{re.escape(keep.name)}\b", rest) and re.search(
+                "|".join(re.escape(e.name) for e in covered if e is not keep) or "$^", rest, flags=re.I):
+            rest = "Sector Deep-Dive"  # the old title named the other sector
         sec.title, sec.entity, sec.entities = f"{keep.name}: {rest}", keep.name, [keep.name]
+        for name, subs in moved.items():
+            new = Section(section_id=f"sec-{next_id}", title=f"{name}: Sector Deep-Dive", role="deep_dive", entity=name,
+                          entities=[name], goal=f"Full analysis of {name} over the window", queries=[f"{name} sector"])
+            for j, x in enumerate(subs, 1):
+                x.section_id = f"{new.section_id}.{j}"
+                x.entities = [name]
+                new.subsections.append(x)
+            sections.append(new)
+            next_id += 1
     for entity in qualifying:
         if _has_own_deep_dive(sections, entity, qualifying):
             continue

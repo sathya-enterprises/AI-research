@@ -178,3 +178,23 @@ def test_unreadable_tables_are_not_shown():
     assert table_problem("Sector | 2023 | 2024", ["IT | 1 | 2"]) == ""
     assert table_problem("Sector | Net Flow (₹ cr)", ["IT | 10,915"]) == ""
     assert clean_rows("Trigger | Why", ["US yields | Reduces the pull", "DLF | DLF Ltd."]) == ["US yields | Reduces the pull"]
+
+
+def test_subsector_with_shared_evidence_is_covered_by_its_parent():
+    from utils.entity_tiers import EntityEvidence, assign_tiers
+    health = EntityEvidence(name="Healthcare", text_passages={f"S{i}.1" for i in range(20)}, good_text_sources={"S1", "S2", "S3", "S4"})
+    pharma = EntityEvidence(name="Pharma", text_passages={f"S{i}.1" for i in range(12, 30)}, good_text_sources={"S5", "S6", "S7", "S8"})
+    it = EntityEvidence(name="IT", text_passages={f"S{i}.2" for i in range(10)}, good_text_sources={"S1", "S2", "S3", "S4"})
+    tiers = assign_tiers([health, pharma, it])
+    assert [e.name for e in tiers["deep_dive"]] == ["Healthcare", "IT"] and "Pharma" in [e.name for e in tiers["compact"]]
+
+
+def test_split_moves_subsections_to_the_sector_they_are_about():
+    from types import SimpleNamespace
+    from utils.report_outline import Section, _sub_about
+    utilities = SimpleNamespace(name="Utilities", aliases=set())
+    media = SimpleNamespace(name="Media", aliases=set())
+    power = Section(section_id="s.1", title="Power Generation and Distribution")
+    niche = Section(section_id="s.2", title="Media: Niche and Regulated Plays")
+    assert _sub_about(power, utilities) and not _sub_about(power, media)
+    assert _sub_about(niche, media) and not _sub_about(niche, utilities)
