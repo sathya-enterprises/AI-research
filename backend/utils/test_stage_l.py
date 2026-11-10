@@ -247,3 +247,9 @@ def test_gap_agent_quota_error_skips_the_step(monkeypatch):
 
     leads, note = asyncio.run(find_data_pages([{"entity": "Auto", "need": "x"}], "q", api_key="k", client=Client()))
     assert leads == [] and note["skipped"] == "agent returned HTTP 429"
+
+
+def test_data_source_line_after_a_source_line_is_dropped():
+    from utils.text_art_fences import repair_broken_lines
+    out, _ = repair_broken_lines("| A | 1 |\nSource: [S83]\n\n*Data Source: [S83]*\n\nText.")
+    assert out.count("Source:") == 1 and "Data Source" not in out

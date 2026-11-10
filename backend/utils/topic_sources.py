@@ -25,7 +25,7 @@ class TopicConnector:
 CONNECTORS: tuple[TopicConnector, ...] = (
     TopicConnector(
         "india_fpi_flows",
-        r"(?i)\b(?:fii|fpi|foreign (?:institutional|portfolio) invest\w*)\b",
+        r"(?i)\b(?:fiis?|fpis?|foreign (?:institutional|portfolio) invest\w*)\b",
         (
             ("https://www.fpi.nsdl.co.in/web/Reports/ReportDetail.aspx?RepID=36", "NSDL: FPI investment details"),
             ("https://www.fpi.nsdl.co.in/web/Reports/Yearwise.aspx?RptType=6", "NSDL: FPI net investment, calendar year-wise"),

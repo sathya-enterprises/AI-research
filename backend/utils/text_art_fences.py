@@ -243,6 +243,10 @@ def repair_broken_lines(text: str) -> tuple[str, list[str]]:
             continue
         m = _DATA_SOURCE_RE.match(line)
         if m:
+            last = next((x for x in reversed(out) if x.strip()), "")
+            if last.strip().startswith("Source:") and not line.strip().startswith("Source:"):
+                actions.append("dropped a 'Data Source' line repeating the table's Source line")
+                continue
             out.append(f"Source: {m.group(1)}")
             if not line.strip().startswith("Source:"):
                 actions.append("normalised a 'Data Source' line")
