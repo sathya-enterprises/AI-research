@@ -197,7 +197,7 @@ PLAN_SYSTEM = ("You choose official statistical datasets that give a research re
 PLAN_PROMPT = """QUESTION: {question}
 TODAY: {today}
 
-CATALOG (id | title | unit):
+{measures}CATALOG (id | title | unit):
 {catalog}
 
 COUNTRY / REGION CODES: {codes}
@@ -240,7 +240,7 @@ def keyword_plan(question: str, limit: int) -> list[dict]:
     return [{"id": i, "entities": entities[:4]} for _, i in scored[:limit]]
 
 
-async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3) -> tuple[list[dict], dict]:
+async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, measures: str = "") -> tuple[list[dict], dict]:
     """[{id, entities}] validated against the catalog; (plan, note)."""
     note = {"method": "llm", "rejected": []}
     catalog = "\n".join(f"{e.id} | {e.title} | {e.unit}" for e in CATALOG.values())
@@ -250,6 +250,8 @@ async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3) 
         try:
             result = await gateway.generate(purpose="official_data_plan", section_id="plan", system=PLAN_SYSTEM,
                                             prompt=PLAN_PROMPT.format(question=question, today=today.isoformat(), catalog=catalog,
+                                                                      measures=(f"MEASURES THE REPORT NEEDS (pick datasets that measure these):\n{measures}\n\n"
+                                                                                if measures else ""),
                                                                       codes=", ".join(f"{k}={v}" for k, v in COUNTRIES.items()),
                                                                       limit=limit),
                                             max_tokens=1024, temperature=0.0, json_mode=True, timeout=60, retries=1)
@@ -452,7 +454,7 @@ def as_source(ds: Dataset) -> dict:
     }
 
 
-async def official_sources(question: str, gateway, *, today: date, tier: str) -> tuple[list[dict], dict]:
+async def official_sources(question: str, gateway, *, today: date, tier: str, measures: str = "") -> tuple[list[dict], dict]:
     """Plan, fetch and format; never raises. (source rows, capture note)."""
     import httpx
     limit = 5 if tier == "in_depth" else 3
@@ -463,7 +465,7 @@ async def official_sources(question: str, gateway, *, today: date, tier: str) ->
     except Exception:
         start_year = today.year - 3
     start_year = min(start_year, today.year - 2)  # at least 3 whole years of context for an annual series
-    plan, plan_note = await plan_datasets(question, gateway, today=today, limit=limit)
+    plan, plan_note = await plan_datasets(question, gateway, today=today, limit=limit, measures=measures)
     note["plan"], note["planNote"] = plan, plan_note
     rows: list[dict] = []
     async with httpx.AsyncClient(timeout=45, follow_redirects=True,
