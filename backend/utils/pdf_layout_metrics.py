@@ -138,7 +138,7 @@ def pdf_layout_metrics(pdf_bytes: bytes) -> dict:
         if hits:
             marker_pages.append((index + 1, hits))
         for ln in lines:   # leftovers of citation stripping in the rendered text (letter-spaced captions excluded)
-            if re.search(r"(?:\w\s){4,}", ln["text"]):
+            if re.search(r"(?:\b\w\s){4,}", ln["text"]):
                 continue
             if re.search(r"[,;]\s*\.(?:\s|$)|\(\s*\)|\s,(?=\s)", ln["text"]):
                 malformed_pdf.append((index + 1, ln["text"][:90]))

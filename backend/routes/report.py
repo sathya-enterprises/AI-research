@@ -14026,15 +14026,58 @@ def _evaluate_auto_repair_candidate(
     _ = (original_pages, repaired_pages, page_minimum, page_shortfall)
     return True, "validated", True
 
+def _blocker_signature(deterministic: dict | None) -> set[str]:
+    """Every blocking item of the deterministic audits as a comparable string (Stage L)."""
+    out: set[str] = set()
+    det = deterministic or {}
+    publication = det.get("publicationAudit") or {}
+    if isinstance(publication, dict) and _publication_audit_is_blocking(publication):
+        for key in ("controlMarkerCount", "danglingChartRefs", "danglingImageRefs", "unresolvedCitationIds",
+                    "missingSourceRecords", "duplicateTableCount", "duplicateObservations", "orphanedChartMentions",
+                    "crossMetricProjectionBasisIssues", "timeframeLabelMismatches", "incompleteNumericFragments",
+                    "emptyChartIndices", "untitledChartIndices", "currencyConversionAnomalies",
+                    "chartTableVerificationConflicts", "chartEvidenceFailures"):
+            value = publication.get(key)
+            if isinstance(value, (list, tuple, set)):
+                out |= {f"pub:{key}:{str(item)[:160]}" for item in value}
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                out |= {f"pub:{key}#{i}" for i in range(int(value))}
+            elif value:
+                out.add(f"pub:{key}")
+    evidence = det.get("sourceEvidenceAudit") or {}
+    if isinstance(evidence, dict) and evidence.get("blocking"):
+        groups = evidence.get("mismatchedCitationGroups") or []
+        out |= {"src:" + re.sub(r"\s+", " ", str((g or {}).get("claim") if isinstance(g, dict) else g))[:160]
+                for g in groups}
+        if not groups:
+            out.add("src:blocking")
+    scope = det.get("scopeCoverageAudit") or {}
+    if isinstance(scope, dict) and scope.get("blocking"):
+        out |= {f"scope:{str(f)[:160]}" for f in (scope.get("flags") or ["blocking"])}
+    return out
+
+
 def _evaluate_exact_patch_candidate(
     *, original_text: str, repaired_text: str, original_pages: int | None,
     repaired_pages: int | None, page_minimum: int, repair_deterministic: dict,
+    original_deterministic: dict | None = None,
 ) -> tuple[bool, str, bool]:
-    """Accept conservative local patches by validation, not rendered length."""
+    """Accept conservative local patches by validation, not rendered length.
+
+    Stage L: with the pre-repair audit given, patches are kept when they add no new blocker. A
+    blocker the patches could not touch (it was there before) no longer throws away good fixes."""
     if not repaired_text or repaired_text.strip() == (original_text or "").strip():
         return False, "no_material_text_change", False
     if len(repaired_text) < max(180, int(len(original_text or "") * 0.72)):
         return False, "exact_patch_changed_too_much_content", False
+    if original_deterministic is not None:
+        if find_incomplete_numeric_fragments(repaired_text):
+            return False, "incomplete_numeric_fragment_remains", False
+        new = _blocker_signature(repair_deterministic) - _blocker_signature(original_deterministic)
+        if new:
+            return False, "new_blocker_introduced", False
+        _ = (original_pages, repaired_pages, page_minimum)
+        return True, "exact_patch_no_new_blockers", True
     publication = (repair_deterministic or {}).get("publicationAudit", {})
     if _publication_audit_is_blocking(publication):
         return False, "deterministic_publication_blocker_remains", False
@@ -15581,11 +15624,50 @@ async def _auto_repair_report_once(
     return "", ""
 
 
+_CHART_MARKER_RE = re.compile(r"\[CHART_(\d+)\]")
+
+
+def _drop_auditor_artifacts(audit: dict, report_text: str, charts: list) -> dict:
+    """Stage L: the model auditor reads a bounded excerpt with [CHART_n] render markers, so it reports
+    'unresolved chart placeholders' and 'truncated body' that the published PDF does not have. Those
+    findings are dropped when the text proves them wrong (every marker has its chart; the body ends
+    on a complete line)."""
+    if not isinstance(audit, dict) or not audit.get("findings"):
+        return audit
+    text = str(report_text or "")
+    markers = [int(m) for m in _CHART_MARKER_RE.findall(text)]
+    markers_ok = all(1 <= m <= len(charts or []) for m in markers)
+    last = next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
+    ends_ok = bool(re.search(r"[.!?)\]|*:”\"']$", last)) or last.startswith(("#", "|", "-", "*", ">"))
+    kept, dropped = [], 0
+    for finding in audit.get("findings") or []:
+        blob = (" ".join(str(finding.get(k) or "") for k in ("issue", "location", "category", "recommended_fix"))
+                if isinstance(finding, dict) else str(finding))
+        low = blob.casefold()
+        if markers_ok and ("[chart_" in low or ("placeholder" in low and "chart" in low)
+                           or "internal marker" in low):
+            dropped += 1
+            continue
+        if ends_ok and re.search(r"truncat|cut off mid|mid-sentence", low):
+            dropped += 1
+            continue
+        kept.append(finding)
+    if dropped:
+        log.info("Report audit: dropped %d model finding(s) disproved by the text (chart markers / truncation)", dropped)
+        audit = dict(audit, findings=kept)
+    return audit
+
+
 async def _run_independent_report_audit(
     *, title: str, question: str, report_text: str, report_tier: str,
     charts: list, images: list, sources: list, timeout_seconds: float = 24.0,
+    store=None,
 ) -> tuple[dict, dict]:
-    """Run a separate Gemini review and deterministic publication gate on all return paths."""
+    """Run a separate Gemini review and deterministic publication gate on all return paths.
+
+    Stage L: with a V2 evidence ``store`` the source-evidence flags are reconciled against the fact
+    sheet *before* any decision uses them, so the first audit, the post-repair check and the final
+    gate share one judge (a repair was rejected for flags the final gate later cleared)."""
     deterministic = {
         "chartDensity": _chart_density_audit(charts, report_tier),
         "publicationAudit": audit_report_publication(report_text, charts, images, sources, question=question),
@@ -15593,6 +15675,12 @@ async def _run_independent_report_audit(
         "structure": audit_report_structure(report_text),
         "scopeCoverageAudit": audit_requested_report_scope(question, report_text, sources),
     }
+    if store is not None:
+        try:
+            from utils.evidence_check import reconcile_final_audit
+            reconcile_final_audit(deterministic, report_text, store)
+        except Exception as exc:  # pragma: no cover - reconciliation is advisory
+            log.warning("Audit reconciliation against the fact sheet skipped: %s", type(exc).__name__)
     started = time.perf_counter()
     log.info("Gemini independent report audit started — tier=%s chars=%d charts=%d sources=%d",
              report_tier, len(report_text or ""), len(charts or []), len(sources or []))
@@ -15608,6 +15696,7 @@ async def _run_independent_report_audit(
     except Exception as exc:
         log.warning("Gemini independent audit failed: %s", type(exc).__name__)
         audit = {"status": "unavailable", "reason": type(exc).__name__, "blocking": False, "findings": [], "provider": "Gemini API"}
+    audit = _drop_auditor_artifacts(audit, report_text, charts)
     audit = _apply_deterministic_audit_gate(audit, deterministic)
     log.info("Gemini independent report audit finished — status=%s blocking=%s findings=%d elapsed_ms=%d",
              audit.get("status", "unknown"), str(bool(audit.get("blocking"))).lower(),
@@ -21278,6 +21367,15 @@ async def generate_report(request: Request):
     # not consume publisher-page slots: the tier limit applies to web pages only.
     _internal_rows = [s for s in sources if str((s or {}).get("url") or "").startswith("internal://")]
     _web_rows = [s for s in sources if not str((s or {}).get("url") or "").startswith("internal://")]
+    try:  # Stage L: topic connectors put the topic's official data pages first in the fetch queue
+        from utils.topic_sources import seed_rows as _seed_rows
+        _seeds = _seed_rows(question, existing_urls={str((s or {}).get("url") or "") for s in _web_rows})
+        if _seeds:
+            log.info("Report: topic connectors queued %d official data page(s): %s", len(_seeds),
+                     ", ".join(s["title"] for s in _seeds))
+            _web_rows = _seeds + _web_rows
+    except Exception as _seed_exc:
+        log.warning("Report: topic connectors skipped: %s", type(_seed_exc).__name__)
     _enrich_queue = _internal_rows + _web_rows[:ENRICH_SOURCE_COUNT]
     enriched_raw = list(await asyncio.gather(
         *[enrich(s, i) for i, s in enumerate(_enrich_queue)]
@@ -22378,6 +22476,33 @@ async def generate_report(request: Request):
                                                                  "sourceSummary": evidence_store.source_summary(),
                                                                  "passages": {p.passage_id: p.to_dict() for p in evidence_store.passages}})
                     record_research_stage("entity_search", _v2_entity_stats)
+                # Stage L: data-gap agent (GG_ANTIGRAVITY_AGENT=1): deep-dives without any data table get one
+                # bounded agent task that returns official pages; the pages are fetched and gated here like
+                # any search result (the agent's own text is never used).
+                try:
+                    from utils.gap_agent import data_gaps as _data_gaps, find_data_pages as _find_data_pages
+                    _gaps = _data_gaps(_v2_tiers, question) if _os.getenv("GG_ANTIGRAVITY_AGENT", "0") == "1" else []
+                    if _gaps:
+                        _report_progress("writing", f"Looking for official data on {len(_gaps)} entities…", 68)
+                        _leads, _agent_note = await _find_data_pages(_gaps, question, window=_window_label)
+                        _known = {str(r.get("url") or "").rstrip("/").casefold() for r in enriched}
+                        _lead_rows = [{"url": l["url"], "title": f"{l['entity']} data page", "snippet": l["quote"],
+                                       "provider": "gap_agent"} for l in _leads
+                                      if l["url"].rstrip("/").casefold() not in _known][:8]
+                        if _lead_rows:
+                            _fetched = [r for r in await asyncio.gather(*[enrich(r, i) for i, r in enumerate(_lead_rows)])
+                                        if isinstance(r, dict) and str(r.get("pageFetchStatus") or "") == "ok"]
+                            _fetched = _filter_relevant_sources(_fetched, question, intent, report_tier=report_tier)
+                            _agent_note["pagesKept"] = len(_fetched)
+                            if _fetched:
+                                enriched = _dedupe_enriched_sources(enriched + _fetched)
+                                source_manifest = build_source_registry(enriched, source_documents)
+                                from utils.evidence_store import build_evidence_store as _rebuild_store
+                                evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
+                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                        record_research_stage("gap_agent", _agent_note)
+                except Exception as _gap_exc:
+                    log.warning("Report: data-gap agent skipped: %s", type(_gap_exc).__name__)
                 record_research_stage("entity_tiers", _tier_summary(_v2_tiers))
 
             def _v2_chart_preverify(specs: list[dict], report_text: str = "") -> list[str]:
@@ -23336,6 +23461,13 @@ async def generate_report(request: Request):
                             "Chart retained with logarithmic axis: values span %.0fx; min=%.4g max=%.4g in '%s'",
                             ratio, min(abs_vals), max(abs_vals), ch.get("title", "?"),
                         )
+                    elif chart_type in {"bar", "horizontal_bar"} and any(v < 0 for v in values) and any(v > 0 for v in values):
+                        # Stage L: net flows, changes and balances are positive AND negative. A
+                        # linear diverging axis with data labels shows them honestly; the small
+                        # bars are labelled, so the chart is kept (it used to be thrown away).
+                        ch.pop("axisScale", None)
+                        log.info("Chart retained on a linear diverging axis: mixed-sign values span %.0fx in '%s'",
+                                 ratio, ch.get("title", "?"))
                     else:
                         log.warning(
                             "Chart rejected — values span %.0fx and cannot safely use a logarithmic axis "
@@ -24616,6 +24748,7 @@ async def generate_report(request: Request):
             title=str(parsed.get("title") or report_topic), question=question,
             report_text=report_text, report_tier=report_tier, charts=charts,
             images=images, sources=audit_sources, timeout_seconds=24.0,
+            store=evidence_store if _v2_used else None,
         )
 
         # Audit findings are actionable: attempt one bounded repair, then re-render
@@ -24665,6 +24798,7 @@ async def generate_report(request: Request):
                     title=str(parsed.get("title") or report_topic), question=question,
                     report_text=_repair_text, report_tier=report_tier, charts=_repair_charts,
                     images=images, sources=_repair_audit_sources, timeout_seconds=24.0,
+                    store=evidence_store if _v2_used else None,
                 )
                 # A repair must not be accepted merely because the model returned
                 # text. Exact patches are re-rendered and re-audited; the page budget
@@ -24675,6 +24809,7 @@ async def generate_report(request: Request):
                         original_text=report_text, repaired_text=_repair_text,
                         original_pages=preflight_pages, repaired_pages=_repair_pages,
                         page_minimum=_page_min, repair_deterministic=_repair_deterministic,
+                        original_deterministic=final_deterministic_audits,
                     )
                 else:
                     _repair_accept, _repair_reason, _repair_meets_page_target = _evaluate_auto_repair_candidate(
@@ -24963,6 +25098,7 @@ async def generate_report(request: Request):
                     title=str(parsed.get("title") or report_topic), question=question,
                     report_text=report_text, report_tier=report_tier, charts=charts,
                     images=images, sources=audit_sources, timeout_seconds=24.0,
+                    store=evidence_store if _v2_used else None,
                 )
         # Carry retrieval diagnostics into the returned source manifest so Show
         # Report and PDF appendix can distinguish a live publisher-page fetch

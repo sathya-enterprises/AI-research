@@ -165,3 +165,23 @@ a fallback draft. Re-run it once the quota resets:
 `python <scratchpad>/tools/run_live.py diagnostics/eval_runs/live_<date>_vacc_deep in_depth "How have global childhood vaccination rates changed since 2015, and what explains the differences between regions?"`
 
 Tests: 1205 passed, 15 xfailed.
+
+## Stage L — data-rich, cohesive reports for any topic (10 Nov 2026)
+
+Diagnosis from the live in-depth FII report (71 pages, 4 charts): the losses were in our own pipeline, not in Gemini quota.
+
+| Area | Fix (module) |
+|---|---|
+| Audit / repair | One judge: the fact sheet reconciles source-evidence flags before the first audit, the post-repair check and the final gate (`routes/report.py` `_run_independent_report_audit(store=)`); exact patches are kept when they add no new blocker (`_blocker_signature`); model findings disproved by the text (chart markers, "truncated") are dropped (`_drop_auditor_artifacts`). |
+| Charts kept | Mixed-sign bars stay on a linear diverging axis (were rejected); accounting negatives "(1,234)", "20.2x", "₹89058 cr" verify (`chart_evidence_audit`); a Total row is left out instead of rejecting the chart; period rows become one series per related column, derived sum columns dropped, yearly and monthly rows split (`section_charts`); every verified chart carries a reading of its own data and is kept when the writer skips it (`chart_story`, `PlannedChart.reading`); the same table from a second publisher is not charted twice. |
+| Chart readability | Time axes oldest → newest; long axis titles shortened to the unit; finished months / fortnights are not "QTD, partial"; metric titles ("FPI Flows (₹ crore): Secondary, Primary and Debt/Hybrid"); "economies" plural (`chart_lint`). |
+| Text damage | "(calculated: …)" labels removed at render, bad range arithmetic restored (`reader_text`); entity-naming rewrite only on prose and whole numbers; repeated statistic keeps its number and points to its section by title (`repetition`). |
+| Text art | Fenced bars / box tables / trees resolved as blocks: tables → sourced Markdown tables, art whose numbers the text gives → dropped; broken headings / table rows joined; "Data Source" lines normalised (`text_art_fences`). |
+| Tables | Data-row headers, separator rows, unit-only headers and stray rows are not reproduced (`table_quality`). |
+| Structure | One time window for every module ("past 10 years" = 120 months, `source_quality.window_start`); a sub-sector inside its parent (Pharma in Healthcare) or a deep-dive with 60% shared evidence becomes compact (`entity_tiers`); splitting a merged deep-dive moves each subsection to its sector (`report_outline`). |
+| Data layers | FRED connector (keyless; yields, Fed funds, oil, FX incl. USD/INR, dollar index, VIX, S&P 500 — annual averages of complete years) in `official_data`; topic connectors queue official data pages (NSDL FPI, AMFI) in the normal fetch path (`topic_sources`, GG_TOPIC_SEEDS); data-gap agent — Gemini Antigravity, off by default (GG_ANTIGRAVITY_AGENT=1), leads only, fetched and gated like search results, one bounded call, 429 skips the step (`gap_agent`); chart target per tier recorded with deep-dives that lack a chart (`chartTarget`: detailed 8, in-depth 18; detailed may now carry 10 charts). |
+| Other | Letter-spaced-text check in `pdf_layout_metrics` had a literal backspace for `\b`. |
+
+Offline replay of the FII capture (no API calls): charts 4 → 11 (FPI secondary/primary/debt by year and by month, H1 CY26 monthly net flows, P/E history, sector flows, hospital market caps…); 0 text-art bars, box tables, code fences or "figure given in Section N". The replay cannot show text written around the new charts (the writer responses are the captured ones); a live run does.
+
+Tests: 1209 passed, 15 xfailed. Next: the cross-domain live test set (markets, EV, semiconductors, health, a policy topic, one new topic) scored on chart count vs target, verified data points, repetition, layout and pages.

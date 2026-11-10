@@ -293,9 +293,12 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
     body prose; the executive summary may add ``exec_extra``. Over the cap, in this order:
       1) a parenthetical that only restates the number is removed;
       2) a sentence that restates the first mention (token overlap >= ``restatement``) becomes a
-         cross-reference "(See Section N, <title>.)" - unless it holds the section's only mention of
+         cross-reference "(See <title>.)" - unless it holds the section's only mention of
          one of its entities, or the section would lose more than ``max_section_cut`` of its words;
-      3) otherwise the sentence stays and the number becomes "the figure given in Section N".
+      3) otherwise the sentence stays, keeps its number and points to the section that gives it:
+         "... (see <title>)". Stage L: section titles, not numbers - numbers shift when sections are
+         added or merged later ("the figure given in Section 8" pointed at the wrong section), and
+         "a record low of the figure given in Section 3" did not read as English.
     Nothing else is deleted, so entity mentions and section length are kept.
     """
     lines = str(report or "").split("\n")
@@ -362,25 +365,26 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                     if number and origin_k != k and all_over and overlap >= restatement and not lone_entity and \
                             cut_words[k] + words <= max_section_cut * max(section_words[k], 1) and \
                             not re.search(r"\b(?:Figure|Table)\s+\d", new):
-                        ref = f"(See Section {number}, {origin_title}.)"
+                        ref = f"(See {origin_title}.)"
                         actions.append({"stat": left[0][1][0], "action": "replaced a restatement by a cross-reference",
                                         "section": title, "sentence": sentence.strip()[:200], "reference": ref})
                         cut_words[k] += words
                         new = ref
                     elif number or origin_k == k:
-                        # 3) keep the sentence; the repeated number points back to where it is given
+                        # 3) keep the sentence and its number; point to the section that gives it
+                        refs: list[str] = []
                         for m, key in left:
-                            o_no, _ = ref_for(first_at[key][0])
-                            if not o_no or _owns(title, sentence, m.start()):
+                            o_no, o_title = ref_for(first_at[key][0])
+                            if not o_no or _owns(title, sentence, m.start()) or first_at[key][0] == k:
                                 continue
-                            where = "above" if first_at[key][0] == k else f"in Section {o_no}"
-                            new = re.sub(r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?(?:[+\-−]\s?(?=[₹$\d]))?"
-                                         r"(?:₹\s?)?(?:[+\-−](?=\d))?" + re.escape(m.group(0).lstrip("₹+-− ")) if m.group(0)[:1] in "₹+-−"
-                                         else r"(?:\b(?:approximately|about|around|roughly|nearly)\s+|~\s?)?(?:[+\-−]\s?(?=[₹$\d]))?(?:₹\s?)?"
-                                         + re.escape(m.group(0)),
-                                         f"the figure given {where}", new, count=1)
-                            actions.append({"stat": key[0], "action": "number replaced by a section reference",
-                                            "section": title, "sentence": sentence.strip()[:200], "reference": f"Section {o_no}"})
+                            if o_title and o_title not in refs:
+                                refs.append(o_title)
+                            actions.append({"stat": key[0], "action": "repeated number points to its section",
+                                            "section": title, "sentence": sentence.strip()[:200], "reference": o_title})
+                        if refs and not _SEE_RE.search(new):
+                            end = re.search(r"([.!?])\s*$", new)
+                            body = new[:end.start()] if end else new.rstrip()
+                            new = f"{body} (see {'; '.join(refs)}){end.group(1) if end else ''}"
             is_exec = limit > cap
             counted: set = set()
             for m, key in mentions:
@@ -398,13 +402,16 @@ def cap_headline_stats(report: str, cap: int = 2, *, exec_extra: int = 1, max_se
                 out.append(new)
         merged = []
         for x in out:
-            if not (merged and x.startswith("(See Section") and merged[-1] == x):
+            if not (merged and x.startswith("(See ") and merged[-1] == x):
                 merged.append(x)
         joined = " ".join(merged)
         lines[n] = "" if (not joined.strip() or re.match(r"^\s*(?:[-*]|\d+[.)])\s*$", joined)) else joined
     if actions:
         log.info("Repetition: headline-statistic cap applied %d time(s)", len(actions))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)), actions
+
+
+_SEE_RE = re.compile(r"\((?:see|See) [^()]{1,160}\)")
 
 
 def fact_counts(report: str) -> Counter:
@@ -419,6 +426,8 @@ def fact_counts(report: str) -> Counter:
             if not _is_prose(line):
                 continue
             for sentence in _sentences(line):
+                if _SEE_RE.search(sentence):
+                    continue  # Stage L: a declared cross-reference to the section that gives the figure
                 keys = {facts.key(_norm_stat(m.group(0)), _context(sentence, m.start(), m.end()))
                         for m in _STAT_RE.finditer(sentence)}
                 for key in keys:  # a fact counts once per sentence (a calculation may repeat its inputs)

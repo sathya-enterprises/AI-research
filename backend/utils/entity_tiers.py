@@ -260,6 +260,10 @@ def discover_entities(store, *, max_entities: int = 40, question: str = "") -> l
     return ranked[:max_entities]
 
 
+# a sub-sector reported inside its parent: one deep-dive covers both when their evidence overlaps
+_SUBSECTOR_OF = {"Pharma": "Healthcare", "Power": "Utilities", "Oil & Gas": "Energy", "Consumer Services": "Services"}
+
+
 def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) -> dict[str, list[EntityEvidence]]:
     tiers = {"deep_dive": [], "compact": [], "coverage_note": []}
     names = [e.name.casefold() for e in entities]
@@ -283,6 +287,21 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
         else:
             entity.tier = "coverage_note"
         tiers[entity.tier].append(entity)
+    # Stage L: a deep-dive whose evidence is mostly another deep-dive's evidence (Pharma inside
+    # Healthcare) would retell the same facts in a second section; it is covered as a compact entity.
+    kept: list[EntityEvidence] = []
+    for entity in list(tiers["deep_dive"]):
+        own = entity.text_passages
+        parent = _SUBSECTOR_OF.get(entity.name)
+        host = next((k for k in kept if own and (
+            len(own & k.text_passages) >= 0.6 * len(own)
+            or (k.name == parent and len(own & k.text_passages) >= 0.4 * len(own)))), None)
+        if host is not None:
+            tiers["deep_dive"].remove(entity)
+            entity.tier = "compact"
+            tiers["compact"].append(entity)
+        else:
+            kept.append(entity)
     return tiers
 
 

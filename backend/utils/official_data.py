@@ -106,6 +106,25 @@ _OWID = [
     ("owid.tourist_arrivals", "international-tourist-trips", "International tourist arrivals", "arrivals", "tourism tourists travel"),
 ]
 
+# Stage L: FRED (Federal Reserve Bank of St. Louis) - keyless CSV; market and macro series used by finance,
+# trade and energy topics in every country. Values are ANNUAL AVERAGES of the publisher's daily / monthly
+# observations (complete years only) - the unit says so.
+_FRED = [
+    ("fred.us10y", "DGS10", "US 10-year Treasury yield", "%, annual average", "us treasury yield bond yields interest rates fed dollar"),
+    ("fred.fedfunds", "FEDFUNDS", "Federal funds effective rate", "%, annual average", "federal reserve fed rate interest rates monetary policy"),
+    ("fred.brent", "DCOILBRENTEU", "Brent crude oil price", "US$ per barrel, annual average", "oil crude brent prices energy"),
+    ("fred.wti", "DCOILWTICO", "WTI crude oil price", "US$ per barrel, annual average", "oil crude wti prices energy"),
+    ("fred.usd_inr", "DEXINUS", "Indian rupees per US dollar", "INR per US$, annual average", "rupee inr currency exchange rate depreciation"),
+    ("fred.usd_cny", "DEXCHUS", "Chinese yuan per US dollar", "CNY per US$, annual average", "yuan renminbi currency exchange rate"),
+    ("fred.usd_jpy", "DEXJPUS", "Japanese yen per US dollar", "JPY per US$, annual average", "yen currency exchange rate"),
+    ("fred.eur_usd", "DEXUSEU", "US dollars per euro", "US$ per EUR, annual average", "euro currency exchange rate"),
+    ("fred.dollar_index", "DTWEXBGS", "Nominal broad US dollar index", "index, annual average", "dollar strength currency emerging markets"),
+    ("fred.vix", "VIXCLS", "CBOE Volatility Index (VIX)", "index, annual average", "volatility risk sentiment markets"),
+    ("fred.sp500", "SP500", "S&P 500 index", "index, annual average", "us stocks equities s&p 500"),
+]
+_FRED_ENTITY = {"fred.usd_inr": "India", "fred.usd_cny": "China", "fred.usd_jpy": "Japan", "fred.eur_usd": "Euro area",
+                "fred.brent": "World", "fred.wti": "World"}
+_FRED_PAGE = "https://fred.stlouisfed.org/series/{code}"
 _WB_PAGE = "https://data.worldbank.org/indicator/{code}"
 _IMF_PAGE = "https://www.imf.org/external/datamapper/{code}"
 _OWID_PAGE = "https://ourworldindata.org/grapher/{code}"
@@ -122,20 +141,21 @@ class CatalogEntry:
 
     @property
     def publisher(self) -> str:
-        return {"wb": "World Bank", "imf": "International Monetary Fund", "owid": "Our World in Data"}[self.connector]
+        return {"wb": "World Bank", "imf": "International Monetary Fund", "owid": "Our World in Data",
+                "fred": "FRED (Federal Reserve Bank of St. Louis)"}[self.connector]
 
     @property
     def collection(self) -> str:
         return {"wb": "World Development Indicators", "imf": "World Economic Outlook (DataMapper)",
-                "owid": "Our World in Data grapher"}[self.connector]
+                "owid": "Our World in Data grapher", "fred": "Federal Reserve Economic Data"}[self.connector]
 
     @property
     def page_url(self) -> str:
-        return {"wb": _WB_PAGE, "imf": _IMF_PAGE, "owid": _OWID_PAGE}[self.connector].format(code=self.code)
+        return {"wb": _WB_PAGE, "imf": _IMF_PAGE, "owid": _OWID_PAGE, "fred": _FRED_PAGE}[self.connector].format(code=self.code)
 
 
 CATALOG: dict[str, CatalogEntry] = {}
-for _conn, _rows in (("wb", _WB), ("imf", _IMF), ("owid", _OWID)):
+for _conn, _rows in (("wb", _WB), ("imf", _IMF), ("owid", _OWID), ("fred", _FRED)):
     for _id, _code, _title, _unit, _kw in _rows:
         CATALOG[_id] = CatalogEntry(_id, _conn, _code, _title, _unit, _kw)
 
@@ -320,12 +340,44 @@ async def _fetch_owid(client, entry: CatalogEntry, entities: list[str], years: l
     return out
 
 
+def fred_annual_averages(csv_text: str, years: list[int]) -> dict[int, float]:
+    """Annual means of a FRED CSV (``observation_date,CODE``; "." / empty = no value). A year counts only
+    with at least 10 observations (a daily series) or 12 (monthly) - partial years are not averaged."""
+    reader = csv.reader(io.StringIO(csv_text))
+    header = next(reader, [])
+    if len(header) < 2:
+        return {}
+    buckets: dict[int, list[float]] = {}
+    for row in reader:
+        if len(row) < 2 or not re.match(r"^\d{4}-\d{2}-\d{2}$", row[0]):
+            continue
+        try:
+            value = float(row[1])
+        except ValueError:
+            continue
+        year = int(row[0][:4])
+        if year in years:
+            buckets.setdefault(year, []).append(value)
+    out = {}
+    for year, values in buckets.items():
+        if len(values) >= 12 and (len(values) >= 200 or len(values) == 12):
+            out[year] = round(sum(values) / len(values), 2)
+    return out
+
+
+async def _fetch_fred(client, entry: CatalogEntry, entities: list[str], years: list[int]) -> dict[str, dict[int, float]]:
+    resp = await client.get("https://fred.stlouisfed.org/graph/fredgraph.csv", params={"id": entry.code})
+    resp.raise_for_status()
+    values = fred_annual_averages(resp.text, years)
+    return {_FRED_ENTITY.get(entry.id, "United States"): values} if values else {}
+
+
 async def fetch_dataset(client, item: dict, *, start_year: int, today: date) -> Dataset | None:
     entry = CATALOG[item["id"]]
-    years = _years(start_year, today, allow_current=entry.connector != "imf")
+    years = _years(start_year, today, allow_current=entry.connector not in {"imf", "fred"})
     if len(years) < 2:
         return None
-    fetcher = {"wb": _fetch_wb, "imf": _fetch_imf, "owid": _fetch_owid}[entry.connector]
+    fetcher = {"wb": _fetch_wb, "imf": _fetch_imf, "owid": _fetch_owid, "fred": _fetch_fred}[entry.connector]
     raw = None
     for attempt in (1, 2):
         try:
@@ -429,7 +481,7 @@ async def official_sources(question: str, gateway, *, today: date, tier: str) ->
 
 
 # ── data-first charts from official datasets in the evidence store ───────────────────────────────
-OFFICIAL_PUBLISHERS = ("World Bank", "International Monetary Fund", "Our World in Data")
+OFFICIAL_PUBLISHERS = ("World Bank", "International Monetary Fund", "Our World in Data", "FRED (Federal Reserve Bank of St. Louis)")
 
 
 def is_official_passage(passage) -> bool:

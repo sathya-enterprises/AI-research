@@ -236,7 +236,17 @@ _FENCE_RE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\n?(.*?)```", re.S)
 
 
 def unfence(body: str) -> str:
-    """Render code blocks as a Markdown table (pipe rows), a bullet list (several lines) or plain text."""
+    """Render code blocks as a Markdown table (pipe rows), a bullet list (several lines) or plain text.
+
+    Stage L: text art (bars, box tables, trees, panels) is resolved first as whole blocks
+    (utils/text_art_fences.py) - a real table becomes a sourced Markdown table, art whose numbers the
+    text already gives is dropped; only what is left falls through to the line rules below."""
+    try:
+        from utils.text_art_fences import resolve_fences
+        body, _ = resolve_fences(body)
+    except Exception:  # pragma: no cover - the fallback below still removes the fences
+        pass
+
     def repl(match: re.Match) -> str:
         lines = [ln.rstrip() for ln in match.group(1).strip().splitlines() if ln.strip()]
         if not lines:
@@ -473,10 +483,11 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     # Fetched-dataset charts the text did not interpret keep their place: the figure goes at the end of
     # the section with its deterministic interpretation (built from the plotted rows), next to it.
     for fig in figures:
-        if fig.status != "referenced" and getattr(fig, "interpretation", "") and bodies:
+        if fig.status != "referenced" and (getattr(fig, "interpretation", "") or getattr(fig, "reading", "")) and bodies:
             n = fig.figure_number
-            text = fig.interpretation
-            if re.match(r"(?:Compounded|In)\b", text):
+            text = getattr(fig, "interpretation", "") or getattr(fig, "reading", "")
+            if re.match(r"(?:Compounded|In)\b", text) or (
+                    not getattr(fig, "interpretation", "") and text[:2] != text[:2].upper()):
                 text = text[0].lower() + text[1:]
             bodies[-1] = f"{bodies[-1].rstrip()}\n\n[[FIGURE {n}]]\n\nAs Figure {n} shows, {text}"
             fig.status, fig.drop_reason = "referenced", ""

@@ -200,7 +200,7 @@ def test_headline_stat_cap_keeps_sentences_and_points_back():
               "## Bank: Credit\n\nBank credit growth stayed at 17.7% this year [S1].\n\n## Outlook\n\n"
               "Looking ahead, credit growth of 17.7% supports lenders such as PSU banks [S1]. Deposits lag (17.7% credit growth) [S1].")
     out, actions = cap_headline_stats(report)
-    assert "PSU banks" in out and "the figure given in Section 2" in out  # sentence kept, number points back
+    assert "PSU banks" in out and "(see Macro)" in out and "the figure given" not in out  # kept, points back by title
     assert "Bank credit growth stayed at 17.7%" in out                     # the deep-dive keeps its own number
     assert repetition_metrics(out)["stats_over_cap"] == 0 and actions
 
@@ -334,7 +334,7 @@ def test_stacked_tables_are_split_and_amount_spellings_are_one_statistic():
     report = ("## Executive Summary\n\nX.\n\n## A\n\nTelecom saw +11,065 Cr of inflows [S1].\n\n## B\n\n"
               "Telecommunication inflows were ₹11,065 crore [S1].\n\n## C\n\nLater, Telecom took +₹11,065 crore in buying [S1].")
     capped, _ = cap_headline_stats(report)
-    assert "took the figure given in Section 2 in buying" in capped and repetition_metrics(capped)["stats_over_cap"] == 0
+    assert "took +₹11,065 crore in buying [S1] (see A)." in capped and repetition_metrics(capped)["stats_over_cap"] == 0
 
 
 # ── Stage J: domain-generic dataset extraction ───────────────────────────────────────────────────

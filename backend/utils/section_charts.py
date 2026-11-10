@@ -26,6 +26,80 @@ _PERIOD_RE = re.compile(
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*'?\d{2,4}|H[12]\s*FY\s*\d{2,4})$", re.I)
 MAX_BAR_POINTS = 15
 MAX_LINE_SERIES = 8
+MAX_COLUMN_SERIES = 4
+_ROW_UNIT_RE = re.compile(r"\s*\((?:₹|rs\.?|inr|us\$|\$|€|£)?\s*(?:crore|cr|lakh|million|mn|billion|bn|trillion|thousand|'000)\b[^)]*\)", re.I)
+_MONTH_WORD = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+
+
+def row_period_label(label: str) -> str:
+    """Stage L: a period row label without its unit / footnote noise: "Calendar 2022 (₹ Crore)" -> "2022",
+    "Dec-2025 (₹ Crore) #" -> "Dec 2025". Other labels are returned cleaned only."""
+    text = clean_label(label)
+    text = _ROW_UNIT_RE.sub("", text)
+    text = re.sub(r"\s*[#*†‡]+\s*$", "", text).strip()
+    text = re.sub(r"(?i)^(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+(?=\d)", "", text)  # "Tue, 10 Nov 2026"
+    text = re.sub(r"(?i)^(?:calendar(?:\s+year)?|cy|year)\s+(?=(?:19|20)\d{2}\b)", "", text)
+    text = re.sub(rf"(?i)^({_MONTH_WORD})[-/ ]'?(\d{{2,4}})$", r"\1 \2", text)
+    return text.strip()
+
+
+_STOP = {"the", "of", "and", "in", "for", "to", "a", "rs", "inr", "crore", "cr", "x", "%", "value", "values"}
+
+
+def _words(header: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", str(header or "").casefold()) if w not in _STOP and len(w) > 1}
+
+
+def related_columns(cols: list[int], header: list[str], rows: list[list[str]]) -> list[int]:
+    """Columns that measure the same thing: they share a word with the first one ("FPI Flows Secondary",
+    "FPI Flows Primary"), and none is the sum of two others (a derived total next to its parts)."""
+    if not cols:
+        return []
+    base = _words(header[cols[0]])
+    keep = [c for c in cols if c == cols[0] or (_words(header[c]) & base)]
+
+    def vals(c: int) -> list[float | None]:
+        return [(_parse_number(r[c]) or (None, ""))[0] for r in rows]
+
+    table = {c: vals(c) for c in keep}
+    derived = set()
+    for c in keep:
+        for a in keep:
+            for b in keep:
+                if len({a, b, c}) < 3 or a > b:
+                    continue
+                pairs = [(x, y, z) for x, y, z in zip(table[a], table[b], table[c]) if None not in (x, y, z)]
+                if len(pairs) >= 3 and sum(1 for x, y, z in pairs if abs((x + y) - z) <= 0.01 * max(1.0, abs(z))) >= 0.8 * len(pairs):
+                    derived.add(c)
+    return [c for c in keep if c not in derived]
+
+
+def series_metric(names: list[str]) -> str:
+    """"FPI Flows Secondary", "FPI Flows Primary" -> "FPI Flows: Secondary and Primary"."""
+    split = [n.split() for n in names]
+    common = []
+    for words in zip(*split):
+        if len({w.casefold() for w in words}) == 1:
+            common.append(words[0])
+        else:
+            break
+    rest = [" ".join(w[len(common):]) or " ".join(w) for w in split]
+    tail = ", ".join(rest[:-1]) + " and " + rest[-1] if len(rest) > 1 else rest[0]
+    return f"{' '.join(common)}: {tail}" if common else " vs ".join(names)
+
+
+def period_granularity(label: str) -> str:
+    """'month', 'quarter', 'half', 'year' or '' for a (cleaned) period label."""
+    text = row_period_label(label)
+    if re.search(rf"(?i)\b{_MONTH_WORD}\b", text) and re.search(r"\d{2,4}", text):
+        return "month"
+    if re.search(r"(?i)\bQ[1-4]\b", text):
+        return "quarter"
+    if re.search(r"(?i)\bH[12]\b", text):
+        return "half"
+    if re.fullmatch(r"(?i)(?:FY\s*'?)?(?:19|20)?\d{2}(?:-\d{2,4})?E?|(?:19|20)\d{2}", text):
+        return "year"
+    return ""
 
 
 @dataclass
@@ -43,6 +117,7 @@ class PlannedChart:
     match_text: str = ""
     heading: str = ""                             # page heading above the table (period context only)
     interpretation: str = ""                      # deterministic paragraph (fetched-dataset charts, Stage F)
+    reading: str = ""                             # Stage L: deterministic reading of any verified chart (fallback text)
 
     def brief(self) -> str:
         """Compact data listing for the section writer."""
@@ -87,24 +162,37 @@ def _split_row(line: str) -> list[str]:
 QTD_LABEL = "QTD, partial"
 
 
+class _QtdStart(int):
+    """The current quarter's first month ordinal, carrying today's month ordinal (``current``)."""
+    current: int | None = None
+
+
 def qtd_start_month(today: str | None) -> int | None:
     """Month ordinal of the first month of the current calendar quarter (None without a date)."""
     try:
         from datetime import date as _date
-        from utils.chart_evidence_audit import _calendar_quarter_months
+        from utils.chart_evidence_audit import _calendar_quarter_months, _month_ordinal
         day = _date.fromisoformat(str(today)[:10])
     except (ValueError, TypeError, ImportError):
         return None
-    return _calendar_quarter_months((day.month - 1) // 3 + 1, day.year)[0]
+    start = _QtdStart(_calendar_quarter_months((day.month - 1) // 3 + 1, day.year)[0])
+    start.current = _month_ordinal(day.year, day.month)
+    return start
 
 
 def _is_qtd(text: str, qtd_start: int | None) -> bool:
-    """Every period named starts inside the CURRENT quarter (Stage J: later periods are forecasts, not QTD)."""
+    """Every period named starts inside the CURRENT quarter (Stage J: later periods are forecasts, not QTD).
+
+    Stage L: a period that has already ended (a finished month or fortnight, e.g. "16-31 Oct 2026" on
+    10 Nov) is complete data, not "QTD, partial"; only a period still running today is partial."""
     if not qtd_start:
         return False
     from utils.chart_evidence_audit import _period_ranges
     ranges = _period_ranges(text)
-    return bool(ranges) and all(qtd_start <= start < qtd_start + 3 for start, _end, _label in ranges)
+    if not (bool(ranges) and all(qtd_start <= start < qtd_start + 3 for start, _end, _label in ranges)):
+        return False
+    current = getattr(qtd_start, "current", None)
+    return current is None or any(end >= current for _start, end, _label in ranges)
 
 
 def _is_future(text: str, qtd_start: int | None) -> bool:
@@ -138,6 +226,25 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     if any(header_is_data(h) for h in header[1:]):
         return []  # the first row is data, not a header: metric names are unknown
     rows, _mixed_note = homogeneous_rows(rows)
+    # Stage L: a Total / aggregate row is not plotted beside its components; the chart keeps the
+    # components (it used to be rejected as a whole: "a Total row is plotted with its components").
+    from utils.chart_lint import TOTAL_RE
+    if sum(1 for r in rows if not TOTAL_RE.search(r[0] if r else "")) >= 3 and not re.search(
+            r"(?i)total|overall|aggregate", (header[0] if header else "")):
+        rows = [r for r in rows if not TOTAL_RE.search(r[0] if r else "") and not re.match(r"(?i)^\s*total\b", r[0] or "")]
+    # Stage L: yearly rows and monthly rows of one table are two different charts (a year bar next to
+    # a month bar reads as a crash or a spike); each granularity with >= 3 rows gets its own chart.
+    if _only_rows is None and _only_cols is None and not _qtd and not _future:
+        groups: dict[str, set] = {}
+        for r in rows:
+            groups.setdefault(period_granularity(r[0]), set()).add(r[0])
+        timed = {g: labels for g, labels in groups.items() if g}
+        if len(timed) >= 2 and not groups.get(""):
+            charts = []
+            for g in ("year", "half", "quarter", "month"):
+                if len(timed.get(g, ())) >= 3:
+                    charts += charts_from_passage(passage, chart_index + len(charts), qtd_start, _only_rows=timed[g])
+            return charts
     if _only_rows is not None:
         rows = [r for r in rows if r[0] in _only_rows]
     if len(rows) < 2:
@@ -185,6 +292,54 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     period_cols = [c for c in numeric_cols if _PERIOD_RE.match(header[c])]
     if len(period_cols) >= 2 and unit_of(period_cols) is None:
         period_cols = []
+    # Stage L: rows are periods and several columns share a unit ("FPI Flows Secondary", "FPI Flows
+    # Primary" by year): one series per column over time - the comparison the table exists for.
+    from utils.chart_lint import is_time_axis
+    if len(period_cols) < 2 and is_time_axis([row_period_label(r[0]) for r in rows]):
+        cols = [c for c in numeric_cols if unit_of([c]) is not None and not non_comparable_metric(header[c])
+                and not re.search(r"(?i)\b(?:total|overall|aggregate|net)\b", header[c])]
+        cols = related_columns(cols, header, rows)
+        if len(cols) >= 2 and unit_of(cols) is not None:
+            cols = cols[:MAX_COLUMN_SERIES]
+            unit = unit_of(cols) or ""
+            if not unit:
+                hdr_unit = _ROW_UNIT_RE.search(rows[0][0] or "")
+                unit = hdr_unit.group(0).strip(" ()") if hdr_unit else ""
+            evidence_rows = {r[0]: " | ".join(r) for r in rows}
+            series, points = [], []
+            for c in cols:
+                data = []
+                for r in rows:
+                    parsed = _parse_number(r[c])
+                    if parsed:
+                        data.append({"label": row_period_label(r[0]), "value": parsed[0], "evidenceSource": passage.source_id,
+                                     "evidenceQuote": evidence_rows.get(r[0], ""), "evidenceValue": r[c]})
+                        points.append((header[c], row_period_label(r[0]), parsed[0]))
+                if len(data) >= 3:
+                    series.append({"name": clean_label(header[c]), "data": data})
+            # the shared words become the metric; series keep only what tells them apart
+            _metric = series_metric([s_["name"] for s_ in series]).split(":")[0] if series else ""
+            if _metric and ":" in series_metric([s_["name"] for s_ in series]):
+                for s_ in series:
+                    rest = s_["name"][len(_metric):].strip()
+                    s_["name"] = rest[:1].upper() + rest[1:] if rest else s_["name"]
+            if len(series) >= 2:
+                labels = [row_period_label(r[0]) for r in rows]
+                title = data_title(metric=(_metric or series_metric([s_["name"] for s_ in series])), labels=labels[:MAX_BAR_POINTS],
+                                   period=f"{labels[0]} to {labels[-1]}", unit=unit)
+                if _qtd:
+                    title = f"{title} ({QTD_LABEL})"
+                spec = {"type": "line" if len(rows) >= 6 else "grouped_bar", "title": title, "xLabel": "Period",
+                        "yLabel": unit or "Value", "unit": unit, "series": series,
+                        "metric": _metric or " vs ".join(s_["name"] for s_ in series),
+                        "source": [passage.source_id], "sourceIds": [passage.source_id],
+                        "evidenceBasis": "calculated" if passage.kind == "calculated" else "reported",
+                        "basisNote": f"Values copied from evidence passage {passage.passage_id}."}
+                passage_ids = list(getattr(passage, "merged_ids", None) or [passage.passage_id])
+                return [PlannedChart(chart_id=f"c{chart_index}{'q' if _qtd else ''}", spec=spec, passage_ids=passage_ids,
+                                     source_ids=[passage.source_id], points=points,
+                                     match_text=" ".join([title, header[0], *labels[:20], *[header[c] for c in cols]]),
+                                     heading=heading)]
     if len(period_cols) >= 2:
         unit = unit_of(period_cols) or ""
     else:
@@ -251,8 +406,9 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         for r in rows[:MAX_BAR_POINTS]:
             parsed = _parse_number(r[col])
             if parsed:
-                data.append(point(clean_label(r[0]), clean_label(r[0]), parsed[0], r[col], r[0]))
-                points.append((header[col], clean_label(r[0]), parsed[0]))
+                shown = row_period_label(r[0])
+                data.append(point(shown, shown, parsed[0], r[col], r[0]))
+                points.append((header[col], shown, parsed[0]))
         spec = {"type": "bar", "title": title, "xLabel": header[0] or "Item",
                 "yLabel": header[col] or unit or "Value", "unit": unit, "series": [{"name": header[col] or "Value", "data": data}]}
     spec.update({"source": [passage.source_id], "sourceIds": [passage.source_id], "evidenceBasis":
