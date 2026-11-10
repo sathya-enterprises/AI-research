@@ -198,3 +198,11 @@ def test_split_moves_subsections_to_the_sector_they_are_about():
     niche = Section(section_id="s.2", title="Media: Niche and Regulated Plays")
     assert _sub_about(power, utilities) and not _sub_about(power, media)
     assert _sub_about(niche, media) and not _sub_about(niche, utilities)
+
+
+def test_fred_annual_averages_use_complete_years_only():
+    from utils.official_data import CATALOG, fred_annual_averages
+    monthly = "observation_date,FEDFUNDS\n" + "".join(f"2024-{m:02d}-01,{5.0 + m / 100:.2f}\n" for m in range(1, 13))
+    monthly += "2025-01-01,4.33\n2025-02-01,.\n"
+    assert fred_annual_averages(monthly, [2024, 2025]) == {2024: 5.07}
+    assert CATALOG["fred.usd_inr"].publisher.startswith("FRED") and "annual average" in CATALOG["fred.brent"].unit
