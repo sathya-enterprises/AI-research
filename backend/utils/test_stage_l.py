@@ -165,6 +165,6 @@ def test_one_window_for_past_n_years():
 
 def test_near_duplicate_chart_values_flagged():
     from utils.chart_lint import quality_reason
-    spec = {"type": "bar", "series": [{"name": "x", "data": [{"label": str(i), "value": v} for i, v in enumerate([5, 7, 9, 11, 13, 15])]}]}
+    spec = {"type": "bar", "series": [{"name": "x", "data": [{"label": f"Sector {c}", "value": v} for c, v in zip("ABCDEF", [5, 7, 9, 11, 13, 15])]}]}
     earlier = [sorted([5.0, 7.0, 9.0, 11.0, 13.0, 21.0])]
     assert "nearly the same values" in quality_reason(spec, "", earlier)
