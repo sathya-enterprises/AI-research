@@ -87,24 +87,37 @@ def _split_row(line: str) -> list[str]:
 QTD_LABEL = "QTD, partial"
 
 
+class _QtdStart(int):
+    """The current quarter's first month ordinal, carrying today's month ordinal (``current``)."""
+    current: int | None = None
+
+
 def qtd_start_month(today: str | None) -> int | None:
     """Month ordinal of the first month of the current calendar quarter (None without a date)."""
     try:
         from datetime import date as _date
-        from utils.chart_evidence_audit import _calendar_quarter_months
+        from utils.chart_evidence_audit import _calendar_quarter_months, _month_ordinal
         day = _date.fromisoformat(str(today)[:10])
     except (ValueError, TypeError, ImportError):
         return None
-    return _calendar_quarter_months((day.month - 1) // 3 + 1, day.year)[0]
+    start = _QtdStart(_calendar_quarter_months((day.month - 1) // 3 + 1, day.year)[0])
+    start.current = _month_ordinal(day.year, day.month)
+    return start
 
 
 def _is_qtd(text: str, qtd_start: int | None) -> bool:
-    """Every period named starts inside the CURRENT quarter (Stage J: later periods are forecasts, not QTD)."""
+    """Every period named starts inside the CURRENT quarter (Stage J: later periods are forecasts, not QTD).
+
+    Stage L: a period that has already ended (a finished month or fortnight, e.g. "16-31 Oct 2026" on
+    10 Nov) is complete data, not "QTD, partial"; only a period still running today is partial."""
     if not qtd_start:
         return False
     from utils.chart_evidence_audit import _period_ranges
     ranges = _period_ranges(text)
-    return bool(ranges) and all(qtd_start <= start < qtd_start + 3 for start, _end, _label in ranges)
+    if not (bool(ranges) and all(qtd_start <= start < qtd_start + 3 for start, _end, _label in ranges)):
+        return False
+    current = getattr(qtd_start, "current", None)
+    return current is None or any(end >= current for _start, end, _label in ranges)
 
 
 def _is_future(text: str, qtd_start: int | None) -> bool:

@@ -96,6 +96,82 @@ def is_time_axis(labels: list[str]) -> bool:
     return bool(labels) and sum(1 for l in labels if _TIME_RE.match(l)) >= 0.8 * len(labels)
 
 
+_MONTH_NUM = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def time_key(label: str) -> float | None:
+    """A sortable position for a period label ("30 Sept 2026", "Jul 2026", "2023", "FY24", "Q1 FY26",
+    "2026-03-31"); None when the label is not a period. Fiscal labels sort by their fiscal year."""
+    t = str(label or "").strip()
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", t)
+    if m:
+        return int(m.group(1)) * 400 + int(m.group(2)) * 32 + int(m.group(3))
+    m = re.fullmatch(rf"(?i)(\d{{1,2}})\s+({_MONTHS})\s+(\d{{4}})", t)
+    if m:
+        return int(m.group(3)) * 400 + _MONTH_NUM[m.group(2)[:3].lower()] * 32 + int(m.group(1))
+    m = re.fullmatch(rf"(?i)({_MONTHS})\s+'?(\d{{2,4}})", t)
+    if m:
+        y = int(m.group(2))
+        return (y if y > 99 else 2000 + y) * 400 + _MONTH_NUM[m.group(1)[:3].lower()] * 32
+    m = re.fullmatch(r"(?i)Q([1-4])\s*(FY)?\s*'?(\d{2,4})", t)
+    if m:
+        y = int(m.group(3))
+        return (y if y > 99 else 2000 + y) * 400 + int(m.group(1)) * 96
+    m = re.fullmatch(r"(?i)H([12])\s*FY\s*'?(\d{2,4})", t)
+    if m:
+        y = int(m.group(2))
+        return (y if y > 99 else 2000 + y) * 400 + int(m.group(1)) * 192
+    m = re.fullmatch(r"(?i)FY\s*'?(\d{2,4})E?", t)
+    if m:
+        y = int(m.group(1))
+        return (y if y > 99 else 2000 + y) * 400 + 399
+    m = re.fullmatch(r"(\d{4})(?:-(\d{2}))?", t)
+    if m:
+        return int(m.group(1)) * 400 + 399
+    return None
+
+
+def chronological(spec: dict) -> bool:
+    """Stage L: a time axis reads oldest to newest. Series listed newest first (a source table's
+    order) are reversed in place; returns True when the order changed."""
+    series = _series(spec)
+    if not series:
+        return False
+    labels = [str(p.get("label") or "") for p in _pts(series[0])]
+    keys = [time_key(l) for l in labels]
+    if len(keys) < 2 or any(k is None for k in keys):
+        return False
+    if all(a > b for a, b in zip(keys, keys[1:])):
+        for s_ in series:
+            s_["data"] = list(reversed(_pts(s_)))
+        return True
+    if not all(a <= b for a, b in zip(keys, keys[1:])):
+        order = {l: k for l, k in zip(labels, keys)}
+        for s_ in series:
+            s_["data"] = sorted(_pts(s_), key=lambda p: order.get(str(p.get("label") or ""), 0))
+        return True
+    return False
+
+
+AXIS_LABEL_MAX = 40
+
+
+def short_axis_label(metric: str, unit: str) -> str:
+    """Stage L: a long rotated axis title runs into the figure title. The chart title keeps the full
+    metric; the axis shows the unit, or the metric cut at a word boundary."""
+    full = f"{metric} ({unit})" if unit else metric
+    if len(full) <= AXIS_LABEL_MAX:
+        return full
+    if unit:
+        return unit[0].upper() + unit[1:] if unit[:1].islower() and not unit.startswith(("x", "%")) else unit
+    words, out = metric.split(), ""
+    for w in words:
+        if len(out) + len(w) + 1 > AXIS_LABEL_MAX - 1:
+            break
+        out = f"{out} {w}".strip()
+    return out or metric[:AXIS_LABEL_MAX]
+
+
 def is_seasonal(labels: list[str]) -> bool:
     labels = [l for l in labels if l]
     return bool(labels) and all(_SEASONAL_RE.match(l) for l in labels)
@@ -272,6 +348,9 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         spec["rows"] = [case_label(r) for r in spec.get("rows") or []]
     labels = _labels(spec)
     time_axis = is_time_axis(labels)
+    if time_axis and kind != "heatmap" and chronological(spec):
+        fixes.append("time axis ordered oldest to newest")
+        labels = _labels(spec)
     unit = str(spec.get("unitLabel") or "").strip() or infer_unit(spec, passage_text)  # a dataset's own unit wins
     metric = metric_name(spec)
     if unit and metric.casefold().endswith(f"({unit.casefold()})"):
@@ -339,7 +418,7 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         x = case_label(str(spec.get("xLabel") or "")) or ("Date" if time_axis else "Category")
         if time_axis and not re.search(r"(?i)date|quarter|month|period|fortnight|week|year", x):
             x = "Date"
-        y = f"{metric}{unit_txt}"
+        y = short_axis_label(metric, unit)
         if spec.get("type") == "horizontal_bar":
             pass  # the renderer swaps axes; the labels keep their meaning (category / value)
         if (x, y) != (spec.get("xLabel"), spec.get("yLabel")):
