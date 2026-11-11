@@ -99,7 +99,8 @@ from utils.source_ids import (
     reconcile_chart_source_ids as _reconcile_chart_source_ids,
 )
 from utils.uploaded_workbook_analytics import (
-    is_file_only_workbook_report, build_pms_workbook_analytics,
+    is_file_only_workbook_report, build_attachment_analytics,
+    attachment_analytics_section, append_attachment_analytics_section,
     assign_workbook_source, workbook_charts_section,
 )
 import contextvars as _contextvars
@@ -12972,31 +12973,32 @@ def _chart_has_payload(chart: dict) -> bool:
 
 
 def _reattach_server_workbook_provenance(raw_chart: dict, normalized_chart: dict) -> dict:
-    """Preserve exact workbook provenance through lossy chart normalizers.
+    """Preserve exact uploaded-data provenance through lossy chart normalizers.
 
     Chart normalizers intentionally retain only renderer fields. That is useful
-    for model-authored charts, but it used to strip the server-only workbook flag
+    for model-authored charts, but it used to strip the server-only evidence flag
     and each point's evidence quote immediately before the final publication gate.
     The gate then treated deterministic, source-backed charts as unverified.
-    This helper carries provenance only from server-generated workbook charts;
+    This helper carries provenance only from server-generated attachment charts;
     numeric evidence is still checked independently by chart_evidence_audit.
     """
+    source_origin = str((raw_chart or {}).get("sourceOrigin") or "").strip().casefold()
     if not (
         isinstance(raw_chart, dict)
         and raw_chart.get("_serverWorkbookEvidence") is True
-        and str(raw_chart.get("sourceOrigin") or "").strip().casefold() == "uploaded_workbook"
+        and source_origin in {"uploaded_workbook", "uploaded_attachment"}
         and isinstance(normalized_chart, dict)
     ):
         return normalized_chart
     result = dict(normalized_chart)
-    result["sourceOrigin"] = "uploaded_workbook"
+    result["sourceOrigin"] = source_origin
     result["_serverWorkbookEvidence"] = True
     for key in ("sourceIds", "source", "sources"):
         if raw_chart.get(key) and not result.get(key):
             result[key] = raw_chart[key]
     raw_series = [x for x in (raw_chart.get("series") or []) if isinstance(x, dict)]
     new_series = [dict(x) if isinstance(x, dict) else x for x in (result.get("series") or [])]
-    evidence_keys = ("evidenceSource", "evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow")
+    evidence_keys = ("evidenceSource", "evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow", "sourceFile")
     for series_index, new_item in enumerate(new_series):
         if not isinstance(new_item, dict):
             continue
@@ -14270,6 +14272,25 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
     return {
         "blocking": bool(mismatches), "mismatchedSources": mismatches,
         "flags": flags + provenance_flags, "provenanceWarnings": provenance_warnings,
+    }
+
+
+def _report_source_evidence_audit(sources: list | None, *, attachment_only: bool = False) -> dict:
+    """Use the uploaded files as evidence without applying publisher-page checks."""
+    if not attachment_only:
+        return _source_evidence_quality_audit(sources)
+    return {
+        "blocking": False,
+        "flags": [],
+        "provenanceWarnings": [],
+        "mismatchedCitationGroups": [],
+        "individualSourceDiagnostics": [],
+        "sourceMode": "uploaded_attachment",
+        "note": (
+            "Attachment-only report: the attached file is the data source of truth; "
+            "publisher-page fetching and external numeric-citation checks do not apply. "
+            "Deterministic attachment tables, chart evidence, structure, consistency, and scope checks remain active."
+        ),
     }
 
 
@@ -15661,7 +15682,7 @@ def _drop_auditor_artifacts(audit: dict, report_text: str, charts: list) -> dict
 async def _run_independent_report_audit(
     *, title: str, question: str, report_text: str, report_tier: str,
     charts: list, images: list, sources: list, timeout_seconds: float = 24.0,
-    store=None,
+    store=None, attachment_only: bool = False,
 ) -> tuple[dict, dict]:
     """Run a separate Gemini review and deterministic publication gate on all return paths.
 
@@ -15671,11 +15692,11 @@ async def _run_independent_report_audit(
     deterministic = {
         "chartDensity": _chart_density_audit(charts, report_tier),
         "publicationAudit": audit_report_publication(report_text, charts, images, sources, question=question),
-        "sourceEvidenceAudit": _source_evidence_quality_audit(sources),
+        "sourceEvidenceAudit": _report_source_evidence_audit(sources, attachment_only=attachment_only),
         "structure": audit_report_structure(report_text),
         "scopeCoverageAudit": audit_requested_report_scope(question, report_text, sources),
     }
-    if store is not None:
+    if store is not None and not attachment_only:
         try:
             from utils.evidence_check import reconcile_final_audit
             reconcile_final_audit(deterministic, report_text, store)
@@ -18869,6 +18890,14 @@ async def _plan_report_structure(
         f"{source_preview}\n\n"
         "Treat this request as a report-generation request when it explicitly asks to generate/write/prepare/produce a report. Do not wait for a separate follow-up command. Plan the full report's section list and per-section presentation format now, per the rules above."
     )
+    if file_only_report and isinstance(workbook_analytics, dict):
+        attachment_profile = attachment_analytics_section(workbook_analytics)
+        if attachment_profile:
+            planning_user_prompt += (
+                "\n\nDETERMINISTIC ATTACHMENT PROFILE (calculated from extracted file rows; use it to plan scope, "
+                "coverage, distributions, comparisons and limitations):\n"
+                + attachment_profile[:24000]
+            )
 
     plan = None
     plan_errors: list[str] = []
@@ -18960,6 +18989,29 @@ async def _plan_report_structure(
             plan["depth"] = report_tier
             plan["tier"] = report_tier
             plan["depth_reason"] = "Workbook-specific fallback preserving the selected report depth when the optional planner fails."
+        elif file_only_report and isinstance(workbook_analytics, dict) and workbook_analytics.get("kind") == "generic_tabular_data":
+            _data_sections = [
+                ("Executive Findings", "State the strongest findings calculated from the attached data, with scope and limitations.", "mixed"),
+                ("Data Coverage and Method", "Inventory the files, sheets, records, fields, missing values, and calculations used.", "table"),
+                ("Key Metrics and Distributions", "Compare numeric fields using the attached data's ranges, medians, means, and outliers where supported.", "mixed"),
+                ("Ranked Comparisons and Segments", "Compare meaningful categories or entities for each supported numeric measure.", "mixed"),
+            ]
+            if workbook_analytics.get("charts"):
+                _data_sections.append(
+                    ("Trends and Quantitative Comparisons", "Interpret the deterministic charts and distinguish observed values from derived summaries.", "mixed")
+                )
+            _data_sections.extend([
+                ("Data Quality and Limitations", "Describe missing, duplicate, inconsistent, or unavailable values without treating them as zero.", "bullets"),
+                ("Conclusions", "Summarize only conclusions supported by the attached records.", "prose"),
+            ])
+            plan["sections"] = [
+                {"heading": heading, "purpose": purpose, "format": fmt,
+                 "format_reason": "Planned from the attached dataset profile and its available observations."}
+                for heading, purpose, fmt in _data_sections
+            ]
+            plan["depth"] = report_tier
+            plan["tier"] = report_tier
+            plan["depth_reason"] = "Evidence-driven attachment analysis; no outside research was requested."
         log.warning(
             "Report: planner fallback selected tier=%s reason=%s fallback_sections=%d",
             report_tier, fallback_reason[:8], len(plan.get("sections") or []),
@@ -20419,38 +20471,61 @@ async def generate_report(request: Request):
     embedded_file_images: list[dict] = body.get("embeddedFileImages", [])
     session_id: str     = body.get("sessionId", "").strip()
     has_rag: bool       = bool(body.get("hasRag", False))
-    # Parse structured PMS workbook tables deterministically. This is used only
-    # for uploaded-file reports; it never substitutes external financial data.
+    # Parse tabular attachments deterministically. PMS workbooks keep their
+    # domain-specific return logic; CSVs, other workbooks and extracted image
+    # tables use the shared generic data profile.
+    _analytics_context = str(file_context or "")
+    if not _analytics_context.strip():
+        _analytics_parts = []
+        for _document in source_documents:
+            if not isinstance(_document, dict):
+                continue
+            _name = str(_document.get("name") or _document.get("title") or "Attached data").strip()
+            _text = str(_document.get("text") or "").strip()
+            if _text:
+                _analytics_parts.append(f"[File: {_name}]\n{_text}")
+        _analytics_context = "\n\n".join(_analytics_parts)
     try:
-        workbook_analytics = build_pms_workbook_analytics(file_context) if "[Sheet:" in str(file_context or "") else {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
+        workbook_analytics = build_attachment_analytics(_analytics_context)
     except Exception as _workbook_analytics_exc:
-        workbook_analytics = {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
-        log.warning("Workbook analytics preflight failed safely: %s", type(_workbook_analytics_exc).__name__)
-    _has_structured_sheet_context = "[sheet:" in str(file_context or "").casefold()
-    _source_doc_names = " ".join(
-        str(item.get("name") or item.get("title") or "") if isinstance(item, dict) else str(item)
-        for item in (source_documents or [])
-    )
-    if not _has_structured_sheet_context and re.search(r"\.xlsx?\b", _source_doc_names, re.I):
-        log.warning(
-            "Workbook-wide analytics unavailable: an Excel source is attached but file_context has no [Sheet:] blocks; "
-            "RAG top-k chunks are not a complete workbook substitute, so deterministic workbook charts cannot be built."
-        )
+        workbook_analytics = {
+            "kind": "generic", "files": [], "datasets": [], "charts": [],
+            "keyStats": [], "evidenceByFile": {}, "sourceOrigin": "uploaded_attachment",
+        }
+        log.warning("Attachment analytics preflight failed safely: %s", type(_workbook_analytics_exc).__name__)
+    if not _analytics_context.strip() and source_documents:
+        log.warning("Attachment analytics unavailable: attached sources supplied no extracted text.")
     file_only_report = is_file_only_workbook_report(
         question, file_context, source_documents, has_rag=has_rag,
     )
     if file_only_report:
-        # A workbook-only instruction must not silently reuse prior web sources,
+        # An attachment-first request must not silently reuse prior web sources,
         # market/news KB entries, or unrelated external image candidates.
         if sources:
-            log.info("Workbook-only report: ignoring %d pre-attached external source(s)", len(sources))
+            log.info("Attachment-first report: ignoring %d pre-attached external source(s)", len(sources))
         sources = []
-        if workbook_analytics.get("kind") == "pms_strategy_performance":
-            by_name = {str(x.get("filename") or "").casefold(): x for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)}
+        if workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
+            analytic_files = [
+                item for item in (workbook_analytics.get("files") or []) if isinstance(item, dict)
+            ]
+            analytic_files.extend(
+                item for item in (workbook_analytics.get("additionalFiles") or []) if isinstance(item, dict)
+            )
+            by_name = {str(x.get("filename") or "").casefold(): x for x in analytic_files}
             evidence_by_file = workbook_analytics.get("evidenceByFile") or {}
+            _attachment_evidence_origin = str(
+                workbook_analytics.get("sourceOrigin")
+                or ("uploaded_workbook" if workbook_analytics.get("kind") == "pms_strategy_performance" else "uploaded_attachment")
+            )
+            _evidence_origins_by_file = workbook_analytics.get("evidenceOriginByFile") or {}
             for filename, file_info in by_name.items():
                 original_name = str(file_info.get("filename") or filename)
                 excerpt = str(evidence_by_file.get(filename) or evidence_by_file.get(original_name) or "")[:16000]
+                file_evidence_origin = str(
+                    _evidence_origins_by_file.get(filename)
+                    or _evidence_origins_by_file.get(original_name.casefold())
+                    or _attachment_evidence_origin
+                )
                 match = next((d for d in source_documents if str(d.get("name") or d.get("title") or "").casefold() == filename), None)
                 if match is None:
                     match = {"name": original_name, "title": original_name, "kind": "Uploaded document", "sourceType": "Uploaded document"}
@@ -20458,20 +20533,29 @@ async def generate_report(request: Request):
                 if excerpt:
                     match.update({
                         "chartEvidenceExcerpt": excerpt,
-                        "evidenceOrigin": "uploaded_workbook",
-                        "evidence_origin": "uploaded_workbook",
+                        "evidenceOrigin": file_evidence_origin,
+                        "evidence_origin": file_evidence_origin,
                         "pageFetchStatus": "not_applicable",
                         "page_fetch_status": "not_applicable",
                         "evidenceAvailable": True,
                         "evidence_available": True,
-                        "sourceType": "Uploaded workbook",
+                        "sourceType": (
+                            "Uploaded workbook"
+                            if file_evidence_origin == "uploaded_workbook"
+                            else "Uploaded attachment"
+                        ),
                     })
-            log.info("Workbook-only report mode enabled; PMS strategies=%d deterministic_charts=%d files=%d period_coverage=%s",
-                     len(workbook_analytics.get("strategies") or []), len(workbook_analytics.get("charts") or []),
-                     len(workbook_analytics.get("files") or []),
-                     workbook_analytics.get("periodCoverage") or {})
+            log.info(
+                "Attachment-first report mode enabled; kind=%s rows=%d deterministic_charts=%d files=%d",
+                workbook_analytics.get("kind"),
+                len(workbook_analytics.get("strategies") or []) or sum(
+                    int(item.get("rowCount") or 0) for item in (workbook_analytics.get("datasets") or [])
+                ),
+                len(workbook_analytics.get("charts") or []),
+                len(by_name),
+            )
         else:
-            log.info("Workbook-only report mode enabled; external research disabled")
+            log.info("Attachment-first report mode enabled; external research disabled")
     rag_status: dict = {"requested": has_rag, "status": "not_requested", "retrievedChunks": 0, "sourceCount": 0}
     rag_source_rows: list[dict] = []
     requested_depth = str(body.get("depth") or body.get("reportDepth") or "").strip().lower()
@@ -20483,6 +20567,11 @@ async def generate_report(request: Request):
         report_tier = report_tier_for_page_count(requested_page_count)
         body["requestedPageCount"] = requested_page_count
         log.info("Report explicit page target resolved: pages=%d tier=%s", requested_page_count, report_tier)
+    if file_only_report:
+        if report_tier != "detailed":
+            log.info("Attachment-first report: replacing research tier %s with data-driven planning", report_tier)
+        report_tier = "detailed"
+        body["reportTier"] = "detailed"
     _tier_error = report_tier_error(report_tier)
     if _tier_error:
         return JSONResponse({"error": _tier_error}, status_code=400)
@@ -20748,10 +20837,50 @@ async def generate_report(request: Request):
         extracted_image_context = await extract_data_from_images(question, file_images)
         if extracted_image_context:
             log.info("Report: extracted %d chars from images", len(extracted_image_context))
+            if file_only_report and workbook_analytics.get("kind") not in {"pms_strategy_performance", "generic_tabular_data"}:
+                _image_names = list(dict.fromkeys(
+                    re.sub(r"\s+page\s+\d+$", "", str(image.get("name") or "").strip(), flags=re.I)
+                    for image in file_images if isinstance(image, dict) and image.get("name")
+                ))
+                _ocr_source_name = _image_names[0] if len(_image_names) == 1 else "Vision-extracted attachment images"
+                _ocr_file_block = f"[File: {_ocr_source_name}]\n{extracted_image_context.strip()}"
+                file_context = "\n\n".join(part for part in (file_context.strip(), _ocr_file_block) if part)
+                _matching_source = next((
+                    document for document in source_documents
+                    if str(document.get("name") or document.get("title") or "").casefold() == _ocr_source_name.casefold()
+                ), None)
+                if _matching_source is None:
+                    _matching_source = {
+                        "name": _ocr_source_name, "title": _ocr_source_name,
+                        "kind": "Uploaded attachment", "sourceType": "Uploaded attachment",
+                    }
+                    source_documents.append(_matching_source)
+                _existing_source_text = str(_matching_source.get("text") or "").strip()
+                _matching_source["text"] = "\n\n".join(
+                    part for part in (_existing_source_text, extracted_image_context.strip()) if part
+                )
+                try:
+                    workbook_analytics = build_attachment_analytics(file_context)
+                    log.info("Attachment analytics refreshed from vision extraction; kind=%s charts=%d",
+                             workbook_analytics.get("kind"), len(workbook_analytics.get("charts") or []))
+                except Exception as _vision_analytics_exc:
+                    log.warning("Vision attachment analytics failed safely: %s", type(_vision_analytics_exc).__name__)
 
     # ── Decide source strategy ─────────────────────────────────────────────────
     search_queries: list[str] = []
-    has_file_data = bool(file_context.strip()) or bool(extracted_image_context.strip()) or bool(rag_source_rows)
+    has_file_data = (
+        bool(file_context.strip())
+        or bool(extracted_image_context.strip())
+        or bool(rag_source_rows)
+        or any(str(document.get("text") or "").strip() for document in source_documents if isinstance(document, dict))
+    )
+
+    if file_only_report and not has_file_data:
+        return JSONResponse({
+            "error": "No readable text or image data could be extracted from the attached files, so a grounded report could not be generated.",
+            "report": "", "charts": [], "images": [], "keyStats": [], "summary": "",
+            "failedStage": "source_evidence", "publicationOutcome": "structural_failure",
+        }, status_code=422)
 
     if file_only_report and has_file_data:
         sources = []
@@ -21776,9 +21905,22 @@ async def generate_report(request: Request):
     # Show Report and PDF export.
     source_manifest = build_source_registry(enriched, source_documents)
     workbook_source_id = ""
-    if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance":
-        workbook_names = [str(x.get("filename") or "").strip() for x in (workbook_analytics.get("files") or []) if isinstance(x, dict)]
+    workbook_source_ids_by_name: dict[str, str] = {}
+    if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
+        workbook_files = list(workbook_analytics.get("files") or [])
+        workbook_files.extend(workbook_analytics.get("additionalFiles") or [])
+        workbook_names = [
+            str(item.get("filename") or "").strip()
+            for item in workbook_files if isinstance(item, dict)
+        ]
         _name_keys = {x.casefold() for x in workbook_names if x}
+        workbook_source_ids_by_name = {
+            str(item.get("title") or "").strip().casefold(): str(item.get("id") or "").upper()
+            for item in source_manifest
+            if isinstance(item, dict)
+            and str(item.get("title") or "").strip().casefold() in _name_keys
+            and item.get("id")
+        }
         _workbook_source = next((item for item in source_manifest if isinstance(item, dict)
                                  and str(item.get("title") or "").strip().casefold() in _name_keys), None)
         if _workbook_source:
@@ -21788,7 +21930,7 @@ async def generate_report(request: Request):
                 log.info("Workbook analytics source resolved: id=%s title=%r excerpt_chars=%d",
                          workbook_source_id, _workbook_source.get("title"), len(_workbook_excerpt))
         if not workbook_source_id:
-            log.warning("Workbook analytics has no canonical source ID; deterministic charts will not be published")
+            log.warning("Attachment analytics has no canonical source ID; deterministic charts will not be published")
     if rag_source_rows:
         rag_identities = {source_identity_key(row) for row in rag_source_rows}
         rag_status["sourceIds"] = [
@@ -22115,6 +22257,25 @@ async def generate_report(request: Request):
         # see call_groq) already skips straight to Gemini when the combined
         # prompt is too large, so raising this is safe on both paths.
         file_section += f"\n\n━━ UPLOADED FILE TEXT CONTENT ━━\n{file_context[:150000]}\n━━ END FILE CONTENT ━━\n"
+
+    if not file_context.strip():
+        _source_document_context = [
+            f"[File: {document.get('name') or document.get('title') or 'Attached file'}]\n{str(document.get('text') or '').strip()}"
+            for document in source_documents
+            if isinstance(document, dict) and str(document.get("text") or "").strip()
+        ]
+        if _source_document_context:
+            file_section += "\n\nUPLOADED FILE TEXT CONTENT\n" + "\n\n".join(_source_document_context)[:150000]
+    if file_only_report:
+        attachment_profile = attachment_analytics_section(
+            workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+        )
+        if attachment_profile:
+            file_section += (
+                "\n\nDETERMINISTIC ATTACHMENT ANALYTICS\n"
+                + attachment_profile
+                + "\nEND DETERMINISTIC ATTACHMENT ANALYTICS\n"
+            )
 
     # Image placement instruction — tell LLM where to place extracted
     # chart/figure image references. Deliberately built from
@@ -23852,30 +24013,35 @@ async def generate_report(request: Request):
         # into the now-shorter array (see _remap_chart_placeholders docstring).
         report_text = _remap_chart_placeholders(report_text, original_charts_list, valid_mask)
 
-        # Add deterministic, workbook-derived PMS comparisons after LLM chart cleanup,
-        # so these exact data-backed charts enter the same final validation/rendering path.
-        if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+        # Add deterministic attachment-derived comparisons after model chart cleanup,
+        # so exact data-backed charts and coverage tables enter the report body.
+        if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
             try:
-                _raw_workbook_charts = workbook_analytics.get("charts") or []
+                _raw_workbook_charts = (workbook_analytics.get("charts") or []) if workbook_source_id else []
                 _existing_chart_titles = {str(c.get("title") or "").casefold().strip() for c in charts if isinstance(c, dict)}
                 _workbook_charts_to_add = []
                 for _raw_workbook_chart in _raw_workbook_charts:
                     # Normalize first: the generic chart normalizer intentionally
-                    # drops unknown model metadata, including workbook evidence.
-                    # Reattach deterministic workbook provenance afterwards so the
+                    # drops unknown model metadata, including attachment evidence.
+                    # Reattach deterministic attachment provenance afterwards so the
                     # final evidence gate can validate each plotted value against
-                    # the exact raw worksheet row rather than treating it as an
-                    # ungrounded model-generated chart.
-                    _candidate_chart = _normalize_chart_spec(_raw_workbook_chart)
+                    # the exact source row rather than treating it as a model chart.
+                    _assigned_raw_chart = assign_workbook_source(
+                        [_raw_workbook_chart], workbook_source_id, workbook_source_ids_by_name,
+                    )[0]
+                    _candidate_chart = _normalize_chart_spec(_assigned_raw_chart)
                     _candidate_chart = dict(_candidate_chart or {})
-                    _candidate_chart["sourceOrigin"] = "uploaded_workbook"
+                    _candidate_chart["sourceOrigin"] = str(
+                        _raw_workbook_chart.get("sourceOrigin")
+                        or workbook_analytics.get("sourceOrigin")
+                        or "uploaded_attachment"
+                    )
                     # This flag is set only on charts computed by the server-side
-                    # workbook analytics path. It lets the evidence gate validate
-                    # exact workbook row quotes without incorrectly requiring a
-                    # fetched public publisher webpage for a private uploaded file.
+                    # attachment analytics path; uploaded data does not need a
+                    # fetched public publisher page to prove its exact row values.
                     _candidate_chart["_serverWorkbookEvidence"] = True
-                    _candidate_chart["sourceIds"] = [workbook_source_id] if workbook_source_id else []
-                    _candidate_chart["source"] = [workbook_source_id] if workbook_source_id else []
+                    _candidate_chart["sourceIds"] = list(_assigned_raw_chart.get("sourceIds") or [])
+                    _candidate_chart["source"] = list(_candidate_chart["sourceIds"])
                     _raw_series_by_name = {
                         str(_series.get("name") or _series.get("label") or "").strip().casefold(): _series
                         for _series in (_raw_workbook_chart.get("series") or []) if isinstance(_series, dict)
@@ -23916,11 +24082,19 @@ async def generate_report(request: Request):
                                 ):
                                     _raw_point = _positional_point
                             if _raw_point:
-                                for _evidence_key in ("evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow"):
+                                for _evidence_key in ("evidenceQuote", "evidenceValue", "sourceSheet", "sourceRow", "sourceFile"):
                                     if _raw_point.get(_evidence_key) is not None:
                                         _point[_evidence_key] = _raw_point[_evidence_key]
-                            if workbook_source_id:
-                                _point["evidenceSource"] = workbook_source_id
+                            _point_source_file = str(
+                                _point.get("sourceFile") or (_raw_point or {}).get("sourceFile") or ""
+                            ).casefold()
+                            _point_source_id = (
+                                workbook_source_ids_by_name.get(_point_source_file)
+                                or (_raw_point or {}).get("evidenceSource")
+                                or workbook_source_id
+                            )
+                            if _point_source_id:
+                                _point["evidenceSource"] = str(_point_source_id).upper()
                             _normalized_points.append(_point)
                         _series[_data_key] = _normalized_points
                         _normalized_series.append(_series)
@@ -23933,21 +24107,60 @@ async def generate_report(request: Request):
                 if _workbook_charts_to_add:
                     _chart_start_index = len(charts) + 1
                     charts.extend(_workbook_charts_to_add)
-                    _workbook_chart_intro = (
-                        "The following rankings are calculated from reported return values in the uploaded PMS workbook. "
-                        "Missing and undisclosed observations are excluded, not treated as zero."
-                    )
+                    _source_label = str(workbook_analytics.get("sourceLabel") or "attached data")
+                    if workbook_analytics.get("kind") == "pms_strategy_performance":
+                        _workbook_chart_intro = (
+                            "The following comparisons use reported PMS return values from the attached workbook. "
+                            "Missing and undisclosed observations are excluded, not treated as zero."
+                        )
+                    else:
+                        _workbook_chart_intro = (
+                            "The following charts are calculated from the attached source rows. "
+                            "Missing values are excluded rather than treated as zero."
+                        )
                     report_text = (report_text or "").rstrip() + "\n\n" + _workbook_chart_intro + "\n\n" + workbook_charts_section(
-                        _workbook_charts_to_add, start_index=_chart_start_index,
+                        _workbook_charts_to_add, start_index=_chart_start_index, source_label=_source_label,
                     ) + "\n"
-                    log.info("Workbook analytics: added %d deterministic evidence-backed chart(s) to report body",
+                    log.info("Attachment analytics: added %d deterministic evidence-backed chart(s) to report body",
                              len(_workbook_charts_to_add))
-                # For file-only PMS reports, publish deterministic KPIs rather than
-                # unsupported LLM-invented keyStats.
+                # Publish deterministic KPIs rather than unsupported model-only values.
                 if workbook_analytics.get("keyStats"):
                     parsed["keyStats"] = list(workbook_analytics["keyStats"])
             except Exception as _workbook_chart_exc:
-                log.warning("Workbook chart insertion failed safely: %s", type(_workbook_chart_exc).__name__)
+                log.warning("Attachment analytics insertion failed safely: %s", type(_workbook_chart_exc).__name__)
+
+        # Attachment-only reports skip the publisher-page number check, so every number the writer put in
+        # the prose is checked against the attached files and the deterministic analytics instead; a
+        # sentence with a number in neither is removed (the same rule the web path's number policy applies).
+        if file_only_report and os.getenv("GG_ATTACHMENT_NUMBER_CHECK", "1") != "0":
+            try:
+                from utils.attachment_numbers import allowed_numbers as _attachment_allowed, check_attachment_numbers
+                _attachment_texts = [file_context or ""] + [
+                    str(d.get("text") or "") for d in source_documents if isinstance(d, dict)
+                ]
+                _attachment_texts.append(attachment_analytics_section(
+                    workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+                ) or "")
+                _attachment_texts.append(" ".join(
+                    f"{k.get('label')} {k.get('value')}" for k in (workbook_analytics.get("keyStats") or [])
+                    if isinstance(k, dict)
+                ))
+                _attachment_texts.append(" ".join(
+                    f"{p.get('value')} {p.get('evidenceValue') or ''}"
+                    for c in charts if isinstance(c, dict) and c.get("_serverWorkbookEvidence")
+                    for s in (c.get("series") or []) if isinstance(s, dict)
+                    for p in (s.get("data") or []) if isinstance(p, dict)
+                ))
+                report_text, _attachment_unsupported = check_attachment_numbers(
+                    report_text, _attachment_allowed(*_attachment_texts),
+                )
+                if _attachment_unsupported:
+                    log.warning("Attachment number check removed %d sentence(s) with numbers not in the attached files: %s",
+                                len(_attachment_unsupported),
+                                "; ".join(", ".join(r["numbers"]) for r in _attachment_unsupported)[:300])
+                record_research_stage("attachment_number_check", {"removed": _attachment_unsupported})
+            except Exception as _attachment_number_exc:
+                log.warning("Attachment number check skipped: %s", type(_attachment_number_exc).__name__)
 
         original_images_list = (
             [] if file_only_report or not image_requested else (parsed.get("images") or [])
@@ -24767,6 +24980,7 @@ async def generate_report(request: Request):
             report_text=report_text, report_tier=report_tier, charts=charts,
             images=images, sources=audit_sources, timeout_seconds=24.0,
             store=evidence_store if _v2_used else None,
+            attachment_only=file_only_report,
         )
 
         # Audit findings are actionable: attempt one bounded repair, then re-render
@@ -24817,6 +25031,7 @@ async def generate_report(request: Request):
                     report_text=_repair_text, report_tier=report_tier, charts=_repair_charts,
                     images=images, sources=_repair_audit_sources, timeout_seconds=24.0,
                     store=evidence_store if _v2_used else None,
+                    attachment_only=file_only_report,
                 )
                 # A repair must not be accepted merely because the model returned
                 # text. Exact patches are re-rendered and re-audited; the page budget
@@ -25108,6 +25323,30 @@ async def generate_report(request: Request):
             _final_chart_gate_changed = True
             log.info("Report numerical consistency repairs: %s", _numeric_consistency_repairs)
 
+        # Table extraction and the final publication table gate intentionally
+        # remove generic/model-authored Markdown tables. Reattach tables computed
+        # from the uploaded files after those gates, then include them in the
+        # final audit and PDF page measurement.
+        if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
+            _coverage_section = attachment_analytics_section(
+                workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+            )
+            report_text, _attachment_tables_added = append_attachment_analytics_section(
+                report_text, workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+            )
+            if _attachment_tables_added:
+                source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                _attachment_pages = _rendered_page_count_preflight(
+                    report_text, str(parsed.get("title") or report_topic), question,
+                    str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
+                    source_manifest, report_presentation, report_tier, web_images=images,
+                    file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                )
+                if _attachment_pages is not None:
+                    preflight_pages = _attachment_pages
+                _final_chart_gate_changed = True
+
         if _final_chart_gate_changed or report_text != _text_before_final_guard or repr(charts) != _charts_before_final_guard:
             # A final sanitizer may have dropped table rows or otherwise changed
             # content. Audit again unless the page-band pass already did so.
@@ -25117,6 +25356,7 @@ async def generate_report(request: Request):
                     report_text=report_text, report_tier=report_tier, charts=charts,
                     images=images, sources=audit_sources, timeout_seconds=24.0,
                     store=evidence_store if _v2_used else None,
+                    attachment_only=file_only_report,
                 )
         # Carry retrieval diagnostics into the returned source manifest so Show
         # Report and PDF appendix can distinguish a live publisher-page fetch
@@ -25201,7 +25441,7 @@ async def generate_report(request: Request):
                 return {
                     "chartDensity": _chart_density_audit(chs, report_tier),
                     "publicationAudit": audit_report_publication(text, chs, images, _srcs, question=question),
-                    "sourceEvidenceAudit": _source_evidence_quality_audit(_srcs),
+                    "sourceEvidenceAudit": _report_source_evidence_audit(_srcs, attachment_only=file_only_report),
                     "structure": audit_report_structure(text),
                     "scopeCoverageAudit": audit_requested_report_scope(question, text, _srcs),
                 }
@@ -25622,12 +25862,27 @@ async def generate_report(request: Request):
             # source manifest is rendered separately by both artifact renderers.
             salvaged["report"] = normalize_report_markdown(salvaged.get("report", ""))
             salvaged_report = normalize_report_markdown(salvaged_report)
-            if file_only_report and workbook_analytics.get("kind") == "pms_strategy_performance" and workbook_source_id:
+            if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
                 try:
                     _salvage_titles = {str(c.get("title") or "").casefold().strip() for c in (salvaged.get("charts") or []) if isinstance(c, dict)}
                     _salvage_additions = []
-                    for _raw_chart in assign_workbook_source(workbook_analytics.get("charts") or [], workbook_source_id):
-                        _chart = _normalize_chart_spec(_raw_chart)
+                    _salvage_charts = assign_workbook_source(
+                        (workbook_analytics.get("charts") or []) if workbook_source_id else [],
+                        workbook_source_id,
+                        workbook_source_ids_by_name,
+                    )
+                    for _raw_chart in _salvage_charts:
+                        _raw_chart = dict(_raw_chart or {})
+                        _raw_chart["sourceOrigin"] = str(
+                            _raw_chart.get("sourceOrigin")
+                            or workbook_analytics.get("sourceOrigin")
+                            or "uploaded_attachment"
+                        )
+                        _raw_chart["_serverWorkbookEvidence"] = True
+                        _chart = _reattach_server_workbook_provenance(
+                            _raw_chart, _normalize_chart_spec(_raw_chart),
+                        )
+                        _chart = dict(_chart or {})
                         _title = str(_chart.get("title") or "").casefold().strip()
                         if _title in _salvage_titles or not _is_plausible_chart(_chart):
                             continue
@@ -25635,10 +25890,16 @@ async def generate_report(request: Request):
                     if _salvage_additions:
                         _start = len(salvaged.get("charts") or []) + 1
                         salvaged["charts"] = list(salvaged.get("charts") or []) + _salvage_additions
-                        salvaged_report += "\n\n" + f"Workbook-derived comparisons use reported values from the uploaded workbook. Source: [{workbook_source_id}]." + "\n\n" + workbook_charts_section(_salvage_additions, start_index=_start)
+                        _source_label = str(workbook_analytics.get("sourceLabel") or "attached data")
+                        salvaged_report += "\n\n" + workbook_charts_section(
+                            _salvage_additions, start_index=_start, source_label=_source_label,
+                        )
+                    salvaged_report, _salvage_tables_added = append_attachment_analytics_section(
+                        salvaged_report, workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+                    )
                     if workbook_analytics.get("keyStats"):
                         salvaged["keyStats"] = list(workbook_analytics["keyStats"])
-                    log.info("Workbook analytics salvage: deterministic charts added=%d", len(_salvage_additions))
+                    log.info("Attachment analytics salvage: deterministic charts added=%d", len(_salvage_additions))
                 except Exception as _salvage_chart_exc:
                     log.warning("Workbook chart salvage failed safely: %s", type(_salvage_chart_exc).__name__)
             try:
@@ -25674,6 +25935,7 @@ async def generate_report(request: Request):
                 report_text=salvaged_report if report_tier in ("detailed", "in_depth") else salvaged.get("report", ""),
                 report_tier=report_tier, charts=salvaged.get("charts", []),
                 images=salvaged.get("images", []), sources=source_manifest, timeout_seconds=18.0,
+                attachment_only=file_only_report,
             )
             _salv_theme = _resolve_theme(salvaged.get("theme"), question)
             if file_only_report:
@@ -25794,6 +26056,7 @@ async def generate_report(request: Request):
                 title=_sanitize_title(repaired_parsed.get("title", ""), question), question=question,
                 report_text=repaired_report, report_tier=report_tier, charts=repaired_charts,
                 images=repaired_imgs, sources=source_manifest, timeout_seconds=18.0,
+                attachment_only=file_only_report,
             )
             _rep_theme = _resolve_theme(repaired_parsed.get("theme"), question)
             repaired_public_report = sanitize_inline_citations(

@@ -1281,16 +1281,19 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
   // very first response in the thread).
   const [includeContext, setIncludeContext] = useState(true);
   const [selectedTier, setSelectedTier] = useState<ReportTier>(msg.reportData?.reportTier ?? initialTier);
+  const attachmentReport = (msg.reportFiles ?? []).some(file => file.status === 'attached');
 
   useEffect(() => {
     // Before a report is generated, mirror the current composer selection.
     // After generation, the report's own tier remains authoritative for PDF export.
-    if (msg.reportData?.reportTier) {
+    if (attachmentReport) {
+      setSelectedTier('detailed');
+    } else if (msg.reportData?.reportTier) {
       setSelectedTier(msg.reportData.reportTier);
     } else {
       setSelectedTier(initialTier);
     }
-  }, [msg.reportData?.reportTier, initialTier]);
+  }, [msg.reportData?.reportTier, initialTier, attachmentReport]);
 
   const rd = msg.reportData;
   const loading = msg.reportLoading ?? false;
@@ -1391,7 +1394,7 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
               <div className="report-progress-head">
                 <span className="report-progress-kicker">
                   <span className="dots" aria-hidden="true"><i/><i/><i/></span>
-                  {REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Report'} report in progress
+                  {attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Report')} report in progress
                 </span>
                 {typeof msg.reportProgressPercent === 'number' ? <span className="report-progress-pct">{Math.max(0, Math.min(100, msg.reportProgressPercent))}%</span> : null}
               </div>
@@ -1438,13 +1441,13 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
           )}
           {!loading && !done && !!error && eligible && (
             <div className="report-tier-status" aria-label="Selected report depth">
-              <span className="report-tier-status-label">Report depth</span>
-              <strong>{REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'In-Detail'}</strong>
-              <span>{REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.scope ?? 'Expanded analysis'}</span>
+              <span className="report-tier-status-label">{attachmentReport ? 'Report scope' : 'Report depth'}</span>
+              <strong>{attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'In-Detail')}</strong>
+              <span>{attachmentReport ? 'Planned from the attached data' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.scope ?? 'Expanded analysis')}</span>
             </div>
           )}
           {!loading && !done && !!error && eligible && (
-            <button className="report-btn" onClick={() => onGenerate(hasPriorContext ? includeContext : false, selectedTier)}>
+            <button className="report-btn" onClick={() => onGenerate(hasPriorContext ? includeContext : false, attachmentReport ? 'detailed' : selectedTier)}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
               Retry Report
             </button>
@@ -1500,7 +1503,7 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
             {/* v93 report masthead: everything shown is read from the generated report payload. */}
             <header className="report-masthead">
               <div className="report-masthead-kicker">
-                Growth Gradual · {REPORT_TIER_OPTIONS.find(o => o.value === (rd.reportTier ?? selectedTier))?.label ?? 'Research'} report
+                Growth Gradual · {attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === (rd.reportTier ?? selectedTier))?.label ?? 'Research')} report
                 {isDraftReport(rd) ? <span className="report-masthead-flag">Draft</span> : null}
               </div>
               {rd.title ? <h1 className="report-masthead-title">{rd.title}</h1> : null}
@@ -1678,9 +1681,13 @@ interface AttachedFile {
   type: string;
   content: string; // base64 data URL or raw text
   extractedText?: string;
+  indexImages?: AttachmentImagePayload[];
   status: 'attaching' | 'attached' | 'failed';
+  indexStatus?: 'indexed' | 'failed';
   error?: string;
+  indexError?: string;
 }
+interface AttachmentImagePayload { name: string; documentName?: string; mimeType: string; data: string; }
 interface PastedText {
   id: string;
   label: string;
@@ -1695,17 +1702,42 @@ const ACCEPTED_TYPES = [
   'text/plain', 'text/csv', 'text/markdown',
   'image/jpeg', 'image/png', 'image/webp', 'image/gif',
 ];
-// Browsers are inconsistent about the MIME type they report for .xlsx/.xls
-// (some send 'application/octet-stream' or ''), so spreadsheet files are
-// also recognised by extension as a fallback — see isSpreadsheetFile below.
+function attachmentExtension(f: { name: string }): string {
+  return f.name.split('.').pop()?.toLowerCase() ?? '';
+}
+function attachmentMimeType(f: { name: string; type: string }): string {
+  const byExtension: Record<string, string> = {
+    pdf: 'application/pdf', doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    csv: 'text/csv', txt: 'text/plain', md: 'text/markdown',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    webp: 'image/webp', gif: 'image/gif',
+  };
+  return byExtension[attachmentExtension(f)] ?? (f.type === 'application/octet-stream' ? '' : (f.type ?? ''));
+}
 function isSpreadsheetFile(f: { name: string; type: string }): boolean {
-  return (
-    f.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    f.type === 'application/vnd.ms-excel' ||
-    /\.(xlsx|xls)$/i.test(f.name)
-  );
+  if (/\.(csv|txt|md)$/i.test(f.name)) return false;
+  return /\.(xlsx|xls)$/i.test(f.name)
+    || f.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    || f.type === 'application/vnd.ms-excel';
+}
+function isPdfAttachmentFile(f: { name: string; type: string }): boolean {
+  return attachmentMimeType(f) === 'application/pdf' || /\.pdf$/i.test(f.name);
+}
+function isWordDocumentFile(f: { name: string; type: string }): boolean {
+  return /\.docx?$/i.test(f.name)
+    || /wordprocessingml\.document|application\/msword/i.test(attachmentMimeType(f));
+}
+function isImageAttachmentFile(f: { name: string; type: string }): boolean {
+  return attachmentMimeType(f).startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(f.name);
+}
+function isTextAttachmentFile(f: { name: string; type: string }): boolean {
+  return attachmentMimeType(f).startsWith('text/') || /\.(csv|txt|md)$/i.test(f.name);
 }
 const MAX_ATTACH = 10;
+const MAX_EXTRACTED_TEXT_CHARS = 1_000_000;
 function wordCount(s: string) { return s.trim().split(/\s+/).filter(Boolean).length; }
 function readAsDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -1720,7 +1752,7 @@ function readAsText(file: File): Promise<string> {
   });
 }
 
-async function extractPdfText(file: File): Promise<string> {
+async function extractPdfText(file: File): Promise<{ text: string; indexImages: AttachmentImagePayload[] }> {
   try {
     // Load PDF.js only when a PDF is actually processed; keep it out of the
     // main Next.js/Turbopack client dependency graph to avoid large compile peaks.
@@ -1731,20 +1763,47 @@ async function extractPdfText(file: File): Promise<string> {
     const bytes   = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const pdf       = await pdfjsLib.getDocument({ data: bytes }).promise;
-    const numPages  = Math.min(pdf.numPages, 30);
+    const maxPages = 500;
+    const numPages = Math.min(pdf.numPages, maxPages);
     const textParts: string[] = [];
+    const indexImages: AttachmentImagePayload[] = [];
+    let extractedChars = 0;
     for (let p = 1; p <= numPages; p++) {
       const page    = await pdf.getPage(p);
       const content = await page.getTextContent();
       const pageText = content.items
         .map((item: unknown) => (item as { str?: string }).str ?? '')
         .join(' ');
-      if (pageText.trim()) textParts.push(`[Page ${p}]\n${pageText.trim()}`);
+      if (pageText.trim()) {
+        const pageBlock = `[Page ${p}]\n${pageText.trim()}`;
+        const remaining = MAX_EXTRACTED_TEXT_CHARS - extractedChars;
+        if (remaining <= 0) break;
+        textParts.push(pageBlock.slice(0, remaining));
+        extractedChars += Math.min(pageBlock.length, remaining);
+      } else if (indexImages.length < 8) {
+        const page = await pdf.getPage(p);
+        const viewport = page.getViewport({ scale: 1.2 });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          await page.render({ canvasContext: ctx, viewport } as any).promise;
+          indexImages.push({
+            name: `${file.name} page ${p}`,
+            documentName: file.name,
+            mimeType: 'image/jpeg',
+            data: canvas.toDataURL('image/jpeg', 0.84).split(',')[1],
+          });
+        }
+      }
     }
-    return textParts.join('\n\n');
+    if (pdf.numPages > maxPages) textParts.push(`[Extraction note: processed ${maxPages} of ${pdf.numPages} PDF pages.]`);
+    if (extractedChars >= MAX_EXTRACTED_TEXT_CHARS) textParts.push('[Extraction note: PDF text was capped at 1,000,000 characters.]');
+    return { text: textParts.join('\n\n'), indexImages };
   } catch (e) {
     console.warn('[processFile] pdf.js extraction failed:', e);
-    return '';
+    return { text: '', indexImages: [] };
   }
 }
 
@@ -1754,8 +1813,8 @@ async function extractPdfText(file: File): Promise<string> {
  *  (see buildFilePayload / fileContext on the backend) — so multi-sheet
  *  data like fund/scheme performance tables survives intact rather than
  *  being dropped because the file wasn't a PDF or plain text.
- *  Fully blank rows are skipped; very large workbooks are capped per-sheet
- *  and in total so a single upload can't blow out the prompt budget. */
+ *  Fully blank rows are skipped. Extraction limits are explicit and any cap is
+ *  recorded in the indexed text so large workbooks are not silently truncated. */
 async function extractXlsxText(file: File): Promise<string> {
   try {
     const XLSX = await import('xlsx');
@@ -1766,24 +1825,51 @@ async function extractXlsxText(file: File): Promise<string> {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const wb = XLSX.read(bytes, { type: 'array' });
 
-    const MAX_SHEETS = 40;
-    const MAX_ROWS_PER_SHEET = 400;
-    const MAX_TOTAL_CHARS = 150_000; // generous — Gemini's context handles this easily;
-                                      // the Groq path auto-skips to Gemini for large prompts
+    const MAX_SHEETS = 100;
+    const MAX_ROWS_PER_SHEET = 20_000;
+    const MAX_TOTAL_CHARS = MAX_EXTRACTED_TEXT_CHARS;
 
     const parts: string[] = [];
+    const truncationNotes: string[] = [];
     let totalChars = 0;
-    for (const sheetName of wb.SheetNames.slice(0, MAX_SHEETS)) {
+    const sheetNames = wb.SheetNames.slice(0, MAX_SHEETS);
+    if (wb.SheetNames.length > MAX_SHEETS) truncationNotes.push(`Only the first ${MAX_SHEETS} of ${wb.SheetNames.length} sheets were extracted.`);
+    for (const sheetName of sheetNames) {
       if (totalChars >= MAX_TOTAL_CHARS) break;
       const ws = wb.Sheets[sheetName];
-      const csv = XLSX.utils.sheet_to_csv(ws, { blankrows: false });
-      const rows = csv.split('\n').filter(r => r.trim().length > 0).slice(0, MAX_ROWS_PER_SHEET);
+      const ref = ws['!ref'];
+      if (!ref) continue;
+      const range = XLSX.utils.decode_range(ref);
+      const rowLimit = Math.min(range.e.r, range.s.r + MAX_ROWS_PER_SHEET - 1);
+      const limitedRows = XLSX.utils.sheet_to_json(ws, {
+        header: 1,
+        blankrows: false,
+        defval: '',
+        raw: false,
+        range: { s: range.s, e: { r: rowLimit, c: range.e.c } },
+      }) as unknown[][];
+      const csv = limitedRows.map(row => row.map(value => {
+        const cell = String(value ?? '');
+        return /[",\r\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+      }).join(',')).join('\n');
+      if (range.e.r > rowLimit) truncationNotes.push(`${sheetName}: extracted ${MAX_ROWS_PER_SHEET} of ${range.e.r - range.s.r + 1} rows.`);
+      const rows = csv.split('\n').filter(r => r.trim().length > 0);
       if (!rows.length) continue;
       const block = `[Sheet: ${sheetName}]\n${rows.join('\n')}`;
+      const remaining = MAX_TOTAL_CHARS - totalChars;
+      if (block.length > remaining) {
+        parts.push(block.slice(0, remaining));
+        totalChars += remaining;
+        truncationNotes.push(`Workbook text reached the ${MAX_TOTAL_CHARS.toLocaleString()} character extraction limit.`);
+        break;
+      }
       totalChars += block.length;
       parts.push(block);
     }
-    return parts.join('\n\n').slice(0, MAX_TOTAL_CHARS);
+    const content = parts.join('\n\n');
+    return truncationNotes.length
+      ? `${content}\n\n[Extraction notes: ${truncationNotes.join(' ')}]`
+      : content;
   } catch (e) {
     console.warn('[processFile] xlsx extraction failed:', e);
     return '';
@@ -1808,26 +1894,34 @@ async function hashText(text: string): Promise<string> {
 }
 
 async function processFile(file: File): Promise<AttachedFile | null> {
-  const accepted = ACCEPTED_TYPES.includes(file.type) || file.type.startsWith('image/') || file.type.startsWith('text/') || isSpreadsheetFile(file);
+  const accepted = ACCEPTED_TYPES.includes(file.type) || file.type.startsWith('image/') || file.type.startsWith('text/')
+    || isSpreadsheetFile(file) || isPdfAttachmentFile(file) || isWordDocumentFile(file)
+    || isTextAttachmentFile(file) || isImageAttachmentFile(file);
   if (!accepted) return null;
   const id = Math.random().toString(36).slice(2, 10);
   // Return immediately with 'attaching' status
-  const base: AttachedFile = { id, name: file.name, size: file.size, type: file.type, content: '', status: 'attaching' };
+  const base: AttachedFile = { id, name: file.name, size: file.size, type: attachmentMimeType(file), content: '', status: 'attaching' };
   try {
     let content = '', extractedText = '';
+    let indexImages: AttachmentImagePayload[] = [];
     if (isSpreadsheetFile(file)) {
       content       = await readAsDataURL(file);
       extractedText = await extractXlsxText(file);
-    } else if (file.type.startsWith('text/')) {
-      extractedText = await readAsText(file);
+    } else if (isTextAttachmentFile(file)) {
+      const text = await readAsText(file);
+      extractedText = text.length > MAX_EXTRACTED_TEXT_CHARS
+        ? `${text.slice(0, MAX_EXTRACTED_TEXT_CHARS)}\n\n[Extraction note: text was capped at 1,000,000 characters.]`
+        : text;
       content = extractedText;
-    } else if (file.type === 'application/pdf') {
+    } else if (isPdfAttachmentFile(file)) {
       content       = await readAsDataURL(file);
-      extractedText = await extractPdfText(file);
+      const pdf = await extractPdfText(file);
+      extractedText = pdf.text;
+      indexImages = pdf.indexImages;
     } else {
       content = await readAsDataURL(file);
     }
-    return { ...base, content, extractedText, status: 'attached' };
+    return { ...base, content, extractedText, indexImages, status: 'attached' };
   } catch (e) {
     return { ...base, status: 'failed', error: (e as Error).message };
   }
@@ -1970,6 +2064,7 @@ export default function GrowthGradualChat() {
   const [attachLoading, setAttachLoading] = useState(false);
   const [ragIndexed, setRagIndexed]       = useState(false);
   const [ragIndexing, setRagIndexing]     = useState(false);
+  const hasCurrentAttachments = attachedFiles.some(file => file.status === 'attached' || file.status === 'attaching') || pastedTexts.length > 0;
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Full-width workspace: measure where the shell starts (below the navbar and
   // ticker, whose heights differ by breakpoint) so it fills the rest of the
@@ -2213,94 +2308,146 @@ export default function GrowthGradualChat() {
 
     const sessionId = getOrCreateSessionId();
     setRagIndexing(true);
+    const attachmentIds = new Set(results.filter((file): file is AttachedFile => file !== null).map(file => file.id));
     let indexedSuccessfully = false;
-    let indexingErrorMessage = '';
-    const filesToIndex = new Set<string>();
-
-    // ── Index attachments directly into rag-service ──
-    // Text is already extracted in the browser by processFile(); rag-service
-    // indexes it for chat and report retrieval. (The old background upload to the
-    // Paperly gateway was removed — those services are no longer deployed.)
     try {
-      const toIndex = results.filter((f): f is AttachedFile => f !== null && !!f.extractedText);
-      toIndex.forEach(f => filesToIndex.add(f.id));
-
-      if (toIndex.length > 0) {
-        const docs = await Promise.all(toIndex.map(async f => ({
-          id: await hashText(f.extractedText!),
-          name: f.name,
-          text: f.extractedText!,
-          source_type: 'file',
-          file_type: f.type,
-        })));
-
-        // ── Index with one automatic retry for a transient service connection failure ──
-        // Database/schema/credential errors are not retried: they are deterministic
-        // and should be shown immediately instead of looking like a cold start.
-        const tryIndex = async (): Promise<{ chunks_added?: number; total_chunks?: number; error?: string; detail?: string; code?: string; status?: number }> => {
-          const r = await fetch('/api/rag/index', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Request-ID': attachmentTraceId },
-            body: JSON.stringify({ session_id: sessionId, documents: docs }),
+      const readyFiles = results.filter((file): file is AttachedFile => file !== null);
+      const textFiles = readyFiles.filter(file => !!file.extractedText);
+      const documents = await Promise.all(textFiles.map(async file => ({
+        id: await hashText(file.extractedText!),
+        name: file.name,
+        text: file.extractedText!,
+        source_type: 'file',
+        file_type: file.type,
+      })));
+      const images: AttachmentImagePayload[] = [];
+      const binaryFiles: { name: string; mimeType: string; data: string }[] = [];
+      for (const file of readyFiles) {
+        images.push(...(file.indexImages ?? []));
+        if (isImageAttachmentFile(file) && file.content.includes(',')) {
+          images.push({
+            name: file.name,
+            documentName: file.name,
+            mimeType: attachmentMimeType(file) || 'image/jpeg',
+            data: file.content.split(',', 2)[1],
           });
-          const payload = await r.json().catch(() => ({}));
-          const body = (payload && typeof payload === 'object') ? payload : {};
-          return {
-            ...body,
-            status: r.status,
-            error: body.error || (typeof body.detail === 'string' ? body.detail : undefined) || (!r.ok ? `RAG service returned HTTP ${r.status}.` : undefined),
-          };
-        };
-
-        console.log('[RAG] Indexing', docs.length, 'doc(s) to pgvector-backed RAG service...');
-        let d = await tryIndex();
-
-        // Retry only a transient connection failure. A schema/credential/database
-        // error is deterministic and should be surfaced immediately, not hidden
-        // behind an unnecessary eight-second cold-start retry.
-        if (d.code === 'RAG_SERVICE_UNREACHABLE') {
-          console.warn('[RAG] RAG service unreachable on first attempt. Retrying in 8s...');
-          setStatusMsg('Reconnecting to file service…');
-          await new Promise(res => setTimeout(res, 8_000));
-          d = await tryIndex();
         }
-
-        if ((d.chunks_added ?? 0) > 0 || (d.total_chunks ?? 0) > 0) {
-          indexedSuccessfully = true;
-          setRagIndexed(true);
-          console.log('[RAG] Indexed', d.chunks_added, 'chunks ✅');
-        } else {
-          // Surface the actual service/schema error instead of disguising it as a cold start.
-          indexingErrorMessage = d.error || 'File indexing failed — check that pgvector is configured and the RAG service is healthy.';
-          console.error('[RAG] Index failed:', d);
-          setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
-            ...f,
-            status: 'failed' as const,
-            error: indexingErrorMessage,
-          }) : f));
+        if (isWordDocumentFile(file) && file.content.includes(',')) {
+          binaryFiles.push({
+            name: file.name,
+            mimeType: attachmentMimeType(file),
+            data: file.content.split(',', 2)[1],
+          });
         }
-      } else {
-        console.warn('[RAG] No extracted text available to index');
       }
 
-    } catch (e) {
-      indexingErrorMessage = e instanceof Error ? e.message : 'File indexing failed unexpectedly.';
-      console.warn('[RAG] Direct index failed:', e);
-      setAttachedFiles(prev => prev.map(f => filesToIndex.has(f.id) ? ({
-        ...f,
-        status: 'failed' as const,
-        error: indexingErrorMessage || 'Upload failed — please try again.',
-      }) : f));
+      if (documents.length || images.length || binaryFiles.length) {
+        const tryIndex = async (): Promise<Record<string, any> & { ok: boolean; httpStatus: number }> => {
+          try {
+            const response = await fetch('/api/rag/index', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Request-ID': attachmentTraceId },
+              body: JSON.stringify({ session_id: sessionId, documents, images, binaryFiles }),
+            });
+            const data = await response.json().catch(() => ({}));
+            return { ...data, ok: response.ok, httpStatus: response.status };
+          } catch (error) {
+            return { ok: false, httpStatus: 0, error: (error as Error)?.message || 'Network error' };
+          }
+        };
+
+        console.info('[RAG] Indexing attachment content', {
+          textDocuments: documents.length, imageDocuments: images.length, binaryDocuments: binaryFiles.length,
+        });
+        let result = await tryIndex();
+        if (!result.ok && [0, 502, 503, 504].includes(result.httpStatus)) {
+          console.warn('[RAG] RAG service did not respond successfully; retrying after a short wake-up delay');
+          setStatusMsg('File index is waking up, retrying…');
+          await new Promise(resolve => setTimeout(resolve, 8_000));
+          result = await tryIndex();
+        }
+
+        const vectorStatus = String(result.vector_persistence?.status || '');
+        indexedSuccessfully = result.ok && result.index_status === 'indexed'
+          && ['persisted', 'unchanged'].includes(vectorStatus);
+        const ocrByName = new Map<string, string>();
+        for (const extracted of Array.isArray(result.extracted_documents) ? result.extracted_documents : []) {
+          if (extracted?.name && extracted?.text) ocrByName.set(String(extracted.name).toLowerCase(), String(extracted.text));
+        }
+        const errorByName = new Map<string, string>();
+        for (const extractionError of Array.isArray(result.extraction_errors) ? result.extraction_errors : []) {
+          if (extractionError?.name && extractionError?.error) errorByName.set(String(extractionError.name).toLowerCase(), String(extractionError.error));
+        }
+        const indexedNames = new Set<string>();
+        for (const indexedDocument of Array.isArray(result.indexed_documents) ? result.indexed_documents : []) {
+          if (indexedDocument?.name && ['indexed', 'already_indexed'].includes(String(indexedDocument.status))) {
+            indexedNames.add(String(indexedDocument.name).toLowerCase());
+          }
+        }
+        const updatedResults = readyFiles.map(file => {
+          const ocrText = ocrByName.get(file.name.toLowerCase());
+          const textParts = [file.extractedText, ocrText].filter((text, index, parts) => !!text && parts.indexOf(text) === index);
+          const extractionError = errorByName.get(file.name.toLowerCase());
+          const fileIndexed = indexedNames.size > 0
+            ? indexedNames.has(file.name.toLowerCase())
+            : indexedSuccessfully && !extractionError;
+          return {
+            ...file,
+            extractedText: textParts.join('\n\n'),
+            indexStatus: fileIndexed ? 'indexed' as const : 'failed' as const,
+            indexError: extractionError || (!indexedSuccessfully
+              ? String(result.error || 'The attachment was not confirmed in the vector database.')
+              : undefined),
+          };
+        });
+        setAttachedFiles(previous => previous.map(file => {
+          const updated = updatedResults.find(item => item.id === file.id);
+          return updated ? updated : file;
+        }));
+
+        if (indexedSuccessfully) {
+          setRagIndexed(true);
+          console.info('[RAG] Attachment indexing confirmed', {
+            chunksAdded: result.chunks_added ?? 0,
+            totalChunks: result.total_chunks ?? 0,
+            vectorStore: result.vector_persistence?.store || result.vector_store || 'supabase_pgvector',
+            extractionWarnings: errorByName.size,
+          });
+          notifyFileReady(
+            'Files indexed',
+            errorByName.size
+              ? 'Readable file data was indexed; one or more attachments need extraction attention.'
+              : 'Readable file data is stored and ready to search.',
+          );
+        } else {
+          const detail = String(result.error || 'The RAG service did not confirm vector database persistence.');
+          console.error('[RAG] Attachment indexing was not confirmed', {
+            httpStatus: result.httpStatus,
+            indexStatus: result.index_status,
+            vectorStatus,
+            extractionWarnings: errorByName.size,
+          });
+          setStatusMsg('The file is attached, but indexing did not complete.');
+          setAttachedFiles(previous => previous.map(file => attachmentIds.has(file.id)
+            ? { ...file, indexStatus: 'failed' as const, indexError: errorByName.get(file.name.toLowerCase()) || detail }
+            : file));
+          notifyFileReady('Indexing needs attention', 'The file is attached, but its text was not confirmed in the search database.');
+        }
+      } else {
+        const detail = 'No readable text or image content was available to index.';
+        console.warn('[RAG] No extracted text or OCR-capable content was available');
+        setAttachedFiles(previous => previous.map(file => attachmentIds.has(file.id)
+          ? { ...file, indexStatus: 'failed' as const, indexError: detail }
+          : file));
+      }
+    } catch (error) {
+      console.warn('[RAG] Direct index failed:', error);
+      setAttachedFiles(previous => previous.map(file => attachmentIds.has(file.id)
+        ? { ...file, indexStatus: 'failed' as const, indexError: 'Indexing request failed. The attachment is still available for report generation.' }
+        : file));
     } finally {
       setRagIndexing(false);
       setStatusMsg('');
-      if (results.some(r => r !== null && !!r.extractedText)) {
-        if (indexedSuccessfully) {
-          notifyFileReady('Ready to search', 'Your file finished indexing — ask away.');
-        } else {
-          notifyFileReady('File indexing failed', 'The file is attached, but the AI could not index it. Check the RAG service and pgvector setup.');
-        }
-      }
     }
   }, [attachedFiles.length]);
 
@@ -3108,10 +3255,14 @@ export default function GrowthGradualChat() {
     // All report tiers must use the durable start + SSE route; the synchronous
     // route can take minutes and prevents progress from reaching the browser.
     const normalizedTier = String(reportTier || 'detailed').trim().toLowerCase();
-    const effectiveReportTier: ReportTier = ['detailed', 'in_depth'].includes(normalizedTier)
+    const hasAttachedData = files.some(file => file.status === 'attached');
+    const effectiveReportTier: ReportTier = hasAttachedData ? 'detailed' : ['detailed', 'in_depth'].includes(normalizedTier)
       ? normalizedTier as ReportTier
       : 'detailed';
-    console.info('[report] using background streaming pipeline', { reportTier: effectiveReportTier });
+    console.info('[report] using background streaming pipeline', {
+      reportTier: effectiveReportTier,
+      planningMode: hasAttachedData ? 'attachment_analysis' : effectiveReportTier,
+    });
     // Duplicate-submission guard: a double click or a retry while this
     // message's report is still in flight must not start a second job.
     if (reportInFlightRef.current.has(botMsgId)) {
@@ -3204,11 +3355,9 @@ export default function GrowthGradualChat() {
 
       for (const f of files) {
         if (f.extractedText) {
-          // Spreadsheets (e.g. multi-sheet fund/scheme performance workbooks)
-          // are dense, structured data that the report treats as its primary
-          // source — give them a much larger budget than prose file types so
-          // a 20+ sheet workbook doesn't get chopped down to its first sheet.
-          const textCap = isSpreadsheetFile(f) ? 150_000 : 12_000;
+          // Keep the complete browser extraction budget for each attachment;
+          // this is the report's primary source and the same text goes to RAG.
+          const textCap = MAX_EXTRACTED_TEXT_CHARS;
           fileTextParts.push(`[File: ${f.name}]\n${f.extractedText.slice(0, textCap)}`);
         }
 
@@ -3289,9 +3438,7 @@ export default function GrowthGradualChat() {
     };
 
     // Source-document concepts for the OKF bundle — one per attached file,
-    // independent of how much text made it into the LLM prompt (capped above
-    // at 12000 chars per file for the prompt; the OKF concept can carry more
-    // since it's just markdown, capped again server-side at 4000 chars).
+    // including extracted text even when the original prompt payload is capped.
     const sourceDocuments = files
       .filter(f => f.status === 'attached')
       .map(f => ({ name: f.name, text: f.extractedText || '', file_type: f.type }));
@@ -3337,7 +3484,9 @@ export default function GrowthGradualChat() {
           return { ok: false, status: started.status || 502, data: { error: safeError } };
         }
         const maxWaitMs = effectiveReportTier === 'in_depth' ? 60 * 60_000 : 30 * 60_000;
-        setStatusMsg(effectiveReportTier === 'in_depth'
+        setStatusMsg(hasAttachedData
+          ? 'Analyzing attached data and preparing the report…'
+          : effectiveReportTier === 'in_depth'
           ? 'Deep Research is running — collecting evidence and building the comprehensive report…'
           : 'In-Detail research is running — expanding evidence and building the detailed report…');
         try {
@@ -6230,10 +6379,14 @@ export default function GrowthGradualChat() {
                 {attachedFiles.map(f => (
                   <div key={f.id}
                     className={`file-chip${f.type.startsWith('image/') ? ' file-chip--img' : ''}`}
-                    title={f.status === 'failed' ? (f.error || 'Failed to read file') : f.name}
+                    title={f.indexError
+                      ? `${f.name}: ${f.indexError}`
+                      : f.indexStatus === 'indexed'
+                        ? `${f.name}: indexed in the vector database`
+                        : f.status === 'failed' ? (f.error || 'Failed to read file') : `${f.name}: attached; indexing pending`}
                     style={{
-                      borderColor: f.status === 'failed' ? '#fca5a5' : f.status === 'attaching' ? '#c4b5fd' : undefined,
-                      background:  f.status === 'failed' ? '#fef2f2' : f.status === 'attaching' ? '#f5f3ff' : undefined,
+                      borderColor: f.status === 'failed' ? '#fca5a5' : f.indexError ? '#fbbf24' : f.status === 'attaching' ? '#c4b5fd' : undefined,
+                      background:  f.status === 'failed' ? '#fef2f2' : f.indexError ? '#fffbeb' : f.status === 'attaching' ? '#f5f3ff' : undefined,
                     }}
                   >
                     {/* Image thumbnail OR icon dot */}
@@ -6250,7 +6403,11 @@ export default function GrowthGradualChat() {
                         ? `Loading ${f.name.length > 12 ? f.name.slice(0,10)+'…' : f.name}`
                         : f.status === 'failed'
                           ? `✗ ${f.name.length > 14 ? f.name.slice(0,12)+'…' : f.name}`
-                          : `✓ ${f.name.length > 16 ? f.name.slice(0,14)+'…' : f.name}`
+                          : f.indexError
+                            ? `⚠ ${f.name.length > 14 ? f.name.slice(0,12)+'…' : f.name}`
+                          : f.indexStatus === 'indexed'
+                            ? `✓ ${f.name.length > 14 ? f.name.slice(0,12)+'…' : f.name}`
+                            : `· ${f.name.length > 16 ? f.name.slice(0,14)+'…' : f.name}`
                       }
                     </span>
 
@@ -6299,13 +6456,13 @@ export default function GrowthGradualChat() {
                   disabled={streaming}
                   aria-haspopup="menu"
                   aria-expanded={reportTierMenuOpen}
-                  title="Choose report depth and style"
+                  title={hasCurrentAttachments ? 'Choose report style for attached-data analysis' : 'Choose report depth and style'}
                 >
                   <span className="report-tier-trigger-dot" aria-hidden="true" />
                   <span className="report-tier-trigger-text">
                     <span className="report-tier-trigger-kicker">Report</span>
                     <span className="report-tier-trigger-value">
-                      {REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail'}
+                      {hasCurrentAttachments ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail')}
                       <span className="report-tier-trigger-sep" aria-hidden="true"> · </span>
                       {REPORT_STYLE_OPTIONS.find(o => o.value === selectedReportStyle)?.label ?? 'Market Currents'}
                     </span>
@@ -6315,23 +6472,32 @@ export default function GrowthGradualChat() {
 
                 {reportTierMenuOpen && (
                   <div className="report-tier-menu" role="dialog" aria-label="Report settings">
-                    <div className="report-tier-menu-head"><span>Depth</span></div>
-                    <div className="report-seg" role="radiogroup" aria-label="Report depth">
-                      {REPORT_TIER_OPTIONS.map(option => (
-                        <button
-                          key={option.value}
-                          type="button"
-                          role="radio"
-                          aria-checked={selectedReportTier === option.value}
-                          className={`report-seg-item ${selectedReportTier === option.value ? 'is-selected' : ''}`}
-                          onClick={() => setSelectedReportTier(option.value)}
-                        >
-                          <span className="report-seg-label">{option.label}</span>
-                          <span className="report-seg-meta">{option.scope}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="report-tier-menu-note">{REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.description}</p>
+                    {hasCurrentAttachments ? (
+                      <>
+                        <div className="report-tier-menu-head"><span>Data scope</span></div>
+                        <p className="report-tier-menu-note">The report will be planned from the attached files, their available data points, and any readable tables or images.</p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="report-tier-menu-head"><span>Depth</span></div>
+                        <div className="report-seg" role="radiogroup" aria-label="Report depth">
+                          {REPORT_TIER_OPTIONS.map(option => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              role="radio"
+                              aria-checked={selectedReportTier === option.value}
+                              className={`report-seg-item ${selectedReportTier === option.value ? 'is-selected' : ''}`}
+                              onClick={() => setSelectedReportTier(option.value)}
+                            >
+                              <span className="report-seg-label">{option.label}</span>
+                              <span className="report-seg-meta">{option.scope}</span>
+                            </button>
+                          ))}
+                        </div>
+                        <p className="report-tier-menu-note">{REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.description}</p>
+                      </>
+                    )}
                     <div className="report-tier-menu-head"><span>Style</span></div>
                     <div className="report-style-grid" role="radiogroup" aria-label="Report style">
                       {REPORT_STYLE_OPTIONS.map(option => (

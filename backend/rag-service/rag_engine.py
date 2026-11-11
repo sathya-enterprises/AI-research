@@ -419,6 +419,24 @@ class RAGEngine:
             "stages": {key: round(value, 2) for key, value in stage_ms.items()},
             "total_ms": round((time.perf_counter() - index_started) * 1000, 2),
         }
+        successful_documents = sum(
+            1 for item in document_diagnostics
+            if item.get("status") in {"indexed", "already_indexed"}
+        )
+        vector_status = (
+            "persisted" if documents and successful_documents == len(documents)
+            else "partial_or_failed" if successful_documents
+            else "no_data"
+        )
+        result["vector_persistence"] = {
+            "store": "supabase_pgvector",
+            "status": vector_status,
+            "documentsAttempted": len(documents),
+            "documentsAvailable": successful_documents,
+            "chunksAdded": chunks_added,
+            "totalChunksInSession": sess.total,
+        }
+        result["diagnostics"]["vector_persistence"] = dict(result["vector_persistence"])
         if persist:
             storage = okf_store.storage_status()
             if not storage.get("writeAvailable"):
