@@ -156,6 +156,8 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
         places = list(_REGIONS)
     q_stems = _stem_words(question)
     place_first = bool(_PLACE_QUESTION_RE.search(str(question or "")))
+    # a question comparing several places ("India, China, Brazil and Nigeria") is about each of them
+    asked_places = [n for n in places if re.search(rf"(?<![A-Za-z]){re.escape(n)}(?![A-Za-z])", str(question or ""))]
     from utils.publisher_roles import PublisherRoles
     roles = PublisherRoles(store, question)
     counts: dict[str, set[str]] = {}
@@ -205,7 +207,7 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
             continue  # "CHIPS" inside "CHIPS and Science Act"
         if name not in places and name not in seed_names and _stem_words(name) <= q_stems:
             continue  # the topic itself ("Electric Vehicles" in an EV question)
-        if name in places and not place_first and _stem_words(name) <= q_stems:
+        if name in places and not place_first and _stem_words(name) <= q_stems and len(asked_places) < 2:
             continue  # the question's own scope ("India" in "India's EV market") is not an entity within it
         keep.append(name)
     keep.sort(key=lambda n: (0 if (place_first and n in places) else 1, -len(folded[n])))
@@ -232,7 +234,7 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
         entity.aliases.add("__body__" if name not in seed_names and (name in _BODIES or roles.is_body(name)) else "")
         # Stage N: the plan's scope is one country; another country the question does not name is context
         # (comparisons), at most a compact entity, never a deep-dive of an India-only report
-        if (scope and name in places and name.casefold() != scope.casefold() and name not in seed_names
+        if (scope and name in places and name.casefold() not in scope.casefold() and name not in seed_names
                 and name.casefold() not in str(question or "").casefold()):
             entity.aliases.add("__out_of_scope__")
         out.append(entity)
@@ -304,7 +306,7 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
         # "Services" is a word inside "Financial Services"/"IT Services": its text
         # matches are mostly other entities, so it cannot earn a deep-dive.
         own = entity.name.casefold()
-        return entity.name not in SYNONYMS and any(
+        return entity.name not in SYNONYMS and not entity.seeded and any(
             other != own and re.search(rf"(?<![a-z]){re.escape(own)}(?![a-z])", other) for other in names)
 
     for entity in entities:
@@ -332,7 +334,8 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
     for entity in list(tiers["deep_dive"]):
         own = entity.text_passages
         parent = _SUBSECTOR_OF.get(entity.name)
-        host = next((k for k in kept if own and (
+        # (an entity the plan compares is not a sub-part of another: India and China share many passages)
+        host = None if entity.seeded else next((k for k in kept if own and (
             len(own & k.text_passages) >= 0.6 * len(own)
             or (k.name == parent and len(own & k.text_passages) >= 0.4 * len(own)))), None)
         if host is not None:
@@ -357,8 +360,82 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
         from utils.report_outline import is_market_topic
         if not is_market_topic(question):
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
-    return assign_tiers(discover_entities(store, question=question, seeds=seeds, scope=scope),
-                        max_deep_dives=max_deep)
+    entities = discover_entities(store, question=question, seeds=seeds, scope=scope)
+    _seed_keys = {str(x).casefold() for x in seeds or []}
+    for _e in entities:  # an entity the plan named is seeded however it was discovered (table or text)
+        if _e.name.casefold() in _seed_keys:
+            _e.seeded = True
+    if question:
+        from utils.report_outline import is_market_topic
+        if not is_market_topic(question):
+            entities = _non_market_hygiene(entities, question=question, seeds=seeds or [], scope=scope, store=store)
+    return assign_tiers(entities, max_deep_dives=max_deep)
+
+
+def _measure_name(name: str) -> bool:
+    from utils.chart_titles import _MEASURE_WORDS
+    return bool(_MEASURE_WORDS.search(name) or re.search(
+        r"(?i)\b(?:mortality|expectancy|density|prevalence|incidence|coverage|expenditure|spending|beds|literacy|"
+        r"enrolment|enrollment|emissions?|consumption|output|yield)\b", name))
+
+
+def _table_peers(store, named: list[str]) -> set[str]:
+    """Labels that sit in the same table rows / header as at least two of the named entities: peers of the same
+    kind (a country table that lists India and China also lists Hong Kong and Lao PDR)."""
+    from utils.table_focus import _key, matches
+    peers: set[str] = set()
+    by_source: dict[str, list[str]] = {}  # a long table is split across passages of one source
+    for passage in getattr(store, "passages", None) or []:
+        if getattr(passage, "kind", "") != "table":
+            continue
+        lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
+        if len(lines) < 2:
+            continue
+        cells = [c.strip() for c in lines[0].split("|")] + [ln.split("|")[0].strip() for ln in lines[1:]]
+        cells += [ln.split("|")[1].strip() for ln in lines[1:] if ln.count("|") >= 1]  # after a rank column
+        by_source.setdefault(str(getattr(passage, "source_id", "")), []).extend(cells)
+    for cells in by_source.values():
+        if sum(1 for n in named if any(matches(c, n) for c in cells)) >= 2:
+            peers |= {_key(c) for c in cells if c}
+    return peers
+
+
+def _non_market_hygiene(entities: list[EntityEvidence], *, question: str, seeds: list[str], scope: str,
+                        store=None) -> list[EntityEvidence]:
+    """Stage N: table row labels are not all entities. A live health report gave deep-dives to "Female",
+    "Life Expectancy" (the question's own measure) and Indonesia (not asked about).
+
+    * a single ordinary word ("Female", "Population", "Definition") is not an entity unless the plan named it
+      or it is an acronym / a place;
+    * a name made only of the question's own words is the topic, not an entity within it;
+    * a place outside the scope the question names is out of scope (compact at most), however it was found."""
+    try:
+        from utils.official_data import COUNTRIES
+        places = set(COUNTRIES.values()) | set(_REGIONS)
+    except Exception:  # pragma: no cover
+        places = set(_REGIONS)
+    seeded = {s.casefold() for s in seeds}
+    q_stems = _stem_words(question)
+    in_scope = f"{scope} {question}".casefold()
+    from utils.table_focus import _key, focus_entities
+    named = focus_entities(f"{scope} {question}")
+    peers = _table_peers(store, named) if (store is not None and len(named) >= 2) else set()
+    kept = []
+    for e in entities:
+        name = e.name
+        if name.casefold() in seeded or e.seeded or name in SYNONYMS:
+            kept.append(e)
+            continue
+        if name not in places and " " not in name.strip() and not name.isupper() and not re.search(r"\d", name):
+            continue  # one ordinary capitalised word from a table row
+        if name not in places and _stem_words(name) <= q_stems:
+            continue  # the question's own subject / measure
+        if name not in places and not name.isupper() and _measure_name(name):
+            continue  # "Infant Mortality Rate", "Population Density": a measure, not an entity
+        if scope and (name in places or _key(name) in peers) and name.casefold() not in in_scope:
+            e.aliases.add("__out_of_scope__")
+        kept.append(e)
+    return kept
 
 
 def tier_summary(tiers: dict[str, list[EntityEvidence]]) -> dict:

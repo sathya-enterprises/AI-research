@@ -45,6 +45,8 @@ _SECTOR_ALIAS_RE = {
 def clean_label(label: str) -> str:
     """Display label: no markdown emphasis, no leading rank number ("1 Data Processing Services")."""
     text = re.sub(r"[*_`]", "", str(label or "")).strip()
+    # flags / pictographs in a header ("🇨🇳 China") are decoration, not part of the name
+    text = re.sub("[\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF☀-➿️]+", "", text).strip()
     return _RANK_PREFIX_RE.sub("", text).strip() or text
 
 

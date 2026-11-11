@@ -472,8 +472,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         min_year = window_start(question, _date.fromisoformat(today[:10])).year
     except Exception:
         min_year = None
+    from utils.table_focus import focus_entities as _focus_entities
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
-                                                     today=today)
+                                                     today=today, focus=_focus_entities(question))
     table_chart_count = len(candidates) + len(chart_drops)
     series_warnings: list[dict] = []  # Stage M: sudden breaks in otherwise stable series (kept, said out loud)
     # Data first (Stage F): charts planned from fetched datasets before writing; they go through

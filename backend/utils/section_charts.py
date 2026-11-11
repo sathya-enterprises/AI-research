@@ -20,7 +20,11 @@ from types import SimpleNamespace
 from utils.chart_titles import (clean_label, data_title, header_is_data, homogeneous_rows, label_entities,
                                 non_comparable_metric, period_of)
 
-_NUM_CELL_RE = re.compile(r"^\(?([+\-−–]?)\s*(?:₹|\$|rs\.?\s*)?([\d,]*\.?\d+)\s*(%|x|pts|bps|cr|crore|bn|mn)?\)?$", re.I)
+# Stage N: units of any domain ("67.7 yrs", "12.5 GW", "1,234 MW", "€ 40 bn"), not only market units
+_NUM_CELL_RE = re.compile(
+    r"^\(?([+\-−–]?)\s*(?:₹|\$|€|£|¥|us\$|rs\.?\s*)?([\d,]*\.?\d+)\s*"
+    r"(%|x|pts|bps|cr|crore|bn|mn|lakh|million|billion|trillion|yrs?|years?|gw|mw|kw|gwh|mwh|twh|kwh|bu|"
+    r"tonnes?|mt|kt|kg|km|ha|‰)?\)?$", re.I)
 _PERIOD_RE = re.compile(
     r"^(?:Q[1-4](?:\s*FY\s*\d{2,4}|\s*CY?\s*\d{2,4}|\s*\d{4})?|FY\s*\d{2,4}(?:-\d{2,4})?|(?:19|20)\d{2}(?:-\d{2})?|"
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*'?\d{2,4}|H[12]\s*FY\s*\d{2,4})$", re.I)
@@ -298,10 +302,18 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     if len(period_cols) < 2 and is_time_axis([row_period_label(r[0]) for r in rows]):
         cols = [c for c in numeric_cols if unit_of([c]) is not None and not non_comparable_metric(header[c])
                 and not re.search(r"(?i)\b(?:total|overall|aggregate|net)\b", header[c])]
-        cols = related_columns(cols, header, rows)
+        # entity columns chosen by the question (utils.table_focus) are compared as they are
+        cols = cols if _only_cols is not None else related_columns(cols, header, rows)
         if len(cols) >= 2 and unit_of(cols) is not None:
             cols = cols[:MAX_COLUMN_SERIES]
             unit = unit_of(cols) or ""
+            # Stage N: newest-first source tables are plotted oldest -> newest
+            from utils.chart_lint import time_key as _time_key
+            try:
+                if _time_key(row_period_label(rows[0][0])) > _time_key(row_period_label(rows[-1][0])):
+                    rows = list(reversed(rows))
+            except Exception:
+                pass
             if not unit:
                 hdr_unit = _ROW_UNIT_RE.search(rows[0][0] or "")
                 unit = hdr_unit.group(0).strip(" ()") if hdr_unit else ""
@@ -325,8 +337,25 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
                     s_["name"] = rest[:1].upper() + rest[1:] if rest else s_["name"]
             if len(series) >= 2:
                 labels = [row_period_label(r[0]) for r in rows]
-                title = data_title(metric=(_metric or series_metric([s_["name"] for s_ in series])), labels=labels[:MAX_BAR_POINTS],
-                                   period=f"{labels[0]} to {labels[-1]}", unit=unit)
+                # Stage N: the series are entities (countries, companies): the measure comes from the table's
+                # caption, or the page title when the caption is generic ("The data", "Full data table by year")
+                from utils.chart_titles import caption_metric, looks_like_entity
+                if all(looks_like_entity(clean_label(header[c])) for c in cols):  # the source headers, not trimmed names
+                    _caption = caption_metric(heading)
+                    if not _caption or re.search(r"(?i)^(?:the\s+)?(?:full\s+)?data(?:\s+table)?\b|^table\b|^information$",
+                                                 _caption):
+                        _caption = caption_metric(re.split(r"\s+[|–—:]\s+|:\s", str(getattr(passage, "title", "") or ""))[0])
+                    _caption = re.sub(r"(?i)\s+by\s+country\b.*$", "", _caption).strip()
+                    if _caption and not looks_like_entity(_caption) or (_caption and len(_caption.split()) >= 2):
+                        title = data_title(metric=_caption, labels=[s_["name"] for s_ in series],
+                                           period=f"{labels[0]} to {labels[-1]}", unit=unit)
+                        _metric = _caption
+                    else:
+                        title = data_title(metric=(_metric or series_metric([s_["name"] for s_ in series])),
+                                           labels=labels[:MAX_BAR_POINTS], period=f"{labels[0]} to {labels[-1]}", unit=unit)
+                else:
+                    title = data_title(metric=(_metric or series_metric([s_["name"] for s_ in series])), labels=labels[:MAX_BAR_POINTS],
+                                       period=f"{labels[0]} to {labels[-1]}", unit=unit)
                 if _qtd:
                     title = f"{title} ({QTD_LABEL})"
                 spec = {"type": "line" if len(rows) >= 6 else "grouped_bar", "title": title, "xLabel": "Period",
@@ -459,7 +488,8 @@ def merge_continuations(passages: list) -> list:
             merged = SimpleNamespace(
                 passage_id=prev.passage_id, source_id=prev.source_id, kind=prev.kind,
                 text=str(prev.text).rstrip() + "\n" + "\n".join(rows), reliability=prev.reliability,
-                publisher=getattr(prev, "publisher", ""),
+                publisher=getattr(prev, "publisher", ""), title=getattr(prev, "title", ""),
+                url=getattr(prev, "url", ""), published=getattr(prev, "published", ""),
                 merged_ids=list(getattr(prev, "merged_ids", None) or [prev.passage_id]) + [passage.passage_id])
             out[-1] = merged
             continue
@@ -542,8 +572,51 @@ def clip_to_window(chart: PlannedChart, min_year: int | None) -> str:
     return ""
 
 
+_RANK_HEADER = re.compile(r"(?i)^(?:#|rank(?:ing)?|s\.?\s?no\.?|sl\.?\s?no\.?|sr\.?\s?no\.?|no\.?|serial(?: no\.?)?)$")
+
+
+def _without_rank_column(passage):
+    """A "# | Country | ..." table charted by its name column: the leading rank / serial column is dropped.
+    Each remaining row is a substring of the source row, so evidence quotes still match the passage."""
+    lines = str(passage.text or "").splitlines()
+    table = [ln for ln in lines if " | " in ln]
+    if len(table) < 3:
+        return passage
+    header = _split_row(table[0])
+    if len(header) < 3 or not _RANK_HEADER.match(header[0].strip()):
+        return passage
+    out = [(" | ".join(_split_row(ln)[1:]) if " | " in ln else ln) for ln in lines]
+    import copy
+    shadow = copy.copy(passage)
+    shadow.text = "\n".join(out)
+    return shadow
+
+
+def _focused_charts(passage, index: int, qtd_start, focus: list[str] | None, min_year: int | None) -> list[PlannedChart]:
+    """Stage N: a wide table is narrowed to the question's entities and window (utils.table_focus) before
+    charting; any other table is charted as before. A leading rank column is never the label."""
+    passage = _without_rank_column(passage)
+    if focus or min_year:
+        lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
+        if len(lines) >= 3:
+            from utils.table_focus import plan as _focus_plan
+            header = _split_row(lines[0])
+            rows = [r for r in (_split_row(ln) for ln in lines[1:]) if len(r) == len(header) and r[0]]
+            narrowed = _focus_plan(header, rows, entities=list(focus or []), min_year=min_year)
+            if narrowed["cols"] is not None or narrowed["rows"] is not None:
+                charts = charts_from_passage(passage, index, qtd_start, _only_cols=narrowed["cols"],
+                                             _only_rows=narrowed["rows"])
+                for chart in charts:
+                    chart.spec["basisNote"] = (f"{chart.spec.get('basisNote') or ''} Shown: the "
+                                               f"{narrowed['reason']} of a larger source table.").strip()
+                if charts:
+                    return charts
+    return charts_from_passage(passage, index, qtd_start)
+
+
 def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None = None,
-                           min_reliability: float = 0.5, today: str | None = None) -> tuple[list[PlannedChart], list[dict]]:
+                           min_reliability: float = 0.5, today: str | None = None,
+                           focus: list[str] | None = None) -> tuple[list[PlannedChart], list[dict]]:
     """Charts from every table/calculated passage; returns (verified charts, dropped log).
 
     Dropped before writing: unverifiable data, periods entirely before the
@@ -551,7 +624,7 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
     """
     charts, dropped, seen, titles = [], [], set(), {}
     for passage in merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"}]):
-        for chart in charts_from_passage(passage, len(charts) + len(dropped) + 1, qtd_start_month(today)):
+        for chart in _focused_charts(passage, len(charts) + len(dropped) + 1, qtd_start_month(today), focus, min_year):
             signature = tuple(sorted((a, b, round(v, 4)) for a, b, v in chart.points))
             if signature in seen:
                 continue
