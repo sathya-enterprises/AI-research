@@ -266,3 +266,43 @@ def test_gap_queries_round_robin_with_scope_first():
                        "measles vaccination coverage Nigeria Lagos statistics table 2018 to 2024",
                        "number of health workers Nigeria annual report data xlsx OR pdf"]
     assert gap_queries([dict(s, covered=True) for s in slots], _plan(), cap=4) == []
+
+
+# --- N5: publisher bodies by role; measure-plan seeds -----------------------------------------------------
+from utils.entity_research import plan_entity_queries  # noqa: E402
+from utils.entity_tiers import entity_tiers  # noqa: E402
+from utils.publisher_roles import PublisherRoles  # noqa: E402
+
+
+def _p(pid, text, url="https://news.example.com/a", publisher="", reliability=0.8):
+    return types.SimpleNamespace(passage_id=pid, source_id=pid.split(".")[0], text=text, kind="text", url=url,
+                                 publisher=publisher, reliability=reliability)
+
+
+def test_publisher_roles_from_the_runs_own_sources():
+    store = types.SimpleNamespace(passages=[
+        _p("S1.1", "The Directorate of Fisheries Statistics (DFS) said output rose. DFS data show 4 million tonnes."),
+        _p("S2.1", "Coastal Harvest Ltd reported record landings; Coastal Harvest Ltd expanded its fleet.",
+           url="https://coastalharvest.com/ir", publisher="Coastal Harvest Ltd"),
+        _p("S3.1", "Analysts say Coastal Harvest Ltd leads; Coastal Harvest Ltd shares rose."),
+        _p("S4.1", "According to SeaWatch, stocks fell. SeaWatch data show decline.", url="https://seawatch.org/r"),
+        _p("S5.1", "SeaWatch report: catches fell.", url="https://seawatch.org/x", publisher="SeaWatch")])
+    roles = PublisherRoles(store, "How has fish production changed in Kerala?")
+    assert roles.is_body("DFS") and roles.is_body("Ministry of Fisheries") and roles.is_body("SeaWatch")
+    assert not roles.is_body("Coastal Harvest Ltd") and not roles.is_body("Kerala")
+    assert not PublisherRoles(store, "What does the Ministry of Fisheries plan?").is_body("Ministry of Fisheries")
+
+
+def test_seeded_entities_are_candidates_and_bodies_are_not_searched():
+    text = ("Gujarat added capacity. Gujarat leads. Rajasthan grew. MNRE data show growth; MNRE said targets. "
+            "The Ministry of New and Renewable Energy (MNRE) publishes figures.")
+    store = types.SimpleNamespace(passages=[_p(f"S{i}.1", text, url=f"https://site{i}.com/x") for i in range(1, 5)]
+                                  + [_p("S9.1", "Kerala installed rooftop units.", url="https://k.com/x")])
+    tiers = entity_tiers(store, tier="in_depth", question="Which Indian states lead solar capacity?",
+                         seeds=["Kerala", "Bihar"])
+    every = {e.name: e for v in tiers.values() for e in v}
+    assert every["MNRE"].role == "body" and every["MNRE"].tier != "deep_dive"
+    assert every["Kerala"].seeded and "Bihar" not in every  # a seed needs at least one source
+    searched = [e for e, _ in plan_entity_queries(tiers, cap=30, window="2021-2025",
+                                                  question="Which Indian states lead solar capacity?")]
+    assert searched[0] == "Kerala" and "MNRE" not in searched

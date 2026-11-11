@@ -22721,7 +22721,10 @@ async def generate_report(request: Request):
             from utils.report_pipeline_v2 import run_pipeline_v2
             _v2_today = _v2_date.today()
             from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
-            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question) if report_tier == "in_depth" else None
+            # Stage N: the entities the measure plan names are entity candidates (states, companies, programmes)
+            _mp_seed_names = [e for m in (getattr(locals().get("_measure_plan"), "measures", None) or []) for e in m.entities]
+            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question,
+                                      seeds=_mp_seed_names) if report_tier == "in_depth" else None
             _v2_entity_stats: dict = {}
             if _v2_tiers:
                 record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
@@ -22769,7 +22772,7 @@ async def generate_report(request: Request):
                         source_manifest = build_source_registry(enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
                         record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
                         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                                  "sourceSummary": evidence_store.source_summary(),
@@ -22798,7 +22801,7 @@ async def generate_report(request: Request):
                                 source_manifest = build_source_registry(enriched, source_documents)
                                 from utils.evidence_store import build_evidence_store as _rebuild_store
                                 evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
                         record_research_stage("gap_agent", _agent_note)
                 except Exception as _gap_exc:
                     log.warning("Report: data-gap agent skipped: %s", type(_gap_exc).__name__)

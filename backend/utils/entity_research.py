@@ -44,7 +44,12 @@ def plan_entity_queries(tiers: dict, *, cap: int, window: str = "", question: st
     """(entity, query) pairs: compact entities first (most table evidence), then the weakest deep-dives."""
     if cap <= 0 or not tiers:
         return []
-    compact = sorted(tiers.get("compact", []), key=lambda e: (-len(e.table_passages), -len(e.good_text_sources), e.name))
+    # Stage N: publishers / governing bodies are where data comes from, not subjects to research; the
+    # entities the measure plan named come first (the planner expects numbers for them).
+    compact = sorted((e for e in tiers.get("compact", []) + tiers.get("coverage_note", [])
+                      if getattr(e, "role", "") != "body" and (e.tier == "compact" or getattr(e, "seeded", False))),
+                     key=lambda e: (0 if getattr(e, "seeded", False) else 1, -len(e.table_passages),
+                                    -len(e.good_text_sources), e.name))
     weak_deep = sorted((e for e in tiers.get("deep_dive", []) if len(e.good_text_sources) < 5),
                        key=lambda e: len(e.good_text_sources))
     templates, topic = QUERY_TEMPLATES, ""
