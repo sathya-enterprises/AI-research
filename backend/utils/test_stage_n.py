@@ -181,3 +181,37 @@ def test_pick_links_skips_known_urls_and_respects_limit():
     picked = pick_links(rows, measure_terms=m, question_terms=q, limit=5,
                         existing_urls={"https://www.who.int/a/coverage.csv"})
     assert [p["url"] for p in picked] == ["https://www.who.int/a/vaccination.xlsx"]
+
+
+# --- N3: chart titles for entity-column tables; same-title dedupe by values -------------------------------
+import types  # noqa: E402
+
+from utils.chart_titles import caption_metric, looks_like_entity  # noqa: E402
+from utils.section_charts import build_chart_candidates, charts_from_passage  # noqa: E402
+
+
+def _table(pid, caption, rows, reliability=0.9):
+    text = f"TABLE 1 — {caption}\n" + "\n".join(rows)
+    return types.SimpleNamespace(passage_id=pid, source_id=pid.split(".")[0], kind="table", text=text,
+                                 reliability=reliability, title=caption)
+
+
+def test_entity_column_takes_measure_from_caption():
+    assert caption_metric("Share of electricity from solar (%), 2021–2025") == "Share of electricity from solar (%)"
+    assert looks_like_entity("Andhra Pradesh") and not looks_like_entity("Installed capacity (MW)")
+    p = _table("S1.1", "Share of electricity from solar (%), 2021–2025",
+               ["Year | India", "2021 | 3.91", "2022 | 5.32", "2023 | 6.02", "2024 | 7.03"])
+    chart = charts_from_passage(p, 1)[0]
+    assert chart.spec["title"] == "Share of electricity from solar (%): India, 2021 to 2024"
+    assert chart.spec["metric"] == "Share of electricity from solar (%)"
+
+
+def test_same_generic_title_with_different_values_is_kept():
+    rows = lambda vals: ["Year | India"] + [f"{2021 + i} | {v}" for i, v in enumerate(vals)]  # noqa: E731
+    store = types.SimpleNamespace(passages=[
+        _table("S1.1", "Installed capacity (GW)", rows([40, 54, 67, 82])),
+        _table("S2.1", "Installed capacity (GW)", rows([39, 41, 44, 47])),      # same title, other values: kept
+        _table("S3.1", "Installed capacity (GW)", rows([40, 54, 67, 82.1]))])   # same title, same values: dropped
+    charts, dropped = build_chart_candidates(store)
+    assert len(charts) == 2, [c.spec["title"] for c in charts]
+    assert any("duplicate" in d["reason"] for d in dropped)

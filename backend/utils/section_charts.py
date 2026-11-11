@@ -362,8 +362,18 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
                            labels=labels[:MAX_LINE_SERIES], periods=[header[c] for c in period_cols])
     else:
         metric = header[numeric_cols[0]]
-        title = data_title(metric=metric, labels=labels[:MAX_BAR_POINTS],
-                           period=period_of([metric], heading, labels), unit=unit)
+        # Stage N: "Year | India" - the column names the entity; the table's own caption names the measure
+        # (titles were "India: 2021, 2022, 2023 and 2 others" and every such chart looked like a duplicate).
+        from utils.chart_titles import caption_metric, looks_like_entity
+        entity_metric = caption_metric(heading) if (looks_like_entity(metric) and heading and is_time_axis(
+            [row_period_label(r[0]) for r in rows])) else ""
+        if entity_metric:
+            shown = [row_period_label(r[0]) for r in rows]
+            title = data_title(metric=entity_metric, labels=[metric], period=f"{shown[0]} to {shown[-1]}",
+                               unit="" if unit and unit in entity_metric else unit)
+        else:
+            title = data_title(metric=metric, labels=labels[:MAX_BAR_POINTS],
+                               period=period_of([metric], heading, labels), unit=unit)
     plotted_periods = [header[c] for c in (period_cols if len(period_cols) >= 2 else numeric_cols[:1])]
     if _future or (qtd_start and plotted_periods and all(_is_future(h, qtd_start) for h in plotted_periods)):
         title = f"{title} (forecast)"
@@ -411,6 +421,8 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
                 points.append((header[col], shown, parsed[0]))
         spec = {"type": "bar", "title": title, "xLabel": header[0] or "Item",
                 "yLabel": header[col] or unit or "Value", "unit": unit, "series": [{"name": header[col] or "Value", "data": data}]}
+        if entity_metric:
+            spec.update({"metric": entity_metric, "yLabel": unit or entity_metric})
     spec.update({"source": [passage.source_id], "sourceIds": [passage.source_id], "evidenceBasis":
                  "calculated" if passage.kind == "calculated" else "reported",
                  "basisNote": f"Values copied from evidence passage {passage.passage_id}."})
@@ -495,7 +507,7 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
     Dropped before writing: unverifiable data, periods entirely before the
     requested window, and data from sources below ``min_reliability``.
     """
-    charts, dropped, seen, titles = [], [], set(), set()
+    charts, dropped, seen, titles = [], [], set(), {}
     for passage in merge_continuations([p for p in store.passages if p.kind in {"table", "calculated"}]):
         for chart in charts_from_passage(passage, len(charts) + len(dropped) + 1, qtd_start_month(today)):
             signature = tuple(sorted((a, b, round(v, 4)) for a, b, v in chart.points))
@@ -505,14 +517,19 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
             reason = verify_chart(chart, passage.text) or _outside_window(chart, min_year)
             if not reason and passage.kind != "calculated" and passage.reliability < min_reliability:
                 reason = f"source reliability {passage.reliability:.2f} below {min_reliability:.2f}"
-            if not reason and str(chart.spec.get("title") or "").casefold() in titles:
-                reason = "same title as an earlier chart (duplicate view)"
+            # Stage N: a repeated title is a duplicate only when the values repeat too; otherwise it is another
+            # subject that happens to share a generic title (unique_titles tells them apart later).
+            values = {round(v, 4) for _, _, v in chart.points}
+            earlier = titles.get(str(chart.spec.get("title") or "").casefold(), [])
+            if not reason and any(len(values & e) >= 0.6 * max(1, min(len(values), len(e))) for e in earlier):
+                reason = "same title and values as an earlier chart (duplicate view)"
             if reason:
                 chart.status, chart.drop_reason = "dropped", reason
                 dropped.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": passage.passage_id, "reason": reason})
                 continue
             charts.append(chart)
-            titles.add(str(chart.spec.get("title") or "").casefold())
+            titles.setdefault(str(chart.spec.get("title") or "").casefold(), []).append(
+                {round(v, 4) for _, _, v in chart.points})
             if len(charts) >= max_charts:
                 return charts, dropped
     return charts, dropped
