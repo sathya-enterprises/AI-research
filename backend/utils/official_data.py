@@ -189,6 +189,8 @@ class Dataset:
     retrieved: str
     latest: int | None = None
     notes: list[str] = field(default_factory=list)
+    fit: str = "direct"   # Stage N: "stand-in" = a related indicator of the same subject, labelled as such
+    measure: str = ""     # the measure of the plan this dataset serves
 
 
 # ── planning ─────────────────────────────────────────────────────────────────────────────────────
@@ -202,10 +204,13 @@ TODAY: {today}
 
 COUNTRY / REGION CODES: {codes}
 
-Return {{"datasets": [{{"id": "<catalog id>", "entities": ["<code>", ...], "why": "<one line>"}}]}}
+Return {{"datasets": [{{"id": "<catalog id>", "entities": ["<code>", ...], "measure": "<the measure / part of the
+question it serves>", "fit": "direct" | "stand-in", "why": "<one line>"}}]}}
 Rules: at most {limit} datasets; 1-5 entities each (the countries the question is about, plus "WLD" or a peer only
-when a comparison helps); never pick a dataset only loosely related to the question; return {{"datasets": []}}
-when nothing in the catalog measures the question's subject."""
+when a comparison helps); "direct" = the dataset measures that quantity itself; "stand-in" = a closely related
+indicator of the SAME subject (e.g. share of electricity from solar for solar capacity); never pick a whole-economy
+indicator (GDP, FDI, credit, inflation) for a sector-specific measure; return {{"datasets": []}} when nothing in the
+catalog measures the question's subject."""
 
 
 def mentioned_entities(question: str) -> list[str]:
@@ -222,6 +227,26 @@ def mentioned_entities(question: str) -> list[str]:
 
 def _stem(word: str) -> str:
     return word[:-1] if len(word) > 4 and word.endswith("s") else word
+
+
+# words that say HOW something is measured, not WHAT: they cannot tie a dataset to a measure on their own
+_GENERIC_MEASURE_WORDS = {
+    "annual", "total", "share", "rate", "growth", "number", "value", "level", "index", "net", "inflow", "outflow",
+    "current", "constant", "investment", "capacity", "percent", "per", "capita", "change", "average", "data",
+    "statistic", "trend", "year", "people", "population", "million", "billion", "us$", "usd", "gdp", "sector",
+    "private", "public", "domestic", "national", "country", "economy", "the", "and", "for", "from", "with", "into",
+}
+
+
+def subject_words(text: str) -> set[str]:
+    return {_stem(w) for w in re.findall(r"[a-z][a-z0-9]{2,}", str(text or "").casefold())} - _GENERIC_MEASURE_WORDS
+
+
+def fits_measure(entry: "CatalogEntry", measure_text: str) -> bool:
+    """True when the dataset shares a SUBJECT word (not a how-measured word) with the measure it is said to serve:
+    "Share of electricity from solar" fits "installed solar capacity"; "Domestic credit to private sector" does not
+    fit "investment in renewable energy projects"."""
+    return bool(subject_words(f"{entry.title} {entry.keywords}") & subject_words(measure_text))
 
 
 def keyword_plan(question: str, limit: int) -> list[dict]:
@@ -269,7 +294,14 @@ async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, 
             entities = [str(e).strip().upper() for e in item.get("entities") or [] if str(e).strip().upper() in COUNTRIES][:5]
             if not entities:
                 entities = mentioned_entities(question)[:4] or ["WLD"]
-            plan.append({"id": entry_id, "entities": entities, "why": str(item.get("why") or "")[:200]})
+            measure = str(item.get("measure") or "")[:160]
+            fit = "stand-in" if str(item.get("fit") or "").strip().casefold().startswith("stand") else "direct"
+            # Stage N: the planner's word is checked against the subject words of the measure (or the question)
+            if not fits_measure(CATALOG[entry_id], measure or measures or question):
+                note["rejected"].append({"id": entry_id, "reason": f"does not measure the subject of '{measure or 'the question'}'"})
+                continue
+            plan.append({"id": entry_id, "entities": entities, "why": str(item.get("why") or "")[:200],
+                         "measure": measure, "fit": fit})
     else:
         note["method"] = "keywords (planner unavailable)"
         plan = keyword_plan(question, limit)
@@ -436,10 +468,15 @@ def as_source(ds: Dataset) -> dict:
     header = "Year | " + " | ".join(names)
     rows = [f"{y} | " + " | ".join(_fmt(ds.series[n][i], e.unit) for n in names) for i, y in enumerate(ds.years)]
     title = f"{e.publisher}: {e.title} ({e.unit}), {ds.years[0]}-{ds.years[-1]}"
+    fit_line = []
+    if ds.fit == "stand-in" and ds.measure:
+        fit_line = [f"NOTE — context indicator for \"{ds.measure}\": this series measures {e.title.lower()}, "
+                    f"not {ds.measure} itself."]
     text = "\n".join([
         f"OFFICIAL DATASET — {e.publisher}, {e.collection}: {e.title} ({e.unit}) [{e.code}]",
         f"Retrieved from the {e.publisher} public API on {ds.retrieved}; the same data is published at {e.page_url}. "
         f"Latest observation: {ds.latest}. Empty cells are years with no published value.",
+        *fit_line,
         f"TABLE 1 — {e.title} ({e.unit}), {ds.years[0]}–{ds.years[-1]}",
         header, *rows,
     ])
@@ -450,7 +487,8 @@ def as_source(ds: Dataset) -> dict:
         "evidenceOrigin": "publisher_page", "sourceType": "Official dataset", "kind": "Official dataset",
         "authorityTier": "primary_official", "reliabilityScore": 0.95,
         "reliabilityNote": f"primary official ({e.publisher} {e.collection}, retrieved via the publisher's API)",
-        "officialDataset": {"id": e.id, "code": e.code, "unit": e.unit, "entities": names, "years": ds.years},
+        "officialDataset": {"id": e.id, "code": e.code, "unit": e.unit, "entities": names, "years": ds.years,
+                            "fit": ds.fit, "measure": ds.measure},
     }
 
 
@@ -476,6 +514,7 @@ async def official_sources(question: str, gateway, *, today: date, tier: str, me
         if ds is None:
             note["skipped"].append({"id": item["id"], "reason": "no data for the window / entities"})
             continue
+        ds.fit, ds.measure = item.get("fit", "direct"), item.get("measure", "")
         rows.append(as_source(ds))
         note["fetched"].append({"id": item["id"], "entities": list(ds.series), "years": [ds.years[0], ds.years[-1]]})
     log.info("Official data: %d planned, %d fetched (%s)", len(plan), len(rows), ", ".join(r["officialDataset"]["id"] for r in rows))
@@ -527,5 +566,10 @@ def official_charts(store, question: str = "") -> list:
         chart.chart_id = f"o{len(charts) + 1}"
         chart.spec["provenance"] = "official dataset"
         chart.spec["basisNote"] = f"Official dataset: {passage.title}; values copied from passage {passage.passage_id}."
+        stand_in = re.search(r'NOTE — context indicator for "([^"]+)"', str(passage.text or ""))
+        if stand_in:  # Stage N: a stand-in says so on the chart
+            chart.spec["fit"] = "stand-in"
+            chart.spec["basisNote"] = (f"Context indicator, not a direct measure of {stand_in.group(1)}. "
+                                       + chart.spec["basisNote"])
         charts.append(chart)
     return charts

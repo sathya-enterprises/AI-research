@@ -424,7 +424,7 @@ def test_official_data_plan_is_validated_against_the_catalog():
             return _Result()
 
     plan, note = asyncio.run(plan_datasets("India EV adoption", _Gateway(), today=date(2026, 11, 10), limit=3))
-    assert plan == [{"id": "owid.ev_car_share", "entities": ["IND", "WLD"], "why": ""}]
+    assert plan == [{"id": "owid.ev_car_share", "entities": ["IND", "WLD"], "why": "", "measure": "", "fit": "direct"}]
     assert note["rejected"] == [{"id": "made.up", "reason": "not in the catalog"}]
 
 

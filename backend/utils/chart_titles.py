@@ -145,6 +145,37 @@ def data_title(*, metric: str, labels: list[str], period: str = "", periods: lis
     return title if len(title) <= max_len else title[: max_len - 1].rstrip(" ,;:") + "…"
 
 
+_MEASURE_WORDS = re.compile(
+    r"(?i)\b(?:share|capacity|value|values|rate|ratio|growth|index|price|prices|volume|number|count|total|amount|"
+    r"revenue|sales|production|generation|consumption|flows?|inflows?|outflows?|coverage|percent|percentage|change|"
+    r"returns?|yield|demand|supply|exports?|imports?|cost|costs|spend|spending|investment|gdp|income|profit|margin|"
+    r"population|emissions|output|level|balance|debt|deficit|surplus|assets|aum|units|tonnes|mw|gw|twh|usd|inr|"
+    r"crore|lakh|million|billion|trillion|average|median|mean|score|per|cagr|yoy|qoq|mom|y-o-y)\b")
+
+
+def looks_like_entity(header: str) -> bool:
+    """A column header that names WHO is measured ("India", "Tata Power", "Andhra Pradesh"), not WHAT.
+
+    Short, no digits, no unit or %, and none of the generic measure words above."""
+    text = str(header or "").strip()
+    if not text or len(text) > 40 or re.search(r"[\d%()$€£₹/]", text):
+        return False
+    words = text.split()
+    return 1 <= len(words) <= 4 and not _MEASURE_WORDS.search(text)
+
+
+_TRAILING_PERIOD = re.compile(r"[\s,;:–—-]*\(?(?:(?:19|20)\d{2}(?:\s*[–—-]\s*(?:19|20)?\d{2,4})?|FY\s*\d{2,4})\)?\s*$")
+
+
+def caption_metric(caption: str) -> str:
+    """The measure named by a table's own caption, without its trailing period ("..., 2021-2025")."""
+    text = re.sub(r"\s+", " ", str(caption or "")).strip(" .:-–—")
+    previous = None
+    while previous != text:
+        previous, text = text, _TRAILING_PERIOD.sub("", text).strip(" .,:-–—")
+    return text
+
+
 def unique_titles(specs: list[dict]) -> int:
     """Make chart titles unique (same title -> add the passage it came from). Returns titles changed."""
     seen: dict[str, int] = {}

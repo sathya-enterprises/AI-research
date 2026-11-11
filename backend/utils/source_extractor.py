@@ -396,14 +396,47 @@ def _extract_publisher_metadata(raw_html: str, fallback_url: str = "") -> dict[s
         return result
 
 
+def _data_file_links(raw_html: str, page_url: str, limit: int = 150) -> list[dict[str, str]]:
+    """Links on a page that point at data files (PDF/XLSX/CSV), with their anchor text. Never raises."""
+    from urllib.parse import urljoin
+
+    from utils.primary_sources import file_extension
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        for match in re.finditer(r"<a\b[^>]*?href\s*=\s*[\"']([^\"'#]+)[\"'][^>]*>(.*?)</a>", raw_html, re.I | re.S):
+            href = urljoin(page_url, match.group(1).strip())
+            ext = file_extension(href)
+            if not ext or href in seen or not href.startswith(("http://", "https://")):
+                continue
+            seen.add(href)
+            text = re.sub(r"<[^>]+>", " ", match.group(2))
+            text = re.sub(r"\s+", " ", text).strip()
+            # the label is often beside the link ("Table 1.1 Net generation ... [XLS] [PDF]")
+            before = re.sub(r"<(script|style)\b.*?</\1>", " ", raw_html[max(0, match.start() - 1500):match.start()],
+                            flags=re.I | re.S)
+            before = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", before)).strip()
+            out.append({"url": href, "text": text[:200], "context": before[-200:], "format": ext.lstrip(".")})
+            if len(out) >= limit:
+                break
+    except Exception:
+        return out
+    return out
+
+
 async def fetch_source_document(
     url: str,
     max_chars: int = 8000,
     *,
     include_script_data: bool = False,
     logger: logging.Logger | None = None,
+    total_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Fetch and extract a source with explicit diagnostics for provenance logs.
+
+    ``total_seconds`` overrides the whole-download budget (a retry of a slow official PDF gets longer).
+    Spreadsheets (XLSX/CSV) are read into the same ``TABLE`` blocks as HTML tables, and an HTML page's
+    links to data files (PDF/XLSX/CSV) are returned in ``data_links`` for the caller to follow.
 
     `status` distinguishes an HTTP denial, a network failure, an unsupported/empty
     extraction, and a successful publisher-page extraction. The caller can still
@@ -422,13 +455,16 @@ async def fetch_source_document(
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return base
     try:
-        timeout = httpx.Timeout(connect=5, read=12, write=8, pool=5)
         # httpx's read timeout is per chunk, so a slow server trickling a 20 MB
         # PDF could hold a fetch slot indefinitely. Bound the whole download.
-        try:
-            total_seconds = max(5.0, float(os.getenv("GG_SOURCE_FETCH_TOTAL_SECONDS", "20")))
-        except (TypeError, ValueError):
-            total_seconds = 20.0
+        if total_seconds is None:
+            try:
+                total_seconds = max(5.0, float(os.getenv("GG_SOURCE_FETCH_TOTAL_SECONDS", "20")))
+            except (TypeError, ValueError):
+                total_seconds = 20.0
+        total_seconds = max(5.0, float(total_seconds))
+        timeout = httpx.Timeout(connect=min(15.0, max(5.0, total_seconds / 4)), read=max(12.0, total_seconds / 2),
+                                write=8, pool=5)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await asyncio.wait_for(client.get(raw_url, headers=_DEFAULT_HEADERS), timeout=total_seconds)
         base.update({
@@ -456,6 +492,16 @@ async def fetch_source_document(
             base["text"] = extracted
             log.debug("Source PDF extracted chars=%d host=%s", len(extracted), parsed.hostname)
             return base
+        from utils.primary_sources import SPREADSHEET_EXTENSIONS, file_extension
+        sheet_ext = file_extension(str(response.url), content_type)
+        if sheet_ext in SPREADSHEET_EXTENSIONS or body[:4] == b"PK\x03\x04":
+            from utils.data_files import spreadsheet_text
+            extracted = await asyncio.to_thread(spreadsheet_text, body, sheet_ext or ".xlsx", max_chars=max_chars,
+                                                title=final_path.rsplit("/", 1)[-1])
+            base["status"] = "ok" if extracted.strip() else "empty_spreadsheet"
+            base["text"] = extracted
+            base["data_format"] = (sheet_ext or ".xlsx").lstrip(".")
+            return base
         encoding = response.encoding or "utf-8"
         try:
             raw_text = body.decode(encoding, errors="replace")
@@ -473,6 +519,7 @@ async def fetch_source_document(
             base["text"] = plain[:max_chars]
             return base
         base.update(_extract_publisher_metadata(raw_text, str(response.url)))
+        base["data_links"] = _data_file_links(raw_text, str(response.url))
         if len(raw_text) > 200_000:
             extracted = await asyncio.to_thread(_extract_html, raw_text, max_chars, include_script_data)
         else:

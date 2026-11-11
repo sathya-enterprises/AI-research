@@ -92,3 +92,5 @@ _os_stage_i.environ.setdefault("GG_V2_RATE_LIMIT_BACKOFF", "")  # Stage K: unit 
 _os_stage_i.environ.setdefault("GG_TOPIC_SEEDS", "0")  # Stage L: unit tests never queue topic-connector pages
 _os_stage_i.environ.setdefault("GG_ANTIGRAVITY_AGENT", "0")  # Stage L: unit tests never call the gap agent
 _os_stage_i.environ.setdefault("GG_MEASURE_PLAN", "0")  # Stage M: unit tests never call the measure planner
+_os_stage_i.environ.setdefault("GG_DATA_LINKS", "0")  # Stage N: unit tests never follow data-file links
+_os_stage_i.environ.setdefault("GG_MEASURE_SLOTS", "0")  # Stage N: unit tests never run gap searches

@@ -2777,6 +2777,7 @@ def _dedupe_enriched_sources(sources: list[dict]) -> list[dict]:
 async def _enrich_report_source(
     source: dict, index: int, question: str, intent: "RequestIntent | None",
     max_chars: int = 8000, semaphore: asyncio.Semaphore | None = None,
+    fetch_seconds: float | None = None,
 ) -> dict:
     """Fetch the linked publisher page even when a search extract is long.
 
@@ -2799,10 +2800,12 @@ async def _enrich_report_source(
         else:
             from utils.source_extractor import fetch_source_document
             if semaphore is None:
-                fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log)
+                fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log,
+                                                           total_seconds=fetch_seconds)
             else:
                 async with semaphore:
-                    fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log)
+                    fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True,
+                                                               logger=log, total_seconds=fetch_seconds)
     except Exception as exc:
         fetch_result = {"text": "", "status": "network_error", "http_status": None, "final_url": url, "content_type": ""}
         log.debug("Report source fetch failed index=%d host=%s error=%s", index + 1, urlparse(url).netloc, type(exc).__name__)
@@ -2810,6 +2813,10 @@ async def _enrich_report_source(
     item["pageFetchHttpStatus"] = fetch_result.get("http_status")
     item["pageFetchContentType"] = str(fetch_result.get("content_type") or "")[:160]
     item["pageFetchFinalUrl"] = str(fetch_result.get("final_url") or url)
+    if fetch_result.get("data_links"):
+        item["pageDataLinks"] = list(fetch_result["data_links"])[:150]
+    if fetch_result.get("data_format"):
+        item["pageDataFormat"] = str(fetch_result["data_format"])
     if _page_text_matches_source(fetched, item, question, intent):
         item["pageContent"] = fetched
         item["pageFetchStatus"] = "ok"
@@ -21541,22 +21548,24 @@ async def generate_report(request: Request):
         # MOFSL and Goldman Sachs PDFs (both answered 200, extraction timed
         # out) to search-extract-only status because 5 of 28 is under the old
         # 40% burst threshold. Official hosts and PDFs go first; cap the retry.
-        def _retry_priority(i: int) -> tuple[int, int]:
-            _u = str((_enrich_queue[i] or {}).get("url") or "").casefold()
-            _official = bool(re.search(r"(?:nsdl\.co\.in|nseindia\.(?:com|in)|niftyindices\.com|sebi\.gov\.in|rbi\.org\.in|bseindia\.com|amfiindia\.com)", _u))
-            return (0 if _official else 1, 0 if _u.split("?")[0].endswith(".pdf") else 1)
-        _failed_idx = sorted(_failed_idx, key=_retry_priority)[:12]
+        # Stage N: a plain retry with the same 20 s budget recovered 0 of 12 pages in a live run. Official
+        # pages and data files (any topic, utils/primary_sources) go first and get a longer budget; at most
+        # two retries hit one host at a time so a slow government server is not hammered.
+        from utils.fetch_tiers import retry_order as _retry_order, retry_seconds as _retry_seconds, HostLimiter
+        _failed_idx = _retry_order(_enrich_queue, _failed_idx, cap=16 if report_tier == "in_depth" else 12)
         log.warning("Report: %d of %d publisher fetches failed with timeout/network_error; retrying them once",
                     len(_failed_idx), len(_web_enriched))
         await asyncio.sleep(2.0)
-        _retry_sem = asyncio.Semaphore(4)
+        _retry_sem = asyncio.Semaphore(6)
+        _host_limit = HostLimiter(per_host=2)
 
         async def _retry_enrich(i: int) -> tuple[int, dict]:
             src = dict(_enrich_queue[i] or {})
             try:
-                async with _retry_sem:
+                async with _retry_sem, _host_limit.slot(str(src.get("url") or "")):
                     return i, await _enrich_report_source(
                         src, i, question, intent, max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                        fetch_seconds=_retry_seconds(src),
                     )
             except Exception:
                 return i, enriched_raw[i]
@@ -21586,6 +21595,109 @@ async def generate_report(request: Request):
         record_research_stage("browser_fetch_fallback", _browser_stats)
     except Exception as _browser_exc:
         log.warning("Report: browser fallback skipped: %s", type(_browser_exc).__name__)
+    try:  # Stage N: per-status fetch counts, official pages included, for the data-layer metrics
+        from utils.fetch_tiers import status_counts as _status_counts
+        from utils.primary_sources import is_primary as _is_primary_url
+        _web_final = [r for r in enriched_raw if isinstance(r, dict) and not str(r.get("url") or "").startswith("internal://")]
+        _primary_rows = [r for r in _web_final if _is_primary_url(str(r.get("url") or ""))]
+        _fetch_summary = {"all": _status_counts(_web_final), "official": _status_counts(_primary_rows),
+                          "dataLinksSeen": sum(len(r.get("pageDataLinks") or []) for r in _web_final)}
+        log.info("Report: fetch status all=%s official=%s", _fetch_summary["all"], _fetch_summary["official"])
+        record_research_stage("fetch_status", _fetch_summary)
+    except Exception as _fs_exc:
+        log.debug("Report: fetch status summary skipped: %s", type(_fs_exc).__name__)
+    # Stage N2: official pages often link the actual numbers as XLSX / CSV / PDF. Follow the few links that
+    # match the measure plan; each file passes the same relevance gate as any page (GG_DATA_LINKS=0 disables).
+    if _os.getenv("GG_DATA_LINKS", "1") != "0":
+        try:
+            from utils.data_links import link_limit as _link_limit, link_terms as _link_terms, pick_links as _pick_links
+            from utils.fetch_tiers import HostLimiter as _LinkHostLimiter, retry_seconds as _link_seconds
+            _mp_links = locals().get("_measure_plan")
+            _m_terms, _q_terms = _link_terms(question, [m.measure for m in getattr(_mp_links, "measures", None) or []])
+            _link_rows = _pick_links(
+                [r for r in enriched_raw if isinstance(r, dict)], measure_terms=_m_terms, question_terms=_q_terms,
+                limit=_link_limit(report_tier), existing_urls={str((r or {}).get("url") or "") for r in enriched_raw})
+            if _link_rows:
+                _report_progress("source_enrichment", f"Opening {len(_link_rows)} linked data files…", 33)
+                _link_sem, _link_hosts = asyncio.Semaphore(4), _LinkHostLimiter(per_host=2)
+
+                async def _fetch_link(i: int, row: dict) -> dict:
+                    async with _link_sem, _link_hosts.slot(str(row.get("url") or "")):
+                        return await _enrich_report_source(row, len(enriched_raw) + i, question, intent,
+                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                                                           fetch_seconds=_link_seconds(row))
+                _link_done = list(await asyncio.gather(*[_fetch_link(i, r) for i, r in enumerate(_link_rows)],
+                                                       return_exceptions=True))
+                _link_ok = [r for r in _link_done if isinstance(r, dict) and r.get("pageFetchStatus") == "ok"]
+                enriched_raw.extend(_link_ok)
+                log.info("Report: data-file links followed=%d added=%d (%s)", len(_link_rows), len(_link_ok),
+                         ", ".join(sorted({str(r.get("pageDataFormat") or "pdf") for r in _link_ok})) or "none")
+                record_research_stage("data_links", {
+                    "followed": len(_link_rows), "added": len(_link_ok),
+                    "links": [{"url": r.get("url"), "title": r.get("title"), "score": r.get("dataLinkScore"),
+                               "parent": r.get("parentUrl"),
+                               "status": (r.get("pageFetchStatus") if isinstance(r, dict) else type(r).__name__)}
+                              for r in _link_done if isinstance(r, dict)]})
+        except Exception as _dl_exc:
+            log.warning("Report: data-file links skipped: %s", type(_dl_exc).__name__)
+    # Stage N4: measure slots. Each (measure x entity) of the measure plan needs a data block; empty slots get
+    # one more round of data-seeking searches (statistics tables, report files, a publisher already reached),
+    # fetched through the same tiers and relevance gate. No LLM call. GG_MEASURE_SLOTS=0 disables.
+    _mp_slots = locals().get("_measure_plan")
+    if (_os.getenv("GG_MEASURE_SLOTS", "1") != "0" and _mp_slots is not None
+            and getattr(_mp_slots, "method", "") == "llm" and not search_audit_mode):
+        try:
+            from datetime import date as _slot_date
+            from utils.data_angles import window_years as _slot_years
+            from utils.measure_slots import (gap_queries as _gap_queries, official_hosts as _slot_hosts,
+                                             slot_coverage as _slot_coverage, slot_limit as _slot_limit)
+            from utils.fetch_tiers import HostLimiter as _SlotHostLimiter, retry_order as _slot_order
+            _slots_before = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
+            _slot_qs = _gap_queries(_slots_before, _mp_slots, years=_slot_years(question, _slot_date.today()),
+                                    hosts=_slot_hosts(_slots_before), cap=_slot_limit(report_tier))
+            _slot_stats: dict = {"slots": len(_slots_before), "coveredBefore": sum(s["covered"] for s in _slots_before),
+                                 "queries": _slot_qs}
+            if _slot_qs:
+                _report_progress("source_enrichment", f"Searching for data on {len(_slot_qs)} uncovered measures…", 34)
+                from routes.chat import exa_search_multi as _slot_search
+                _slot_found = await _slot_search(_slot_qs, max_results=6, min_results=2, max_keys_per_query=1)
+                _known_urls = {str((r or {}).get("url") or "").rstrip("/").casefold() for r in enriched_raw}
+                _slot_fresh = [r for r in _slot_found if isinstance(r, dict)
+                               and str(r.get("url") or "").rstrip("/").casefold() not in _known_urls]
+                _slot_rel = _filter_relevant_sources(_slot_fresh, question, intent, require_context=False,
+                                                     report_tier=report_tier)
+                _slot_pick = [_slot_rel[i] for i in _slot_order(_slot_rel, list(range(len(_slot_rel))),
+                                                                 cap=2 * _slot_limit(report_tier))]
+                _slot_sem, _slot_hosts_lim = asyncio.Semaphore(6), _SlotHostLimiter(per_host=2)
+
+                async def _slot_fetch(i: int, row: dict) -> dict:
+                    async with _slot_sem, _slot_hosts_lim.slot(str(row.get("url") or "")):
+                        return await _enrich_report_source(dict(row), len(enriched_raw) + i, question, intent,
+                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None)
+                _slot_rows = [r for r in await asyncio.gather(*[_slot_fetch(i, r) for i, r in enumerate(_slot_pick)],
+                                                              return_exceptions=True) if isinstance(r, dict)]
+                try:
+                    from utils.browser_fallback import apply_browser_fallback as _slot_browser
+                    _slot_stats["browser"] = await _slot_browser(
+                        _slot_rows, report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+                        matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent))
+                except Exception as _sb_exc:
+                    _slot_stats["browser"] = {"error": type(_sb_exc).__name__}
+                for _r in _slot_rows:
+                    _r["discoveredVia"] = _r.get("discoveredVia") or "measure_slot"
+                enriched_raw.extend(_slot_rows)  # failed fetches keep their labelled search excerpt, as above
+                _slots_after = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
+                _slot_stats.update({"found": len(_slot_found), "new": len(_slot_fresh), "fetched": len(_slot_rows),
+                                    "fetchedOk": sum(1 for r in _slot_rows if r.get("pageFetchStatus") == "ok"),
+                                    "coveredAfter": sum(s["covered"] for s in _slots_after),
+                                    "emptyAfter": [f"{s['measure']} / {s['entity'] or 'all'}" for s in _slots_after
+                                                   if not s["covered"]]})
+            log.info("Report: measure slots %d, covered %d -> %s after %d gap search(es)", _slot_stats["slots"],
+                     _slot_stats["coveredBefore"], _slot_stats.get("coveredAfter", _slot_stats["coveredBefore"]),
+                     len(_slot_qs))
+            record_research_stage("measure_slots", _slot_stats)
+        except Exception as _slot_exc:
+            log.warning("Report: measure-slot search skipped: %s", type(_slot_exc).__name__)
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",
@@ -22609,7 +22721,10 @@ async def generate_report(request: Request):
             from utils.report_pipeline_v2 import run_pipeline_v2
             _v2_today = _v2_date.today()
             from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
-            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question) if report_tier == "in_depth" else None
+            # Stage N: the entities the measure plan names are entity candidates (states, companies, programmes)
+            _mp_seed_names = [e for m in (getattr(locals().get("_measure_plan"), "measures", None) or []) for e in m.entities]
+            _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question,
+                                      seeds=_mp_seed_names) if report_tier == "in_depth" else None
             _v2_entity_stats: dict = {}
             if _v2_tiers:
                 record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
@@ -22639,17 +22754,25 @@ async def generate_report(request: Request):
                     async def _entity_enrich(rows):
                         return list(await asyncio.gather(*[enrich(row, i) for i, row in enumerate(rows)]))
 
+                    async def _entity_browser(rows):  # Stage N: the browser tier for blocked entity pages too
+                        from utils.browser_fallback import apply_browser_fallback as _entity_browser_fallback
+                        return await _entity_browser_fallback(
+                            rows, report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+                            matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent),
+                        )
+
                     _entity_rows, _v2_entity_stats = await run_entity_search(
                         _entity_plan, search_fn=_entity_search, filter_fn=_entity_filter, enrich_fn=_entity_enrich,
                         quality_fn=lambda rows: _assess_sources(rows, question=question, report_tier=report_tier),
                         existing_urls={str(r.get("url") or "") for r in enriched},
+                        rescue_fn=_entity_browser,
                     )
                     if _entity_rows:
                         enriched = _dedupe_enriched_sources(enriched + _entity_rows)
                         source_manifest = build_source_registry(enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
                         record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
                         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                                  "sourceSummary": evidence_store.source_summary(),
@@ -22678,7 +22801,7 @@ async def generate_report(request: Request):
                                 source_manifest = build_source_registry(enriched, source_documents)
                                 from utils.evidence_store import build_evidence_store as _rebuild_store
                                 evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question)
+                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
                         record_research_stage("gap_agent", _agent_note)
                 except Exception as _gap_exc:
                     log.warning("Report: data-gap agent skipped: %s", type(_gap_exc).__name__)

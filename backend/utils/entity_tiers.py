@@ -81,11 +81,18 @@ class EntityEvidence:
     text_passages: set[str] = field(default_factory=set)
     good_text_sources: set[str] = field(default_factory=set)
     tier: str = "coverage_note"
+    role: str = ""        # "body": a publisher / governing body (the source of data, not a subject)
+    seeded: bool = False  # named by the measure plan (the planner expects data for it)
 
     def to_dict(self) -> dict:
-        return {"entity": self.name, "tier": self.tier, "tablePassages": len(self.table_passages),
-                "textPassages": len(self.text_passages), "goodTextSources": len(self.good_text_sources),
-                "aliases": sorted(self.aliases)[:8]}
+        out = {"entity": self.name, "tier": self.tier, "tablePassages": len(self.table_passages),
+               "textPassages": len(self.text_passages), "goodTextSources": len(self.good_text_sources),
+               "aliases": sorted(self.aliases)[:8]}
+        if self.role:
+            out["role"] = self.role
+        if self.seeded:
+            out["seeded"] = True
+        return out
 
 
 def canonical(label: str) -> str | None:
@@ -136,7 +143,8 @@ def _stem_words(text: str) -> set[str]:
     return {w[:-1] if len(w) > 4 and w.endswith("s") else w for w in re.findall(r"[a-z0-9]+", str(text or "").casefold())}
 
 
-def discover_text_entities(store, question: str = "", *, min_sources: int = 3, max_entities: int = 24) -> list[EntityEvidence]:
+def discover_text_entities(store, question: str = "", *, min_sources: int = 3, max_entities: int = 24,
+                           seeds: list[str] | None = None) -> list[EntityEvidence]:
     """Stage K: entities of a non-market topic from the TEXT (countries, regions, recurring named entities such as
     programmes, policies, companies or technologies), counted only when at least ``min_sources`` independent sources
     discuss them. Publishers / statistical bodies are at most compact; places come first when the question asks
@@ -148,6 +156,8 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
         places = list(_REGIONS)
     q_stems = _stem_words(question)
     place_first = bool(_PLACE_QUESTION_RE.search(str(question or "")))
+    from utils.publisher_roles import PublisherRoles
+    roles = PublisherRoles(store, question)
     counts: dict[str, set[str]] = {}
     for passage in store.passages:
         if passage.kind in {"calculated"}:
@@ -174,22 +184,36 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
             folded[key] |= sources
             if name[1:].islower() or not key[1:].islower():
                 folded[name] = folded.pop(key)
+    # Stage N: entities the measure plan names (states, companies, programmes) are candidates with one source;
+    # they still need the deep-dive evidence rule to earn a section, and entity search looks for more.
+    seed_names = []
+    for seed in seeds or []:
+        seed = re.sub(r"\s+", " ", str(seed or "")).strip()
+        if len(seed) < 2 or any(seed.casefold() == s.casefold() for s in seed_names):
+            continue
+        hit = re.compile(rf"(?<![A-Za-z]){re.escape(seed)}(?![A-Za-z])", re.I)
+        found = {p.source_id for p in store.passages if p.kind != "calculated" and hit.search(str(p.text or ""))}
+        key = next((k for k in folded if k.casefold() == seed.casefold()), seed)
+        folded[key] = folded.get(key, set()) | found
+        seed_names.append(key)
     names = sorted(folded, key=lambda n: -len(folded[n]))
-    qualifying = [n for n in names if len(folded[n]) >= min_sources]
+    qualifying = [n for n in names if len(folded[n]) >= min_sources or (n in seed_names and folded[n])]
     keep = []
     for name in qualifying:
         if any(name != other and re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", other)
                and len(folded[other]) >= 0.6 * len(folded[name]) for other in qualifying):
             continue  # "CHIPS" inside "CHIPS and Science Act"
-        if name not in places and _stem_words(name) <= q_stems:
+        if name not in places and name not in seed_names and _stem_words(name) <= q_stems:
             continue  # the topic itself ("Electric Vehicles" in an EV question)
         if name in places and not place_first and _stem_words(name) <= q_stems:
             continue  # the question's own scope ("India" in "India's EV market") is not an entity within it
         keep.append(name)
     keep.sort(key=lambda n: (0 if (place_first and n in places) else 1, -len(folded[n])))
+    # seeds are kept even when the text-discovered list is full
+    keep = keep[:max_entities] + [n for n in keep[max_entities:] if n in seed_names]
     out: list[EntityEvidence] = []
-    for name in keep[:max_entities]:
-        entity = EntityEvidence(name=name, aliases=set(_PLACE_ALIASES.get(name, ())))
+    for name in keep:
+        entity = EntityEvidence(name=name, aliases=set(_PLACE_ALIASES.get(name, ())), seeded=name in seed_names)
         pattern = _pattern(entity)
         for passage in store.passages:
             if passage.kind in {"table", "calculated"}:
@@ -203,12 +227,14 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
             # a place the question asks about qualifies with 2 good sources (most sources name places once)
             entity.good_text_sources |= {passage.source_id for passage in store.passages
                                          if passage.passage_id in entity.text_passages}
-        entity.aliases.add("__body__" if name in _BODIES else "")
+        # Stage N: publishers / governing bodies found from the run's own sources, not only the fixed list
+        entity.aliases.add("__body__" if (name in _BODIES or roles.is_body(name)) else "")
         out.append(entity)
     return out
 
 
-def discover_entities(store, *, max_entities: int = 40, question: str = "") -> list[EntityEvidence]:
+def discover_entities(store, *, max_entities: int = 40, question: str = "",
+                      seeds: list[str] | None = None) -> list[EntityEvidence]:
     found: dict[str, EntityEvidence] = {}
     for passage in store.passages:
         if passage.kind not in {"table", "calculated"}:
@@ -253,11 +279,11 @@ def discover_entities(store, *, max_entities: int = 40, question: str = "") -> l
     if question:
         from utils.report_outline import is_market_topic
         if not is_market_topic(question):
-            for entity in discover_text_entities(store, question):
+            for entity in discover_text_entities(store, question, seeds=seeds):
                 if entity.name not in found:
                     found[entity.name] = entity
     ranked = sorted(found.values(), key=lambda e: (-len(e.good_text_sources), -len(e.table_passages), e.name))
-    return ranked[:max_entities]
+    return ranked[:max_entities] + [e for e in ranked[max_entities:] if e.seeded]
 
 
 # a sub-sector reported inside its parent: one deep-dive covers both when their evidence overlaps
@@ -277,6 +303,8 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
 
     for entity in entities:
         is_body = "__body__" in entity.aliases or entity.name in _BODIES
+        if is_body:
+            entity.role = "body"
         entity.aliases.discard("__body__")
         entity.aliases.discard("")
         if (len(entity.good_text_sources) >= DEEP_DIVE_SOURCES and len(tiers["deep_dive"]) < max_deep_dives
@@ -305,7 +333,8 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
     return tiers
 
 
-def entity_tiers(store, *, tier: str = "in_depth", question: str = "") -> dict[str, list[EntityEvidence]]:
+def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
+                 seeds: list[str] | None = None) -> dict[str, list[EntityEvidence]]:
     # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
     # ceiling (ranked by evidence) that keeps the report within the LLM call budget.
     import os
@@ -317,7 +346,7 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "") -> dict[s
         from utils.report_outline import is_market_topic
         if not is_market_topic(question):
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
-    return assign_tiers(discover_entities(store, question=question), max_deep_dives=max_deep)
+    return assign_tiers(discover_entities(store, question=question, seeds=seeds), max_deep_dives=max_deep)
 
 
 def tier_summary(tiers: dict[str, list[EntityEvidence]]) -> dict:
@@ -334,5 +363,7 @@ def tiers_from_summary(store, summary: dict) -> dict[str, list[EntityEvidence]]:
             name = str(row.get("entity") or "")
             entity = found.get(name) or EntityEvidence(name=name)
             entity.tier = tier
+            entity.role = str(row.get("role") or entity.role or "")
+            entity.seeded = bool(row.get("seeded") or entity.seeded)
             tiers.setdefault(tier, []).append(entity)
     return tiers

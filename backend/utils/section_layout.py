@@ -59,7 +59,7 @@ def parse_table(passage) -> Table | None:
     if len(lines) < 3:
         return None
     heading_line = next((ln for ln in str(passage.text).splitlines() if ln.strip() and " | " not in ln), "")
-    heading = re.sub(r"^TABLE \d+\s*[—-]\s*", "", heading_line.strip()).replace("(continued)", "").strip()
+    heading = re.sub(r"^TABLE \d+\b\s*(?:\(continued\))?\s*(?:[—-]\s*)?", "", heading_line.strip()).replace("(continued)", "").strip()
     split = lambda ln: [c.strip() for c in ln.strip().strip("|").split("|")]  # noqa: E731
     header = split(lines[0])
     rows = [r for r in (split(ln) for ln in lines[1:]) if len(r) == len(header) and r[0]]

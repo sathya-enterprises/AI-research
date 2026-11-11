@@ -134,6 +134,9 @@ def authority(url: str) -> tuple[str, str]:
         return "denylisted", f"host label looks like the {brand} brand but is a different domain"
     if _matches(host, _PRIMARY) or host.endswith(_PRIMARY_SUFFIXES):
         return "primary_official", "regulator / exchange / official statistics"
+    from utils.primary_sources import is_primary_host  # any country / domain: government, statistics, intl bodies
+    if is_primary_host(host):
+        return "primary_official", "government, statistics or international data body"
     if _matches(host, _INSTITUTIONAL):
         return "institutional_research", "broker, AMC, rating agency or research institution"
     if _matches(host, _MEDIA):
