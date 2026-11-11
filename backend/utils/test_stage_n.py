@@ -453,3 +453,54 @@ def test_seeded_company_publishing_its_own_pages_stays_a_subject():
     assert PublisherRoles(store, "India solar companies").is_body("ReNew")  # by role alone it looks like a publisher
     seeded = entity_tiers(store, tier="in_depth", question="India solar companies", seeds=["ReNew"])
     assert next(e.role for v in seeded.values() for e in v if e.name == "ReNew") == ""
+
+
+# --- N11: wide tables narrowed to the question; units of any domain; entity hygiene ------------------------------
+from utils import table_focus  # noqa: E402
+
+
+def _wide():
+    rows = "\n".join(f"{y} | {37 - (y - 2000) * 0.5:.1f} | 6.5 | {20 - (y - 2000) * 0.5:.1f} | {60 - (y - 2000):.1f} | "
+                     f"{18 - (y - 2000) * 0.2:.1f} | 4.4 | {130 - (y - 2000) * 1.5:.1f}" for y in range(2024, 2003, -1))
+    return types.SimpleNamespace(passage_id="S29.6", source_id="S29", kind="table", reliability=0.8, published="",
+                                 title="Child Mortality Rate by Country: Chart, Data Table and CSV",
+                                 text="TABLE 200 — Full data table by year\n"
+                                      "Year | World | United States | China | India | Brazil | United Kingdom | Nigeria\n" + rows)
+
+
+def test_wide_country_year_table_is_narrowed_to_question_and_window():
+    focus = table_focus.focus_entities("How did child mortality change in India, China, Brazil and Nigeria?")
+    assert focus == ["India", "China", "Brazil", "Nigeria"]
+    charts, dropped = build_chart_candidates(types.SimpleNamespace(passages=[_wide()]), min_year=2010, focus=focus)
+    spec = charts[0].spec
+    assert [s["name"] for s in spec["series"]] == ["China", "India", "Brazil", "Nigeria"]
+    labels = [d["label"] for d in spec["series"][0]["data"]]
+    assert labels[0] == "2010" and labels[-1] == "2024"            # in-window, oldest first
+    assert spec["title"].startswith("Child Mortality Rate: China, India, Brazil")
+    assert "larger source table" in spec["basisNote"]
+
+
+def test_rank_column_and_unit_cells():
+    rows = "\n".join(f"{i} | {c} | {v} yrs" for i, (c, v) in enumerate(
+        [("Monaco", 86.5), ("Japan", 84.0), ("China", 78.0), ("Brazil", 75.8), ("India", 72.0), ("Nigeria", 54.5)], 1))
+    p = types.SimpleNamespace(passage_id="S17.1", source_id="S17", kind="table", reliability=0.8, published="",
+                              title="Health indicators", text="TABLE 1 — Data\n# | Country | Life expectancy 2024\n" + rows)
+    charts, _ = build_chart_candidates(types.SimpleNamespace(passages=[p]), min_year=2010,
+                                       focus=["India", "China", "Brazil", "Nigeria"])
+    data = charts[0].spec["series"][0]["data"]
+    assert [d["label"] for d in data] == ["China", "Brazil", "India", "Nigeria"] and data[0]["value"] == 78.0
+
+
+def test_table_words_and_measures_are_not_entities_and_peers_are_out_of_scope():
+    table = ("TABLE 1 — Ranking\n# | Country | Value\n1 | Hong Kong | 85\n2 | China | 78\n3 | India | 72\n"
+             "4 | Female | 80\n5 | Infant Mortality Rate | 30")
+    text = "Hong Kong leads. Hong Kong spends. China grew. India grew. Female Female. Infant Mortality Rate fell."
+    store = types.SimpleNamespace(passages=[types.SimpleNamespace(passage_id=f"S{i}.1", source_id=f"S{i}", kind="table",
+                                                                  text=table, url=f"https://t{i}.org/x", publisher="",
+                                                                  reliability=0.8) for i in range(1, 4)]
+                                  + [_p(f"S{i}.2", text, url=f"https://s{i}.com/x") for i in range(4, 8)])
+    tiers = entity_tiers(store, tier="in_depth", question="How did health change in India and China?",
+                         seeds=["India", "China"], scope="India and China")
+    every = {e.name: e for v in tiers.values() for e in v}
+    assert "Female" not in every and "Infant Mortality Rate" not in every
+    assert every["Hong Kong"].role == "out_of_scope" and every["Hong Kong"].tier != "deep_dive"

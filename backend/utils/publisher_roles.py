@@ -20,7 +20,8 @@ _BODY_NAME = re.compile(
     r"statistics|statistical|census|central statistics|national statistic\w*)\b"
     r"|\b(?:ministry|department|directorate|bureau)\s+of\b"
     r"|\b(?:statistics|statistical)\s+(?:office|agency|bureau|authority|service|institute)\b"
-    r"|\b(?:authority|commission|regulator|regulatory\s+commission|agency|directorate|secretariat)$")
+    r"|\b(?:authority|commission|regulator|regulatory\s+commission|agency|directorate|secretariat)$"
+    r"|^(?:the\s+)?united\s+nations\b|\b(?:organization|organisation)\b")
 
 
 def _host_label(url: str) -> str:
