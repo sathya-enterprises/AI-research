@@ -215,3 +215,54 @@ def test_same_generic_title_with_different_values_is_kept():
     charts, dropped = build_chart_candidates(store)
     assert len(charts) == 2, [c.spec["title"] for c in charts]
     assert any("duplicate" in d["reason"] for d in dropped)
+
+
+# --- N4: measure plan scope / breakdown; measure slots ----------------------------------------------------
+from datetime import date as _date  # noqa: E402
+
+from utils.measure_plan import Measure, MeasurePlan, measure_queries, validate  # noqa: E402
+from utils.measure_slots import gap_queries, official_hosts, slot_coverage  # noqa: E402
+
+
+def test_measure_plan_scope_and_breakdown_split():
+    plan = validate({"scope": "India", "measures": [
+        {"measure": "installed capacity for solar and wind", "entities": ["Solar Power", "Wind Power", "India"]},
+        {"measure": "operational renewable portfolio size", "entities": ["ReNew", "Tata Power Renewable Energy"],
+         "breakdown": "solar"}]}, tier="in_depth")
+    first, second = plan.measures
+    assert plan.scope == "India" and first.entities == [] and first.breakdown == ["Solar Power", "Wind Power"]
+    assert second.entities == ["ReNew", "Tata Power Renewable Energy"] and second.breakdown == ["solar"]
+    queries = measure_queries(plan, "India renewables 2021 to 2025", today=_date(2026, 1, 1), tier="detailed")
+    assert queries[0].startswith("installed capacity for solar and wind India statistics by year")
+    assert "Scope: India" in plan.brief()
+
+
+def _plan():
+    return MeasurePlan(scope="Nigeria", measures=[
+        Measure("measles vaccination coverage", entities=["Lagos", "Kano"]),
+        Measure("number of health workers per 10000 people")])
+
+
+def test_slot_coverage_needs_a_data_block_with_measure_and_entity():
+    rows = [{"url": "https://www.who.int/x", "pageFetchStatus": "ok",
+             "pageContent": "TABLE 1 — Measles vaccination coverage by state\nState | 2022 | 2023\nLagos | 81 | 84\n"
+                            "Kano | 40 | 47\nOyo | 60 | 62"},
+            {"url": "https://news.example.com/y", "pageFetchStatus": "ok",
+             "pageContent": "Health workers per 10000 people remain scarce, the minister said."},
+            {"url": "https://down.example.com/z", "pageFetchStatus": "timeout",
+             "pageContent": "TABLE 1 — health workers\nYear | n\n2021 | 1\n2022 | 2\n2023 | 3"}]
+    slots = slot_coverage(_plan(), rows)
+    assert [(s["entity"], s["covered"]) for s in slots] == [("Lagos", True), ("Kano", True), ("", False)]
+    assert official_hosts(slots) == ["who.int"]
+
+
+def test_gap_queries_round_robin_with_scope_first():
+    slots = [{"measure": "measles vaccination coverage", "entity": "Lagos", "covered": False, "sources": []},
+             {"measure": "measles vaccination coverage", "entity": "Kano", "covered": False, "sources": []},
+             {"measure": "number of health workers", "entity": "", "covered": False, "sources": []}]
+    queries = gap_queries(slots, _plan(), years=[2018, 2024], hosts=["who.int"], cap=4)
+    assert queries == ["measles vaccination coverage Nigeria statistics table 2018 to 2024",
+                       "number of health workers Nigeria statistics table 2018 to 2024",
+                       "measles vaccination coverage Nigeria Lagos statistics table 2018 to 2024",
+                       "number of health workers Nigeria annual report data xlsx OR pdf"]
+    assert gap_queries([dict(s, covered=True) for s in slots], _plan(), cap=4) == []

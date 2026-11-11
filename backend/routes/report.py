@@ -21640,6 +21640,64 @@ async def generate_report(request: Request):
                               for r in _link_done if isinstance(r, dict)]})
         except Exception as _dl_exc:
             log.warning("Report: data-file links skipped: %s", type(_dl_exc).__name__)
+    # Stage N4: measure slots. Each (measure x entity) of the measure plan needs a data block; empty slots get
+    # one more round of data-seeking searches (statistics tables, report files, a publisher already reached),
+    # fetched through the same tiers and relevance gate. No LLM call. GG_MEASURE_SLOTS=0 disables.
+    _mp_slots = locals().get("_measure_plan")
+    if (_os.getenv("GG_MEASURE_SLOTS", "1") != "0" and _mp_slots is not None
+            and getattr(_mp_slots, "method", "") == "llm" and not search_audit_mode):
+        try:
+            from datetime import date as _slot_date
+            from utils.data_angles import window_years as _slot_years
+            from utils.measure_slots import (gap_queries as _gap_queries, official_hosts as _slot_hosts,
+                                             slot_coverage as _slot_coverage, slot_limit as _slot_limit)
+            from utils.fetch_tiers import HostLimiter as _SlotHostLimiter, retry_order as _slot_order
+            _slots_before = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
+            _slot_qs = _gap_queries(_slots_before, _mp_slots, years=_slot_years(question, _slot_date.today()),
+                                    hosts=_slot_hosts(_slots_before), cap=_slot_limit(report_tier))
+            _slot_stats: dict = {"slots": len(_slots_before), "coveredBefore": sum(s["covered"] for s in _slots_before),
+                                 "queries": _slot_qs}
+            if _slot_qs:
+                _report_progress("source_enrichment", f"Searching for data on {len(_slot_qs)} uncovered measures…", 34)
+                from routes.chat import exa_search_multi as _slot_search
+                _slot_found = await _slot_search(_slot_qs, max_results=6, min_results=2, max_keys_per_query=1)
+                _known_urls = {str((r or {}).get("url") or "").rstrip("/").casefold() for r in enriched_raw}
+                _slot_fresh = [r for r in _slot_found if isinstance(r, dict)
+                               and str(r.get("url") or "").rstrip("/").casefold() not in _known_urls]
+                _slot_rel = _filter_relevant_sources(_slot_fresh, question, intent, require_context=False,
+                                                     report_tier=report_tier)
+                _slot_pick = [_slot_rel[i] for i in _slot_order(_slot_rel, list(range(len(_slot_rel))),
+                                                                 cap=2 * _slot_limit(report_tier))]
+                _slot_sem, _slot_hosts_lim = asyncio.Semaphore(6), _SlotHostLimiter(per_host=2)
+
+                async def _slot_fetch(i: int, row: dict) -> dict:
+                    async with _slot_sem, _slot_hosts_lim.slot(str(row.get("url") or "")):
+                        return await _enrich_report_source(dict(row), len(enriched_raw) + i, question, intent,
+                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None)
+                _slot_rows = [r for r in await asyncio.gather(*[_slot_fetch(i, r) for i, r in enumerate(_slot_pick)],
+                                                              return_exceptions=True) if isinstance(r, dict)]
+                try:
+                    from utils.browser_fallback import apply_browser_fallback as _slot_browser
+                    _slot_stats["browser"] = await _slot_browser(
+                        _slot_rows, report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+                        matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent))
+                except Exception as _sb_exc:
+                    _slot_stats["browser"] = {"error": type(_sb_exc).__name__}
+                for _r in _slot_rows:
+                    _r["discoveredVia"] = _r.get("discoveredVia") or "measure_slot"
+                enriched_raw.extend(_slot_rows)  # failed fetches keep their labelled search excerpt, as above
+                _slots_after = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
+                _slot_stats.update({"found": len(_slot_found), "new": len(_slot_fresh), "fetched": len(_slot_rows),
+                                    "fetchedOk": sum(1 for r in _slot_rows if r.get("pageFetchStatus") == "ok"),
+                                    "coveredAfter": sum(s["covered"] for s in _slots_after),
+                                    "emptyAfter": [f"{s['measure']} / {s['entity'] or 'all'}" for s in _slots_after
+                                                   if not s["covered"]]})
+            log.info("Report: measure slots %d, covered %d -> %s after %d gap search(es)", _slot_stats["slots"],
+                     _slot_stats["coveredBefore"], _slot_stats.get("coveredAfter", _slot_stats["coveredBefore"]),
+                     len(_slot_qs))
+            record_research_stage("measure_slots", _slot_stats)
+        except Exception as _slot_exc:
+            log.warning("Report: measure-slot search skipped: %s", type(_slot_exc).__name__)
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",

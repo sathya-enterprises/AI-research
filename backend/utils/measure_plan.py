@@ -36,13 +36,16 @@ A measure is a quantity that some publisher reports over time or across entities
 that are electric", "net foreign portfolio investment flows", "measles vaccination coverage of one-year-olds",
 "installed solar capacity", "number of data-centre projects announced".
 
-Return {{"measures": [{{"measure": "<the quantity, plain words, no numbers>",
-  "entities": ["<country / company / sector / programme / group it is needed for>", ...],
+Return {{"scope": "<the place / population / market the whole question is about, e.g. a country; '' if global>",
+ "measures": [{{"measure": "<the quantity, plain words, no numbers>",
+  "entities": ["<WHO is compared: country / state / company / programme / group>", ...],
+  "breakdown": ["<categories the quantity splits into, e.g. solar / wind, or loans / bonds>", ...],
   "chart": "trend" | "comparison" | "share" | "ranking",
   "why": "<one line: which part of the question it answers>"}}]}}
-Rules: 2-{n} measures; 1-5 entities each, taken from the question or the obvious peers it implies; never invent
-data values; prefer measures an official or primary publisher (statistics office, regulator, industry body,
-international organisation, company filing) is likely to publish."""
+Rules: 2-{n} measures; 0-5 entities each, taken from the question or the obvious peers it implies (empty when the
+measure is only needed for the scope as a whole); kinds, types, segments or sources of the quantity go in
+"breakdown", never in "entities"; never invent data values; prefer measures an official or primary publisher
+(statistics office, regulator, industry body, international organisation, company filing) is likely to publish."""
 
 
 @dataclass
@@ -51,9 +54,11 @@ class Measure:
     entities: list[str] = field(default_factory=list)
     chart: str = "trend"
     why: str = ""
+    breakdown: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"measure": self.measure, "entities": self.entities, "chart": self.chart, "why": self.why}
+        return {"measure": self.measure, "entities": self.entities, "breakdown": self.breakdown,
+                "chart": self.chart, "why": self.why}
 
 
 @dataclass
@@ -61,13 +66,18 @@ class MeasurePlan:
     measures: list[Measure]
     method: str = "llm"
     rejected: list[dict] = field(default_factory=list)
+    scope: str = ""
 
     def to_dict(self) -> dict:
-        return {"method": self.method, "measures": [m.to_dict() for m in self.measures], "rejected": self.rejected}
+        return {"method": self.method, "scope": self.scope, "measures": [m.to_dict() for m in self.measures],
+                "rejected": self.rejected}
 
     def brief(self) -> str:
         """One line per measure, for other planners' prompts."""
-        return "\n".join(f"- {m.measure}" + (f" ({', '.join(m.entities)})" if m.entities else "") for m in self.measures)
+        head = f"Scope: {self.scope}\n" if self.scope else ""
+        return head + "\n".join(
+            f"- {m.measure}" + (f" ({', '.join(m.entities)})" if m.entities else "")
+            + (f" by {' / '.join(m.breakdown)}" if m.breakdown else "") for m in self.measures)
 
 
 def _clean(text: object, limit: int) -> str:
@@ -78,6 +88,7 @@ def validate(data: object, *, tier: str) -> MeasurePlan:
     """Keep only well-formed measures (shape checks; nothing about any domain)."""
     plan = MeasurePlan(measures=[])
     items = data.get("measures") if isinstance(data, dict) else None
+    plan.scope = _clean(data.get("scope"), 60) if isinstance(data, dict) else ""
     seen: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
@@ -89,12 +100,37 @@ def validate(data: object, *, tier: str) -> MeasurePlan:
         if measure.casefold() in seen:
             continue
         seen.add(measure.casefold())
-        entities = [_clean(e, 50) for e in (item.get("entities") or []) if _clean(e, 50)][:5]
+        breakdown = [_clean(b, 50) for b in _as_list(item.get("breakdown")) if _clean(b, 50)][:6]
+        entities = []
+        for e in _as_list(item.get("entities")):
+            e = _clean(e, 50)
+            if not e or e.casefold() == plan.scope.casefold():
+                continue  # the scope is in every query already
+            if _is_breakdown(e, measure):
+                breakdown.append(e)  # "Solar Power" under "capacity for solar and wind" is a kind, not a who
+                continue
+            entities.append(e)
         chart = str(item.get("chart") or "trend").strip().casefold()
-        plan.measures.append(Measure(measure=measure, entities=list(dict.fromkeys(entities)),
+        plan.measures.append(Measure(measure=measure, entities=list(dict.fromkeys(entities))[:5],
+                                     breakdown=list(dict.fromkeys(breakdown))[:6],
                                      chart=chart if chart in CHART_KINDS else "trend", why=_clean(item.get("why"), 160)))
     plan.measures = plan.measures[: MAX_MEASURES.get(tier, 4)]
     return plan
+
+
+def _as_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    return [value] if isinstance(value, str) and value.strip() else []
+
+
+def _is_breakdown(entity: str, measure: str) -> bool:
+    """An 'entity' made only of the measure's own words is a kind of the measure ("Solar Power" for
+    "installed capacity for solar and wind"), not an entity measured. Whole words only, so a company
+    named "ReNew" or "Tata Power Renewable Energy" stays an entity."""
+    words = [w for w in re.findall(r"[a-z]{3,}", entity.casefold()) if w not in {"the", "and", "power", "total"}]
+    measure_words = set(re.findall(r"[a-z]{3,}", measure.casefold()))
+    return 0 < len(words) <= 2 and all(w in measure_words or w.rstrip("s") in measure_words for w in words)
 
 
 def fallback_plan(question: str) -> MeasurePlan:
@@ -138,12 +174,18 @@ def measure_queries(plan: MeasurePlan, question: str, *, today: date, tier: str,
         years = []
     span = f"{years[0]} to {years[-1]}" if len(years) >= 2 else ""
     out: list[str] = []
+    scope = plan.scope if plan.scope else ""
+
+    def where(m: Measure) -> str:  # the scope unless the measure or its entities already say it
+        said = f"{m.measure} {' '.join(m.entities)}".casefold()
+        return scope if scope and scope.casefold() not in said else ""
+
     for m in plan.measures:  # every measure gets its statistics query before any gets a second one
-        who = " ".join(m.entities[:2])
+        who = " ".join([where(m), *m.entities[:2]]).strip()
         out.append(f"{m.measure} {who} statistics by year {span} official data".strip())
     if tier == "in_depth":
         for m in plan.measures:
-            who = " ".join(m.entities[:2])
+            who = " ".join([where(m), *m.entities[:2]]).strip()
             kind = "by country" if m.chart in {"comparison", "ranking"} and not m.entities else "annual"
             out.append(f"{m.measure} {who} {kind} data table report".strip())
     have = {q.casefold() for q in existing or []}
