@@ -22723,8 +22723,9 @@ async def generate_report(request: Request):
             from utils.entity_tiers import entity_tiers as _entity_tiers, tier_summary as _tier_summary
             # Stage N: the entities the measure plan names are entity candidates (states, companies, programmes)
             _mp_seed_names = [e for m in (getattr(locals().get("_measure_plan"), "measures", None) or []) for e in m.entities]
+            _mp_scope = str(getattr(locals().get("_measure_plan"), "scope", "") or "")
             _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question,
-                                      seeds=_mp_seed_names) if report_tier == "in_depth" else None
+                                      seeds=_mp_seed_names, scope=_mp_scope) if report_tier == "in_depth" else None
             _v2_entity_stats: dict = {}
             if _v2_tiers:
                 record_research_stage("entity_tiers_before_search", _tier_summary(_v2_tiers))
@@ -22752,7 +22753,24 @@ async def generate_report(request: Request):
                         return _filter_relevant_sources(rows, question, intent, require_context=require_context, report_tier=report_tier)
 
                     async def _entity_enrich(rows):
-                        return list(await asyncio.gather(*[enrich(row, i) for i, row in enumerate(rows)]))
+                        done = list(await asyncio.gather(*[enrich(row, i) for i, row in enumerate(rows)]))
+                        # Stage N: the same retry tier as the main fetch (official files first, longer budget);
+                        # a live run's entity pages timed out 18 of 25 times at the 20 s first-pass budget
+                        from utils.fetch_tiers import HostLimiter as _EHost, retry_order as _eorder, retry_seconds as _esec
+                        failed = _eorder(done, [i for i, r in enumerate(done)
+                                                if r.get("pageFetchStatus") in {"timeout", "network_error"}], cap=10)
+                        if failed:
+                            sem, hosts = asyncio.Semaphore(6), _EHost(per_host=2)
+
+                            async def again(i):
+                                async with sem, hosts.slot(str(done[i].get("url") or "")):
+                                    return i, await _enrich_report_source(dict(rows[i]), i, question, intent,
+                                                                          max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                                                                          fetch_seconds=_esec(done[i]))
+                            for i, row in await asyncio.gather(*[again(i) for i in failed]):
+                                if row.get("pageFetchStatus") == "ok":
+                                    done[i] = row
+                        return done
 
                     async def _entity_browser(rows):  # Stage N: the browser tier for blocked entity pages too
                         from utils.browser_fallback import apply_browser_fallback as _entity_browser_fallback
@@ -22772,7 +22790,7 @@ async def generate_report(request: Request):
                         source_manifest = build_source_registry(enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
+                        _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names, scope=_mp_scope)
                         record_research_stage("canonical_source_manifest", {"sourceCount": len(source_manifest), "sources": source_manifest})
                         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                                  "sourceSummary": evidence_store.source_summary(),
@@ -22801,7 +22819,7 @@ async def generate_report(request: Request):
                                 source_manifest = build_source_registry(enriched, source_documents)
                                 from utils.evidence_store import build_evidence_store as _rebuild_store
                                 evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
-                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names)
+                                _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names, scope=_mp_scope)
                         record_research_stage("gap_agent", _agent_note)
                 except Exception as _gap_exc:
                     log.warning("Report: data-gap agent skipped: %s", type(_gap_exc).__name__)

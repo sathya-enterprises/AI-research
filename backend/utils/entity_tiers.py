@@ -144,7 +144,7 @@ def _stem_words(text: str) -> set[str]:
 
 
 def discover_text_entities(store, question: str = "", *, min_sources: int = 3, max_entities: int = 24,
-                           seeds: list[str] | None = None) -> list[EntityEvidence]:
+                           seeds: list[str] | None = None, scope: str = "") -> list[EntityEvidence]:
     """Stage K: entities of a non-market topic from the TEXT (countries, regions, recurring named entities such as
     programmes, policies, companies or technologies), counted only when at least ``min_sources`` independent sources
     discuss them. Publishers / statistical bodies are at most compact; places come first when the question asks
@@ -229,12 +229,17 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
                                          if passage.passage_id in entity.text_passages}
         # Stage N: publishers / governing bodies found from the run's own sources, not only the fixed list
         entity.aliases.add("__body__" if (name in _BODIES or roles.is_body(name)) else "")
+        # Stage N: the plan's scope is one country; another country the question does not name is context
+        # (comparisons), at most a compact entity, never a deep-dive of an India-only report
+        if (scope and name in places and name.casefold() != scope.casefold() and name not in seed_names
+                and name.casefold() not in str(question or "").casefold()):
+            entity.aliases.add("__out_of_scope__")
         out.append(entity)
     return out
 
 
 def discover_entities(store, *, max_entities: int = 40, question: str = "",
-                      seeds: list[str] | None = None) -> list[EntityEvidence]:
+                      seeds: list[str] | None = None, scope: str = "") -> list[EntityEvidence]:
     found: dict[str, EntityEvidence] = {}
     for passage in store.passages:
         if passage.kind not in {"table", "calculated"}:
@@ -279,7 +284,7 @@ def discover_entities(store, *, max_entities: int = 40, question: str = "",
     if question:
         from utils.report_outline import is_market_topic
         if not is_market_topic(question):
-            for entity in discover_text_entities(store, question, seeds=seeds):
+            for entity in discover_text_entities(store, question, seeds=seeds, scope=scope):
                 if entity.name not in found:
                     found[entity.name] = entity
     ranked = sorted(found.values(), key=lambda e: (-len(e.good_text_sources), -len(e.table_passages), e.name))
@@ -303,9 +308,14 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
 
     for entity in entities:
         is_body = "__body__" in entity.aliases or entity.name in _BODIES
+        out_of_scope = "__out_of_scope__" in entity.aliases
         if is_body:
             entity.role = "body"
+        elif out_of_scope:
+            entity.role = "out_of_scope"
+        is_body = is_body or out_of_scope
         entity.aliases.discard("__body__")
+        entity.aliases.discard("__out_of_scope__")
         entity.aliases.discard("")
         if (len(entity.good_text_sources) >= DEEP_DIVE_SOURCES and len(tiers["deep_dive"]) < max_deep_dives
                 and not ambiguous(entity) and not is_body):
@@ -334,7 +344,7 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
 
 
 def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
-                 seeds: list[str] | None = None) -> dict[str, list[EntityEvidence]]:
+                 seeds: list[str] | None = None, scope: str = "") -> dict[str, list[EntityEvidence]]:
     # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
     # ceiling (ranked by evidence) that keeps the report within the LLM call budget.
     import os
@@ -346,7 +356,8 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
         from utils.report_outline import is_market_topic
         if not is_market_topic(question):
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
-    return assign_tiers(discover_entities(store, question=question, seeds=seeds), max_deep_dives=max_deep)
+    return assign_tiers(discover_entities(store, question=question, seeds=seeds, scope=scope),
+                        max_deep_dives=max_deep)
 
 
 def tier_summary(tiers: dict[str, list[EntityEvidence]]) -> dict:

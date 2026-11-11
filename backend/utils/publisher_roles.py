@@ -19,7 +19,8 @@ _BODY_NAME = re.compile(
     r"(?i)^(?:the\s+)?(?:ministry|department|dept\.?|government|govt\.?|bureau|directorate|office|secretariat|"
     r"statistics|statistical|census|central statistics|national statistic\w*)\b"
     r"|\b(?:ministry|department|directorate|bureau)\s+of\b"
-    r"|\b(?:statistics|statistical)\s+(?:office|agency|bureau|authority|service|institute)\b")
+    r"|\b(?:statistics|statistical)\s+(?:office|agency|bureau|authority|service|institute)\b"
+    r"|\b(?:authority|commission|regulator|regulatory\s+commission|agency|directorate|secretariat)$")
 
 
 def _host_label(url: str) -> str:

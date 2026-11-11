@@ -26,7 +26,10 @@ def retry_seconds(row: dict) -> float:
     """Whole-download budget for a retry: long for official pages and data files, moderate otherwise."""
     url = str((row or {}).get("url") or "")
     ctype = str((row or {}).get("pageFetchContentType") or "")
-    if is_primary(url) or is_data_file(url, ctype):
+    primary, data = is_primary(url), is_data_file(url, ctype)
+    if primary and data:  # a government PDF took 70 s to download on a stable network
+        return _seconds("GG_RETRY_FETCH_SECONDS_OFFICIAL_FILE", 90.0)
+    if primary or data:
         return _seconds("GG_RETRY_FETCH_SECONDS_PRIMARY", 45.0)
     return _seconds("GG_RETRY_FETCH_SECONDS", 30.0)
 

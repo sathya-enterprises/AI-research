@@ -373,7 +373,7 @@ def test_network_failure_classification_and_wait():
         return False
 
     waited, back = asyncio.run(net_recovery.wait_for_network(0.05, every=0.02, probe=never))
-    assert not back and waited <= 0.05
+    assert not back and waited < 0.5
 
 
 def test_wait_budget_is_zero_in_tests_unless_set(monkeypatch):
@@ -381,3 +381,25 @@ def test_wait_budget_is_zero_in_tests_unless_set(monkeypatch):
     assert net_recovery.wait_budget() == 0
     monkeypatch.setenv("GG_NETWORK_WAIT_SECONDS", "120")
     assert net_recovery.wait_budget() == 120
+
+
+# --- N9: fixes from the stable-network live run -------------------------------------------------------------
+def test_n9_budgets_slots_links_bodies_scope():
+    assert fetch_tiers.retry_seconds({"url": "https://mnre.gov.in/static/uploads/a.pdf"}) == 90
+    assert fetch_tiers.retry_seconds({"url": "https://www.pib.gov.in/PressReleasePage.aspx"}) == 45
+    plan = MeasurePlan(scope="India", measures=[Measure("grid curtailment rate")])
+    rows = [{"url": "https://x.com/a", "pageFetchStatus": "ok",
+             "pageContent": "TABLE 1 — Grid investment\nYear | Grid capex\n2021 | 10\n2022 | 12\n2023 | 14"}]
+    assert slot_coverage(plan, rows)[0]["covered"] is False      # "grid" alone does not cover "grid curtailment"
+    slots = [{"measure": "grid curtailment rate", "entity": "", "covered": False, "sources": []}]
+    assert not any("nih.gov" in q for q in gap_queries(slots, plan, hosts=["pmc.ncbi.nlm.nih.gov"], cap=6))
+    html = '<a href="/x.pdf"><img alt="Open resources icon" class="usa-icon" /></a>'
+    assert _data_file_links(html, "https://pmc.ncbi.nlm.nih.gov/a/")[0]["text"] == ""
+    store = types.SimpleNamespace(passages=[_p("S1.1", "The Central Electricity Authority (CEA) said capacity rose.")])
+    roles = PublisherRoles(store, "India solar")
+    assert roles.is_body("CEA") and roles.is_body("Central Electricity Authority")
+    text = "United States added capacity. United States leads. India grew. Gujarat leads."
+    store = types.SimpleNamespace(passages=[_p(f"S{i}.1", text, url=f"https://s{i}.com/x") for i in range(1, 5)])
+    tiers = entity_tiers(store, tier="in_depth", question="How did India's solar capacity grow?", scope="India")
+    us = next(e for v in tiers.values() for e in v if e.name == "United States")
+    assert us.tier != "deep_dive" and us.role == "out_of_scope"

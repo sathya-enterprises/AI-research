@@ -410,8 +410,10 @@ def _data_file_links(raw_html: str, page_url: str, limit: int = 150) -> list[dic
             if not ext or href in seen or not href.startswith(("http://", "https://")):
                 continue
             seen.add(href)
-            text = re.sub(r"<[^>]+>", " ", match.group(2))
+            text = re.sub(r"<[^>]*>?", " ", match.group(2))
             text = re.sub(r"\s+", " ", text).strip()
+            if re.search(r"=\s*[\"']|/>|\b(?:class|alt|src|href)\s*=", text):  # broken markup, not a label
+                text = ""
             # the label is often beside the link ("Table 1.1 Net generation ... [XLS] [PDF]")
             before = re.sub(r"<(script|style)\b.*?</\1>", " ", raw_html[max(0, match.start() - 1500):match.start()],
                             flags=re.I | re.S)
