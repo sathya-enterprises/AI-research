@@ -35,10 +35,12 @@ def _data_blocks(text: str) -> list[str]:
 
 
 def _covers(block: str, measure_words: set[str], entity: str) -> bool:
+    """Every measure word for a short measure ("grid curtailment" needs both), two thirds for a long one;
+    the entity named in the same block."""
     hay = block.casefold()
     words = _content_words(hay)
-    need = max(1, (len(measure_words) + 1) // 2)
-    if len(measure_words & words) < need:
+    need = len(measure_words) if len(measure_words) <= 2 else -(-2 * len(measure_words) // 3)
+    if not measure_words or len(measure_words & words) < need:
         return False
     return not entity or entity.casefold() in hay
 
@@ -97,7 +99,7 @@ def gap_queries(slots: list[dict], plan, *, years: list[int] | None = None, host
                    [subject(measure, s["entity"]) for s in empty]
         queries = [f"{x} statistics table {span}".strip() for x in subjects]
         queries.append(f"{subjects[0]} annual report data xlsx OR pdf")
-        queries += [f"{h} {subjects[0]} {span}".strip() for h in (hosts or [])[:1]]
+        # (a host-name query was dropped: an article repository on a .gov host was taken for the publisher)
         waves.append(queries)
     out: list[str] = []
     for i in range(max((len(w) for w in waves), default=0)):
