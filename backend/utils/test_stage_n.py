@@ -306,3 +306,33 @@ def test_seeded_entities_are_candidates_and_bodies_are_not_searched():
     searched = [e for e, _ in plan_entity_queries(tiers, cap=30, window="2021-2025",
                                                   question="Which Indian states lead solar capacity?")]
     assert searched[0] == "Kerala" and "MNRE" not in searched
+
+
+# --- N6: official datasets declare their fit; unrelated ones rejected; stand-ins labelled -----------------
+from utils.official_data import CATALOG, Dataset, as_source, fits_measure, plan_datasets  # noqa: E402
+
+
+def test_official_dataset_fit_is_checked_and_stand_ins_labelled():
+    class _Result:
+        ok = True
+
+        def json(self):
+            return {"datasets": [
+                {"id": "owid.solar_share", "entities": ["IND"], "measure": "installed solar capacity", "fit": "stand-in"},
+                {"id": "wb.domestic_credit", "entities": ["IND"], "measure": "investment in renewable energy projects",
+                 "fit": "direct"}]}
+
+    class _Gateway:
+        async def generate(self, **_):
+            return _Result()
+
+    plan, note = asyncio.run(plan_datasets("India renewables", _Gateway(), today=_date(2026, 11, 10), limit=3,
+                                           measures="- installed solar capacity"))
+    assert [(x["id"], x["fit"]) for x in plan] == [("owid.solar_share", "stand-in")]
+    assert note["rejected"][0]["id"] == "wb.domestic_credit"
+    assert not fits_measure(CATALOG["wb.fdi_inflows"], "annual investment in renewable energy projects")
+    ds = Dataset(entry=CATALOG["owid.solar_share"], years=[2021, 2022, 2023], series={"India": [3.9, 5.3, 6.0]},
+                 retrieved="2026-11-10", latest=2023, fit="stand-in", measure="installed solar capacity")
+    row = as_source(ds)
+    assert 'NOTE — context indicator for "installed solar capacity"' in row["pageContent"]
+    assert row["officialDataset"]["fit"] == "stand-in"
