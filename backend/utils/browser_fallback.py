@@ -49,9 +49,11 @@ def page_limit(report_tier: str) -> int:
 
 
 def _is_pdf(row: dict) -> bool:
-    url = str(row.get("url") or "").casefold()
+    """A file a browser cannot render as a page (PDF, spreadsheet, CSV)."""
+    from utils.primary_sources import is_data_file
+    url = str(row.get("url") or "")
     ctype = str(row.get("pageFetchContentType") or "").casefold()
-    return "pdf" in ctype or urlparse(url).path.endswith(".pdf")
+    return "pdf" in ctype or urlparse(url.casefold()).path.endswith(".pdf") or is_data_file(url, ctype)
 
 
 def candidates(rows: list[dict], limit: int) -> list[int]:
@@ -66,9 +68,9 @@ def candidates(rows: list[dict], limit: int) -> list[int]:
         picked.append(idx)
 
     def priority(idx: int) -> tuple[int, int]:
-        host = (urlparse(str(rows[idx].get("url") or "")).hostname or "").casefold()
-        official = any(host.endswith(d) for d in (".gov.in", ".nic.in", "nseindia.com", "niftyindices.com", "bseindia.com", "nsdl.co.in", "rbi.org.in", "sebi.gov.in", "amfiindia.com"))
-        return (0 if official else 1, idx)
+        # any topic: government / statistics / international data hosts first (utils.primary_sources)
+        from utils.primary_sources import is_primary
+        return (0 if is_primary(str(rows[idx].get("url") or "")) else 1, idx)
 
     return sorted(picked, key=priority)[: max(0, limit)]
 

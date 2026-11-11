@@ -2777,6 +2777,7 @@ def _dedupe_enriched_sources(sources: list[dict]) -> list[dict]:
 async def _enrich_report_source(
     source: dict, index: int, question: str, intent: "RequestIntent | None",
     max_chars: int = 8000, semaphore: asyncio.Semaphore | None = None,
+    fetch_seconds: float | None = None,
 ) -> dict:
     """Fetch the linked publisher page even when a search extract is long.
 
@@ -2799,10 +2800,12 @@ async def _enrich_report_source(
         else:
             from utils.source_extractor import fetch_source_document
             if semaphore is None:
-                fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log)
+                fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log,
+                                                           total_seconds=fetch_seconds)
             else:
                 async with semaphore:
-                    fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log)
+                    fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True,
+                                                               logger=log, total_seconds=fetch_seconds)
     except Exception as exc:
         fetch_result = {"text": "", "status": "network_error", "http_status": None, "final_url": url, "content_type": ""}
         log.debug("Report source fetch failed index=%d host=%s error=%s", index + 1, urlparse(url).netloc, type(exc).__name__)
@@ -2810,6 +2813,10 @@ async def _enrich_report_source(
     item["pageFetchHttpStatus"] = fetch_result.get("http_status")
     item["pageFetchContentType"] = str(fetch_result.get("content_type") or "")[:160]
     item["pageFetchFinalUrl"] = str(fetch_result.get("final_url") or url)
+    if fetch_result.get("data_links"):
+        item["pageDataLinks"] = list(fetch_result["data_links"])[:40]
+    if fetch_result.get("data_format"):
+        item["pageDataFormat"] = str(fetch_result["data_format"])
     if _page_text_matches_source(fetched, item, question, intent):
         item["pageContent"] = fetched
         item["pageFetchStatus"] = "ok"
@@ -21541,22 +21548,24 @@ async def generate_report(request: Request):
         # MOFSL and Goldman Sachs PDFs (both answered 200, extraction timed
         # out) to search-extract-only status because 5 of 28 is under the old
         # 40% burst threshold. Official hosts and PDFs go first; cap the retry.
-        def _retry_priority(i: int) -> tuple[int, int]:
-            _u = str((_enrich_queue[i] or {}).get("url") or "").casefold()
-            _official = bool(re.search(r"(?:nsdl\.co\.in|nseindia\.(?:com|in)|niftyindices\.com|sebi\.gov\.in|rbi\.org\.in|bseindia\.com|amfiindia\.com)", _u))
-            return (0 if _official else 1, 0 if _u.split("?")[0].endswith(".pdf") else 1)
-        _failed_idx = sorted(_failed_idx, key=_retry_priority)[:12]
+        # Stage N: a plain retry with the same 20 s budget recovered 0 of 12 pages in a live run. Official
+        # pages and data files (any topic, utils/primary_sources) go first and get a longer budget; at most
+        # two retries hit one host at a time so a slow government server is not hammered.
+        from utils.fetch_tiers import retry_order as _retry_order, retry_seconds as _retry_seconds, HostLimiter
+        _failed_idx = _retry_order(_enrich_queue, _failed_idx, cap=16 if report_tier == "in_depth" else 12)
         log.warning("Report: %d of %d publisher fetches failed with timeout/network_error; retrying them once",
                     len(_failed_idx), len(_web_enriched))
         await asyncio.sleep(2.0)
-        _retry_sem = asyncio.Semaphore(4)
+        _retry_sem = asyncio.Semaphore(6)
+        _host_limit = HostLimiter(per_host=2)
 
         async def _retry_enrich(i: int) -> tuple[int, dict]:
             src = dict(_enrich_queue[i] or {})
             try:
-                async with _retry_sem:
+                async with _retry_sem, _host_limit.slot(str(src.get("url") or "")):
                     return i, await _enrich_report_source(
                         src, i, question, intent, max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                        fetch_seconds=_retry_seconds(src),
                     )
             except Exception:
                 return i, enriched_raw[i]
@@ -21586,6 +21595,17 @@ async def generate_report(request: Request):
         record_research_stage("browser_fetch_fallback", _browser_stats)
     except Exception as _browser_exc:
         log.warning("Report: browser fallback skipped: %s", type(_browser_exc).__name__)
+    try:  # Stage N: per-status fetch counts, official pages included, for the data-layer metrics
+        from utils.fetch_tiers import status_counts as _status_counts
+        from utils.primary_sources import is_primary as _is_primary_url
+        _web_final = [r for r in enriched_raw if isinstance(r, dict) and not str(r.get("url") or "").startswith("internal://")]
+        _primary_rows = [r for r in _web_final if _is_primary_url(str(r.get("url") or ""))]
+        _fetch_summary = {"all": _status_counts(_web_final), "official": _status_counts(_primary_rows),
+                          "dataLinksSeen": sum(len(r.get("pageDataLinks") or []) for r in _web_final)}
+        log.info("Report: fetch status all=%s official=%s", _fetch_summary["all"], _fetch_summary["official"])
+        record_research_stage("fetch_status", _fetch_summary)
+    except Exception as _fs_exc:
+        log.debug("Report: fetch status summary skipped: %s", type(_fs_exc).__name__)
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",
@@ -22639,10 +22659,18 @@ async def generate_report(request: Request):
                     async def _entity_enrich(rows):
                         return list(await asyncio.gather(*[enrich(row, i) for i, row in enumerate(rows)]))
 
+                    async def _entity_browser(rows):  # Stage N: the browser tier for blocked entity pages too
+                        from utils.browser_fallback import apply_browser_fallback as _entity_browser_fallback
+                        return await _entity_browser_fallback(
+                            rows, report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+                            matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent),
+                        )
+
                     _entity_rows, _v2_entity_stats = await run_entity_search(
                         _entity_plan, search_fn=_entity_search, filter_fn=_entity_filter, enrich_fn=_entity_enrich,
                         quality_fn=lambda rows: _assess_sources(rows, question=question, report_tier=report_tier),
                         existing_urls={str(r.get("url") or "") for r in enriched},
+                        rescue_fn=_entity_browser,
                     )
                     if _entity_rows:
                         enriched = _dedupe_enriched_sources(enriched + _entity_rows)

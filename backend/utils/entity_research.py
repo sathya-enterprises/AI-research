@@ -64,9 +64,33 @@ def plan_entity_queries(tiers: dict, *, cap: int, window: str = "", question: st
     return plan
 
 
+_EXTRACT_MIN_CHARS = 600
+
+
+def _labelled_extracts(rows: list[dict]) -> list[dict]:
+    """Rows whose page fetch failed but whose search-provider excerpt is substantial.
+
+    They stay labelled ``search_extract_only`` (set by the enrichment step), the same treatment the main
+    search gives a failed fetch, so an entity is not left with no evidence because its pages were slow."""
+    out = []
+    for row in rows:
+        if row.get("pageFetchStatus") == "ok":
+            continue
+        if len(str(row.get("fullContent") or row.get("snippet") or "")) < _EXTRACT_MIN_CHARS:
+            continue
+        row.setdefault("evidenceOrigin", "search_extract_only")
+        out.append(row)
+    return out
+
+
 async def run_entity_search(plan: list[tuple[str, str]], *, search_fn, filter_fn, enrich_fn, quality_fn,
-                            existing_urls: set[str]) -> tuple[list[dict], dict]:
-    """Run the planned queries; return (new evidence rows, stats per entity)."""
+                            existing_urls: set[str], rescue_fn=None,
+                            keep_extracts: bool = True) -> tuple[list[dict], dict]:
+    """Run the planned queries; return (new evidence rows, stats per entity).
+
+    ``rescue_fn(rows)`` (optional, async) re-fetches blocked / timed-out rows in place (the browser tier).
+    With ``keep_extracts`` a row whose page could not be fetched keeps its labelled search excerpt."""
+    from utils.fetch_tiers import status_counts
     stats: dict = {"queries": len(plan), "results": 0, "new_urls": 0, "after_relevance": 0, "fetched_ok": 0,
                    "after_post_fetch_relevance": 0, "kept": 0, "perEntity": {}}
     if not plan:
@@ -86,9 +110,19 @@ async def run_entity_search(plan: list[tuple[str, str]], *, search_fn, filter_fn
     relevant = filter_fn(fresh, require_context=False)
     stats["after_relevance"] = len(relevant)
     fetched = await enrich_fn(relevant)
+    stats["fetchStatus"] = status_counts(fetched)
+    if rescue_fn is not None and any(r.get("pageFetchStatus") != "ok" for r in fetched):
+        try:
+            stats["browser"] = await rescue_fn(fetched)
+        except Exception as exc:  # the browser tier is optional
+            stats["browser"] = {"error": type(exc).__name__}
     stats["fetched_ok"] = sum(1 for r in fetched if r.get("pageFetchStatus") == "ok")
     post = filter_fn([r for r in fetched if r.get("pageFetchStatus") == "ok"], require_context=True)
     stats["after_post_fetch_relevance"] = len(post)
+    if keep_extracts:
+        extracts = filter_fn(_labelled_extracts(fetched), require_context=True)
+        stats["search_extracts_kept"] = len(extracts)
+        post = post + extracts
     kept, quality = quality_fn(post)
     stats["kept"] = len(kept)
     stats["quality"] = {k: v for k, v in quality.items() if k != "denylisted_hosts"}
@@ -100,6 +134,7 @@ async def run_entity_search(plan: list[tuple[str, str]], *, search_fn, filter_fn
     for row in kept:
         per[row.get("entitySearch") or "?"]["kept"] += 1
     stats["perEntity"] = {k: dict(v) for k, v in per.items()}
-    log.info("Entity search: queries=%d results=%d new=%d relevant=%d fetched=%d kept=%d",
-             stats["queries"], stats["results"], stats["new_urls"], stats["after_relevance"], stats["fetched_ok"], stats["kept"])
+    log.info("Entity search: queries=%d results=%d new=%d relevant=%d fetched=%d extracts=%d kept=%d status=%s",
+             stats["queries"], stats["results"], stats["new_urls"], stats["after_relevance"], stats["fetched_ok"],
+             stats.get("search_extracts_kept", 0), stats["kept"], stats.get("fetchStatus"))
     return kept, stats
