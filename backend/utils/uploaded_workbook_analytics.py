@@ -28,6 +28,7 @@ _RETURN_ALIASES = {
     "10 yr": "10 Yr", "10 year": "10 Yr",
     "since incp.": "Since Incp.", "since inception": "Since Incp.", "inception": "Since Incp.",
 }
+MIN_CATEGORY_SIZE = 3  # categories with fewer strategies are listed but not ranked
 _NA = {"", "na", "n/a", "nd", "n.d.", "--", "—", "-", "undisc.", "undisclosed", "not disclosed", "not available"}
 _FILE_MARKER = re.compile(r"(?m)^\[File:\s*(.*?)\]\s*$")
 _SHEET_MARKER = re.compile(r"(?m)^\[Sheet:\s*(.*?)\]\s*$")
@@ -1068,6 +1069,30 @@ def attachment_analytics_section(
                 f"{float(item.get('mean') or 0):.2f}% | {float(item.get('median') or 0):.2f}% | "
                 f"{float(item.get('min') or 0):.2f}% to {float(item.get('max') or 0):.2f}% |"
             )
+        _strategies = [s for s in (analytics.get("strategies") or []) if isinstance(s, dict)]
+        if _strategies:
+            # AUM disclosure is a common question about these files; give the counted figure so the writer
+            # does not estimate it (a live report stated 237 undisclosed where the workbook holds 287).
+            _aums = sorted(float(s["aum"]) for s in _strategies if isinstance(s.get("aum"), (int, float)))
+            _undisclosed = len(_strategies) - len(_aums)
+            lines.extend([
+                "",
+                "## AUM disclosure",
+                "",
+                "| Measure | Source(s) | Value |",
+                "|---|---|---:|",
+                f"| Strategies analysed | {_md_cell(aggregate_sources)} | {len(_strategies)} |",
+                f"| Strategies reporting AUM | {_md_cell(aggregate_sources)} | {len(_aums)} |",
+                f"| Strategies with AUM not disclosed | {_md_cell(aggregate_sources)} | {_undisclosed} "
+                f"({_undisclosed / len(_strategies):.1%}) |",
+            ])
+            if _aums:
+                _mid = len(_aums) // 2
+                _median = _aums[_mid] if len(_aums) % 2 else (_aums[_mid - 1] + _aums[_mid]) / 2
+                lines.extend([
+                    f"| Total reported AUM (₹ crore) | {_md_cell(aggregate_sources)} | {sum(_aums):,.2f} |",
+                    f"| Median reported AUM (₹ crore) | {_md_cell(aggregate_sources)} | {_median:,.2f} |",
+                ])
         if analytics.get("categorySummaries"):
             lines.extend([
                 "",
@@ -1076,12 +1101,20 @@ def attachment_analytics_section(
                 "| Category | Source(s) | Strategies with values | Mean 1-year return | Median 1-year return |",
                 "|---|---|---:|---:|---:|",
             ])
-            for item in analytics["categorySummaries"][:15]:
+            # A category average over one or two strategies is not comparable with one over hundreds:
+            # categories with enough strategies are ranked; small ones follow, labelled, unranked.
+            _ranked = [i for i in analytics["categorySummaries"] if int(i.get("available") or 0) >= MIN_CATEGORY_SIZE]
+            _small = [i for i in analytics["categorySummaries"] if int(i.get("available") or 0) < MIN_CATEGORY_SIZE]
+            for item in (_ranked + _small)[:15]:
+                small = int(item.get("available") or 0) < MIN_CATEGORY_SIZE
                 lines.append(
-                    f"| {_md_cell(item.get('category'))} | {_md_cell(aggregate_sources)} | "
+                    f"| {_md_cell(item.get('category'))}{' (too few to rank)' if small else ''} | {_md_cell(aggregate_sources)} | "
                     f"{int(item.get('available') or 0)} | {float(item.get('mean1Year') or 0):.2f}% | "
                     f"{float(item.get('median1Year') or 0):.2f}% |"
                 )
+            if _small:
+                lines.extend(["", f"Categories with fewer than {MIN_CATEGORY_SIZE} strategies are listed after the ranked "
+                                  "categories: their averages describe one or two strategies, not the category."])
 
         ranked_charts = [
             chart for chart in (analytics.get("charts") or [])

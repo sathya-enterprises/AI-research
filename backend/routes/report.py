@@ -24115,6 +24115,39 @@ async def generate_report(request: Request):
             except Exception as _workbook_chart_exc:
                 log.warning("Attachment analytics insertion failed safely: %s", type(_workbook_chart_exc).__name__)
 
+        # Attachment-only reports skip the publisher-page number check, so every number the writer put in
+        # the prose is checked against the attached files and the deterministic analytics instead; a
+        # sentence with a number in neither is removed (the same rule the web path's number policy applies).
+        if file_only_report and os.getenv("GG_ATTACHMENT_NUMBER_CHECK", "1") != "0":
+            try:
+                from utils.attachment_numbers import allowed_numbers as _attachment_allowed, check_attachment_numbers
+                _attachment_texts = [file_context or ""] + [
+                    str(d.get("text") or "") for d in source_documents if isinstance(d, dict)
+                ]
+                _attachment_texts.append(attachment_analytics_section(
+                    workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
+                ) or "")
+                _attachment_texts.append(" ".join(
+                    f"{k.get('label')} {k.get('value')}" for k in (workbook_analytics.get("keyStats") or [])
+                    if isinstance(k, dict)
+                ))
+                _attachment_texts.append(" ".join(
+                    f"{p.get('value')} {p.get('evidenceValue') or ''}"
+                    for c in charts if isinstance(c, dict) and c.get("_serverWorkbookEvidence")
+                    for s in (c.get("series") or []) if isinstance(s, dict)
+                    for p in (s.get("data") or []) if isinstance(p, dict)
+                ))
+                report_text, _attachment_unsupported = check_attachment_numbers(
+                    report_text, _attachment_allowed(*_attachment_texts),
+                )
+                if _attachment_unsupported:
+                    log.warning("Attachment number check removed %d sentence(s) with numbers not in the attached files: %s",
+                                len(_attachment_unsupported),
+                                "; ".join(", ".join(r["numbers"]) for r in _attachment_unsupported)[:300])
+                record_research_stage("attachment_number_check", {"removed": _attachment_unsupported})
+            except Exception as _attachment_number_exc:
+                log.warning("Attachment number check skipped: %s", type(_attachment_number_exc).__name__)
+
         original_images_list = (
             [] if file_only_report or not image_requested else (parsed.get("images") or [])
         )
