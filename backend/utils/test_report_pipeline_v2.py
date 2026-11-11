@@ -356,3 +356,33 @@ def test_charts_failing_on_the_assembled_text_are_dropped_and_references_rewritt
         assert f"[CHART_{i}]" in report
     assert f"[CHART_{len(out['charts']) + 1}]" not in report
     assert "underlying data" not in report
+
+
+def test_sections_lost_to_a_network_outage_are_rewritten_when_it_ends(monkeypatch):
+    """Stage N: a DNS outage mid-report used to fail every section and drop to the fallback writer."""
+    from utils import net_recovery
+
+    class OutageGateway(FakeGateway):
+        down = True
+
+        async def generate(self, *, purpose, **kwargs):
+            if self.down and purpose == "section":
+                self.stats.calls += 1
+                return LLMResult(ok=False, text="", model="fake", error="network:ConnectError model=fake")
+            return await super().generate(purpose=purpose, **kwargs)
+
+    gateway = OutageGateway(OUTLINE)
+    waits = []
+
+    async def fake_wait(max_seconds, **_):
+        waits.append(max_seconds)
+        gateway.down = False  # the network comes back while we wait
+        return 30.0, True
+
+    monkeypatch.setenv("GG_NETWORK_WAIT_SECONDS", "300")
+    monkeypatch.setattr(net_recovery, "wait_for_network", fake_wait)
+    store, manifest = _store()
+    result = asyncio.run(run_pipeline_v2(runtime=None, question="Sector rotation in India over the last 4 quarters",
+                                         tier="detailed", store=store, manifest=manifest, today="2026-11-07", gateway=gateway))
+    assert waits and json.loads(result["raw"])["report"].startswith("## Executive Summary")
+    assert result["meta"]["deadline"]["networkWaits"][0]["networkBack"] is True

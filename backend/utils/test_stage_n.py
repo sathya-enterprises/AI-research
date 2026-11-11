@@ -351,3 +351,33 @@ def test_bare_table_number_is_not_a_caption_and_charted_tables_are_skipped():
     out = place_inline_tables(body, {"S3.2": table}, set())
     assert "**Table: State by Solar (MW)**" in out and "TABLE 1" not in out
     assert place_inline_tables(body, {"S3.2": table}, {"S3.2"}) == body  # already shown as a figure
+
+
+# --- network outage: wait and rewrite lost sections -------------------------------------------------------
+from utils import net_recovery  # noqa: E402
+
+
+def test_network_failure_classification_and_wait():
+    assert net_recovery.network_failure("part 1: network:ConnectError model=gemini")
+    assert not net_recovery.network_failure("empty response from model")
+    calls = {"n": 0}
+
+    async def probe():
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    waited, back = asyncio.run(net_recovery.wait_for_network(5, every=0.01, probe=probe))
+    assert back and calls["n"] == 3
+
+    async def never():
+        return False
+
+    waited, back = asyncio.run(net_recovery.wait_for_network(0.05, every=0.02, probe=never))
+    assert not back and waited <= 0.05
+
+
+def test_wait_budget_is_zero_in_tests_unless_set(monkeypatch):
+    monkeypatch.delenv("GG_NETWORK_WAIT_SECONDS", raising=False)
+    assert net_recovery.wait_budget() == 0
+    monkeypatch.setenv("GG_NETWORK_WAIT_SECONDS", "120")
+    assert net_recovery.wait_budget() == 120
