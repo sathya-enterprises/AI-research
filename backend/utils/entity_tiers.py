@@ -228,7 +228,8 @@ def discover_text_entities(store, question: str = "", *, min_sources: int = 3, m
             entity.good_text_sources |= {passage.source_id for passage in store.passages
                                          if passage.passage_id in entity.text_passages}
         # Stage N: publishers / governing bodies found from the run's own sources, not only the fixed list
-        entity.aliases.add("__body__" if (name in _BODIES or roles.is_body(name)) else "")
+        # an entity the measure plan names (a company to compare) is a subject even when it publishes its own pages
+        entity.aliases.add("__body__" if name not in seed_names and (name in _BODIES or roles.is_body(name)) else "")
         # Stage N: the plan's scope is one country; another country the question does not name is context
         # (comparisons), at most a compact entity, never a deep-dive of an India-only report
         if (scope and name in places and name.casefold() != scope.casefold() and name not in seed_names
