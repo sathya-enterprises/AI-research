@@ -640,6 +640,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     import asyncio
     reserve = 6 * 60  # report.py checks, self-healing gates and the render run after V2
     wave_seconds: list[float] = []
+    from utils.net_recovery import wait_budget as _wait_budget
+    network_wait_left = _wait_budget()
     for start in range(0, len(analysis), wave_size):
         wave = analysis[start:start + wave_size]
         covered = [_covered_line(d) for d in drafts if d.ok]
@@ -660,13 +662,30 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         if progress:
             progress(f"Writing sections {start + 1}-{start + len(wave)} of {len(analysis)}…")
         wave_started = time.monotonic()
-        results = await asyncio.gather(*[
-            write_section(gateway, store, sec, [c for c in planned if c.section_id == sec.section_id],
-                          question=question, thesis=outline.thesis, already_covered=covered,
-                          other_sections=[g for sid, g in goals.items() if sid != sec.section_id],
-                          allow_extension=allow_extension, budget_scale=budget_scale)
-            for sec in wave
-        ])
+
+        def _write(sec, covered=covered, allow_extension=allow_extension, budget_scale=budget_scale):
+            return write_section(gateway, store, sec, [c for c in planned if c.section_id == sec.section_id],
+                                 question=question, thesis=outline.thesis, already_covered=covered,
+                                 other_sections=[g for sid, g in goals.items() if sid != sec.section_id],
+                                 allow_extension=allow_extension, budget_scale=budget_scale)
+        results = list(await asyncio.gather(*[_write(sec) for sec in wave]))
+        # Stage N: sections lost only to a network outage are written again once the network is back
+        # (a DNS outage of a few minutes used to cost every section and drop the report to the fallback writer).
+        from utils.net_recovery import network_failure, wait_budget, wait_for_network
+        lost = [i for i, d in enumerate(results) if not d.ok and network_failure(getattr(d, "error", ""))]
+        if lost and network_wait_left > 0 and not (deadline and time.monotonic() > deadline[1] - reserve):
+            if progress:
+                progress(f"Network unreachable; waiting to rewrite {len(lost)} section(s)…")
+            waited, back = await wait_for_network(network_wait_left)
+            network_wait_left -= waited
+            deadline_log.setdefault("networkWaits", []).append(
+                {"sections": [wave[i].title for i in lost], "waitedSeconds": round(waited), "networkBack": back})
+            if back:
+                retried = await asyncio.gather(*[_write(wave[i]) for i in lost])
+                for i, draft in zip(lost, retried):
+                    results[i] = draft
+                log.warning("V2: rewrote %d section(s) after a network outage; %d recovered", len(lost),
+                            sum(1 for d in retried if d.ok))
         wave_seconds.append(time.monotonic() - wave_started)
         deadline_log["waves"].append({"sections": f"{start + 1}-{start + len(wave)}", "mode": mode,
                                       "seconds": round(wave_seconds[-1])})
