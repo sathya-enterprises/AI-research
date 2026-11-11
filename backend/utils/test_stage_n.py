@@ -88,9 +88,18 @@ def test_data_file_links_resolved_with_anchor_text():
             '<a href="https://x.gov.in/a.pdf"><span>Annual report</span></a><a href="/about">About</a>'
             '<a href="/uploads/RE_capacity_2026.xlsx">dup</a>')
     links = _data_file_links(html, "https://mnre.gov.in/physical-progress/")
-    assert links == [{"url": "https://mnre.gov.in/uploads/RE_capacity_2026.xlsx",
-                      "text": "Installed RE capacity (state-wise)", "format": "xlsx"},
-                     {"url": "https://x.gov.in/a.pdf", "text": "Annual report", "format": "pdf"}]
+    assert [(x["url"], x["text"], x["format"]) for x in links] == [
+        ("https://mnre.gov.in/uploads/RE_capacity_2026.xlsx", "Installed RE capacity (state-wise)", "xlsx"),
+        ("https://x.gov.in/a.pdf", "Annual report", "pdf")]
+    assert links[1]["context"] == "Installed RE capacity (state-wise)"
+    # a bare "XLS" link takes its label from the text printed before it
+    eia = '<tr><td>Table 3.1.B. Net generation from renewable sources</td><td><a href="t3_1_b.xlsx">XLS</a></td></tr>'
+    link = _data_file_links(eia, "https://www.eia.gov/electricity/annual/")[0]
+    assert link["context"].endswith("Net generation from renewable sources")
+    m, q = link_terms("US renewable generation", ["net generation from solar"])
+    picked = pick_links([{"url": "https://www.eia.gov/electricity/annual/", "pageFetchStatus": "ok",
+                          "pageDataLinks": [link]}], measure_terms=m, question_terms=q, limit=2, existing_urls=set())
+    assert picked[0]["title"] == "Table 3.1.B. Net generation from renewable sources"
 
 
 def _entity_run(rows_after_fetch, rescue_fn=None):
@@ -129,3 +138,46 @@ def test_entity_search_browser_rescue_counts_as_fetched():
 
     kept, stats = _entity_run(rows, rescue_fn=rescue)
     assert stats["fetched_ok"] == 1 and stats["browser"]["recovered"] == 1 and len(kept) == 1
+
+
+# --- N2: data-file links ---------------------------------------------------------------------------------
+from utils.data_links import link_terms, pick_links  # noqa: E402
+
+
+def _parent(url, links, status="ok"):
+    return {"url": url, "pageFetchStatus": status, "title": "Physical progress", "publisher": "MNRE",
+            "pageDataLinks": [{"url": u, "text": t, "format": u.rsplit(".", 1)[-1]} for u, t in links]}
+
+
+def test_link_terms_split_measures_from_question():
+    m, q = link_terms("How has India's renewable capacity grown?", ["installed solar capacity", "wind capacity"])
+    assert {"installed", "solar", "capacity", "wind"} <= m and "india" in q and "growth" not in q
+
+
+def test_pick_links_needs_a_measure_word_and_prefers_official_spreadsheets():
+    m, q = link_terms("India renewable energy capacity", ["installed solar capacity"])
+    rows = [_parent("https://mnre.gov.in/physical-progress/", [
+                ("https://mnre.gov.in/u/state-wise-installed-capacity.xlsx", "State-wise installed capacity"),
+                ("https://mnre.gov.in/u/tender-notice.pdf", "Tender notice"),
+                ("https://mnre.gov.in/u/solar-capacity-2025.pdf", "Solar capacity report 2025"),
+                ("https://mnre.gov.in/u/annual-capacity.xls", "Annual capacity")]),
+            _parent("https://blog.example.com/x", [("https://blog.example.com/solar.pdf", "Solar capacity")]),
+            _parent("https://down.example.gov.in/", [("https://down.example.gov.in/solar.xlsx", "solar")], status="timeout")]
+    picked = pick_links(rows, measure_terms=m, question_terms=q, limit=5, existing_urls=set())
+    urls = [p["url"] for p in picked]
+    assert urls[0].endswith("state-wise-installed-capacity.xlsx")
+    assert "https://mnre.gov.in/u/tender-notice.pdf" not in urls      # no measure word
+    assert not any(u.endswith(".xls") for u in urls)                  # legacy format not readable
+    assert "https://down.example.gov.in/solar.xlsx" not in urls       # parent page was not fetched
+    assert sum(1 for p in picked if p["parentUrl"] == "https://mnre.gov.in/physical-progress/") == 2  # per parent cap
+    assert picked[0]["discoveredVia"] == "data_link" and picked[0]["publisher"] == "MNRE"
+
+
+def test_pick_links_skips_known_urls_and_respects_limit():
+    m, q = link_terms("vaccination coverage", ["measles vaccination coverage"])
+    rows = [_parent("https://www.who.int/data", [("https://www.who.int/a/coverage.csv", "Measles coverage"),
+                                                  ("https://www.who.int/a/vaccination.xlsx", "Vaccination data")])]
+    assert len(pick_links(rows, measure_terms=m, question_terms=q, limit=1, existing_urls=set())) == 1
+    picked = pick_links(rows, measure_terms=m, question_terms=q, limit=5,
+                        existing_urls={"https://www.who.int/a/coverage.csv"})
+    assert [p["url"] for p in picked] == ["https://www.who.int/a/vaccination.xlsx"]

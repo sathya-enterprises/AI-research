@@ -2814,7 +2814,7 @@ async def _enrich_report_source(
     item["pageFetchContentType"] = str(fetch_result.get("content_type") or "")[:160]
     item["pageFetchFinalUrl"] = str(fetch_result.get("final_url") or url)
     if fetch_result.get("data_links"):
-        item["pageDataLinks"] = list(fetch_result["data_links"])[:40]
+        item["pageDataLinks"] = list(fetch_result["data_links"])[:150]
     if fetch_result.get("data_format"):
         item["pageDataFormat"] = str(fetch_result["data_format"])
     if _page_text_matches_source(fetched, item, question, intent):
@@ -21606,6 +21606,40 @@ async def generate_report(request: Request):
         record_research_stage("fetch_status", _fetch_summary)
     except Exception as _fs_exc:
         log.debug("Report: fetch status summary skipped: %s", type(_fs_exc).__name__)
+    # Stage N2: official pages often link the actual numbers as XLSX / CSV / PDF. Follow the few links that
+    # match the measure plan; each file passes the same relevance gate as any page (GG_DATA_LINKS=0 disables).
+    if _os.getenv("GG_DATA_LINKS", "1") != "0":
+        try:
+            from utils.data_links import link_limit as _link_limit, link_terms as _link_terms, pick_links as _pick_links
+            from utils.fetch_tiers import HostLimiter as _LinkHostLimiter, retry_seconds as _link_seconds
+            _mp_links = locals().get("_measure_plan")
+            _m_terms, _q_terms = _link_terms(question, [m.measure for m in getattr(_mp_links, "measures", None) or []])
+            _link_rows = _pick_links(
+                [r for r in enriched_raw if isinstance(r, dict)], measure_terms=_m_terms, question_terms=_q_terms,
+                limit=_link_limit(report_tier), existing_urls={str((r or {}).get("url") or "") for r in enriched_raw})
+            if _link_rows:
+                _report_progress("source_enrichment", f"Opening {len(_link_rows)} linked data files…", 33)
+                _link_sem, _link_hosts = asyncio.Semaphore(4), _LinkHostLimiter(per_host=2)
+
+                async def _fetch_link(i: int, row: dict) -> dict:
+                    async with _link_sem, _link_hosts.slot(str(row.get("url") or "")):
+                        return await _enrich_report_source(row, len(enriched_raw) + i, question, intent,
+                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                                                           fetch_seconds=_link_seconds(row))
+                _link_done = list(await asyncio.gather(*[_fetch_link(i, r) for i, r in enumerate(_link_rows)],
+                                                       return_exceptions=True))
+                _link_ok = [r for r in _link_done if isinstance(r, dict) and r.get("pageFetchStatus") == "ok"]
+                enriched_raw.extend(_link_ok)
+                log.info("Report: data-file links followed=%d added=%d (%s)", len(_link_rows), len(_link_ok),
+                         ", ".join(sorted({str(r.get("pageDataFormat") or "pdf") for r in _link_ok})) or "none")
+                record_research_stage("data_links", {
+                    "followed": len(_link_rows), "added": len(_link_ok),
+                    "links": [{"url": r.get("url"), "title": r.get("title"), "score": r.get("dataLinkScore"),
+                               "parent": r.get("parentUrl"),
+                               "status": (r.get("pageFetchStatus") if isinstance(r, dict) else type(r).__name__)}
+                              for r in _link_done if isinstance(r, dict)]})
+        except Exception as _dl_exc:
+            log.warning("Report: data-file links skipped: %s", type(_dl_exc).__name__)
     enriched = _dedupe_enriched_sources(enriched_raw + rag_source_rows)
     if len(enriched) != len(enriched_raw):
         log.info("Report: canonical source merge collapsed %d duplicate/alias rows while preserving the strongest fetched evidence",

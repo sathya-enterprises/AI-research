@@ -41,7 +41,10 @@ def _rows_to_block(title: str, rows: list[list[str]], index: int) -> list[str]:
     used = [j for j in range(width) if any(j < len(r) and r[j] for r in rows)]
     out = [f"TABLE {index}" + (f" — {title[:180]}" if title else "")]
     for row in rows[:MAX_ROWS_PER_SHEET]:
-        out.append(" | ".join(row[j] if j < len(row) else "" for j in used))
+        cells = [row[j] if j < len(row) else "" for j in used]
+        while cells and not cells[-1]:
+            cells.pop()
+        out.append(" | ".join(cells))
     return out
 
 

@@ -396,7 +396,7 @@ def _extract_publisher_metadata(raw_html: str, fallback_url: str = "") -> dict[s
         return result
 
 
-def _data_file_links(raw_html: str, page_url: str, limit: int = 40) -> list[dict[str, str]]:
+def _data_file_links(raw_html: str, page_url: str, limit: int = 150) -> list[dict[str, str]]:
     """Links on a page that point at data files (PDF/XLSX/CSV), with their anchor text. Never raises."""
     from urllib.parse import urljoin
 
@@ -412,7 +412,11 @@ def _data_file_links(raw_html: str, page_url: str, limit: int = 40) -> list[dict
             seen.add(href)
             text = re.sub(r"<[^>]+>", " ", match.group(2))
             text = re.sub(r"\s+", " ", text).strip()
-            out.append({"url": href, "text": text[:200], "format": ext.lstrip(".")})
+            # the label is often beside the link ("Table 1.1 Net generation ... [XLS] [PDF]")
+            before = re.sub(r"<(script|style)\b.*?</\1>", " ", raw_html[max(0, match.start() - 1500):match.start()],
+                            flags=re.I | re.S)
+            before = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", before)).strip()
+            out.append({"url": href, "text": text[:200], "context": before[-200:], "format": ext.lstrip(".")})
             if len(out) >= limit:
                 break
     except Exception:

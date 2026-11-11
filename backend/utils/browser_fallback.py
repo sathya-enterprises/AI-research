@@ -146,7 +146,7 @@ async def apply_browser_fallback(
     ``matches_source(text, row)`` is the caller's relevance check (the same one
     the HTTP path uses). Returns stats for logging and the research capture.
     """
-    from utils.source_extractor import _extract_html, _extract_publisher_metadata
+    from utils.source_extractor import _data_file_links, _extract_html, _extract_publisher_metadata
 
     stats = {"attempted": 0, "recovered": 0, "rejected_by_relevance": 0, "failed": 0, "limit": 0, "seconds": 0.0}
     if not enabled():
@@ -183,6 +183,9 @@ async def apply_browser_fallback(
         row["pageContent"] = text
         row["pageFetchStatus"] = "ok"
         row["pageFetchMethod"] = "browser"
+        links = _data_file_links(html, final_url or url)
+        if links:
+            row["pageDataLinks"] = links
         row["pageFetchRelevanceMatched"] = True
         row["pageFetchFinalUrl"] = final_url or url
         row["evidenceOrigin"] = "publisher_page_and_search_extract" if (row.get("fullContent") or row.get("snippet")) else "publisher_page"
