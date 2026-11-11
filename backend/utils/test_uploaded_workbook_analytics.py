@@ -3,7 +3,10 @@ import csv
 from io import StringIO
 
 from utils.uploaded_workbook_analytics import (
+    append_attachment_analytics_section,
+    attachment_analytics_section,
     assign_workbook_source,
+    build_attachment_analytics,
     build_pms_workbook_analytics,
     is_file_only_workbook_report,
     workbook_charts_section,
@@ -72,6 +75,34 @@ def test_workbook_only_mode_can_be_overridden_by_explicit_external_research_requ
     )
 
 
+def test_pms_attachment_tables_cover_horizons_categories_rankings_and_per_file_sources():
+    result = build_attachment_analytics(_pms_context())
+    section = attachment_analytics_section(result, source_ids_by_file={"PMS_demo.xlsx": "S7"})
+
+    assert "| File | Source | Sheet / section | Data rows analyzed | Fields | Missing observations |" in section
+    assert "| Horizon | Source(s) | Records with values | Coverage | Mean return | Median return | Range |" in section
+    assert "| 1 Yr | [S7] | 2 |" in section
+    assert "## One-year category comparison" in section
+    assert "## Highest reported strategies by return horizon" in section
+    assert "| 1 Yr | 1 | [S7] | Table 2 | AMC Alpha" in section
+    assert result["files"][0]["sheets"][0]["missingReturnValues"] == 2
+
+
+def test_final_attachment_tables_replace_empty_model_coverage_section():
+    result = build_attachment_analytics(_pms_context())
+    original = "## Executive Findings\n\n## Attached-data coverage\n\n## Conclusion"
+
+    report, changed = append_attachment_analytics_section(
+        original, result, source_ids_by_file={"PMS_demo.xlsx": "S3"}
+    )
+
+    assert changed
+    assert report.count("## Attached-data coverage") == 1
+    assert "| Horizon | Source(s) | Records with values |" in report
+    assert "| 1 Yr | [S3] | 2 |" in report
+    assert report.index("## Conclusion") < report.index("## Attached-data coverage")
+
+
 def test_negative_web_instruction_does_not_turn_off_workbook_only_mode():
     context = _pms_context()
     assert is_file_only_workbook_report(
@@ -99,3 +130,86 @@ def test_generic_report_request_with_structured_workbook_uses_workbook_analytics
         "Analyze this data and create a report with charts using current market data from the web.",
         context, has_rag=True,
     )
+
+
+def test_csv_report_builds_numeric_and_category_tables_with_data_backed_charts():
+    context = """[File: sales.csv]
+Month,Region,Revenue,Margin
+2026-01,North,100,15%
+2026-02,South,130,18%
+2026-03,North,115,16%
+2026-04,West,140,21%
+"""
+    result = build_attachment_analytics(context)
+    assert result["kind"] == "generic_tabular_data"
+    assert result["datasets"][0]["rowCount"] == 4
+    assert {item["name"] for item in result["datasets"][0]["numericSummaries"]} == {"Revenue", "Margin"}
+    assert len(result["charts"]) >= 2
+    table = attachment_analytics_section(result)
+    assert "Numeric-field summary" in table
+    assert "Categorical distributions" in table
+    assert "North (2)" in table
+    assert is_file_only_workbook_report("Create a report from the attached CSV file", context)
+    assert not is_file_only_workbook_report("Create a report and search the web for current sector news", context)
+
+
+def test_pms_workbook_keeps_other_attached_tabular_files_in_the_same_report():
+    context = _pms_context() + """
+
+[File: sales.csv]
+Month,Region,Revenue
+2026-01,North,100
+2026-02,South,130
+2026-03,North,115
+"""
+    result = build_attachment_analytics(context)
+    assert result["kind"] == "pms_strategy_performance"
+    assert len(result["strategies"]) == 2
+    assert result["datasets"][0]["filename"] == "sales.csv"
+    assert any("Revenue" in chart["title"] for chart in result["charts"])
+    profile = attachment_analytics_section(result)
+    assert "Return-horizon coverage and distribution" in profile
+    assert "sales.csv" in profile
+
+
+def test_attachment_chart_source_ids_are_assigned_per_file():
+    context = """[File: sales.csv]
+Month,Region,Revenue
+2026-01,North,100
+2026-02,South,130
+2026-03,North,115
+"""
+    result = build_attachment_analytics(context)
+    assigned = assign_workbook_source(result["charts"], "S1", {"sales.csv": "S2"})
+    assert assigned
+    assert all(chart["sourceIds"] == ["S2"] for chart in assigned)
+    assert all(
+        point["evidenceSource"] == "S2"
+        for chart in assigned for series in chart["series"] for point in series["data"]
+    )
+
+
+def test_generic_summary_tables_cite_the_correct_attachment_per_row():
+    context = """[File: north.csv]
+Month,Region,Revenue
+2026-01,North,100
+2026-02,North,120
+2026-03,North,110
+
+[File: south.csv]
+Month,Region,Revenue
+2026-01,South,200
+2026-02,South,220
+2026-03,South,210
+"""
+    analytics = build_attachment_analytics(context)
+    section = attachment_analytics_section(
+        analytics, source_ids_by_file={"north.csv": "S1", "south.csv": "S2"},
+    )
+
+    assert "| Sheet / section | Source | Field |" in section
+    north_row = next(line for line in section.splitlines() if "[S1]" in line and "Revenue" in line)
+    south_row = next(line for line in section.splitlines() if "[S2]" in line and "Revenue" in line)
+    assert "north.csv" not in north_row  # file name is kept in the coverage table
+    assert "[S2]" not in north_row
+    assert "[S1]" not in south_row

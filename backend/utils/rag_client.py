@@ -46,6 +46,29 @@ def _exc_str(exc: Exception) -> str:
     return f"{type(exc).__name__}: {msg}" if msg else f"{type(exc).__name__} (no message — likely a connect/read timeout, e.g. HF Space cold start)"
 
 
+def _safe_index_http_error(response: httpx.Response) -> str:
+    """Turn a RAG service error into an actionable message without echoing its body."""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, str) else ""
+    normalized = " ".join(detail.split()).casefold()
+
+    if "server-only supabase_secret_key" in normalized or "server-only supabase_service_role_key" in normalized:
+        return "RAG pgvector persistence is not configured with a server-only Supabase key."
+    if "supabase_url" in normalized and ("not configured" in normalized or "set supabase_url" in normalized):
+        return "RAG pgvector persistence is not configured with a database URL."
+    if "embedding dimension mismatch" in normalized:
+        return "RAG pgvector schema does not match the configured embedding model."
+    if "supabase pgvector returned http 401" in normalized or "supabase pgvector returned http 403" in normalized:
+        return "RAG pgvector rejected the server credentials. Check the Supabase key and permissions."
+    if "supabase pgvector returned http 404" in normalized:
+        return "RAG pgvector could not find its table or RPC. Check the database migration and service permissions."
+    return f"RAG service returned HTTP {response.status_code}. Check RAG service health diagnostics."
+
+
 async def _wake_rag_service(max_wait: float = 100.0, poll_interval: float = 5.0) -> bool:
     """
     A sleeping HF Space's wake-up proxy will accept a TCP connection for the
@@ -110,8 +133,9 @@ async def rag_index(session_id: str, documents: list[dict]) -> dict:
             "documents": len(documents), "input_chars": input_chars,
             "http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke,
         })
-        log.warning("RAG index HTTP %d: %s", res.status_code, res.text[:200])
-        return {"error": f"HTTP {res.status_code}", "chunks_added": 0, "http_status": res.status_code}
+        safe_error = _safe_index_http_error(res)
+        log.warning("RAG index HTTP %d: %s", res.status_code, safe_error)
+        return {"error": safe_error, "chunks_added": 0, "http_status": res.status_code}
     except Exception as exc:
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
         record_event("rag-client", "index", "error", duration_ms=elapsed, details={
@@ -234,6 +258,17 @@ async def rag_health_details() -> dict:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as c:
             res = await c.get(f"{RAG_URL}/health")
         if not res.is_success:
+            try:
+                payload = res.json()
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                safe_keys = {
+                    "service", "status", "ready", "port", "model", "embedding_dimension",
+                    "index_type", "vector_storage", "reranker", "active_sessions", "total_chunks",
+                }
+                safe_payload = {key: value for key, value in payload.items() if key in safe_keys}
+                return {"reachable": True, **safe_payload, "httpStatus": res.status_code}
             return {"reachable": True, "ready": False, "status": "http_error", "httpStatus": res.status_code}
         payload = res.json()
         if not isinstance(payload, dict):

@@ -65,3 +65,19 @@ def test_server_workbook_charts_survive_generic_report_prompt_relevance_filter()
         require_publisher_verification=True,
     )
     assert len(charts) == 1, meta
+
+
+def test_uploaded_attachment_chart_is_validated_from_its_exact_file_excerpt():
+    chart = _workbook_chart()
+    chart["sourceOrigin"] = "uploaded_attachment"
+    source_text = "\n".join(point["evidenceQuote"] for point in chart["series"][0]["data"])
+    sources = [{
+        "id": "S1", "title": "sales.csv", "kind": "uploaded_attachment",
+        "evidenceOrigin": "uploaded_attachment", "pageFetchStatus": "not_applicable",
+        "chartEvidenceExcerpt": source_text,
+    }]
+    audit = audit_chart_evidence_consistency(
+        "## Quantitative comparisons from the attached data\n[CHART_1]", [chart], sources,
+        require_publisher_verification=True,
+    )
+    assert not audit.get("chartEvidenceFailures"), audit.get("chartEvidenceFailures")

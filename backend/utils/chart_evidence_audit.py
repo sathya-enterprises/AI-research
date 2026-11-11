@@ -317,10 +317,10 @@ def _chart_source_text(source: dict | None, require_publisher_verification: bool
     origin = str(source.get("evidenceOrigin") or source.get("evidence_origin") or "").strip().casefold()
     kind = str(source.get("kind") or source.get("source_type") or source.get("sourceType") or "").strip().casefold()
     workbook_excerpt = str(source.get("chartEvidenceExcerpt") or "").strip()
-    # A user-uploaded workbook is primary evidence for a file-based report. It is
-    # not a web publisher page, but its exact row excerpt may still validate a
-    # chart point when evidenceSource/evidenceQuote/evidenceValue match that row.
-    if origin == "uploaded_workbook" and "uploaded" in kind and workbook_excerpt:
+    # Uploaded attachments are primary file evidence, not web publisher pages.
+    # Their exact row excerpts can validate chart points when source IDs and raw
+    # values match the uploaded text.
+    if origin in {"uploaded_workbook", "uploaded_attachment"} and "uploaded" in kind and workbook_excerpt:
         return workbook_excerpt
     if is_trusted_calculated_sector_source(source):
         return workbook_excerpt
@@ -656,8 +656,8 @@ def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple
     mask: list[bool] = []
     removed = 0
     for idx, chart in enumerate(charts, start=1):
-        # Deterministic workbook charts are already selected from the uploaded
-        # workbook's actual metric columns. A generic prompt ("analyze this data")
+        # Deterministic attachment charts are already selected from uploaded
+        # table columns. A generic prompt ("analyze this data")
         # may not repeat terms such as "return" or "PMS", so the generic topical
         # relevance heuristic incorrectly discarded every valid workbook chart.
         # Trust this bypass only for the server-set provenance flag + origin; the
@@ -665,7 +665,8 @@ def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple
         server_workbook_chart = (
             isinstance(chart, dict)
             and chart.get("_serverWorkbookEvidence") is True
-            and str(chart.get("sourceOrigin") or "").strip().casefold() == "uploaded_workbook"
+            and str(chart.get("sourceOrigin") or "").strip().casefold()
+            in {"uploaded_workbook", "uploaded_attachment"}
         )
         v2_validated = _chart_observation_signature(chart) in _TRUSTED_CHART_SIGNATURES.get()
         keep = server_workbook_chart or v2_validated or _chart_is_relevant(chart, report, question, idx)
@@ -1493,14 +1494,14 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
             if not source:
                 continue
             source_text[sid] = _chart_source_text(source, require_publisher_verification)
-        # Uploaded workbooks are primary evidence, but they are not publisher
-        # webpages. For charts created by the deterministic server-side workbook
-        # analytics path, validate each exact row quote and numeric scaling
+        # Uploaded files are primary evidence, but they are not publisher
+        # webpages. For charts created by deterministic server-side analytics,
+        # validate each exact row quote and numeric scaling
         # directly. Requiring publisher-page verification here rejects valid
         # workbook points even though the row-level quote came from the workbook.
         server_workbook_chart = chart.get("_serverWorkbookEvidence") is True and str(
             chart.get("sourceOrigin") or ""
-        ).strip().casefold() == "uploaded_workbook"
+        ).strip().casefold() in {"uploaded_workbook", "uploaded_attachment"}
         for series_index, point_index, series, label, value, point in indexed_points:
             quote_sid = str(point.get("evidenceSource") or "").strip().upper()
             if server_workbook_chart and quote_sid in ids and quote_sid in source_by_id and point.get("evidenceQuote"):

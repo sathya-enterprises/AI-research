@@ -8,6 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         chromium \
         chromium-driver \
+        antiword \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

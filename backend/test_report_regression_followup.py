@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 
-from routes.report import _attach_audit_source_evidence, _source_evidence_quality_audit, _publication_audit_is_blocking
+from routes.report import (
+    _attach_audit_source_evidence,
+    _report_source_evidence_audit,
+    _source_evidence_quality_audit,
+    _publication_audit_is_blocking,
+)
 from routes.html_report import _render_chart_block_inner
 from utils.chart_catalog import chart_density_assessment
 from utils.report_quality import audit_report_publication
@@ -46,6 +51,24 @@ def test_a_number_unsupported_by_every_cited_source_still_blocks():
     assert evidence_audit["blocking"]
     assert evidence_audit["mismatchedCitationGroups"]
     assert _publication_audit_is_blocking({"controlMarkerCount": 1})
+
+
+def test_attachment_only_source_mode_is_separate_from_normal_claim_checks():
+    manifest = [{
+        "id": "S1",
+        "title": "PMS uploaded workbook",
+        "kind": "Uploaded document",
+    }]
+    report = "The workbook's 1 Mth mean return is 5.20% [S1]."
+
+    audited = _attach_audit_source_evidence(manifest, [], report)
+    ordinary_audit = _report_source_evidence_audit(audited)
+    attachment_audit = _report_source_evidence_audit(audited, attachment_only=True)
+
+    assert ordinary_audit["blocking"] is True
+    assert attachment_audit["blocking"] is False
+    assert attachment_audit["sourceMode"] == "uploaded_attachment"
+    assert "data source of truth" in attachment_audit["note"]
 
 
 def test_risk_matrix_marker_is_removed_from_reader_text_and_raw_marker_is_blocking():
