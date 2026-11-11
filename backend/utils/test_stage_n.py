@@ -403,3 +403,53 @@ def test_n9_budgets_slots_links_bodies_scope():
     tiers = entity_tiers(store, tier="in_depth", question="How did India's solar capacity grow?", scope="India")
     us = next(e for v in tiers.values() for e in v if e.name == "United States")
     assert us.tier != "deep_dive" and us.role == "out_of_scope"
+
+
+# --- N10: more charts from verifiable data -------------------------------------------------------------------
+from utils.dataset_extractor import verify_dataset  # noqa: E402
+from utils.section_charts import clip_to_window  # noqa: E402
+
+
+def test_pdf_table_row_aligned_with_period_header_is_verified():
+    text = ("STATES / UT's 2021-22 2022-23 2023-24 2024-25\n"
+            "Gujarat 17,130.55 19,385.02 24,950.80 32,000.10\n"
+            "Kerala 600.1 700.2 800.3\n")  # a short row: alignment uncertain
+    ds = {"metric": "RE installed capacity", "unit": "MW", "x": "time", "series": [
+        {"name": "Gujarat", "points": [{"label": "2022-23", "value": "19,385.02"},
+                                       {"label": "2023-24", "value": "24,950.80"},
+                                       {"label": "2024-25", "value": "32,000.10"}]}]}
+    assert verify_dataset(ds, text, _date(2026, 11, 11))[0] is not None
+    wrong = {**ds, "series": [{"name": "Gujarat", "points": [{"label": "2022-23", "value": "24,950.80"},
+                                                             {"label": "2023-24", "value": "19,385.02"},
+                                                             {"label": "2024-25", "value": "32,000.10"}]}]}
+    assert verify_dataset(wrong, text, _date(2026, 11, 11))[0] is None  # swapped values are caught
+
+
+def test_fiscal_year_run_then_value_run_is_verified():
+    text = "Fig 6.2 RE share 2019-20 2020-21 2021-22 2022-23 21.26 21.67 21.73 22.61"
+    ds = {"metric": "Share of RE", "unit": "%", "x": "time", "series": [{"name": "Share of RE", "points": [
+        {"label": y, "value": v} for y, v in [("2019-20", "21.26"), ("2020-21", "21.67"), ("2021-22", "21.73"),
+                                              ("2022-23", "22.61")]]}]}
+    assert verify_dataset(ds, text, _date(2026, 11, 11))[0] is not None
+
+
+def test_time_series_clipped_to_window_not_dropped():
+    from utils.section_charts import PlannedChart
+    data = [{"label": lab, "value": v} for lab, v in [("Cumulative till Mar 2014", 1), ("FY 2019-20", 2),
+                                                     ("FY 2021-22", 3), ("FY 2022-23", 4), ("FY 2023-24", 5)]]
+    chart = PlannedChart(chart_id="c1", spec={"type": "bar", "title": "Added (MW): Cumulative till Mar 2014, FY 2019-20",
+                                              "series": [{"name": "Added (MW)", "data": data}]},
+                         passage_ids=["S1.1"], source_ids=["S1"],
+                         points=[("Added (MW)", d["label"], d["value"]) for d in data])
+    assert clip_to_window(chart, 2021) == ""
+    assert [d["label"] for d in chart.spec["series"][0]["data"]] == ["FY 2021-22", "FY 2022-23", "FY 2023-24"]
+    assert chart.spec["title"] == "Added (MW): FY 2021-22 to FY 2023-24" and len(chart.points) == 3
+
+
+def test_seeded_company_publishing_its_own_pages_stays_a_subject():
+    own = "ReNew reported capacity. ReNew data show growth. ReNew said targets."
+    store = types.SimpleNamespace(passages=[_p(f"S{i}.1", own, url=f"https://renew.com/p{i}", publisher="ReNew")
+                                            for i in range(1, 5)])
+    assert PublisherRoles(store, "India solar companies").is_body("ReNew")  # by role alone it looks like a publisher
+    seeded = entity_tiers(store, tier="in_depth", question="India solar companies", seeds=["ReNew"])
+    assert next(e.role for v in seeded.values() for e in v if e.name == "ReNew") == ""

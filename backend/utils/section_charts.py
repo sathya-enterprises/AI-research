@@ -500,6 +500,48 @@ def _outside_window(chart: PlannedChart, min_year: int | None) -> str:
     return ""
 
 
+def _period_end_year(label: str) -> int | None:
+    """The year a period label ends in: "2023" -> 2023, "FY 2014-15" -> 2015, "FY24" -> 2024, else None."""
+    text = str(label or "")
+    m = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)", text)
+    if m:
+        return int(m.group(1)[:2] + m.group(2))
+    years = re.findall(r"\b((?:19|20)\d{2})\b", text)
+    if years:
+        return int(years[-1])
+    m = re.search(r"(?i)\bFY\s*'?(\d{2})\b", text)
+    return 2000 + int(m.group(1)) if m else None
+
+
+def clip_to_window(chart: PlannedChart, min_year: int | None) -> str:
+    """Stage N: a time series that starts before the requested window keeps its in-window periods (>= 3)
+    instead of failing the window audit as a whole; '' when kept (possibly clipped), else the drop reason."""
+    if not min_year or chart.spec.get("type") not in {"line", "grouped_bar", "bar"}:
+        return ""
+    series = chart.spec.get("series") or []
+    labels = [str(d.get("label")) for s in series for d in s.get("data") or []]
+    ends = {lab: _period_end_year(lab) for lab in labels}
+    if not labels or any(v is None for v in ends.values()):
+        return ""  # not a time axis (or not every label is a dated period): nothing to clip
+    old = {lab for lab, y in ends.items() if y < min_year}
+    if not old:
+        return ""
+    for s in series:
+        s["data"] = [d for d in s.get("data") or [] if str(d.get("label")) not in old]
+    series = [s for s in series if len(s.get("data") or []) >= 3]
+    if not series:
+        return f"fewer than 3 periods inside the requested window (from {min_year})"
+    chart.spec["series"] = series
+    chart.points = [(a, b, v) for a, b, v in chart.points if a not in old and b not in old]
+    title = str(chart.spec.get("title") or "")
+    if any(lab in title for lab in old):  # the title listed the clipped periods: rebuild it from what is plotted
+        kept = [str(d.get("label")) for d in series[0]["data"]]
+        chart.spec["title"] = f"{title.split(':', 1)[0].strip()}: {kept[0]} to {kept[-1]}"
+    chart.spec["basisNote"] = (str(chart.spec.get("basisNote") or "") +
+                               f" Periods before {min_year} are left out (outside the requested window).").strip()
+    return ""
+
+
 def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None = None,
                            min_reliability: float = 0.5, today: str | None = None) -> tuple[list[PlannedChart], list[dict]]:
     """Charts from every table/calculated passage; returns (verified charts, dropped log).
@@ -515,6 +557,8 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
                 continue
             seen.add(signature)
             reason = verify_chart(chart, passage.text) or _outside_window(chart, min_year)
+            if not reason:
+                reason = clip_to_window(chart, min_year)
             if not reason and passage.kind != "calculated" and passage.reliability < min_reliability:
                 reason = f"source reliability {passage.reliability:.2f} below {min_reliability:.2f}"
             # Stage N: a repeated title is a duplicate only when the values repeat too; otherwise it is another

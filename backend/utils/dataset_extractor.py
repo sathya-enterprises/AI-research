@@ -126,7 +126,9 @@ def _mapping_verified(points: list[dict], text: str) -> bool:
     n = len(values)
     # a chart printed as text: the values are a contiguous run AND the labels are a printed run of
     # exactly n period labels ("2014 2015 ... 2024"), so the value -> period alignment is certain
-    period_runs = [run.split() for run in re.findall(r"(?:\b(?:19|20)\d{2}\b[ \t]+){2,}\b(?:19|20)\d{2}\b", text or "")]
+    # (Stage N: fiscal-year labels "2015-16 2016-17 ..." form a run too)
+    _yr = r"\b(?:19|20)\d{2}(?:[-–]\d{2}(?!\d))?\b"
+    period_runs = [run.split() for run in re.findall(rf"(?:{_yr}[ \t]+){{2,}}{_yr}", text or "")]
     for i in range(0, max(0, len(tokens) - n) + 1):
         if [round(t, 4) for t in tokens[i:i + n]] == [round(v, 4) for v in values]:
             if any(run == labels for run in period_runs):
@@ -156,6 +158,50 @@ def _mapping_verified(points: list[dict], text: str) -> bool:
 
 _LABEL_STOP = {"the", "and", "for", "with", "from", "total", "sales", "share", "units"}
 
+_PERIOD_TOKEN = re.compile(r"(?i)^(?:(?:19|20)\d{2}(?:[-–/]\d{2,4})?|FY\s?'?\d{2,4}(?:[-–]\d{2,4})?|CY\d{2,4}|"
+                           r"Q[1-4][-']?(?:FY)?\d{0,4}|H[12][-']?(?:FY)?\d{0,4}|[A-Z][a-z]{2}[-']\d{2,4})(?:\([A-Z]{1,2}\))?$")
+
+
+def _cells(line: str) -> list[str]:
+    if " | " in line:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+    return line.split()
+
+
+def _row_aligned(name: str, points: list[dict], text: str) -> bool:
+    """Stage N: a table row whose values line up with a header row of periods, one value per period.
+
+    PDF tables arrive as "STATES 2021-22 2022-23 2023-24" / "Gujarat 1,234 1,456 1,789" (or pipe rows). When the
+    row starting with the series name has exactly as many numbers as the header has periods, value i belongs to
+    period i, so every point's label -> value can be checked. Any other shape (a missing cell, an NA, extra
+    columns) is not certain and is left to the other checks."""
+    key = re.sub(r"\s+", " ", str(name or "")).strip().casefold()
+    if len(key) < 2:
+        return False
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    headers = []
+    for line in lines:
+        periods = [c.strip() for c in _cells(line) if _PERIOD_TOKEN.match(c.strip())]
+        if len(periods) >= 3:
+            headers.append([p.casefold() for p in periods])
+    if not headers:
+        return False
+    for line in lines:
+        flat = re.sub(r"\s+", " ", line.replace("|", " ")).strip()
+        if not flat.casefold().startswith(key) or (len(flat) > len(key) and flat[len(key)].isalnum()):
+            continue
+        values = [_value(raw) for raw in _NUM_RE.findall(flat[len(key):])]
+        if not values or any(v is None for v in values):
+            continue
+        for header in headers:
+            if len(header) != len(values):
+                continue
+            column = dict(zip(header, values))
+            if all(column.get(p["label"].strip().casefold()) is not None
+                   and round(column[p["label"].strip().casefold()], 4) == round(p["value"], 4) for p in points):
+                return True
+    return False
+
 
 def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
     """(clean dataset, '') or (None, reason)."""
@@ -181,7 +227,7 @@ def verify_dataset(ds: dict, text: str, today: date) -> tuple[dict | None, str]:
             pts.append({"label": label, "value": v, "raw": str(p.get("value"))})
         if len(pts) < 3:
             return None, "fewer than 3 points"
-        if not _mapping_verified(pts, text):
+        if not (_mapping_verified(pts, text) or _row_aligned(str(s.get("name") or ""), pts, text)):
             return None, f"cannot verify which value belongs to which label in series {str(s.get('name'))[:40]!r}"
         clean.append({"name": str(s.get("name") or ds.get("metric") or "Value").strip(), "points": pts})
     labels = [p["label"] for p in clean[0]["points"]]
