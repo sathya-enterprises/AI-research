@@ -217,7 +217,7 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     if len(lines) < 3:
         return []
     heading_line = next((ln for ln in str(passage.text).splitlines() if ln.strip() and " | " not in ln), "")
-    heading = re.sub(r"^TABLE \d+\s*[—-]\s*", "", heading_line.strip()).replace("(continued)", "").strip()
+    heading = re.sub(r"^TABLE \d+\b\s*(?:\(continued\))?\s*(?:[—-]\s*)?", "", heading_line.strip()).replace("(continued)", "").strip()
     header = _split_row(lines[0])
     rows = [_split_row(ln) for ln in lines[1:]]
     rows = [r for r in rows if len(r) == len(header) and r[0]]

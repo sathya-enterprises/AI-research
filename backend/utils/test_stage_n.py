@@ -336,3 +336,18 @@ def test_official_dataset_fit_is_checked_and_stand_ins_labelled():
     row = as_source(ds)
     assert 'NOTE — context indicator for "installed solar capacity"' in row["pageContent"]
     assert row["officialDataset"]["fit"] == "stand-in"
+
+
+# --- N7: charted tables are not printed again; bare "TABLE 1" is not a caption ------------------------------
+from utils.section_layout import parse_table, place_inline_tables  # noqa: E402
+
+
+def test_bare_table_number_is_not_a_caption_and_charted_tables_are_skipped():
+    p = types.SimpleNamespace(passage_id="S3.2", source_id="S3", kind="table", reliability=0.8, published="",
+                              text="TABLE 1\nState | Solar (MW)\nRajasthan | 41700\nGujarat | 31000\nKarnataka | 9800")
+    table = parse_table(p)
+    assert table.heading == ""
+    body = "Rajasthan leads solar capacity [S3.2]."
+    out = place_inline_tables(body, {"S3.2": table}, set())
+    assert "**Table: State by Solar (MW)**" in out and "TABLE 1" not in out
+    assert place_inline_tables(body, {"S3.2": table}, {"S3.2"}) == body  # already shown as a figure

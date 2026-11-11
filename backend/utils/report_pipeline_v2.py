@@ -133,7 +133,8 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
-def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None, window_start=None) -> dict:
+def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None, window_start=None,
+                          charted: set[str] | None = None) -> dict:
     """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
     from utils.number_policy import apply_number_policy
     from utils.section_charts import _is_qtd, qtd_start_month
@@ -148,7 +149,8 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
     summaries = {d.section_id: d.summary for d in good}
     sections = {s.section_id: s for s in analysis}
     stats = {"statStrips": 0, "takeaways": 0, "watch": 0, "inlineTables": 0, "comparisons": 0,
-             "placedTables": set(), "scorecard": "", "scorecardRows": 0, "headingsRemoved": 0}
+             # Stage N: a table already drawn as a figure is not printed again beside it or in the appendix
+             "placedTables": set(charted or ()), "scorecard": "", "scorecardRows": 0, "headingsRemoved": 0}
     for e in edited:
         sec = sections.get(e.section_id)
         cited = {t.strip().upper() for g in CITE_RE.findall(e.body) for t in re.split(r"\s*[,;]\s*", g)}
@@ -376,7 +378,7 @@ def appendix_data_markdown(store, used_passages: set[str], max_tables: int = 10,
         ids = ", ".join(getattr(p, "merged_ids", None) or [p.passage_id])
         # A clear caption: the source's table title without its "TABLE n —" numbering; a
         # too-short title is described from the table's own columns.
-        caption = re.sub(r"^TABLE\s+\d+\s*[—-]\s*", "", heading).replace("(continued)", "").strip(" :")
+        caption = re.sub(r"^TABLE\s+\d+\b\s*(?:\(continued\))?\s*(?:[—-]\s*)?", "", heading).replace("(continued)", "").strip(" :")
         cols = [c.strip() for c in rows[0].strip().strip("|").split("|") if c.strip()]
         row_labels = [r.strip().strip("|").split("|")[0].strip() for r in body_rows]
         from utils.chart_titles import data_title, foreign_entities
@@ -822,7 +824,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except Exception:
         layout_window = None
     layout = _apply_section_layout(edited, store=store, outline=outline, analysis=analysis, good=good, today=today,
-                                   asks=asks, window_start=layout_window)
+                                   asks=asks, window_start=layout_window,
+                                   charted={pid for c in used for pid in c.passage_ids})
     # Agreement list questions ("all the FTAs signed in the past 1 year"): the dated ledger from the
     # evidence (signing kept apart from entry into force; what official sources verify), placed in the
     # section that answers the list ask.
