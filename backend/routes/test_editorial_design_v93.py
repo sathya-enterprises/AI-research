@@ -107,6 +107,16 @@ def test_editorial_layer_is_appended_after_legacy_css_and_scoped():
     assert "@page" in D.editorial_print_css() and "{short_title}" in D.editorial_print_css()
 
 
+def test_editorial_print_flow_avoids_section_page_gaps_and_caps_chart_height():
+    css = D.editorial_print_css()
+    assert re.search(
+        r"\.gg-section ~ \.gg-section \{ break-before: auto !important; page-break-before: auto !important; \}",
+        css,
+    )
+    assert "break-before: page !important" not in css
+    assert "max-height: 250pt !important" in css
+
+
 def test_svg_horizontal_bar_labels_are_not_clipped_and_generic_axis_titles_dropped():
     long = "Small finance banks (aggregate of all reporting institutions)"
     svg = P._svg_chart_from_config({"type": "bar", "data": {"labels": [long, "Foreign banks"], "datasets": [{"label": "CRAR", "data": [21.4, 19.1]}]},

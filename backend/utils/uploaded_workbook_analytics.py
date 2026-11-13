@@ -38,6 +38,173 @@ def _norm(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
+def _chart_words(value: object) -> str:
+    """Normalize chart labels for semantic matching without relying on titles alone."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _return_periods_in_text(value: object) -> set[str]:
+    words = f" {_chart_words(value)} "
+    aliases = dict(_RETURN_ALIASES)
+    aliases.update({
+        "one month": "1 Mth", "three months": "3 Mth", "six months": "6 Mth",
+        "one year": "1 Yr", "two years": "2 Yr", "three years": "3 Yr",
+        "five years": "5 Yr", "ten years": "10 Yr",
+    })
+    return {
+        period for alias, period in aliases.items()
+        if f" {_chart_words(alias)} " in words
+    }
+
+
+def _chart_series(chart: dict) -> list[dict]:
+    return [series for series in (chart.get("series") or []) if isinstance(series, dict)]
+
+
+def _chart_points(series: dict) -> list[dict]:
+    values = series.get("data") if isinstance(series.get("data"), list) else series.get("values")
+    return [point for point in (values or []) if isinstance(point, dict)]
+
+
+def _category_words(value: object) -> set[str]:
+    return {
+        word for word in _chart_words(value).split()
+        if word not in {"pms", "strategy", "strategies", "category", "categories", "investment"}
+    }
+
+
+def _close_chart_value(left: object, right: object) -> bool:
+    try:
+        a, b = float(left), float(right)
+    except (TypeError, ValueError):
+        return False
+    return abs(a - b) <= max(0.01, abs(b) * 0.002)
+
+
+def _duplicates_category_medians(chart: dict, workbook_charts: list[dict]) -> bool:
+    title_and_axes = " ".join(str(chart.get(key) or "") for key in ("title", "xLabel", "yLabel"))
+    model_series = _chart_series(chart)
+    if "category" not in _chart_words(title_and_axes) and not any(
+        "categor" in _chart_words(series.get("name")) for series in model_series
+    ):
+        return False
+    if "median" not in _chart_words(title_and_axes) and not any(
+        "median" in _chart_words(series.get("name")) for series in model_series
+    ):
+        return False
+
+    model_median_series = [
+        series for series in model_series
+        if "median" in _chart_words(series.get("name"))
+    ] or model_series[:1]
+    model_points = [point for series in model_median_series for point in _chart_points(series)]
+    if len(model_points) < 3:
+        return False
+
+    for baseline in workbook_charts:
+        if baseline.get("chartRole") != "snapshot_summary":
+            continue
+        baseline_title = _chart_words(baseline.get("title"))
+        if "categor" not in baseline_title:
+            continue
+        median_series = [
+            series for series in _chart_series(baseline)
+            if "median" in _chart_words(series.get("name"))
+        ]
+        baseline_points = [point for series in median_series for point in _chart_points(series)]
+        if not baseline_points:
+            continue
+        matched = 0
+        for point in model_points:
+            label = _category_words(point.get("label") or point.get("name") or point.get("x"))
+            if not label:
+                continue
+            for reference in baseline_points:
+                reference_label = _category_words(
+                    reference.get("label") or reference.get("name") or reference.get("x")
+                )
+                labels_match = bool(label and reference_label and (label <= reference_label or reference_label <= label))
+                if labels_match and _close_chart_value(
+                    point.get("value", point.get("y")), reference.get("value", reference.get("y")),
+                ):
+                    matched += 1
+                    break
+        if matched >= 3 and matched / len(model_points) >= 0.75:
+            return True
+    return False
+
+
+def pms_model_chart_keep_mask(
+    model_charts: list | None, workbook_charts: list | None,
+) -> tuple[list[bool], list[str]]:
+    """Reject model charts that duplicate attachment facts or misuse lookback periods.
+
+    Lookback horizons in a PMS snapshot are independent return windows, not a
+    chronological axis. Server-built workbook charts remain authoritative; this
+    only filters redundant or misleading model-generated charts in PMS reports.
+    """
+    charts = list(model_charts or [])
+    deterministic = [chart for chart in (workbook_charts or []) if isinstance(chart, dict)]
+    deterministic_titles = {
+        _chart_words(chart.get("title")) for chart in deterministic if _chart_words(chart.get("title"))
+    }
+    ranking_periods = {
+        str(chart.get("workbookMetric") or "")
+        for chart in deterministic
+        if chart.get("chartRole") == "strategy_ranking" and chart.get("workbookMetric")
+    }
+    keep_mask: list[bool] = []
+    reasons: list[str] = []
+    time_series_types = {"line", "spline", "area", "stacked_area", "step_line"}
+
+    for chart in charts:
+        if not isinstance(chart, dict) or chart.get("_serverWorkbookEvidence") is True:
+            keep_mask.append(True)
+            reasons.append("")
+            continue
+        title = str(chart.get("title") or "").strip()
+        title_words = _chart_words(title)
+        reason = ""
+        if title_words and title_words in deterministic_titles:
+            reason = "same title as a deterministic workbook chart"
+
+        series = _chart_series(chart)
+        first_points = _chart_points(series[0]) if series else []
+        labels = [str(point.get("label") or point.get("name") or point.get("x") or "") for point in first_points]
+        label_periods = [_RETURN_ALIASES.get(_chart_words(label)) for label in labels]
+        matched_horizons = sum(period is not None for period in label_periods)
+        horizon_axis = "horizon" in _chart_words(" ".join((title, str(chart.get("xLabel") or ""))))
+        chart_type = _chart_words(chart.get("type")).replace(" ", "_")
+        if (
+            not reason and chart_type in time_series_types and len(labels) >= 3
+            and matched_horizons >= 3 and matched_horizons / len(labels) >= 0.75
+            and horizon_axis
+        ):
+            reason = "reported lookback windows are separate snapshots, not a time series"
+
+        descriptor = " ".join([
+            title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""),
+            *(str(item.get("name") or "") for item in series),
+        ])
+        words = _chart_words(descriptor)
+        is_strategy_ranking = (
+            ("top" in words or "rank" in words)
+            and ("strategies" in words or "strategy" in words)
+        )
+        if not reason and is_strategy_ranking:
+            matching_periods = _return_periods_in_text(descriptor) & ranking_periods
+            if matching_periods:
+                period = sorted(matching_periods)[0]
+                reason = f"duplicate {period} strategy ranking already computed from workbook rows"
+
+        if not reason and _duplicates_category_medians(chart, deterministic):
+            reason = "category medians duplicate the deterministic workbook mean/median comparison"
+
+        keep_mask.append(not reason)
+        reasons.append(reason)
+    return keep_mask, reasons
+
+
 def _benchmark_key(value: object) -> str:
     """Normalize common long/short benchmark labels for workbook row matching."""
     text = _norm(value)
@@ -685,9 +852,18 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                 "evidenceValue": raw_value,
                 "sourceSheet": sheet_name, "sourceRow": row_number, "sourceFile": source_row.get("filename"),
             })
+        ranking_type = (
+            "dot_plot" if period in {"1 Mth", "3 Mth", "6 Mth"}
+            else "lollipop" if period in {"3 Yr", "5 Yr", "10 Yr", "Since Incp."}
+            else "horizontal_bar"
+        )
+        if ranking_type in {"dot_plot", "lollipop"}:
+            x_label, y_label = f"{period} return (%)", "PMS strategy"
+        else:
+            x_label, y_label = "PMS strategy", f"{period} return (%)"
         charts.append({
-            "type": "horizontal_bar", "title": chart_title,
-            "xLabel": "PMS strategy", "yLabel": f"{period} return (%)", "unit": "%",
+            "type": ranking_type, "title": chart_title,
+            "xLabel": x_label, "yLabel": y_label, "unit": "%",
             "series": [{"name": series_name, "data": points}],
             "sourceIds": [], "sourceOrigin": "uploaded_workbook", "workbookMetric": period,
             "chartRole": "strategy_ranking",
@@ -2581,7 +2757,16 @@ def workbook_charts_section(
         )
     lines = [f"## Quantitative comparisons from the {source_label}", "", intro, ""]
     for offset, chart in enumerate(charts, start=0):
-        lines.extend([f"### {chart.get('title', 'Workbook comparison')}",
-                      str(chart.get("takeaway") or "This chart compares the available reported observations."),
-                      f"[CHART_{start_index + offset}]", ""])
+        marker = f"[CHART_{start_index + offset}]"
+        if chart.get("takeaway") or chart.get("rationale"):
+            # The rendered chart panel already contains its title, context and
+            # takeaway. Repeating them in Markdown strands captions when the
+            # complete chart panel moves to the next PDF page.
+            lines.extend([marker, ""])
+        else:
+            lines.extend([
+                f"### {chart.get('title', 'Workbook comparison')}",
+                "This chart compares the available reported observations.",
+                marker, "",
+            ])
     return "\n".join(lines).strip()

@@ -47,11 +47,17 @@ def test_pms_workbook_yields_deterministic_return_charts_and_missing_values_stay
     assert any("1-Year" in title for title in titles)
     assert any("5-Year" in title for title in titles)
     one_year = next(c for c in result["charts"] if "1-Year" in c["title"])
+    one_month = next(c for c in result["charts"] if "1-Month" in c["title"])
     points = one_year["series"][0]["data"]
+    assert one_month["type"] == "dot_plot"
+    assert one_month["xLabel"] == "1 Mth return (%)" and one_month["yLabel"] == "PMS strategy"
+    assert one_year["type"] == "horizontal_bar"
     assert points[0]["value"] == 24.8
     assert points[0]["evidenceValue"] == "0.248"
     assert all(p["value"] != 0 for p in points)
     five_year = next(c for c in result["charts"] if "5-Year" in c["title"])
+    assert five_year["type"] == "lollipop"
+    assert five_year["xLabel"] == "5 Yr return (%)" and five_year["yLabel"] == "PMS strategy"
     assert len(five_year["series"][0]["data"]) == 2
     assert result["periodCoverage"]["2 Yr"] == 2
     assert result["periodCoverage"]["Since Incp."] == 2
@@ -68,8 +74,9 @@ def test_workbook_charts_get_canonical_source_and_body_placeholders():
     assert "[CHART_3]" in body
     assert "[CHART_4]" in body
     assert "[CHART_5]" in body
-    assert body.index(assigned[0]["title"]) < body.index("[CHART_3]")
-    assert body.index("Shows up to ten highest reported") < body.index("[CHART_3]")
+    assert assigned[0]["title"] not in body  # the chart panel renders it once beside the figure
+    assert "Shows up to ten highest reported" not in body
+    assert body.index("calculated from the workbook's reported values") < body.index("[CHART_3]")
 
 
 def test_workbook_only_mode_can_be_overridden_by_explicit_external_research_request():
@@ -118,7 +125,7 @@ def test_pms_snapshot_charts_use_grouped_summaries_and_pass_the_evidence_gate():
 
     assert len(charts) == 5
     assert [chart["type"] for chart in charts].count("grouped_bar") == 2
-    assert [chart["type"] for chart in charts].count("horizontal_bar") == 3
+    assert {chart["type"] for chart in charts} == {"dot_plot", "horizontal_bar", "lollipop", "grouped_bar"}
     markers = "\n".join(f"[CHART_{index}]" for index in range(1, len(charts) + 1))
     audit = audit_chart_evidence_consistency(
         markers, charts, [source], question="Analyze the attached PMS workbook.",
@@ -126,6 +133,60 @@ def test_pms_snapshot_charts_use_grouped_summaries_and_pass_the_evidence_gate():
     )
     assert audit.get("chartEvidenceFailures", []) == [], audit
     assert audit.get("chartTableVerificationConflicts", []) == [], audit
+
+
+def test_pms_model_chart_filter_removes_duplicate_rankings_and_misleading_horizon_trends():
+    from utils.uploaded_workbook_analytics import pms_model_chart_keep_mask
+    from routes.report import _remap_chart_placeholders
+
+    workbook_charts = [
+        {"chartRole": "strategy_ranking", "workbookMetric": "1 Yr", "title": "Top PMS Strategies by 1-Year Return"},
+        {
+            "chartRole": "snapshot_summary", "title": "PMS 1-year return averages by category (mean vs median)",
+            "series": [
+                {"name": "Mean 1-year return", "data": [
+                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.65},
+                    {"label": "LARGE CAP", "value": 6.89},
+                    {"label": "SMALL CAP", "value": -3.57},
+                    {"label": "MULTI ASSET", "value": 13.97},
+                ]},
+                {"name": "Median 1-year return", "data": [
+                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.7},
+                    {"label": "LARGE CAP", "value": 7.225},
+                    {"label": "SMALL CAP", "value": -6.91},
+                    {"label": "MULTI ASSET", "value": 11.33},
+                ]},
+            ],
+        },
+    ]
+    model_charts = [
+        {"title": "Top 10 Strategies — 1-Year Returns", "type": "lollipop", "xLabel": "Return (%)", "yLabel": "Strategy",
+         "series": [{"name": "1-Yr Return", "data": [{"label": "Alpha", "value": 24.8}]}]},
+        {"title": "Mean Return Profile Across Horizons", "type": "spline", "xLabel": "Lookback Horizon",
+         "series": [{"name": "Mean", "data": [
+             {"label": "1 Mth", "value": -2.9}, {"label": "3 Mth", "value": -4.1},
+             {"label": "1 Yr", "value": 3.6}, {"label": "5 Yr", "value": 17.2},
+         ]}]},
+        {"title": "Median Return Profile by Horizon and Category", "type": "grouped_bar", "xLabel": "Category", "yLabel": "Median Return (%)",
+         "series": [{"name": "1-Year", "data": [
+             {"label": "Multi Cap", "value": 3.7}, {"label": "Large Cap", "value": 7.22},
+             {"label": "Small Cap", "value": -6.91}, {"label": "Multi Asset", "value": 11.33},
+         ]}]},
+        {"title": "Strategy Count by Investment Category", "type": "horizontal_bar", "series": [
+            {"name": "Strategies", "data": [{"label": "Large Cap", "value": 28}]},
+        ]},
+    ]
+
+    keep_mask, reasons = pms_model_chart_keep_mask(model_charts, workbook_charts)
+
+    assert keep_mask == [False, False, False, True]
+    assert "duplicate 1 Yr strategy ranking" in reasons[0]
+    assert "not a time series" in reasons[1]
+    assert "duplicate the deterministic" in reasons[2]
+    remapped = _remap_chart_placeholders(
+        "\n".join(f"[CHART_{i}]" for i in range(1, len(model_charts) + 1)), model_charts, keep_mask,
+    )
+    assert remapped.splitlines() == ["[CHART_1]"]
 
 
 def test_benchmark_rows_stop_at_next_strategy_table_and_compare_matched_strategy_median():

@@ -25798,6 +25798,30 @@ async def generate_report(request: Request):
         if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
             try:
                 _raw_workbook_charts = (workbook_analytics.get("charts") or []) if workbook_source_id else []
+                if workbook_analytics.get("kind") == "pms_strategy_performance" and charts:
+                    from utils.uploaded_workbook_analytics import pms_model_chart_keep_mask
+                    _model_keep_mask, _model_drop_reasons = pms_model_chart_keep_mask(
+                        charts, _raw_workbook_charts,
+                    )
+                    if any(not keep for keep in _model_keep_mask):
+                        _model_charts_before_filter = list(charts)
+                        report_text = _remap_chart_placeholders(
+                            report_text, _model_charts_before_filter, _model_keep_mask,
+                        )
+                        charts = [
+                            chart for chart, keep in zip(_model_charts_before_filter, _model_keep_mask) if keep
+                        ]
+                        _removed_model_details = [
+                            f"{str(chart.get('title') or 'untitled') if isinstance(chart, dict) else 'untitled'}"
+                            f" ({reason})"
+                            for chart, keep, reason in zip(
+                                _model_charts_before_filter, _model_keep_mask, _model_drop_reasons,
+                            ) if not keep
+                        ]
+                        log.info(
+                            "PMS chart selection removed %d duplicate/misleading model chart(s): %s",
+                            len(_removed_model_details), "; ".join(_removed_model_details[:6]),
+                        )
                 _existing_chart_titles = {str(c.get("title") or "").casefold().strip() for c in charts if isinstance(c, dict)}
                 _workbook_charts_to_add = []
                 for _raw_workbook_chart in _raw_workbook_charts:
@@ -25877,17 +25901,7 @@ async def generate_report(request: Request):
                     _chart_start_index = len(charts) + 1
                     charts.extend(_workbook_charts_to_add)
                     _source_label = str(workbook_analytics.get("sourceLabel") or "attached data")
-                    if workbook_analytics.get("kind") == "pms_strategy_performance":
-                        _workbook_chart_intro = (
-                            "The following comparisons use reported PMS return values from the attached workbook. "
-                            "Missing and undisclosed observations are excluded, not treated as zero."
-                        )
-                    else:
-                        _workbook_chart_intro = (
-                            "The following charts are calculated from the attached source rows. "
-                            "Missing values are excluded rather than treated as zero."
-                        )
-                    report_text = (report_text or "").rstrip() + "\n\n" + _workbook_chart_intro + "\n\n" + workbook_charts_section(
+                    report_text = (report_text or "").rstrip() + "\n\n" + workbook_charts_section(
                         _workbook_charts_to_add, start_index=_chart_start_index, source_label=_source_label,
                     ) + "\n"
                     log.info("Attachment analytics: added %d deterministic evidence-backed chart(s) to report body",

@@ -400,10 +400,11 @@ html:has(body.gg-editorial) {{ background: #FFFFFF !important; }}
 {p} .gg-table-wrap[data-col-count="7"] .gg-table th, {p} .gg-table-wrap[data-col-count="8"] .gg-table th,
 {p} .gg-table-wrap[data-col-count="9"] .gg-table th, {p} .gg-table-wrap[data-col-count="10"] .gg-table th {{ font-size: 5.9pt !important; letter-spacing: .08em !important; }}
 {p} .gg-table td.gg-cell-numeric {{ white-space: nowrap !important; }}
-{p} .gg-chart-wrap {{ padding: 8pt 0 6pt !important; margin: 10pt 0 !important; background: #FFFFFF !important; }}
-{p} .gg-chart-wrap > .gg-chart-title {{ font-size: 11.5pt !important; margin-bottom: 6pt !important; }}
+{p} .gg-chart-wrap {{ padding: 6pt 0 4pt !important; margin: 6pt 0 7pt !important; background: #FFFFFF !important; }}
+{p} .gg-chart-wrap > .gg-chart-title {{ font-size: 11.5pt !important; margin-bottom: 4pt !important; }}
 {p} .gg-chart-wrap > .gg-chart-title::before {{ font-size: 6.4pt !important; margin-bottom: 2pt !important; }}
-{p} .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {{ max-height: 300pt !important; }}
+/* Cap oversized Chart.js fallback SVGs while leaving compact custom SVG charts at their natural size. */
+{p} .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {{ max-height: 250pt !important; }}
 {p} .gg-source-note {{ font-size: 7.4pt !important; padding-top: 4pt !important; }}
 {p} .gg-figure img {{ max-height: 230pt !important; }}
 {p} .gg-figure figcaption {{ font-size: 8.4pt !important; }}
@@ -424,8 +425,8 @@ html:has(body.gg-editorial) {{ background: #FFFFFF !important; }}
   break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-stats-grid, {p} .gg-metrics {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-keep-with-next {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
-/* every major section starts on a new page (layout rule only: no new visual tokens) */
-{p} .gg-section ~ .gg-section {{ break-before: page !important; page-break-before: always !important; }}
+/* Sections flow naturally; headings and chart/table cards remain protected below. */
+{p} .gg-section ~ .gg-section {{ break-before: auto !important; page-break-before: auto !important; }}
 {p} .gg-keep-with-next .gg-table-wrap, {p} .gg-keep-with-next .gg-table-scroll {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
 {p} .gg-section-heading, {p} .gg-section-h3, {p} .gg-subsection-h4, {p} .gg-chart-title {{ break-after: avoid-page !important; page-break-after: avoid !important; }}
 {p} .gg-table tr {{ break-inside: avoid-page !important; page-break-inside: avoid !important; }}
