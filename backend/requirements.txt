@@ -6,6 +6,7 @@ Pillow==10.4.0
 python-multipart==0.0.9
 python-dotenv==1.0.1
 openpyxl==3.1.5
+pycountry>=24.6.1,<26
 python-docx>=1.1,<2
 
 WeasyPrint==68.0

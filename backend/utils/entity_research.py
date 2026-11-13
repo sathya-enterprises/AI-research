@@ -54,12 +54,18 @@ def plan_entity_queries(tiers: dict, *, cap: int, window: str = "", question: st
     weak_deep = sorted((e for e in tiers.get("deep_dive", []) if len(e.good_text_sources) < 5),
                        key=lambda e: len(e.good_text_sources))
     templates, topic = QUERY_TEMPLATES, ""
+    market_topic = True
     if question:
         from utils.report_outline import is_market_topic
-        if not is_market_topic(question):
+        market_topic = is_market_topic(question)
+        if not market_topic:
             from utils.data_angles import subject_terms
             templates = GENERIC_QUERY_TEMPLATES
             topic = " ".join(t for t in subject_terms(question, limit=5))
+    if not market_topic:
+        # Table-only row labels remain available to deterministic charts, but without any text support they
+        # should not each trigger three broad web searches (especially labels from metadata tables).
+        compact = [e for e in compact if getattr(e, "seeded", False) or getattr(e, "text_passages", None)]
     plan = []
     for entity in compact + weak_deep:
         for template in templates:

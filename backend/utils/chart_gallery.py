@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from utils.chart_catalog import CHART_TYPE_ALIASES, CHART_TYPES, normalize_chart_type
-from utils.evidence_dataset import EvidenceDataset, Observation, _metric_in, period_date_range
+from utils.evidence_dataset import EvidenceDataset, Observation, _metric_in, parse_period, period_date_range
 
 # Display order follows the catalog requested for reports.
 GALLERY_ORDER: list[str] = [
@@ -244,6 +244,8 @@ def _cite(ids) -> str:
 
 
 _COMPONENT_METRICS = {"demand_deposits", "savings_deposits", "term_deposits", "term_loans"}
+_UNQUALIFIED_CURRENCY_UNITS = {"crore (as reported)", "lakh (as reported)", "lakh crore (as reported)"}
+_AMOUNT_UNITS = {"₹ crore", "US$ million", *_UNQUALIFIED_CURRENCY_UNITS}
 
 
 def _metric_family(metric: str) -> str:
@@ -312,6 +314,29 @@ class _Builder:
     def label(self, metric: str) -> str:
         return self.ds.metric_label(metric)
 
+    def _currency_safe_rows(self, metric: str, observations: list[Observation]) -> list[Observation]:
+        """Do not combine unqualified crore observations from different sources.
+
+        A bare "crore" identifies scale but does not identify currency. When
+        several publishers use that scale without naming currency, one source
+        can still support an internally consistent chart; mixing them cannot.
+        """
+        if self.unit(metric) not in _UNQUALIFIED_CURRENCY_UNITS:
+            return observations
+        counts: dict[str, tuple[set[tuple[str, str]], int]] = {}
+        for obs in observations:
+            source_id = str(obs.source_id or "")
+            if not source_id:
+                continue
+            keys, targets = counts.setdefault(source_id, (set(), 0))
+            keys.add((obs.entity_key, obs.period))
+            if obs.is_target:
+                counts[source_id] = (keys, targets + 1)
+        if len(counts) <= 1:
+            return observations
+        preferred = max(counts, key=lambda sid: (counts[sid][1], len(counts[sid][0]), sid))
+        return [obs for obs in observations if obs.source_id == preferred]
+
     def rank_metrics(self, *, units: set[str] | None = None, min_entities: int = 2, targets_only: bool = False,
                      prefer_unused: bool = True, exclude: set[str] | None = None) -> list[str]:
         out = []
@@ -320,7 +345,8 @@ class _Builder:
                 continue
             if units is not None and self.unit(metric) not in units:
                 continue
-            pool = [o for o in obs if o.is_target] if targets_only else obs
+            safe_obs = self._currency_safe_rows(metric, obs)
+            pool = [o for o in safe_obs if o.is_target] if targets_only else safe_obs
             if len({o.entity_key for o in pool}) < min_entities:
                 continue
             out.append(metric)
@@ -355,7 +381,80 @@ class _Builder:
     @staticmethod
     def point(label: str, obs: Observation, **extra) -> dict:
         p = {"label": label, "value": obs.value, "evidenceSource": obs.source_id,
-             "evidenceQuote": obs.quote[:400], "evidenceValue": _raw_number(obs.raw_value)}
+             "evidenceQuote": obs.quote[:400], "evidenceValue": _raw_number(obs.raw_value),
+             "evidenceEntity": obs.entity, "evidenceMetric": obs.metric_label,
+             "evidenceUnit": obs.unit}
+        if obs.period:
+            p["evidencePeriod"] = obs.period
+        if obs.origin == "table":
+            if obs.raw_value:
+                p["evidenceCell"] = obs.raw_value[:160]
+            table_headers: list[tuple[list[str], set[int], set[int]]] = []
+            metric_columns: set[int] = set()
+            period_columns: set[int] = set()
+            shared_unit_context: list[str] = []
+            period_key = re.sub(r"\s+", " ", obs.period.casefold()).strip()
+            unit_signal = re.compile(
+                r"(?i)(?:\b(?:inr|usd|eur|gbp|jpy|rs\.?|rupees?|dollars?|euros?|pounds?|yen|"
+                r"crores?|cr\.?|lakhs?|million|billion|trillion|thousand|percent|per\s+cent|"
+                r"tonnes?|metric\s+tons?|years?|yrs?|gw|mw|kw|tw|twh|gwh|mwh|kwh|bps|basis\s+points?)\b|"
+                r"[%\u20b9$\u20ac\u00a3\u00a5])"
+            )
+            for line in obs.context_lines:
+                if "|" not in line:
+                    if unit_signal.search(line) and not _metric_in(line):
+                        shared_unit_context.append(line)
+                    continue
+                cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                if len(cells) < 2 or re.fullmatch(r"\s*:?-{2,}:?\s*", line.strip().strip("|")):
+                    continue
+                header_metric_columns = {
+                    index for index, cell in enumerate(cells)
+                    if any(key == obs.metric for _start, _end, key in _metric_in(cell))
+                }
+                header_period_columns = set()
+                if period_key:
+                    for index, cell in enumerate(cells):
+                        parsed_period = parse_period(cell)
+                        if parsed_period and re.sub(r"\s+", " ", parsed_period[0].casefold()).strip() == period_key:
+                            header_period_columns.add(index)
+                metric_columns.update(header_metric_columns)
+                period_columns.update(header_period_columns)
+                table_headers.append((cells, header_metric_columns, header_period_columns))
+                if unit_signal.search(line) and not any(_metric_in(cell) for cell in cells):
+                    shared_unit_context.append(line)
+
+            matched_columns = metric_columns
+            if period_columns:
+                both = metric_columns & period_columns
+                matched_columns = both or period_columns if not metric_columns else both
+            if len(matched_columns) == 1:
+                column_index = next(iter(matched_columns))
+                column_text = next((cells[column_index] for cells, metric_indices, period_indices in table_headers
+                                    if column_index < len(cells)
+                                    and (column_index in metric_indices or column_index in period_indices)
+                                    and cells[column_index]), "")
+                if column_text:
+                    p["evidenceColumn"] = column_text
+                    p["evidenceColumnIndex"] = column_index
+                    p["evidenceColumnRole"] = "measure"
+                    p["evidenceRowLabel"] = obs.entity
+            if shared_unit_context:
+                p["evidenceUnitContext"] = " ".join(dict.fromkeys(shared_unit_context))[:500]
+
+            entity_key = re.sub(r"[^a-z0-9]", "", obs.entity.casefold())
+            if "evidenceColumn" not in p:
+                for line in obs.context_lines:
+                    if "|" not in line:
+                        continue
+                    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                    matches = [cell for cell in cells[1:]
+                           if (key := re.sub(r"[^a-z0-9]", "", cell.casefold()))
+                           and (key == entity_key or entity_key and key.startswith(entity_key))]
+                    if len(matches) == 1:
+                        p["evidenceColumn"] = matches[0]
+                        p["evidenceColumnRole"] = "entity"
+                        break
         p.update(extra)
         return p
 
@@ -403,6 +502,7 @@ class _Builder:
 
     def cross(self, metric: str, *, targets_only: bool = False, nonneg: bool = False) -> tuple[str, list[Observation]]:
         period, obs = self.sections.get(metric, ("", []))
+        obs = self._currency_safe_rows(metric, obs)
         if targets_only:
             obs = [o for o in obs if o.is_target]
         if nonneg:
@@ -410,7 +510,7 @@ class _Builder:
         return period, obs
 
     def money_metrics(self, **kw) -> list[str]:
-        return self.rank_metrics(units={"₹ crore", "US$ million"}, **kw)
+        return self.rank_metrics(units=_AMOUNT_UNITS, **kw)
 
     def ratio_metrics(self, **kw) -> list[str]:
         return self.rank_metrics(units={"%"}, **kw)
@@ -420,6 +520,15 @@ class _Builder:
         series = self.ds.time_series(metric)
         if not series:
             return [], {}
+        if self.unit(metric) in _UNQUALIFIED_CURRENCY_UNITS:
+            all_observations = [obs for items in series.values() for obs in items]
+            safe_observations = self._currency_safe_rows(metric, all_observations)
+            safe_sources = {obs.source_id for obs in safe_observations}
+            series = {key: [obs for obs in items if obs.source_id in safe_sources]
+                      for key, items in series.items()}
+            series = {key: items for key, items in series.items() if items}
+            if not series:
+                return [], {}
         all_periods: dict[str, float] = {}
         for items in series.values():
             for o in items:
@@ -547,7 +656,7 @@ class _Builder:
             self.mark(metric)
             return chart, f"{self.label(metric)} for {len(ents)} entities across {len(periods)} reported periods ({', '.join(periods)}).{_cite(chart['source'])}"
         # Fallback: two or more metrics sharing a unit across the same entities.
-        for unit in ("%", "₹ crore", "x"):
+        for unit in ("%", "₹ crore", "crore (as reported)", "x"):
             metrics = self.rank_metrics(units={unit}, min_entities=2, targets_only=True)[:4]
             if len(metrics) < 2:
                 continue
@@ -573,7 +682,7 @@ class _Builder:
 
     def _b_stacked_bar(self):
         for metric, periods, ents in self.trend_metrics(min_periods=2, min_entities=2):
-            if self.unit(metric) not in {"₹ crore", "US$ million"}:
+            if self.unit(metric) not in _AMOUNT_UNITS:
                 continue
             obs = [ents[k][p] for k in ents for p in periods]
             chart = self.base("stacked_bar", f"{self.label(metric)} — combined peer total by period", obs,
@@ -582,7 +691,9 @@ class _Builder:
                                 "data": [self.point(p, ents[k][p]) for p in periods]} for k in ents]
             self.mark(metric)
             return chart, f"Each bar stacks the reported {self.label(metric).lower()} of {len(ents)} entities for a period.{_cite(chart['source'])}"
-        metrics = self.money_metrics(min_entities=2, targets_only=True)[:4]
+        all_money_metrics = self.money_metrics(min_entities=2, targets_only=True)
+        unit = self.unit(all_money_metrics[0]) if all_money_metrics else ""
+        metrics = [metric for metric in all_money_metrics if self.unit(metric) == unit][:4]
         if len(metrics) >= 1:
             ents = None
             for m in metrics:
@@ -600,7 +711,7 @@ class _Builder:
                         data.append(self.point(self.series_name(m, period), o))
                     series.append({"name": self.ds.entity_display(ek), "data": data})
                 chart = self.base("stacked_bar", "Combined peer totals by metric", obs_all, x_label="Metric",
-                                  y_label="₹ crore", unit="₹ crore")
+                                  y_label=unit, unit=unit)
                 chart["series"] = series
                 self.mark(*metrics)
                 return chart, f"Each bar stacks the reported amount of every entity for one metric.{_cite(chart['source'])}"
@@ -757,7 +868,7 @@ class _Builder:
     # Trends
     def _trend(self, ctype: str, *, additive: bool = False, title_suffix: str = "trend") -> tuple[dict, str]:
         for metric, periods, ents in self.trend_metrics(min_periods=2, min_entities=1):
-            if additive and self.unit(metric) not in {"₹ crore", "US$ million"}:
+            if additive and self.unit(metric) not in _AMOUNT_UNITS:
                 continue
             obs = [ents[k][p] for k in ents for p in periods]
             chart = self.base(ctype, f"{self.label(metric)} — {title_suffix}", obs, x_label="Period",

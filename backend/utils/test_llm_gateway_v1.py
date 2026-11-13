@@ -69,6 +69,21 @@ def test_budget_refuses_extra_calls_without_raising(monkeypatch):
     assert gw.stats.budget_refusals == 1 and gw.stats.calls == 1
 
 
+def test_concurrent_calls_reserve_the_budget_atomically(monkeypatch):
+    _patch_http(monkeypatch, lambda request: _ok("x"))
+    gw = G.LLMGateway(_runtime(), "detailed", budget=3, concurrency=4, capture=False)
+
+    async def run():
+        return await asyncio.gather(*[
+            gw.generate(purpose="section", section_id=f"s{i}", prompt="p") for i in range(12)
+        ])
+
+    results = asyncio.run(run())
+    assert sum(result.ok for result in results) == 3
+    assert gw.stats.calls == 3 and gw.stats.budget_refusals == 9
+    assert gw.remaining == 0
+
+
 def test_total_failure_returns_not_ok_for_json_and_uses_groq_for_text(monkeypatch):
     _patch_http(monkeypatch, lambda request: httpx.Response(500))
     gw = G.LLMGateway(_runtime(groq_text=""), "in_depth", budget=5, capture=False)

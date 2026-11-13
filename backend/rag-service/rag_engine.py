@@ -207,7 +207,7 @@ class RAGEngine:
             "session_id":  sid,
             "chunk_count": s.total,
             "embedding_model": MODEL_NAME,
-            "vector_store": "supabase_pgvector",
+            "vector_store": pgvector_store.storage_backend(),
             "hf_rerank_enabled": self._reranker is not None,
             "hf_rerank_model": HF_RERANK_MODEL if self._reranker is not None else None,
             "doc_count":   len(s.doc_ids),
@@ -266,8 +266,13 @@ class RAGEngine:
 
     async def index(self, session_id: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Index documents. Idempotent per document id and content hash."""
-        await self.ensure_session_loaded(session_id)
-        return await self._index_documents(session_id, documents, persist=True)
+        restore_state = await self.ensure_session_loaded(session_id)
+        result = await self._index_documents(session_id, documents, persist=True)
+        if result.get("total_chunks", 0) and restore_state == "empty_or_unavailable":
+            # The empty state describes what existed before this upload. Once new
+            # chunks are persisted, expose the active session state accurately.
+            self._restore_states[session_id] = "indexed_in_process"
+        return result
 
     async def _index_documents(self, session_id: str, documents: List[Dict[str, Any]], *, persist: bool) -> Dict[str, Any]:
         index_started = time.perf_counter()
@@ -410,12 +415,13 @@ class RAGEngine:
         if chunks_added > 0 and persist:
             manifest_persisted = await okf_store.write_bundle_manifest(session_id, sess.okf_concepts)
 
-        result = {"chunks_added": chunks_added, "total_chunks": sess.total, "vector_store": "supabase_pgvector"}
+        vector_backend = pgvector_store.storage_backend()
+        result = {"chunks_added": chunks_added, "total_chunks": sess.total, "vector_store": vector_backend}
         result["diagnostics"] = {
             "mode": "index", "input_documents": len(documents), "input_chars": input_chars,
             "documents": document_diagnostics,
             "embedding_model": MODEL_NAME, "embedding_dimension": self._dim,
-            "vector_store": "supabase_pgvector", "total_chunks_in_session": sess.total,
+            "vector_store": vector_backend, "total_chunks_in_session": sess.total,
             "stages": {key: round(value, 2) for key, value in stage_ms.items()},
             "total_ms": round((time.perf_counter() - index_started) * 1000, 2),
         }
@@ -429,7 +435,7 @@ class RAGEngine:
             else "no_data"
         )
         result["vector_persistence"] = {
-            "store": "supabase_pgvector",
+            "store": vector_backend,
             "status": vector_status,
             "documentsAttempted": len(documents),
             "documentsAvailable": successful_documents,

@@ -9,6 +9,7 @@ from routes.report import (
     _build_multi_angle_search_queries,
     _dedupe_enriched_sources,
     _extract_company_candidates,
+    _filter_relevant_sources,
     _merge_source_evidence_statuses,
     _page_text_matches_source,
     _publication_audit_is_blocking,
@@ -111,6 +112,36 @@ def test_compact_official_numeric_table_is_retained_as_publisher_evidence():
     assert _page_text_matches_source(
         compact, source, "India renewable energy capacity", _intent("India renewable energy capacity"),
     ) is True
+
+
+def test_structured_data_file_uses_its_targeted_query_for_relevance_only():
+    question = "Compare HIV prevalence and incidence in India and Brazil"
+    intent = _intent("HIV prevalence and incidence", ["historical", "comparison"])
+    page = (
+        "TABLE 1 — UNICEF SDMX export\n"
+        "REF_AREA | INDICATOR | TIME_PERIOD | OBS_VALUE\n"
+        "India (IND) | HVA_EPI_INF_ANN | 2010 | 120\n"
+        "India (IND) | HVA_EPI_INF_ANN | 2011 | 118\n"
+        "India (IND) | HVA_EPI_INF_ANN | 2012 | 116\n"
+        "Brazil (BRA) | HVA_EPI_INF_ANN | 2010 | 140\n"
+        "Brazil (BRA) | HVA_EPI_INF_ANN | 2011 | 135\n"
+        "Brazil (BRA) | HVA_EPI_INF_ANN | 2012 | 130"
+    )
+    source = {
+        "title": "",
+        "url": "https://sdmx.data.unicef.org/ws/data?format=csv",
+        "searchQuery": "HIV prevalence and incidence India Brazil annual data",
+        "pageContent": page,
+        "pageFetchStatus": "ok",
+        "pageFetchContentType": "text/csv; charset=utf-8",
+    }
+    assert _page_text_matches_source(page, source, question, intent)
+    assert _filter_relevant_sources([source], question, intent, require_context=True) == [source]
+
+    # Search-query metadata cannot make an ordinary article relevant.
+    article = {**source, "url": "https://news.example.com/story", "pageFetchContentType": "text/html",
+               "pageContent": "An unrelated article about public administration with no health data."}
+    assert _filter_relevant_sources([article], question, intent, require_context=True) == []
 
 
 def test_direct_fetch_reports_http_forbidden_separately_from_missing_source():
@@ -280,6 +311,90 @@ def test_numeric_evidence_match_inherits_table_units_and_ignores_fiscal_year_suf
     audited = _attach_audit_source_evidence(manifest, enriched, report)
     assert audited[0]["claimEvidenceMatched"] is True
     assert audited[0]["unmatchedNumericClaims"] == []
+
+
+def test_numeric_evidence_keeps_decimal_growth_multiplier_suffix():
+    manifest = build_source_registry([{
+        "title": "India solar generation data",
+        "url": "https://official.example/india-solar",
+    }])
+    enriched = [{
+        "title": "India solar generation data",
+        "url": "https://official.example/india-solar",
+        "pageFetchStatus": "ok",
+        "pageContent": "India solar generation grew 23.29x from 2014 to 2024.",
+    }]
+    audited = _attach_audit_source_evidence(
+        manifest, enriched, "India solar generation grew 23.29x from 2014 to 2024 [S1].",
+    )
+    group = audited[0]["_citedClaimGroups"][0]
+    assert group["claimTokens"] == ["scalar:23.29"]
+    assert group["supportByToken"]["scalar:23.29"] == ["S1"]
+    assert group["groupEvidenceMatched"] is True
+
+
+def test_registered_short_chart_table_row_supports_only_its_fetched_publisher_claim():
+    from routes import report as report_mod
+
+    manifest = build_source_registry([{
+        "title": "China solar capacity statistics",
+        "url": "https://publisher.example/china-solar-capacity",
+    }])
+    source = {
+        "title": "China solar capacity statistics",
+        "url": "https://publisher.example/china-solar-capacity",
+        "pageFetchStatus": "ok",
+        "pageFetchRelevanceMatched": True,
+        "evidenceOrigin": "publisher_page",
+        "pageContent": "TABLE 1 - China solar capacity\nPeriod | China (GW)\n2024 | 886.12",
+    }
+    report_mod._CHART_EVIDENCE_LINES.set({
+        "S1": ["Period | China (GW)", "2024 | 886.12"],
+    })
+    report_mod._PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set({"S1"})
+    try:
+        audited = _attach_audit_source_evidence(
+            manifest, [source], "China solar capacity reached 886.12 GW in 2024 [S1].",
+        )
+    finally:
+        report_mod._CHART_EVIDENCE_LINES.set({})
+        report_mod._PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set(set())
+
+    assert audited[0]["claimEvidenceMatched"] is True, {key: audited[0].get(key) for key in (
+        "evidenceExcerpt", "publisherEvidenceExcerpt", "unmatchedNumericClaims", "_matchedNumericClaimTokens",
+        "_matchedTokenSubjectStems", "_citedClaimGroups",
+    )}
+    assert audited[0]["unmatchedNumericClaims"] == []
+
+
+def test_chart_rows_do_not_support_claims_from_rejected_or_unregistered_sources():
+    from routes import report as report_mod
+
+    manifest = build_source_registry([{
+        "title": "China solar capacity statistics",
+        "url": "https://publisher.example/china-solar-capacity",
+    }])
+    source = {
+        "title": "China solar capacity statistics",
+        "url": "https://publisher.example/china-solar-capacity",
+        "pageFetchStatus": "ok",
+        "pageFetchRelevanceMatched": False,
+        "pageFetchRejectReason": "extracted_text_did_not_pass_subject_relevance_check",
+        "evidenceOrigin": "publisher_page",
+        "pageContent": "TABLE 1 - China solar capacity\nPeriod | China (GW)\n2024 | 886.12",
+    }
+    report_mod._CHART_EVIDENCE_LINES.set({"S1": ["Period | China (GW)", "2024 | 886.12"]})
+    report_mod._PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set({"S1"})
+    try:
+        audited = _attach_audit_source_evidence(
+            manifest, [source], "China solar capacity reached 886.12 GW in 2024 [S1].",
+        )
+    finally:
+        report_mod._CHART_EVIDENCE_LINES.set({})
+        report_mod._PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set(set())
+
+    assert audited[0]["claimEvidenceMatched"] is False
+    assert audited[0]["unmatchedNumericClaims"]
 
 
 def test_source_evidence_audit_blocks_unmatched_cited_numeric_claims():

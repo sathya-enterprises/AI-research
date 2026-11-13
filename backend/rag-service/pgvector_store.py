@@ -12,9 +12,11 @@ source bundle because it has already been applied to the user's Supabase project
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -27,11 +29,14 @@ _SERVER_KEY = (
     or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 )
 _ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
+_DATABASE_URL = os.getenv("RESEARCH_DATABASE_URL", "").strip()
 _TABLE = "rag_chunks"
 _RPC = "rag_match_chunks"
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
 _CLIENT: Optional[httpx.Client] = None
 _CLIENT_LOCK = threading.Lock()
+_DB_POOL = None
+_DB_POOL_LOCK = threading.Lock()
 
 
 class PgVectorStoreError(RuntimeError):
@@ -52,6 +57,91 @@ def _credentials() -> tuple[str, str]:
     return _SUPABASE_URL, key
 
 
+def _storage_mode() -> str:
+    """Prefer the configured service-key REST path; otherwise use the private DB URL."""
+    if _SUPABASE_URL and _SERVER_KEY:
+        return "rest"
+    if _DATABASE_URL:
+        return "postgres"
+    return "unavailable"
+
+
+def storage_backend() -> str:
+    """Expose the configured persistent vector backend without credential details."""
+    mode = _storage_mode()
+    if mode == "postgres":
+        return "postgresql_pgvector"
+    if mode == "rest":
+        return "supabase_pgvector"
+    return "unavailable"
+
+
+def _database_pool():
+    """Create a small, thread-safe pool without ever logging its DSN."""
+    global _DB_POOL
+    if not _DATABASE_URL:
+        raise PgVectorStoreError("pgvector is not configured: set a server-only database URL or Supabase server key.")
+    try:
+        from psycopg2.pool import ThreadedConnectionPool
+    except ImportError as exc:
+        raise PgVectorStoreError("Direct PostgreSQL pgvector storage requires psycopg2-binary.") from exc
+    if _DB_POOL is None:
+        with _DB_POOL_LOCK:
+            if _DB_POOL is None:
+                try:
+                    try:
+                        max_connections = max(2, min(16, int(os.getenv("RAG_DB_POOL_MAX", "8"))))
+                    except (TypeError, ValueError):
+                        max_connections = 8
+                    _DB_POOL = ThreadedConnectionPool(
+                        1, max_connections, dsn=_DATABASE_URL,
+                        connect_timeout=max(2, min(20, int(os.getenv("RAG_DB_CONNECT_TIMEOUT", "8")))),
+                        application_name="paperly-rag-pgvector",
+                    )
+                except Exception as exc:
+                    raise PgVectorStoreError(
+                        f"Direct PostgreSQL pgvector connection failed ({type(exc).__name__})."
+                    ) from exc
+    return _DB_POOL
+
+
+@contextmanager
+def _database_connection():
+    pool = _database_pool()
+    try:
+        connection = pool.getconn()
+    except Exception as exc:
+        raise PgVectorStoreError(
+            f"Direct PostgreSQL pgvector connection failed ({type(exc).__name__})."
+        ) from exc
+    try:
+        with connection:
+            yield connection
+    except PgVectorStoreError:
+        raise
+    except Exception as exc:
+        raise PgVectorStoreError(
+            f"Direct PostgreSQL pgvector request failed ({type(exc).__name__})."
+        ) from exc
+    finally:
+        try:
+            pool.putconn(connection, close=bool(connection.closed))
+        except Exception:
+            pass
+
+
+def _vector_literal(values: List[float]) -> str:
+    try:
+        return "[" + ",".join(format(float(value), ".9g") for value in values) + "]"
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PgVectorStoreError("pgvector embedding contains an invalid value.") from exc
+
+
+def _postgres_rows(cursor) -> List[Dict[str, Any]]:
+    names = [column.name for column in (cursor.description or [])]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
 def _client() -> httpx.Client:
     global _CLIENT
     if _CLIENT is None:
@@ -62,11 +152,17 @@ def _client() -> httpx.Client:
 
 
 def close() -> None:
-    global _CLIENT
+    global _CLIENT, _DB_POOL
     with _CLIENT_LOCK:
         if _CLIENT is not None:
             _CLIENT.close()
             _CLIENT = None
+    with _DB_POOL_LOCK:
+        if _DB_POOL is not None:
+            try:
+                _DB_POOL.closeall()
+            finally:
+                _DB_POOL = None
 
 
 def _headers(key: str, *, prefer: Optional[str] = None, range_header: Optional[str] = None) -> dict[str, str]:
@@ -117,6 +213,27 @@ _CHUNK_COLUMNS = (
 
 def get_session_chunks(session_id: str) -> List[Dict[str, Any]]:
     """Load chunk text/metadata for scope detection; no embeddings are downloaded."""
+    if _storage_mode() == "postgres":
+        rows: List[Dict[str, Any]] = []
+        with _database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT session_id, chunk_id, doc_id, "text", source_name, source_type,
+                              file_type, chunk_index, total_chunks, source_sha256,
+                              original_location, source_metadata
+                       FROM public.rag_chunks
+                       WHERE session_id = %s
+                       ORDER BY doc_id ASC, chunk_index ASC, chunk_id ASC""",
+                    (str(session_id),),
+                )
+                while True:
+                    batch = cursor.fetchmany(500)
+                    if not batch:
+                        break
+                    names = [column.name for column in (cursor.description or [])]
+                    rows.extend(_normalize_chunk(dict(zip(names, row))) for row in batch)
+        return rows
+
     rows: List[Dict[str, Any]] = []
     start, page_size = 0, 500
     while True:
@@ -155,6 +272,45 @@ def upsert_chunks(rows: List[Dict[str, Any]]) -> None:
     batch_size = 50
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
+        if _storage_mode() == "postgres":
+            values = []
+            for row in batch:
+                embedding = row.get("embedding")
+                if not isinstance(embedding, list) or len(embedding) != 384:
+                    raise PgVectorStoreError("Embedding dimension mismatch: this pgvector schema expects 384 values from all-MiniLM-L6-v2.")
+                metadata = row.get("source_metadata") if isinstance(row.get("source_metadata"), dict) else {}
+                values.append((
+                    str(row["session_id"]), str(row["chunk_id"]), str(row["doc_id"]),
+                    str(row.get("text") or ""), str(row.get("source_name") or "Unknown"),
+                    str(row.get("source_type") or "file"), str(row.get("file_type") or ""),
+                    int(row.get("chunk_index") or 0), int(row.get("total_chunks") or 0),
+                    str(row.get("source_sha256") or ""), row.get("original_location"),
+                    json.dumps(metadata, ensure_ascii=False, default=str), _vector_literal(embedding),
+                ))
+            with _database_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        """INSERT INTO public.rag_chunks
+                           (session_id, chunk_id, doc_id, "text", source_name, source_type,
+                            file_type, chunk_index, total_chunks, source_sha256,
+                            original_location, source_metadata, embedding)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
+                           ON CONFLICT (session_id, chunk_id) DO UPDATE SET
+                             doc_id = EXCLUDED.doc_id,
+                             "text" = EXCLUDED."text",
+                             source_name = EXCLUDED.source_name,
+                             source_type = EXCLUDED.source_type,
+                             file_type = EXCLUDED.file_type,
+                             chunk_index = EXCLUDED.chunk_index,
+                             total_chunks = EXCLUDED.total_chunks,
+                             source_sha256 = EXCLUDED.source_sha256,
+                             original_location = EXCLUDED.original_location,
+                             source_metadata = EXCLUDED.source_metadata,
+                             embedding = EXCLUDED.embedding,
+                             updated_at = NOW()""",
+                        values,
+                    )
+            continue
         payload = []
         for row in batch:
             embedding = row.get("embedding")
@@ -183,6 +339,14 @@ def upsert_chunks(rows: List[Dict[str, Any]]) -> None:
 
 
 def delete_document(session_id: str, doc_id: str) -> None:
+    if _storage_mode() == "postgres":
+        with _database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM public.rag_chunks WHERE session_id = %s AND doc_id = %s",
+                    (str(session_id), str(doc_id)),
+                )
+        return
     _request("DELETE", _TABLE, params={
         "session_id": f"eq.{session_id}",
         "doc_id": f"eq.{doc_id}",
@@ -190,18 +354,41 @@ def delete_document(session_id: str, doc_id: str) -> None:
 
 
 def delete_session(session_id: str) -> None:
+    if _storage_mode() == "postgres":
+        with _database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM public.rag_chunks WHERE session_id = %s", (str(session_id),))
+        return
     _request("DELETE", _TABLE, params={"session_id": f"eq.{session_id}"}, prefer="return=minimal")
 
 
 def search_chunks(session_id: str, query_embedding: List[float], limit: int = 8) -> List[Dict[str, Any]]:
     if len(query_embedding) != 384:
         raise PgVectorStoreError("Query embedding dimension mismatch; expected 384 values from all-MiniLM-L6-v2.")
+    count = max(1, min(int(limit), 100))
+    if _storage_mode() == "postgres":
+        with _database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """SELECT session_id, chunk_id, doc_id, "text", source_name, source_type,
+                              file_type, chunk_index, total_chunks, source_sha256,
+                              original_location, source_metadata, similarity
+                       FROM public.rag_match_chunks(%s::vector, %s, %s)""",
+                    (_vector_literal(query_embedding), str(session_id), count),
+                )
+                rows = _postgres_rows(cursor)
+        results = []
+        for row in rows:
+            normalized = _normalize_chunk(row)
+            normalized["score"] = float(row.get("similarity") or 0.0)
+            results.append(normalized)
+        return results
     response = _request(
         "POST", f"rpc/{_RPC}",
         json={
             "query_embedding": query_embedding,
             "match_session_id": session_id,
-            "match_count": max(1, min(int(limit), 100)),
+            "match_count": count,
         },
     )
     data = response.json()
@@ -219,6 +406,43 @@ def search_chunks(session_id: str, query_embedding: List[float], limit: int = 8)
 
 def health_check() -> Dict[str, Any]:
     """Return safe storage diagnostics without disclosing URLs or API keys."""
+    if _storage_mode() == "postgres":
+        try:
+            with _database_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector'),
+                                  to_regclass('public.rag_chunks') IS NOT NULL,
+                                  EXISTS (
+                                    SELECT 1 FROM pg_proc p
+                                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                                    WHERE n.nspname = 'public' AND p.proname = %s AND p.pronargs = 3
+                                      AND has_function_privilege(current_user, p.oid, 'EXECUTE')
+                                  ),
+                                  has_table_privilege(current_user, 'public.rag_chunks', 'SELECT'),
+                                  has_table_privilege(current_user, 'public.rag_chunks', 'INSERT'),
+                                  has_table_privilege(current_user, 'public.rag_chunks', 'UPDATE'),
+                                  has_table_privilege(current_user, 'public.rag_chunks', 'DELETE')""",
+                        (_RPC,),
+                    )
+                    vector, table, rpc, can_select, can_insert, can_update, can_delete = cursor.fetchone()
+            missing = []
+            if not vector:
+                missing.append("vector_extension")
+            if not table:
+                missing.append("rag_chunks_table")
+            if not rpc:
+                missing.append("rag_match_chunks_rpc_or_permission")
+            if not all((can_select, can_insert, can_update, can_delete)):
+                missing.append("rag_chunks_permissions")
+            return {
+                "backend": "postgresql_pgvector", "configured": True,
+                "ready": not missing, "table": _TABLE,
+                **({"reason": ",".join(missing)} if missing else {}),
+            }
+        except PgVectorStoreError as exc:
+            return {"backend": "postgresql_pgvector", "configured": True, "ready": False,
+                    "reason": str(exc)[:200]}
     if not _SUPABASE_URL:
         return {"backend": "supabase_pgvector", "configured": False, "ready": False, "reason": "missing_supabase_url"}
     if not _SERVER_KEY:

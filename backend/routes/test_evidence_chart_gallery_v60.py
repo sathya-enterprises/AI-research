@@ -114,6 +114,19 @@ def test_gallery_charts_pass_quote_based_audit_after_json_round_trip():
             break
     assert audit_chart_evidence_consistency(body, bad, payload["sources"])["chartEvidenceFailures"]
 
+    wrong_period = json.loads(json.dumps(charts))
+    npa_chart = next(chart for chart in wrong_period if chart.get("title") == "Gross NPA ratio by period — HDFC Bank")
+    npa_chart["series"][0]["data"][1]["label"] = "Q4 FY27"
+    npa_chart["series"][0]["data"][1]["evidencePeriod"] = "Q4 FY27"
+    period_failures = audit_chart_evidence_consistency(body, wrong_period, payload["sources"])["chartEvidenceFailures"]
+    assert any("exact period" in item["reason"] for item in period_failures)
+
+    wrong_unit = json.loads(json.dumps(charts))
+    scatter = next(chart for chart in wrong_unit if chart.get("title") == "Return on equity vs Share price")
+    scatter["series"][1]["data"][0]["evidenceUnit"] = "%"
+    unit_failures = audit_chart_evidence_consistency(body, wrong_unit, payload["sources"])["chartEvidenceFailures"]
+    assert any("stated unit" in item["reason"] for item in unit_failures)
+
 
 def test_entity_metric_search_plan_and_candidates_survive_topic_rewrite():
     class Intent:

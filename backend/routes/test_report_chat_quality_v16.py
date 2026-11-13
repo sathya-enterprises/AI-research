@@ -81,6 +81,27 @@ def test_report_title_year_range_matches_next_three_years():
     assert "2024" not in title
 
 
+def test_report_title_preserves_explicit_historical_range():
+    title = _align_title_horizon(
+        "Comparative Digital Connectivity Trends (2026–2024)",
+        "Compare annual data from 2015 to 2024",
+    )
+    assert "2015–2024" in title
+    assert "2026" not in title
+
+
+def test_report_title_adds_explicit_range_when_the_model_omits_it():
+    title = _align_title_horizon("Digital Connectivity Trends", "Compare annual data between 2015 and 2024")
+    assert title.endswith("(2015–2024)")
+
+
+def test_report_title_horizon_alignment_leaves_uploaded_file_title_unchanged():
+    title = "Workbook Performance Overview (2026–2024)"
+    assert _align_title_horizon(
+        title, "Compare annual data from 2015 to 2024", has_uploaded_data=True,
+    ) == title
+
+
 def test_unsupported_negative_basis_point_claim_is_removed_from_table():
     source = _publisher_source("Net interest margins faced pressure from slower deposit repricing.")
     text, charts, count = _sanitize_unverified_financial_claims(

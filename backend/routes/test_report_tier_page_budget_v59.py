@@ -24,8 +24,10 @@ def test_page_budget_expands_toward_the_depth_floor_only_from_evidence(monkeypat
     # floor; it stops as soon as the remeasured PDF reaches it (27 pages).
     measured_pages = iter([3])
     expansion_calls = []
+    preflight_kwargs = []
 
     def fake_preflight(*args, **kwargs):
+        preflight_kwargs.append(kwargs)
         return next(measured_pages, 27)
 
     async def fake_expand(**kwargs):
@@ -61,9 +63,14 @@ def test_page_budget_expands_toward_the_depth_floor_only_from_evidence(monkeypat
             {"id": f"S{i}", "pageFetchStatus": "ok"} for i in range(1, 25)
         ],
         presentation={},
+        report_style="market_currents",
+        kicker="Solar outlook",
     ))
 
     assert len(expansion_calls) == 1
+    assert len(preflight_kwargs) == 2
+    assert all(item["report_style"] == "market_currents" for item in preflight_kwargs)
+    assert all(item["kicker"] == "Solar outlook" for item in preflight_kwargs)
     assert pages == 27
     assert final_body.startswith(body.strip()) and "evidence angle 1" in final_body
 

@@ -608,11 +608,23 @@ def _unit_family(unit_token: str, currency: str) -> tuple[str, float]:
     if u.startswith("crore share"):
         return "shares", 10000000.0
     if u.startswith("lakh cr"):
-        return "₹ crore", 100000.0
+        if cur in {"₹", "rs", "inr"}:
+            return "₹ crore", 100000.0
+        if cur in {"$", "us$", "usd"}:
+            return "US$ million", 1_000_000.0
+        return "lakh crore (as reported)", 1.0
     if u in {"crore", "crores", "cr"}:
-        return "₹ crore", 1.0
+        if cur in {"₹", "rs", "inr"}:
+            return "₹ crore", 1.0
+        if cur in {"$", "us$", "usd"}:
+            return "US$ million", 10.0
+        return "crore (as reported)", 1.0
     if u in {"lakh", "lakhs"}:
-        return "₹ crore", 0.01
+        if cur in {"₹", "rs", "inr"}:
+            return "₹ crore", 0.01
+        if cur in {"$", "us$", "usd"}:
+            return "US$ million", 0.1
+        return "lakh (as reported)", 1.0
     if u in {"billion", "bn"}:
         if cur in {"₹", "rs", "inr"}:
             return "₹ crore", 100.0
@@ -881,7 +893,8 @@ class EvidenceDataset:
         lines: dict[str, list[str]] = {}
         for obs in self.observations:
             bucket = lines.setdefault(obs.source_id, [])
-            for line in [*obs.context_lines, obs.quote]:
+            source_date = str((self.source_meta.get(obs.source_id) or {}).get("dateContext") or "").strip()
+            for line in [source_date, *obs.context_lines, obs.quote]:
                 line = str(line or "").strip()
                 if line and line not in bucket:
                     bucket.append(line)
@@ -940,9 +953,12 @@ def _unit_hint(text: str) -> tuple[str, str]:
     t = str(text or "")
     if re.search(r"\(\s*%\s*\)|\bin\s*%|\(\s*per\s?cent\s*\)|%\s*$", t, re.I):
         return "%", ""
-    match = re.search(r"(?:\(|\bin\s+|\b)(?P<cur>₹|rs\.?|inr|us\$|usd|\$)?\s*(?P<u>lakh\s+crores?|lakh\s+cr|crores?|cr\b|lakhs?|bn\b|billion|mn\b|million)", t, re.I)
+    match = re.search(r"(?:\(|\bin\s+|\b)(?P<cur>₹|rs\.?|inr|us\$|usd|\$|(?:indian\s+)?rupees?)?\s*(?P<u>lakh\s+crores?|lakh\s+cr|crores?|cr\b|lakhs?|bn\b|billion|mn\b|million)", t, re.I)
     if match:
-        return match.group("u"), match.group("cur") or ("₹" if re.search(r"₹|\brs\b|\binr\b|crore|\bcr\b|lakh", t, re.I) else "")
+        currency = match.group("cur") or ""
+        if re.fullmatch(r"(?i)(?:indian\s+)?rupees?", currency):
+            currency = "₹"
+        return match.group("u"), currency
     if re.search(r"\((?:rs\.?|₹|inr)\)", t, re.I):
         return "", "₹"
     return "", ""
@@ -1989,8 +2005,10 @@ def build_evidence_dataset(sources: list[dict], question: str, targets: list[str
             continue
         origin = str(source.get("origin") or "")
         ref = _parse_ref_date(source.get("published")) or _date_in_text(text)
+        date_context = next((line.strip()[:300] for line in text.splitlines()[:12]
+                             if _date_in_text(line) is not None), "")
         meta[sid] = {"title": source.get("title") or "", "published": ref.isoformat() if ref else "",
-                     "origin": origin, "url": source.get("url") or ""}
+                     "dateContext": date_context, "origin": origin, "url": source.get("url") or ""}
         try:
             extractor.tables(text, sid, origin, ref)
             extractor.prose(text, sid, origin, ref)

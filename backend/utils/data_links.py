@@ -29,6 +29,16 @@ _DATA_WORDS = re.compile(r"(?i)\b(statistic|statistics|data|dataset|table|tables
 _FORMAT_SCORE = {".xlsx": 3, ".xlsm": 3, ".csv": 3, ".pdf": 1}
 _FETCHABLE = set(_FORMAT_SCORE)  # legacy .xls / .ods are not readable without extra libraries
 _SEPARATORS = re.compile(r"[_\-.+%]+")
+_DATA_CONTEXT_UNIT_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:%|per\s?cent|GW|MW|KW|TW|TWh|GWh|MWh|kWh|BU|"
+    r"years?|yrs?|tonnes?|metric\s+tons?|mt|kt|kg|km|ha|"
+    r"USD|INR|EUR|GBP|JPY|dollars?|rupees?|euros?|pounds?|yen|Rs\.?|"
+    r"\u20b9|\u20ac|\u00a3|\u00a5|"
+    r"lakh\s+crores?|lakh\s+crs?\.?|crores?|crs?\.?|lakhs?|"
+    r"million|billion|trillion|thousand|bn|mn)(?![a-z0-9])"
+)
+_CONTEXT_NUMBER_RE = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?")
+_YEAR_ONLY_RE = re.compile(r"^(?:19|20)\d{2}$")
 
 
 def _words(text: str) -> set[str]:
@@ -59,6 +69,47 @@ def _data_parent(parent: dict, terms: set[str]) -> bool:
         return False
     body = _words(str(parent.get("pageContent") or "")[:20000])
     return len(body & terms) >= 2
+
+
+def parent_data_context(text: object, limit: int = 1200) -> str:
+    """Keep only unit-bearing captions and table headers from a fetched parent page.
+
+    Linked CSV/XLSX files often omit units that appear in the publisher page's
+    column headings. This context carries those labels to the child file; it
+    deliberately excludes numeric observations so the file remains the value
+    source of truth.
+    """
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(text or "").splitlines()]
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    def has_observation(line: str) -> bool:
+        tokens = _CONTEXT_NUMBER_RE.findall(line)
+        if not tokens:
+            return False
+        # Years in a caption/header are metadata. Any other numeric token is a
+        # value, so do not transport that line into child-source context.
+        return any(not _YEAR_ONLY_RE.fullmatch(token.replace(",", "")) for token in tokens)
+
+    for index, line in enumerate(lines):
+        if not line or len(line) > 700 or not _DATA_CONTEXT_UNIT_RE.search(line) or has_observation(line):
+            continue
+        if "|" in line:
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if any(has_observation(cell) for cell in cells):
+                continue
+        if index:
+            heading = lines[index - 1]
+            if (heading and "|" not in heading and len(heading) <= 180
+                    and not has_observation(heading) and heading.casefold() not in seen):
+                selected.append(heading)
+                seen.add(heading.casefold())
+        if line.casefold() not in seen:
+            selected.append(line)
+            seen.add(line.casefold())
+        if sum(len(item) + 1 for item in selected) >= limit:
+            break
+    return "\n".join(selected)[:max(0, limit)]
 
 
 def score_link(link: dict, parent: dict, measure_terms: set[str], question_terms: set[str]) -> int:
@@ -133,14 +184,19 @@ def pick_links(rows: list[dict], *, measure_terms: set[str], question_terms: set
         if len(title) < 12 and context:  # "XLS" -> the table label printed beside the link
             title = _context_label(context)
         parent_title = str(parent.get("publisherPageTitle") or parent.get("title") or "").strip()
+        parent_context = parent_data_context(parent.get("pageContent"))
         if len(title) < 12 and parent_title:
             title = f"{title} ({parent_title[:120]})"
         picked.append({
             "url": url, "title": title,
+            # Preserve the page that establishes what a generic-named CSV/XLSX contains.
+            # The file remains the evidence source; this is contextual provenance for its rows.
+            "publisherPageTitle": parent_title[:180],
             "publisher": parent.get("publisherPagePublisher") or parent.get("publisher") or "",
             "snippet": "", "fullContent": "",
             "parentUrl": parent_url, "discoveredVia": "data_link", "dataLinkScore": score,
             "searchQuery": parent.get("searchQuery") or "",
+            "parentDataContext": parent_context,
         })
         if len(picked) >= limit:
             break

@@ -379,6 +379,14 @@ def _measure_name(name: str) -> bool:
         r"enrolment|enrollment|emissions?|consumption|output|yield)\b", name))
 
 
+_METADATA_ENTITY_RE = re.compile(
+    r"(?i)\b(?:also\s+known\s+as|aka|(?:unique\s+)?identifier|codes?|calculation(?:\s+type)?|"
+    r"confidence\s+intervals?|direction\s+of\s+progress|frequency(?:\s+of\s+data\s+release)?|periodicity|"
+    r"(?:first|most\s+recent|last)\s+available\s+data|geographic\s+entities(?:\s+and\s+groups)?|metadata|"
+    r"short\s+description|definition|unit\s+of\s+measure|value\s+display\s+label|semantic\s+value|"
+    r"subject\s+of\s+measure|sdg\s+goal|data\s+release)\b")
+
+
 def _table_peers(store, named: list[str]) -> set[str]:
     """Labels that sit in the same table rows / header as at least two of the named entities: peers of the same
     kind (a country table that lists India and China also lists Hong Kong and Lao PDR)."""
@@ -426,6 +434,8 @@ def _non_market_hygiene(entities: list[EntityEvidence], *, question: str, seeds:
         if name.casefold() in seeded or e.seeded or name in SYNONYMS:
             kept.append(e)
             continue
+        if name not in places and not e.good_text_sources and _METADATA_ENTITY_RE.search(name):
+            continue  # schema labels belong to the source metadata, not the report's research entities
         if name not in places and " " not in name.strip() and not name.isupper() and not re.search(r"\d", name):
             continue  # one ordinary capitalised word from a table row
         if name not in places and _stem_words(name) <= q_stems:

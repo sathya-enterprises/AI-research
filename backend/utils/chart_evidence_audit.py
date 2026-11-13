@@ -1,27 +1,15 @@
 """Deterministic provenance checks for numeric charts and report tables."""
 from __future__ import annotations
 
-import contextvars
 import os
 import re
 import logging
 import datetime as _dt
 
 from utils.evidence_provenance import is_trusted_calculated_sector_source
+from utils.source_identity import canonical_http_url
 
 log = logging.getLogger(__name__)
-
-# Charts the V2 pipeline validated once, early (evidence, window, placement next to a paragraph
-# about them): their observation signatures, per request. The topical-relevance heuristic does not
-# remove them; the evidence and duplicate checks still run. Set server-side only (Stage F).
-_TRUSTED_CHART_SIGNATURES: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
-    "trusted_chart_signatures", default=frozenset())
-
-
-def trust_validated_charts(charts: list | None) -> int:
-    signatures = frozenset(_chart_observation_signature(c) for c in (charts or []) if isinstance(c, dict))
-    _TRUSTED_CHART_SIGNATURES.set(signatures)
-    return len(signatures)
 
 _UNVERIFIED = re.compile(
     r"(?i)\b(?:not\s+verified|unverified|unsupported|insufficient\s+evidence|not\s+established)\b"
@@ -40,6 +28,21 @@ _GENERIC = {
     "power", "metric", "result", "amount", "share", "rate", "index", "source",
     "research", "report", "reports", "analysis", "analytical", "overview", "outlook",
 }
+
+_CHART_SCOPE_STOPWORDS = _GENERIC | {
+    "the", "and", "for", "with", "from", "into", "through", "among", "across", "between",
+    "in", "on", "at", "to", "by", "of", "as", "is", "are", "was", "were", "be", "been",
+    "their", "its", "they", "this", "that", "these", "those", "not", "only", "both", "each",
+    "other", "every", "country", "countries", "area", "areas", "year", "years", "updated", "latest",
+    "figure", "figures", "table", "tables", "csv", "xlsx", "pdf", "retrieved", "published", "count",
+    "number", "numbers", "observations", "observed", "average", "across", "reported", "all",
+    "prepare", "create", "write", "build", "cover", "use", "using", "based", "around", "where",
+    "include", "included", "including", "provide", "provided", "show", "shown", "state", "named",
+    "actual", "expected", "necessary", "credible", "official", "publisher", "publishers", "website",
+    "websites", "source", "sources", "deep", "depth", "dive", "cross", "four", "theme", "themes",
+    "section", "sections", "measure", "measures", "research", "study", "studies", "question", "query",
+    "request", "requested", "user", "input", "output", "around", "about", "also", "only", "very",
+}
 _MEASURE_UNITS = {
     "gw": (r"\bgw\b", r"gigawatts?"), "mw": (r"\bmw\b", r"megawatts?"),
     "kw": (r"\bkw\b", r"kilowatts?"), "twh": (r"\btwh\b", r"terawatt[- ]hours?"),
@@ -49,6 +52,20 @@ _MEASURE_UNITS = {
     "usd": (r"\busd\b", r"\bus\s*\$", r"\$", "dollars?"), "$": (r"\busd\b", r"\bus\s*\$", r"\$", "dollars?"),
     "bps": (r"\bbps\b", r"basis points?"), "crore": (r"\bcrores?\b",), "lakh": (r"\blakhs?\b",),
 }
+_MEASURE_UNITS.update({
+    "years": (r"\byears?\b", r"\byrs?\b"), "tonnes": (r"\btonnes?\b", r"\bmetric\s+tons?\b"),
+    "mt": (r"\bmt\b", r"\bmetric\s+tons?\b"), "kt": (r"\bkt\b", r"\bthousand\s+tonnes?\b"),
+    "kg": (r"\bkg\b", r"\bkilograms?\b"), "km": (r"\bkm\b", r"\bkilomet(?:er|re)s?\b"),
+    "ha": (r"\bha\b", r"\bhectares?\b"), "tw": (r"\btw\b", r"\bterawatts?\b"),
+    "kwh": (r"\bkwh\b", r"\bkilowatt[- ]hours?\b"), "bu": (r"\bbu\b", r"\bbillion\s+units\b"),
+    "eur": (r"\beur\b", r"\u20ac", r"\beuros?\b"),
+    "gbp": (r"\bgbp\b", r"\u00a3", r"\bpounds?\b"),
+    "jpy": (r"\bjpy\b", r"\u00a5", r"\byen\b"),
+    "million tonnes": (r"\bmillion\s+tonnes?\b",), "billion tonnes": (r"\bbillion\s+tonnes?\b",),
+    "thousand tonnes": (r"\bthousand\s+tonnes?\b",), "million": (r"\bmillions?\b", r"\bmn\b"),
+    "billion": (r"\bbillions?\b", r"\bbn\b"), "trillion": (r"\btrillions?\b",),
+    "thousand": (r"\bthousands?\b",), "points": (r"\bpoints?\b", r"\bpts\b"),
+})
 
 
 def _tables(text: str) -> list[tuple[list[str], list[list[str]]]]:
@@ -545,37 +562,118 @@ def _heatmap_cell_matches_source(
     return False
 
 
-def _chart_metric_tokens(chart: dict, surrounding: str = "") -> set[str]:
-    raw = " ".join(str(chart.get(key) or "") for key in ("title", "xLabel", "yLabel", "unit"))
-    raw += " " + " ".join(str(s.get("name") or s.get("label") or "") for s in chart.get("series", []) if isinstance(s, dict))
-    raw += " " + str(surrounding or "")
-    tokens = {t for t in re.findall(r"[a-z]{3,}", raw.casefold()) if t not in _GENERIC}
-    return tokens
+def _chart_metric_tokens(chart: dict, supporting_context: str = "") -> set[str]:
+    raw = " ".join(str(chart.get(key) or "") for key in (
+        "title", "xLabel", "yLabel", "unit", "metric", "measure", "caption", "heading",
+        "sourceTitle", "source_title", "tableTitle", "table_title",
+    ))
+    raw += " " + " ".join(
+        str(s.get("name") or s.get("label") or "")
+        for s in chart.get("series", []) if isinstance(s, dict)
+    )
+    raw += " " + str(supporting_context or "")
+    return {t for t in re.findall(r"[a-z]{3,}", raw.casefold()) if t not in _CHART_SCOPE_STOPWORDS}
 
 
-_BANKING_METRIC_FAMILIES = {
-    "credit": ("credit", "advances", "loan", "loans", "lending"),
-    "deposits": ("deposit", "deposits", "casa", "savings", "term"),
-    "asset_quality": ("npa", "gnpa", "nnpa", "nonperforming", "non", "performing", "asset", "assets", "quality", "ratio", "ratios", "provision", "slippage"),
-    "profitability": ("profit", "profitability", "margin", "nim", "nii", "roa", "roe", "earnings", "income"),
-    "rates": ("repo", "interest", "policy", "rate", "rates", "mclr", "yield"),
-    "digital_payments": ("upi", "digital", "payments", "transaction", "transactions", "volume", "value"),
-    "capital": ("capital", "adequacy", "tier", "car", "riskweighted"),
-    "balance_sheet": ("assets", "liabilities", "balance", "sheet", "growth"),
-}
+def _source_details_for_chart(chart: dict, sources: list | dict | None) -> tuple[str, list[str]]:
+    refs: set[str] = set()
+    for key in ("sourceIds", "source_ids", "sourceId", "source"):
+        raw = chart.get(key)
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("sourceId") or value.get("source_id")
+            if value is not None:
+                refs.update(item.casefold() for item in re.findall(r"\bS\d+\b", str(value), flags=re.I))
+
+    entries = (list(sources.values()) if isinstance(sources, dict) else list(sources or [])) if refs else []
+    context_parts: list[str] = []
+    titles: list[str] = []
+    for source in entries:
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("id") or source.get("sourceId") or source.get("source_id") or "").strip()
+        if refs and source_id.casefold() not in refs:
+            continue
+        if refs and not source_id:
+            continue
+        for key in ("title", "sourceTitle", "source_title", "publisherTitle", "matchedEvidenceTitle"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                context_parts.append(value)
+                if key in {"title", "sourceTitle", "source_title", "publisherTitle"} and value not in titles:
+                    titles.append(value)
+        for key in ("publisher", "publisherName", "url", "matchedEvidenceUrl"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                context_parts.append(value)
+    # Chart builders that already carry publisher/table labels do not need a
+    # manifest lookup to retain that context.
+    for key in ("sourceTitle", "source_title", "tableTitle", "table_title", "publisher"):
+        value = str(chart.get(key) or "").strip()
+        if value:
+            context_parts.append(value)
+            if key in {"sourceTitle", "source_title", "tableTitle", "table_title"} and value not in titles:
+                titles.append(value)
+    return " ".join(context_parts), titles
 
 
-def _chart_is_relevant(chart: dict, report: str, question: str, index: int) -> bool:
-    """Block out-of-topic charts before evidence verification/publication."""
+def _requested_chart_entities(question: str) -> list[str]:
+    """Get an explicitly enumerated entity scope for this chart request."""
+    try:
+        from utils.evidence_dataset import extract_requested_entities
+        names = [str(item).strip() for item in extract_requested_entities(question) if str(item).strip()]
+    except Exception:
+        names = []
+    if len(names) >= 2:
+        # Recover the first member when a request says "outcomes in India,
+        # China, Brazil and Nigeria"; the shared entity parser currently starts
+        # at China because the leading topic phrase is lower case.
+        first_position = min((str(question).casefold().find(name.casefold()) for name in names
+                              if str(question).casefold().find(name.casefold()) >= 0), default=-1)
+        if first_position >= 0:
+            prefix = str(question)[:first_position]
+            match = re.search(
+                r"\b(?:in|across|among|between)\s+([A-Z][A-Za-z0-9&.'’/-]*(?:\s+[A-Z][A-Za-z0-9&.'’/-]*){0,3})\s*,\s*$",
+                prefix,
+            )
+            candidate = match.group(1).strip() if match else ""
+            if candidate and all(candidate.casefold() != name.casefold() for name in names):
+                names.insert(0, candidate)
+    return list(dict.fromkeys(names))
+
+
+def _question_chart_topic_tokens(question: str, entities: list[str] | None = None) -> set[str]:
+    topic_question = str(question or "").casefold()
+    for entity in entities if entities is not None else _requested_chart_entities(question):
+        normalized = _normalized_entity_text(entity)
+        if normalized:
+            pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized.split()) + r"(?![a-z0-9])"
+            topic_question = re.sub(pattern, " ", topic_question)
+    return {
+        term for term in re.findall(r"[a-z]{3,}", topic_question)
+        if term not in _CHART_SCOPE_STOPWORDS
+    }
+
+
+def _normalized_entity_text(text: object) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
+
+
+def _contains_entity(text: object, entity: str) -> bool:
+    haystack = f" {_normalized_entity_text(text)} "
+    needle = f" {_normalized_entity_text(entity)} "
+    return bool(needle.strip()) and needle in haystack
+
+
+def _chart_is_relevant(chart: dict, report: str, question: str, index: int,
+                       source_context: str = "") -> bool:
+    """Require charts to match the requested topic and any explicit entity list."""
     title = str(chart.get("title") or "").strip()
-    type_name = str(chart.get("type") or chart.get("chartType") or "").casefold()
     if not title or re.search(r"(?i)\b(?:file size|document size|source count|spread of reported observations|reported observations by metric)\b", title):
         return False
-    start = max(0, report.upper().find(f"[CHART_{index}]") - 700)
-    marker_pos = report.upper().find(f"[CHART_{index}]")
-    surrounding = report[start:marker_pos] if marker_pos >= 0 else ""
     title_and_context = (title + " " + str(chart.get("xLabel") or "") + " " +
-                         str(chart.get("yLabel") or "") + " " + surrounding + " " +
+                         str(chart.get("yLabel") or "") + " " + source_context + " " +
                          " ".join(str(s.get("name") or s.get("label") or "") for s in chart.get("series", []) if isinstance(s, dict))).casefold()
     q = str(question or "").casefold()
     chart_subject = " ".join([
@@ -586,13 +684,14 @@ def _chart_is_relevant(chart: dict, report: str, question: str, index: int) -> b
             str(series.get("name") or series.get("label") or "")
             for series in chart.get("series", []) if isinstance(series, dict)
         ),
+        source_context,
     ]).casefold()
     if re.search(r"\bpromoter\b", q) and re.search(
         r"\b(?:stake\s+sales?|exits?|shareholding|bulk\s+deals?|block\s+deals?|pledges?|promoter\s+holdings?)\b", q
     ):
         # A nearby report paragraph can mention promoter exits even when a
         # model-generated chart is about an unrelated portfolio metric. Require
-        # the chart's own title/axes/series to identify ownership or a transaction.
+        # the chart's own or publisher's title/axes/series to identify ownership.
         if not re.search(
             r"\b(?:promoter|stake|shareholding|ownership|shares?\s+(?:sold|transacted)|"
             r"sale|seller|exit|pledge|bulk\s+deal|block\s+deal|holding\s+change)\b",
@@ -617,14 +716,64 @@ def _chart_is_relevant(chart: dict, report: str, question: str, index: int) -> b
         if not all_terms.intersection(allowed):
             return False
     else:
-        question_terms = {t for t in re.findall(r"[a-z]{4,}", q) if t not in _GENERIC}
-        chart_terms = _chart_metric_tokens(chart, surrounding)
-        # General questions must have at least one substantive topical anchor
-        # unless the question is too short to provide a useful anchor.
-        if len(question_terms) >= 2 and chart_terms and not question_terms.intersection(chart_terms):
-            if type_name not in {"table", "heatmap", "network", "tree", "flowchart", "gantt", "timeline", "sankey"}:
+        requested_entities = _requested_chart_entities(question)
+        question_terms = _question_chart_topic_tokens(question, requested_entities)
+        chart_terms = _chart_metric_tokens(chart, source_context)
+        # A value/title such as "Value: World" is not a topical anchor. V2's
+        # exact-value validation proves provenance, not that a source measures
+        # the subject the user asked about.
+        if len(question_terms) >= 2 and not question_terms.intersection(chart_terms):
+            return False
+
+        if len(requested_entities) >= 2:
+            plotted_names = [
+                str(series.get("name") or series.get("label") or "")
+                for series in chart.get("series", []) if isinstance(series, dict)
+            ]
+            plotted_text = " ".join([
+                title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""),
+                *plotted_names,
+                *[
+                    str(point.get(key) or "")
+                    for series in chart.get("series", []) if isinstance(series, dict)
+                    for point in (series.get("data") if isinstance(series.get("data"), list) else series.get("values") or [])
+                    if isinstance(point, dict) for key in ("label", "name", "category", "period", "date", "x", "key")
+                ],
+                *[str(row) for row in (chart.get("rows") or [])],
+            ])
+            clean_global_terms = re.sub(r"\bworld\s+bank\b|\bworld\s+health\s+organization\b", "", plotted_text, flags=re.I)
+            series_is_global = any(
+                _normalized_entity_text(name) in {"world", "global", "worldwide", "all countries", "world average", "global average"}
+                for name in plotted_names
+            )
+            title_is_global = bool(re.search(
+                r"(?i)(?:\bworldwide\b|\bglobal\s+(?:average|aggregate|total|trend|trends)\b|"
+                r"\bworld\s+(?:average|aggregate|total|trend|trends|data)\b|\ball\s+countries\b|"
+                r"[:|—–-]\s*(?:world|global)\s*(?:[,;|—–-]|$))",
+                clean_global_terms,
+            ))
+            query_global = bool(re.search(
+                r"(?i)\b(?:worldwide|global|world average|world total|global average|all countries)\b",
+                re.sub(r"\bworld\s+bank\b|\bworld\s+health\s+organization\b", "", q),
+            ))
+            if (series_is_global or title_is_global) and not query_global:
+                return False
+            entity_text = plotted_text + " " + source_context
+            if not any(_contains_entity(entity_text, entity) for entity in requested_entities):
                 return False
     return True
+
+
+_BANKING_METRIC_FAMILIES = {
+    "credit": ("credit", "advances", "loan", "loans", "lending"),
+    "deposits": ("deposit", "deposits", "casa", "savings", "term"),
+    "asset_quality": ("npa", "gnpa", "nnpa", "nonperforming", "non", "performing", "asset", "assets", "quality", "ratio", "ratios", "provision", "slippage"),
+    "profitability": ("profit", "profitability", "margin", "nim", "nii", "roa", "roe", "earnings", "income"),
+    "rates": ("repo", "interest", "policy", "rate", "rates", "mclr", "yield"),
+    "digital_payments": ("upi", "digital", "payments", "transaction", "transactions", "volume", "value"),
+    "capital": ("capital", "adequacy", "tier", "car", "riskweighted"),
+    "balance_sheet": ("assets", "liabilities", "balance", "sheet", "growth"),
+}
 
 
 def _chart_observation_signature(chart: dict) -> tuple:
@@ -649,7 +798,37 @@ def _chart_observation_signature(chart: dict) -> tuple:
     return (str(chart.get("unit") or chart.get("yLabel") or "").casefold().strip(), tuple(sorted(points)))
 
 
-def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple[str, list[dict], int]:
+def _source_metric_title(source_titles: list[str], question: str) -> str:
+    entities = _requested_chart_entities(question)
+    topic_terms = _question_chart_topic_tokens(question, entities)
+    for source_title in source_titles:
+        candidate = re.split(r"\s*[|·â€¢]\s*", str(source_title or ""), maxsplit=1)[0].strip()
+        if ":" in candidate:
+            left, right = candidate.split(":", 1)
+            left_terms = _chart_metric_tokens({"title": left})
+            right_terms = _chart_metric_tokens({"title": right})
+            if not (left_terms & topic_terms) and right_terms & topic_terms:
+                candidate = right.strip()
+        candidate = re.sub(r"(?i)\s+(?:since|updated|retrieved|as\s+of)\b.*$", "", candidate)
+        candidate = re.sub(r"(?i)\s+by\s+(?:country|countries|area|areas|region|regions|year)\b.*$", "", candidate)
+        candidate = re.sub(r"(?i)\s+(?:chart|data\s+table|data|table|csv|xlsx|pdf|download)\b.*$", "", candidate)
+        candidate = re.sub(r"\s*\([^)]*\)", "", candidate)
+        candidate = re.sub(r"[,;].*$", "", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip(" .:-")
+        for entity in entities:
+            normalized = _normalized_entity_text(entity)
+            if normalized:
+                pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized.split()) + r"(?![a-z0-9])"
+                candidate = re.sub(pattern, " ", candidate, flags=re.I)
+        candidate = re.sub(r"\s+", " ", candidate).strip(" .:-")
+        candidate_terms = _chart_metric_tokens({"title": candidate})
+        if candidate and topic_terms.intersection(candidate_terms):
+            return candidate
+    return ""
+
+
+def _dedupe_chart_specs(report: str, charts: list[dict], question: str,
+                        sources: list | dict | None = None) -> tuple[str, list[dict], int]:
     """Remove irrelevant and duplicate chart specs, preserving unique comparisons."""
     kept: list[dict] = []
     signatures: dict[tuple, int] = {}
@@ -668,8 +847,29 @@ def _dedupe_chart_specs(report: str, charts: list[dict], question: str) -> tuple
             and str(chart.get("sourceOrigin") or "").strip().casefold()
             in {"uploaded_workbook", "uploaded_attachment"}
         )
-        v2_validated = _chart_observation_signature(chart) in _TRUSTED_CHART_SIGNATURES.get()
-        keep = server_workbook_chart or v2_validated or _chart_is_relevant(chart, report, question, idx)
+        source_context, source_titles = _source_details_for_chart(chart, sources)
+        keep = server_workbook_chart or _chart_is_relevant(
+            chart, report, question, idx, source_context=source_context,
+        )
+        if keep:
+            generic_title = re.match(
+                r"(?is)^(\s*(?:figure\s+\d+\s*:\s*)?)value\s*:\s*(.*)$",
+                str(chart.get("title") or ""),
+            )
+            if generic_title and not server_workbook_chart:
+                rest = re.sub(r"\s*\([a-z0-9.-]+\.[a-z]{2,}\)\s*$", "", generic_title.group(2), flags=re.I).strip()
+                topic_terms = _question_chart_topic_tokens(question)
+                rest_has_metric = bool(topic_terms.intersection(_chart_metric_tokens({"title": rest})))
+                if rest_has_metric:
+                    chart["title"] = f"{generic_title.group(1)}{rest}".strip()
+                else:
+                    metric_title = _source_metric_title(source_titles, question)
+                    if metric_title:
+                        chart["title"] = f"{generic_title.group(1)}{metric_title}: {rest}".strip()
+                    else:
+                        keep = False
+                if keep and str(chart.get("metric") or "").strip().casefold() in {"value", "values"}:
+                    chart["metric"] = metric_title if not rest_has_metric else rest.split(":", 1)[0].strip()
         if keep:
             signature = _chart_observation_signature(chart)
             title_tokens = _chart_metric_tokens(chart)
@@ -1076,10 +1276,24 @@ def _question_time_windows(question: object) -> list[tuple[int, int, str]]:
     return _period_ranges(text)
 
 
+_SOURCE_METADATA_PERIOD_RE = re.compile(
+    r"(?i)\b(?:retriev(?:ed|al)|accessed|downloaded|crawled|published|"
+    r"(?:last\s+)?(?:modified|updated))\b[^.;\r\n]{0,120}?\b"
+    r"(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?\b"
+)
+
+
+def _period_evidence_text(value: object) -> str:
+    """Remove publisher/retrieval timestamps before reading observation periods."""
+    return _SOURCE_METADATA_PERIOD_RE.sub(" ", str(value or ""))
+
+
 def _periods_outside_question_window(
     question: object,
     observed_texts: list[object],
     fallback_texts: list[object] | None = None,
+    *,
+    ignore_source_metadata_dates: bool = False,
 ) -> list[str]:
     """Return explicitly observed periods outside the requested time window.
 
@@ -1096,7 +1310,8 @@ def _periods_outside_question_window(
         found: list[tuple[int, int, str]] = []
         seen: set[tuple[int, int, str]] = set()
         for part in parts or []:
-            for item in _period_ranges(part):
+            period_text = _period_evidence_text(part) if ignore_source_metadata_dates else part
+            for item in _period_ranges(period_text):
                 if item not in seen:
                     seen.add(item)
                     found.append(item)
@@ -1115,12 +1330,51 @@ def _periods_outside_question_window(
 def _source_period_metadata(source: dict | None) -> list[str]:
     if not isinstance(source, dict):
         return []
-    return [str(source.get(key) or "") for key in (
+    if not _is_official_dataset_source(source):
+        return [str(source.get(key) or "") for key in (
+            "title", "publisher_page_title", "publisherPageTitle", "period", "dataPeriod", "data_period",
+            "publication_date", "publicationDate", "published_at", "publishedAt",
+            "publisherPagePublishedAt", "publisher_page_published_at",
+            "url", "publisher_page_url", "publisherPageUrl",
+        ) if str(source.get(key) or "").strip()]
+    data_period_fields = [str(source.get(key) or "") for key in (
+        "period", "dataPeriod", "data_period", "datasetPeriod", "dataset_period",
+    ) if str(source.get(key) or "").strip()]
+    descriptive_fields = [str(source.get(key) or "") for key in (
         "title", "publisher_page_title", "publisherPageTitle", "period", "dataPeriod", "data_period",
-        "publication_date", "publicationDate", "published_at", "publishedAt",
-        "publisherPagePublishedAt", "publisher_page_published_at",
         "url", "publisher_page_url", "publisherPageUrl",
     ) if str(source.get(key) or "").strip()]
+    dataset = source.get("officialDataset") or source.get("official_dataset")
+    if isinstance(dataset, dict):
+        years = [int(value) for value in dataset.get("years") or []
+                 if str(value).isdigit() and 1900 <= int(value) <= 2200]
+        if years:
+            data_period_fields.append(f"{min(years)}-{max(years)}")
+    # Explicit data ranges describe observations. API retrieval and publication
+    # dates describe when the evidence was collected, so they must not make an
+    # in-window dataset appear stale.
+    has_data_period = any(_period_ranges(value) for value in data_period_fields)
+    if not has_data_period:
+        has_data_period = any(_period_ranges(value) for value in descriptive_fields[:2])
+    if has_data_period:
+        return list(dict.fromkeys([*data_period_fields, *descriptive_fields]))
+    publication_fields = [str(source.get(key) or "") for key in (
+        "publication_date", "publicationDate", "published_at", "publishedAt",
+        "publisherPagePublishedAt", "publisher_page_published_at",
+    ) if str(source.get(key) or "").strip()]
+    return list(dict.fromkeys([*descriptive_fields, *publication_fields]))
+
+
+def _is_official_dataset_source(source: dict | None) -> bool:
+    if not isinstance(source, dict):
+        return False
+    origin = str(source.get("evidence_origin") or source.get("evidenceOrigin") or "").casefold()
+    kind = str(source.get("source_type") or source.get("sourceType") or source.get("kind") or "")
+    if origin in {"uploaded_workbook", "uploaded_attachment"} or "uploaded" in kind.casefold():
+        return False
+    if isinstance(source.get("officialDataset") or source.get("official_dataset"), dict):
+        return True
+    return "official dataset" in kind.casefold()
 
 
 def drop_charts_outside_requested_window(
@@ -1151,13 +1405,24 @@ def drop_charts_outside_requested_window(
             source_by_id[source_id] = source
 
     def out_of_window(observed: list[object], source_ids: list[str]) -> list[str]:
-        explicit = _period_ranges(" ".join(str(part or "") for part in observed))
+        ignore_metadata_dates = bool(source_ids) and all(
+            _is_official_dataset_source(source_by_id.get(source_id)) for source_id in source_ids
+        )
+        observed_text = " ".join(
+            _period_evidence_text(part) if ignore_metadata_dates else str(part or "")
+            for part in observed
+        )
+        explicit = _period_ranges(observed_text)
         if explicit:
-            return _periods_outside_question_window(question, observed)
+            return _periods_outside_question_window(
+                question, observed,
+                ignore_source_metadata_dates=ignore_metadata_dates,
+            )
         outside: list[str] = []
         for source_id in source_ids:
             outside.extend(_periods_outside_question_window(
                 question, observed, _source_period_metadata(source_by_id.get(source_id)),
+                ignore_source_metadata_dates=_is_official_dataset_source(source_by_id.get(source_id)),
             ))
         return list(dict.fromkeys(outside))[:3]
 
@@ -1250,7 +1515,8 @@ def drop_charts_outside_requested_window(
 
 
 
-_ENTITY_FILLER = {"bank", "banks", "sector", "group", "groups", "ltd", "limited", "the", "and", "all"}
+_ENTITY_FILLER = {"bank", "banks", "sector", "group", "groups", "ltd", "limited", "the", "and", "all",
+                  "cagr", "yoy", "annual", "average", "rate", "growth", "share", "ratio", "index"}
 
 
 def _label_terms_present(label: str, text: str) -> bool:
@@ -1262,15 +1528,483 @@ def _label_terms_present(label: str, text: str) -> bool:
     if any(re.search(rf"\b{re.escape(t)}\b", text, re.I) for t in terms):
         return True
     initials = "".join(w[0] for w in re.findall(r"[A-Za-z]+", str(label or "")) if w.casefold() not in {"the", "and", "of"})
-    return len(initials) >= 2 and bool(re.search(rf"\b{re.escape(initials)}s?\b", text, re.I))
+    if len(initials) >= 2 and re.search(rf"\b{re.escape(initials)}s?\b", text, re.I):
+        return True
+    # Entity resolution may display an acronym ("SBI") while the cited table
+    # uses its expanded name ("State Bank of India"). Resolve that direction
+    # from the source row itself instead of rejecting a valid same-row value.
+    acronym = str(label or "").strip()
+    if re.fullmatch(r"[A-Z][A-Z0-9]{1,7}", acronym):
+        source_words = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+        ignored = {"the", "and", "of"}
+        source_words = [word for word in source_words if word.casefold() not in ignored]
+        wanted = acronym.casefold()
+        for start in range(len(source_words)):
+            for end in range(start + 2, min(len(source_words), start + 7) + 1):
+                if "".join(word[0] for word in source_words[start:end]).casefold() == wanted:
+                    return True
+    return False
+
+
+_POINT_YEAR_RANGE = re.compile(
+    r"(?i)^(?:FY\s*)?((?:19|20)\d{2})\s*[-/\u2010-\u2015]\s*((?:(?:19|20)?\d{2,4}))$"
+)
+
+
+def _is_point_period(value: object) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return False
+    if _POINT_YEAR_RANGE.fullmatch(text):
+        return True
+    if re.fullmatch(r"(?i)(?:(?:FY|CY)\s*['\u2019]?\s*)?(?:19|20)\d{2}", text):
+        return True
+    if re.fullmatch(r"(?i)Q[1-4]\s*(?:(?:FY|CY)\s*)?['\u2019]?(?:(?:19|20)\d{2}|\d{2})", text):
+        return True
+    if re.fullmatch(r"(?i)H[12]\s*FY\s*['\u2019]?(?:(?:19|20)\d{2}|\d{2})", text):
+        return True
+    return False
+
+
+def _point_period_in_text(period: object, text: str) -> bool:
+    """Match a chart's actual period, including fiscal-year and quarter labels.
+
+    A label such as 2024 must not match only the start of a FY2024-25 value.
+    Table-column alignment below handles which value belongs to which period.
+    """
+    raw = re.sub(r"\s+", " ", str(period or "").strip())
+    if not raw:
+        return True
+    source = str(text or "")
+    quarter = re.fullmatch(r"(?i)Q([1-4])\s*(?:(FY|CY)\s*)?['\u2019]?((?:19|20)?\d{2})", raw)
+    if quarter:
+        year = quarter.group(3)
+        full_year = year if len(year) == 4 else "20" + year
+        short_year = full_year[-2:]
+        pattern = rf"(?i)(?<![A-Za-z0-9])Q{quarter.group(1)}\s*(?:(?:FY|CY)\s*)?['\u2019]?(?:{full_year}|{short_year})(?!\d)"
+        if re.search(pattern, source):
+            return True
+    year_range = _POINT_YEAR_RANGE.fullmatch(raw)
+    if year_range:
+        start, end = year_range.groups()
+        end_pattern = re.escape(end) if len(end) == 4 else rf"(?:20)?{re.escape(end)}"
+        pattern = rf"(?i)(?<!\d)(?:FY\s*)?{re.escape(start)}\s*[-/\u2010-\u2015]\s*{end_pattern}(?!\d)"
+        return bool(re.search(pattern, source))
+    year = re.fullmatch(r"(?i)(?:(?:FY|CY)\s*['\u2019]?\s*)?((?:19|20)\d{2})", raw)
+    if year:
+        value = year.group(1)
+        return bool(re.search(rf"(?<!\d){value}(?!\d)(?!\s*[-/\u2010-\u2015]\s*\d{{2,4}})", source))
+    compact = re.sub(r"[^a-z0-9]", "", raw.casefold())
+    source_compact = re.sub(r"[^a-z0-9]", "", source.casefold())
+    return bool(compact and compact in source_compact)
+
+
+def _metric_terms(label: str, *, explicit: bool = False) -> set[str]:
+    label = re.sub(r"(?i)\bmarket\s+(?:cap|capitalization|capitalisation)\b", "market capitalisation", str(label or ""))
+    stop = _CHART_SCOPE_STOPWORDS | {"percentage", "percent", "cent", "per", "years", "year", "yrs", "yr",
+                                    "cagr", "yoy", "qoq", "avg", "annual", "ranking", "ranked"}
+    terms = {word for word in re.findall(r"[a-z]{3,}", str(label or "").casefold()) if word not in stop}
+    return terms
+
+
+def _metric_label_supported(label: str, context: str, *, explicit: bool = False) -> bool:
+    context = re.sub(r"(?i)\bmarket\s+(?:cap|capitalization|capitalisation)\b", "market capitalisation", str(context or ""))
+    terms = _metric_terms(label, explicit=explicit)
+    if not terms:
+        return True
+    hits = sum(bool(re.search(rf"\b{re.escape(term)}\b", context, re.I)) for term in terms)
+    required = len(terms) if explicit and len(terms) <= 2 else max(1, (len(terms) + 1) // 2)
+    if hits >= required:
+        return True
+
+    # Financial tables commonly use short, well-defined headers where the
+    # value is still in the same verified column (CMP, ROE, ROA, NIM, etc.).
+    # Accept an acronym derived from the expected measure only when the exact
+    # acronym appears in that source context.
+    ignored = {"and", "the"}
+    words = [word for word in re.findall(r"[a-z]+", str(label or "").casefold()) if word not in ignored]
+    acronym = "".join(word[0] for word in words)
+    if len(acronym) >= 3 and re.search(rf"(?<![A-Za-z]){re.escape(acronym)}(?![A-Za-z])", context, re.I):
+        return True
+    normalized = " ".join(re.findall(r"[a-z]+", str(label or "").casefold()))
+    aliases = {
+        "share price": (r"\bcmp(?:\s*\(\s*rs\s*\))?\b", r"\bcurrent\s+(?:market|share|stock)\s+price\b"),
+    }
+    return any(re.search(pattern, context, re.I) for pattern in aliases.get(normalized, ()))
+
+
+def _cell_label_matches(expected: str, observed: str) -> bool:
+    expected, observed = str(expected or "").strip(), str(observed or "").strip()
+    if not expected or not observed:
+        return False
+    if _is_point_period(expected):
+        return _point_period_in_text(expected, observed)
+    expected_terms = [word for word in re.findall(r"[a-z]{3,}", expected.casefold())
+                      if word not in {"the", "and", "of", "by", "total", "value", "inr", "usd", "eur", "gbp", "jpy",
+                                      "crore", "crores", "lakh", "lakhs", "million", "billion", "thousand"}]
+    if not expected_terms:
+        return _label_terms_present(expected, observed)
+    hits = sum(bool(re.search(rf"\b{re.escape(term)}\b", observed, re.I)) for term in expected_terms)
+    required = len(expected_terms) if len(expected_terms) <= 3 else max(2, (3 * len(expected_terms) + 3) // 4)
+    return hits >= required
+
+
+def _source_cell_matches(value: object, evidence_value: object, cell: str) -> bool:
+    raw = str(evidence_value or value or "").strip()
+    if not raw or not _number_is_in(raw, str(cell or "")):
+        return False
+    # _quote_supports also checks a chart value's explicit scale against its
+    # quoted raw cell; use a synthetic full quote because single-cell strings
+    # are intentionally too short to count as source quotations by themselves.
+    proof = f"source cell {raw}"
+    return _quote_supports(value, raw, proof, proof)
+
+
+def _table_point_column_matches(point: dict, series: str, label: str, value: object,
+                                quote: str, source_text: str) -> bool | None:
+    """Align quoted values with their named table column/period when row metadata allows it.
+
+    Returns None for prose or layouts that cannot be interpreted safely; explicit
+    column provenance returns False when the cited table does not prove that cell.
+    """
+    expected_column = str(point.get("evidenceColumn") or point.get("evidence_column") or "").strip()
+    explicit_column = bool(expected_column)
+    raw_index = point.get("evidenceColumnIndex", point.get("evidence_column_index"))
+    try:
+        column_index = int(raw_index) if raw_index is not None else None
+    except (TypeError, ValueError):
+        column_index = None
+    period = str(point.get("evidencePeriod") or point.get("evidence_period") or "").strip()
+    if not period:
+        period = label if _is_point_period(label) else (series if _is_point_period(series) else "")
+    row_label = str(point.get("evidenceRowLabel") or point.get("evidence_row_label")
+                    or point.get("evidenceCategory") or point.get("evidence_category") or "").strip()
+    has_pipe_table = "|" in str(quote or "") or "|" in str(source_text or "")
+    if not has_pipe_table:
+        return False if expected_column or column_index is not None else None
+    if not (expected_column or column_index is not None or period):
+        return None
+
+    quoted = _norm_quote(quote)
+    lines = str(source_text or "").splitlines()
+    for row_index, line in enumerate(lines):
+        row = _pipe_cells(line)
+        if len(row) < 2 or re.fullmatch(r"\s*:?-{2,}:?\s*", line.strip().strip("|")):
+            continue
+        if quoted and _norm_quote(line) not in quoted:
+            continue
+        raw_value = point.get("evidenceValue", point.get("evidence_value"))
+        matching_value_indices = [index for index, cell in enumerate(row)
+                                  if _source_cell_matches(value, raw_value, cell)]
+        if not matching_value_indices:
+            continue
+        if row_label:
+            if _is_point_period(row_label):
+                if not _point_period_in_text(row_label, row[0] if row else ""):
+                    continue
+            elif not _label_terms_present(row_label, row[0] if row else ""):
+                continue
+
+        previous_rows: list[list[str]] = []
+        for header_line in reversed(lines[max(0, row_index - 8):row_index]):
+            header = _pipe_cells(header_line)
+            if len(header) < 2:
+                if previous_rows:
+                    break
+                continue
+            if re.fullmatch(r"\s*:?-{2,}:?\s*", header_line.strip().strip("|")):
+                continue
+            previous_rows.append(header)
+
+        effective_column = expected_column
+        if not effective_column and column_index is None and _is_point_period(label) and not _is_point_period(series):
+            # For a time series, a named entity/series that is literally a
+            # source column can establish which of several neighboring values
+            # belongs to this point. Long-form tables are checked by their row.
+            if any(_cell_label_matches(series, cell) for header in previous_rows for cell in header):
+                effective_column = series
+
+        column_matches: set[int] | None = None
+        if column_index is not None:
+            column_matches = {column_index}
+        if effective_column:
+            found = {index for header in previous_rows for index, cell in enumerate(header)
+                     if _cell_label_matches(effective_column, cell)}
+            if not found:
+                return False if explicit_column else None
+            column_matches = found if column_matches is None else column_matches & found
+        period_columns = {index for header in previous_rows for index, cell in enumerate(header)
+                          if period and _point_period_in_text(period, cell)}
+        if period_columns:
+            column_matches = period_columns if column_matches is None else column_matches & period_columns
+
+        if column_matches is not None:
+            if any(index in matching_value_indices for index in column_matches):
+                return True
+            return False
+        if period and any(_point_period_in_text(period, cell) for cell in row):
+            return True
+        if period and previous_rows and any(_is_point_period(cell) for header in previous_rows for cell in header):
+            return False
+        if expected_column or column_index is not None:
+            return False
+    return False if expected_column or column_index is not None else None
+
+
+def _shift_quarter_label(label: str, quarters: int) -> str:
+    match = re.fullmatch(r"(?i)Q([1-4])\s*(?:(FY|CY)\s*)?['\u2019]?((?:19|20)?\d{2})", str(label or "").strip())
+    if not match:
+        return ""
+    quarter, prefix, year_text = match.groups()
+    year = int(year_text) if len(year_text) == 4 else 2000 + int(year_text)
+    ordinal = year * 4 + int(quarter) - 1 + quarters
+    shifted_year, shifted_quarter = divmod(ordinal, 4)
+    year_suffix = f"{shifted_year:04d}" if len(year_text) == 4 else f"{shifted_year % 100:02d}"
+    period_prefix = f"{prefix.upper()} " if prefix else ""
+    return f"Q{shifted_quarter + 1} {period_prefix}{year_suffix}"
+
+
+def _value_relation_clauses(value: object, text: str) -> list[str]:
+    """Tie a relative date phrase to the numeric occurrence it describes."""
+    parsed = _NUMBER.fullmatch(str(value or "").strip())
+    if not parsed:
+        return [str(text or "")]
+    try:
+        target = float(parsed.group(1).replace(",", ""))
+    except ValueError:
+        return [str(text or "")]
+    tokens = list(_VALUE_TOKEN.finditer(str(text or "")))
+    if not tokens:
+        return [str(text or "")]
+    clauses = []
+    for index, match in enumerate(tokens):
+        try:
+            observed = float(match.group(0).replace(",", ""))
+        except ValueError:
+            continue
+        if abs(observed - target) > max(0.001, abs(target) * 0.002):
+            continue
+        # A relative phrase normally follows its figure ("1.17% in the
+        # preceding quarter"). Keeping only the text after this occurrence
+        # prevents a qualifier belonging to the previous figure from leaking
+        # across a conjunction ("1.24% a year earlier and 1.17% ...").
+        start = match.end()
+        end = tokens[index + 1].start() if index + 1 < len(tokens) else len(str(text or ""))
+        clauses.append(str(text or "")[start:end])
+    return clauses or [str(text or "")]
+
+
+def _relative_period_supported(expected: str, own: str, context: str, source_text: str,
+                               value: object = None) -> bool:
+    """Verify a relative quarter only when a dated source anchor supports the arithmetic."""
+    if _point_period_in_text(expected, f"{own} {context}"):
+        return True
+    if not re.fullmatch(r"(?i)Q[1-4]\s*(?:(?:FY|CY)\s*)?['\u2019]?(?:(?:19|20)\d{2}|\d{2})", expected or ""):
+        return False
+    try:
+        from utils.evidence_dataset import _Extractor, _date_in_text
+        date_line = next((line for line in str(source_text or "").splitlines() if _date_in_text(line)), "")
+        reference = _date_in_text(date_line or source_text)
+        if reference is None:
+            return False
+        local = " ".join((context, own))
+        anchor = _Extractor._sentence_period(local, reference)
+        if not anchor or anchor[2] != "Q":
+            return False
+        for relation_clause in _value_relation_clauses(value, own):
+            clause_period = _Extractor._sentence_period(relation_clause, reference)
+            relation = relation_clause.casefold()
+            if re.search(r"\b(?:a|one|same)\s+year\s+(?:ago|earlier)\b|\byear\s+ago\b|\bsame\s+period\s+last\s+year\b", relation):
+                shift = -4
+            elif re.search(r"\b(?:preceding|previous|prior|last)\s+quarter\b", relation):
+                shift = -1
+            elif re.search(r"\b(?:at\s+)?(?:the\s+)?end\s+of\s+(?:june|september|december|march)\b", relation):
+                shift = 0
+            else:
+                if clause_period and clause_period[2] == "Q" and _point_period_in_text(expected, clause_period[0]):
+                    return True
+                continue
+            base_period = clause_period if clause_period and clause_period[2] == "Q" else anchor
+            candidate = _shift_quarter_label(base_period[0], shift)
+            if candidate and _point_period_in_text(expected, candidate):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, point: dict,
+                           quote: str, source_text: str, unit_context: str = "") -> str:
+    """Return a reason unless the exact source quote supports this point's metric, subject and period."""
+    evidence_value = point.get("evidenceValue", point.get("evidence_value"))
+    windows = []
+    quote_norm = _norm_quote(quote)
+    for own, context in _value_windows(evidence_value or value, source_text):
+        if (_norm_quote(own) and _norm_quote(own) in quote_norm) or (quote_norm and quote_norm in _norm_quote(context)):
+            windows.append((own, context))
+    if not windows:
+        windows = _value_windows(evidence_value or value, quote)
+    if not windows:
+        return "The quoted source value cannot be tied to a local row or statement."
+
+    column_match = _table_point_column_matches(point, series, label, value, quote, source_text)
+    if column_match is False:
+        return "The chart value does not match the quoted source row, period, or named table column."
+
+    explicit_metric = str(point.get("evidenceMetric") or point.get("evidence_metric") or "").strip()
+    metric = explicit_metric or str(chart.get("metric") or chart.get("measure") or chart.get("yLabel") or chart.get("title") or "").strip()
+    expected_period = str(point.get("evidencePeriod") or point.get("evidence_period") or "").strip()
+    if not expected_period:
+        expected_period = label if _is_point_period(label) else (series if _is_point_period(series) else "")
+    expected_entity = str(point.get("evidenceEntity") or point.get("evidence_entity") or "").strip()
+    expected_category = str(point.get("evidenceCategory") or point.get("evidence_category") or "").strip()
+    expected_row = str(point.get("evidenceRowLabel") or point.get("evidence_row_label") or "").strip()
+    if not expected_entity and _is_point_period(label) and not _is_point_period(series):
+        series_terms = _metric_terms(series)
+        metric_terms = _metric_terms(metric)
+        if series_terms and not series_terms.issubset(metric_terms):
+            expected_entity = series
+    if not expected_category and not _is_point_period(label):
+        expected_category = label
+
+    unit_context = str(unit_context or "")
+    period_miss = entity_miss = metric_miss = unit_miss = False
+    for own, context in windows:
+        local = " ".join((own, context, quote, unit_context))
+        if expected_period and not _relative_period_supported(
+            expected_period, own, context, source_text, evidence_value or value,
+        ):
+            period_miss = True
+            continue
+        if expected_row:
+            if _is_point_period(expected_row):
+                if not _point_period_in_text(expected_row, own):
+                    continue
+            elif not _label_terms_present(expected_row, own):
+                continue
+        if expected_category and not _label_terms_present(expected_category, own):
+            continue
+        if expected_entity and not _label_terms_present(expected_entity, local):
+            entity_miss = True
+            continue
+        metric_context = local
+        unit_local = local
+        expected_column = str(point.get("evidenceColumn") or point.get("evidence_column") or "").strip()
+        column_role = str(point.get("evidenceColumnRole") or point.get("evidence_column_role") or "").strip().casefold()
+        if (column_match is True and expected_column
+                and _norm_quote(expected_column) in _norm_quote(source_text)
+                and column_role == "measure"):
+            evidence_cell = str(point.get("evidenceCell") or point.get("evidence_cell") or "").strip()
+            evidence_cell_valid = bool(
+                evidence_cell
+                and _norm_quote(evidence_cell) in _norm_quote(quote)
+                and _source_cell_matches(value, point.get("evidenceValue", point.get("evidence_value")), evidence_cell)
+            )
+            metric_context = " ".join((expected_column, evidence_cell if evidence_cell_valid else ""))
+            unit_parts = [expected_column, evidence_cell if evidence_cell_valid else "", unit_context]
+            shared_unit_context = str(point.get("evidenceUnitContext") or point.get("evidence_unit_context") or "").strip()
+            if shared_unit_context and _norm_quote(shared_unit_context) in _norm_quote(source_text):
+                unit_parts.append(shared_unit_context)
+            unit_local = " ".join(unit_parts)
+        if metric and not _metric_label_supported(metric, metric_context, explicit=bool(explicit_metric)):
+            metric_miss = True
+            continue
+        point_unit = str(point.get("evidenceUnit") or point.get("evidence_unit") or "").strip()
+        unit_chart = {**chart, "unit": point_unit} if point_unit else chart
+        if not _unit_is_in(unit_chart, unit_local):
+            unit_miss = True
+            continue
+        return ""
+    if metric_miss:
+        return "The quoted source row does not establish the chart's stated measure."
+    if entity_miss:
+        return "The quoted source row does not support the chart point's entity or category."
+    if unit_miss:
+        return "The quoted source row does not establish the chart's stated unit."
+    if expected_period:
+        if period_miss:
+            return "The quoted source row does not support the chart point's exact period."
+        return "The quoted source row does not support the chart point's exact period."
+    if expected_entity or expected_category or expected_row:
+        return "The quoted source row does not support the chart point's entity or category."
+    if metric:
+        return "The quoted source row does not establish the chart's stated measure."
+    return "The quoted source value cannot be tied to a local row or statement."
 
 
 def _unit_is_in(chart: dict, evidence: str) -> bool:
-    label = str(chart.get("unit") or chart.get("yLabel") or "").casefold()
-    for unit, patterns in _MEASURE_UNITS.items():
-        if unit in label:
-            return any(re.search(pattern, evidence, re.I) for pattern in patterns)
-    return True
+    unit_label = re.sub(r"\s+", " ", str(chart.get("unit") or "")).strip()
+    if not unit_label:
+        return True
+    label = unit_label.casefold()
+    currencies = {
+        "inr": (r"\binr\b", r"\brs\.?\b", "\u20b9", r"\brupees?\b"),
+        "usd": (r"\busd\b", r"\bus\s*\$", r"\$", r"\bdollars?\b"),
+        "eur": (r"\beur\b", "\u20ac", r"\beuros?\b"),
+        "gbp": (r"\bgbp\b", "\u00a3", r"\bpounds?\b"),
+        "jpy": (r"\bjpy\b", "\u00a5", r"\byen\b"),
+    }
+    selected_currency = [key for key, patterns in currencies.items()
+                         if any(re.search(pattern, label, re.I) for pattern in patterns)]
+    if selected_currency:
+        if len(selected_currency) != 1:
+            return False
+        currency_patterns = currencies[selected_currency[0]]
+        if not any(re.search(pattern, evidence, re.I) for pattern in currency_patterns):
+            return False
+        scale_patterns = {
+            "lakh crore": (r"\blakh\s+crores?\b", r"\blakh\s+crs?\.?\b"),
+            "crore": (r"\bcrores?\b", r"\bcrs?\.?\b"),
+            "lakh": (r"\blakhs?\b",),
+            "million": (r"\bmillions?\b", r"\bmn\b"),
+            "billion": (r"\bbillions?\b", r"\bbn\b"),
+            "trillion": (r"\btrillions?\b",),
+            "thousand": (r"\bthousands?\b",),
+        }
+        scale = next((key for key in scale_patterns if re.search(rf"(?i)(?<![a-z]){re.escape(key)}(?![a-z])", label)), "")
+        return not scale or any(re.search(pattern, evidence, re.I) for pattern in scale_patterns[scale])
+
+    unit_patterns = {
+        "%": (r"%", r"\bpercent(?:age)?\b", r"\bper\s?cent\b"),
+        "years": (r"\byears?\b", r"\byrs?\b"),
+        "tonnes": (r"\btonnes?\b", r"\bmetric\s+tons?\b"),
+        "mt": (r"\bmt\b", r"\bmetric\s+tons?\b"),
+        "kt": (r"\bkt\b", r"\bthousand\s+tonnes?\b"),
+        "kg": (r"\bkg\b", r"\bkilograms?\b"),
+        "km": (r"\bkm\b", r"\bkilomet(?:er|re)s?\b"),
+        "ha": (r"\bha\b", r"\bhectares?\b"),
+        "lakh crore": (r"\blakh\s+crores?\b", r"\blakh\s+crs?\.?\b"),
+        "gw": (r"\bgw\b", r"\bgigawatts?\b"),
+        "mw": (r"\bmw\b", r"\bmegawatts?\b"),
+        "kw": (r"\bkw\b", r"\bkilowatts?\b"),
+        "tw": (r"\btw\b", r"\bterawatts?\b"),
+        "twh": (r"\btwh\b", r"\bterawatt[- ]hours?\b"),
+        "gwh": (r"\bgwh\b", r"\bgigawatt[- ]hours?\b"),
+        "mwh": (r"\bmwh\b", r"\bmegawatt[- ]hours?\b"),
+        "kwh": (r"\bkwh\b", r"\bkilowatt[- ]hours?\b"),
+        "bu": (r"\bbu\b", r"\bbillion\s+units\b"),
+        "crore": (r"\bcrores?\b", r"\bcrs?\.?\b"),
+        "lakh": (r"\blakhs?\b",),
+        "million tonnes": (r"\bmillion\s+tonnes?\b",),
+        "billion tonnes": (r"\bbillion\s+tonnes?\b",),
+        "thousand tonnes": (r"\bthousand\s+tonnes?\b",),
+        "million": (r"\bmillions?\b", r"\bmn\b"),
+        "billion": (r"\bbillions?\b", r"\bbn\b"),
+        "trillion": (r"\btrillions?\b",),
+        "thousand": (r"\bthousands?\b",),
+        "bps": (r"\bbps\b", r"\bbasis points?\b"),
+        "points": (r"\bpoints?\b", r"\bpts\b"),
+        "x": (r"\b(?:p\s*/\s*e|pe)\s*(?:ratio)?\b", r"\bprice[- ]to[- ]earnings(?:\s+ratio)?\b",
+              r"\btimes?\b", r"\bmultiple\b"),
+    }
+    key = re.sub(r"\s+\(as reported\)$", "", label)
+    if key in {"mt", "kt", "kw", "mw", "gw", "tw", "twh", "gwh", "mwh", "kwh", "bu", "bps", "ha", "km", "kg"}:
+        patterns = unit_patterns.get(key, ())
+    else:
+        patterns = unit_patterns.get(key, ())
+    if patterns:
+        return any(re.search(pattern, evidence, re.I) for pattern in patterns)
+    return False
 
 
 def audit_chart_evidence_consistency(report: str, charts: list | None, sources: list | None,
@@ -1353,6 +2087,34 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
         if str(chart.get("type") or chart.get("chartType") or "").casefold() == "table":
             continue
         title = str(chart.get("title") or f"Chart {chart_index}")
+        unit_source_id = str(chart.get("unitEvidenceSource") or "").strip().upper()
+        if unit_source_id:
+            chart_ids = _source_ids(chart)
+            unit_source = source_by_id.get(unit_source_id)
+            child_ids = [source_id for source_id in chart_ids if source_id != unit_source_id]
+            linked_context_valid = False
+            if (unit_source_id in chart_ids and isinstance(unit_source, dict)
+                    and str(unit_source.get("page_fetch_status") or unit_source.get("pageFetchStatus") or "").casefold() == "ok"
+                    and str(unit_source.get("url") or "").startswith(("http://", "https://"))):
+                parent_url = canonical_http_url(str(unit_source.get("url") or ""))
+                for child_id in child_ids:
+                    child_source = source_by_id.get(child_id)
+                    if not isinstance(child_source, dict):
+                        continue
+                    relation_url = canonical_http_url(str(child_source.get("data_parent_url") or ""))
+                    relation_id = str(child_source.get("data_parent_source_id") or "").strip().upper()
+                    relation_context = str(child_source.get("data_parent_context") or "")
+                    if (relation_id == unit_source_id and relation_url and relation_url == parent_url
+                            and _unit_is_in(chart, relation_context)):
+                        linked_context_valid = True
+                        break
+            if not linked_context_valid:
+                failures.append({
+                    "chartIndex": chart_index, "chartTitle": title[:180],
+                    "sourceIds": [*child_ids, unit_source_id],
+                    "unit": str(chart.get("unit") or "")[:80],
+                    "reason": "The inherited chart unit is not backed by a directly fetched related parent header.",
+                })
         # Derived charts (shares, quartiles, histogram counts, scaled scores)
         # are verified through the reported inputs they were computed from.
         derived_inputs = chart.get("derivedFrom") if isinstance(chart.get("derivedFrom"), list) else []
@@ -1382,6 +2144,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     *[context for _own, context in record_windows],
                 ],
                 _source_period_metadata(source),
+                ignore_source_metadata_dates=_is_official_dataset_source(source),
             )
             if outside_periods:
                 failures.append({
@@ -1436,6 +2199,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                                     " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
                                 ],
                                 _source_period_metadata(source),
+                                ignore_source_metadata_dates=_is_official_dataset_source(source),
                             )
                             if outside_periods:
                                 period_failure = {
@@ -1507,11 +2271,29 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
             if server_workbook_chart and quote_sid in ids and quote_sid in source_by_id and point.get("evidenceQuote"):
                 source_text[quote_sid] = str(point.get("evidenceQuote") or "")
             if quote_sid and point.get("evidenceQuote"):
-                if _quote_supports(value, point.get("evidenceValue"), point.get("evidenceQuote"), source_text.get(quote_sid, "")):
+                quote = str(point.get("evidenceQuote") or "")
+                quote_evidence = source_text.get(quote_sid, "")
+                if _quote_supports(value, point.get("evidenceValue"), quote, quote_evidence):
                     quote_source = source_by_id.get(quote_sid)
-                    quote_windows = _value_windows(
-                        point.get("evidenceValue") or value, str(point.get("evidenceQuote") or ""),
-                    )
+                    quote_windows = _value_windows(point.get("evidenceValue") or value, quote_evidence)
+                    if not server_workbook_chart:
+                        unit_sid = str(chart.get("unitEvidenceSource") or chart.get("unit_evidence_source") or "").strip().upper()
+                        point_mismatch = _quoted_point_mismatch(
+                            chart, series, label, value, point, quote, quote_evidence,
+                            unit_context=source_text.get(unit_sid, ""),
+                        )
+                        if point_mismatch:
+                            failures.append({
+                                "chartIndex": chart_index, "seriesIndex": series_index, "pointIndex": point_index,
+                                "chartTitle": title[:180], "series": series[:100], "label": label[:100],
+                                "value": str(value)[:40],
+                                "unit": str(chart.get("unit") or chart.get("yLabel") or "")[:60],
+                                "sourceIds": [quote_sid],
+                                "sourceFetchStatus": str((quote_source or {}).get("page_fetch_status") or
+                                                          (quote_source or {}).get("pageFetchStatus") or "unknown"),
+                                "reason": point_mismatch,
+                            })
+                            continue
                     outside_periods = _periods_outside_question_window(
                         question,
                         [
@@ -1521,6 +2303,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                             *[context for _own, context in quote_windows],
                         ],
                         _source_period_metadata(quote_source),
+                        ignore_source_metadata_dates=_is_official_dataset_source(quote_source),
                     )
                     if outside_periods:
                         failures.append({
@@ -1592,6 +2375,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         *[local for _own, local in windows],
                     ],
                     _source_period_metadata(source_by_id.get(sid)),
+                    ignore_source_metadata_dates=_is_official_dataset_source(source_by_id.get(sid)),
                 )
                 if outside_periods:
                     stale_periods = outside_periods
@@ -1844,7 +2628,7 @@ def sanitize_charts_for_publication(report: str, charts: list | None, sources: l
         question=question,
     )
     critical_conflicts = list(initial_audit.get("chartTableVerificationConflicts") or [])
-    text, current, irrelevant_or_duplicate = _dedupe_chart_specs(text, current, question)
+    text, current, irrelevant_or_duplicate = _dedupe_chart_specs(text, current, question, sources=sources)
     text, caption_recovered_indices = _attach_chart_placeholders_to_matching_captions(text, current)
     if caption_recovered_indices:
         log.info("Chart publication recovered %d caption-matched inline placeholder(s): %s", len(caption_recovered_indices), caption_recovered_indices)

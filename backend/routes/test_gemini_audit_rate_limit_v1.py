@@ -29,6 +29,7 @@ async def test_audit_cools_rate_limited_key_before_hedging_another_model(monkeyp
             return SimpleNamespace(status_code=429)
 
     monkeypatch.setattr(report, "get_gemini_keys", lambda: ["test-key"])
+    monkeypatch.setattr(report, "get_groq_keys", lambda: [])
     monkeypatch.setattr(report, "_is_rest_api_key", lambda _key: True)
     monkeypatch.setattr(report, "GEMINI_MODELS", ["model-a", "model-b"])
     monkeypatch.setattr(report, "mark_rate_limited", mark_rate_limited)

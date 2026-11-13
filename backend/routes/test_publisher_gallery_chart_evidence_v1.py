@@ -29,7 +29,10 @@ def test_verified_gallery_excerpt_can_pass_strict_chart_audit_for_fetched_publis
         "page_fetch_status": "ok",
         "evidence_origin": "publisher_page_and_search_extract",
         "publisher_gallery_chart_evidence_verified": True,
-        "chartEvidenceExcerpt": quote,
+        "chartEvidenceExcerpt": (
+            "Scheduled commercial bank credit growth by financial year\n"
+            "Population | Fiscal year | Credit growth (%)\n" + quote
+        ),
     }
     audit = audit_chart_evidence_consistency(
         "Credit growth was 12.4% in FY2024 [S1].", [_line_chart()], [source],

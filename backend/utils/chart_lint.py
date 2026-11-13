@@ -28,7 +28,11 @@ import re
 log = logging.getLogger("chart_lint")
 
 BENCHMARKS = {"nifty 50", "nifty", "nifty (benchmark)", "nifty50", "sensex", "nifty 50 (benchmark)"}
-TOTAL_RE = re.compile(r"(?i)^\s*(?:grand\s+)?total\b|^\s*(?:all|overall|aggregate)\s*$")
+TOTAL_RE = re.compile(
+    r"(?i)^\s*(?:grand\s+)?total\b|^\s*(?:all\s+(?:causes?|deaths?|diseases?|conditions?|injuries?|people|persons|"
+    r"population|respondents?|observations?|records?|items?|products?|sectors?|industries|countries|regions?|states?|"
+    r"entities|values?)|overall(?:\s+total)?|aggregate(?:\s+total)?)\s*$"
+)
 PLACEHOLDER_RE = re.compile(r"\$#%|#%|\bXX+%?|\[(?:value|x|data|number)\]|\{\{[^}]*\}\}|lorem ipsum", re.I)
 FORECAST_ROW_RE = re.compile(r"(?i)\b(?:forecast|projected|projection|estimated?|expected)\b|\b20\d{2}\s?[EeFfPp]\b")
 EXAMPLE_RE = re.compile(r"(?i)\b(?:example|examples|illustrative|illustration|sample|hypothetical|for instance|e\.g\.)\b")
@@ -298,7 +302,52 @@ def _short_range(first: str, last: str) -> str:
 
 
 # ── quality gate ─────────────────────────────────────────────────────────────────────────────────
+_EXPLICIT_CHART_UNIT_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(%|percent(?:age)?|pct|gwh|mwh|twh|kwh|gw|mw|kw|bu|tonnes?|mt|kt|kg|km|ha|"
+    r"crore|cr|billion|bn|million|mn|lakh|trillion|years?|yrs?|bps|pts)(?![a-z0-9])")
+
+
+def _canonical_chart_unit(unit: str) -> str:
+    value = str(unit or "").strip().casefold()
+    return {
+        "percentage": "%", "percent": "%", "pct": "%", "cr": "crore", "crore": "crore",
+        "bn": "billion", "billion": "billion", "mn": "million", "million": "million",
+        "yr": "years", "yrs": "years", "year": "years", "years": "years", "tonne": "tonnes",
+        "tonnes": "tonnes", "pts": "points", "gw": "gw", "mw": "mw", "kw": "kw",
+        "gwh": "gwh", "mwh": "mwh", "twh": "twh", "kwh": "kwh", "bu": "bu",
+        "mt": "mt", "kt": "kt", "kg": "kg", "km": "km", "ha": "ha", "bps": "bps",
+        "lakh": "lakh", "trillion": "trillion",
+    }.get(value, value)
+
+
+def _parenthetical_units(text: str) -> set[str]:
+    units: set[str] = set()
+    for group in re.findall(r"\(([^()]*)\)", str(text or "")):
+        units.update(_canonical_chart_unit(unit) for unit in _EXPLICIT_CHART_UNIT_RE.findall(group))
+    return units
+
+
+def _mixed_unit_reason(spec: dict) -> str:
+    series_units = [_parenthetical_units(s.get("name") or "") for s in _series(spec)]
+    explicit = set().union(*series_units) if series_units else set()
+    if len(explicit) > 1:
+        return "series use incompatible explicit units: " + ", ".join(sorted(explicit))
+
+    declared: set[str] = set()
+    unit_field = str(spec.get("unit") or "").strip()
+    unit_matches = _EXPLICIT_CHART_UNIT_RE.findall(unit_field)
+    if len(unit_matches) == 1 and unit_matches[0].casefold() == unit_field.casefold():
+        declared.add(_canonical_chart_unit(unit_matches[0]))
+    declared.update(_parenthetical_units(spec.get("yLabel") or ""))
+    if explicit and declared and not (explicit & declared):
+        return "chart axis unit conflicts with the units named by its series"
+    return ""
+
+
 def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]] | None = None) -> str:
+    mixed_units = _mixed_unit_reason(spec)
+    if mixed_units:
+        return mixed_units
     vals = _values(spec)
     labels = _labels(spec)
     if len({round(v, 6) for v in vals}) < 3:

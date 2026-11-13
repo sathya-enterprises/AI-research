@@ -123,7 +123,7 @@ async def ping():
         "model": engine.model_name,
         "embedding_dimension": engine._dim,
         "reranker_loaded": engine._reranker is not None,
-        "vector_store": "supabase_pgvector",
+        "vector_store": pgvector_store.storage_backend(),
     }
 
 @app.get("/health")
@@ -139,7 +139,7 @@ async def health():
         "port": int(os.getenv("RAG_PORT", 7860)),
         "model": engine.model_name,
         "embedding_dimension": engine._dim,
-        "index_type": "Supabase Postgres pgvector (persistent; no local vector index)",
+        "index_type": f"{vector_storage.get('backend', 'Postgres pgvector')} (persistent; no local vector index)",
         "vector_storage": vector_storage,
         "reranker": {
             "enabled": engine._reranker is not None,
@@ -160,7 +160,7 @@ async def index_docs(req: IndexReq, request: Request):
         result = await engine.index(req.session_id, [d.dict() for d in req.documents])
         elapsed = round((time.time() - t0) * 1000)
         diag = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
-        _record_rag_event(request, "index_complete", "ok" if (result.get("chunks_added", 0) or result.get("total_chunks", 0)) else "no_match", elapsed, {"mode": "index", "documents": len(req.documents), "input_chars": diag.get("input_chars", 0), "chunks_added": result.get("chunks_added", 0), "total_chunks": result.get("total_chunks", 0), "stages": diag.get("stages", {}), "embedding_dimension": diag.get("embedding_dimension"), "vector_store": "supabase_pgvector", "persistence_status": (result.get("persistence") or {}).get("status")})
+        _record_rag_event(request, "index_complete", "ok" if (result.get("chunks_added", 0) or result.get("total_chunks", 0)) else "no_match", elapsed, {"mode": "index", "documents": len(req.documents), "input_chars": diag.get("input_chars", 0), "chunks_added": result.get("chunks_added", 0), "total_chunks": result.get("total_chunks", 0), "stages": diag.get("stages", {}), "embedding_dimension": diag.get("embedding_dimension"), "vector_store": pgvector_store.storage_backend(), "persistence_status": (result.get("persistence") or {}).get("status")})
         log.info(f"Indexed session={req.session_id[:8]} docs={len(req.documents)} "
                  f"chunks={result['chunks_added']} ({elapsed}ms)")
         return {**result, "session_id": req.session_id, "elapsed_ms": elapsed}
@@ -244,7 +244,7 @@ async def generate_report(req: ReportReq, request: Request):
 @app.delete("/session/{session_id}")
 async def delete_session(session_id: str):
     await engine.delete_session(session_id)
-    return {"success": True, "session_id": session_id, "vector_store": "supabase_pgvector"}
+    return {"success": True, "session_id": session_id, "vector_store": pgvector_store.storage_backend()}
 
 
 @app.get("/session/{session_id}/info")

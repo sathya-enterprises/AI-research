@@ -71,3 +71,34 @@ def test_source_registry_removes_url_credentials_and_redacts_sensitive_query_val
     assert "year=2026" in url
     for secret in ("user", "password", "secret-one", "secret-two", "secret-three"):
         assert secret not in url
+
+
+def test_source_registry_preserves_bounded_linked_data_parent_provenance():
+    source = {
+        "title": "China solar capacity CSV", "url": "https://publisher.example/china-solar.csv",
+        "data_parent_source_id": "S2",
+        "data_parent_url": "https://user:secret@publisher.example/solar-capacity?api_key=private",
+        "data_parent_title": "Solar capacity by country",
+        "data_parent_context": "Solar capacity by country\nPeriod | China (GW) | China share (%)",
+    }
+
+    item = build_source_registry([source])[0]
+
+    assert item["data_parent_source_id"] == "S2"
+    assert item["data_parent_url"].startswith("https://publisher.example/solar-capacity?")
+    assert "api_key=REDACTED" in item["data_parent_url"]
+    assert "secret" not in item["data_parent_url"]
+    assert item["data_parent_title"] == "Solar capacity by country"
+    assert item["data_parent_context"].splitlines() == [
+        "Solar capacity by country", "Period | China (GW) | China share (%)",
+    ]
+
+
+def test_source_registry_rejects_invalid_data_parent_ids():
+    item = build_source_registry([{
+        "title": "Child CSV", "url": "https://publisher.example/child.csv",
+        "data_parent_source_id": "attacker", "data_parent_url": "https://publisher.example/page",
+        "data_parent_context": "Column (GW)",
+    }])[0]
+
+    assert "data_parent_source_id" not in item

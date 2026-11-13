@@ -2580,13 +2580,31 @@ def _sanitize_cover_summary_amounts(summary: object, report_body: object) -> str
     return re.sub(r"\s+", " ", " ".join(kept)).strip()
 
 
-def _align_title_horizon(title: str, question: str) -> str:
-    """Align forecast-year ranges in the title with an explicit user horizon."""
+def _align_title_horizon(title: str, question: str, *, has_uploaded_data: bool = False) -> str:
+    """Align the title's year range with an explicit user window or forecast horizon."""
     text = str(title or "").strip()
     q = str(question or "")
-    if not text or not q:
+    if not text or not q or has_uploaded_data:
         return text
     current_year = time.gmtime().tm_year
+    range_re = re.compile(
+        r"\b((?:19|20|21)\d{2})\s*(?:[-‐‑‒–—−]|to|through|until|till|and)\s*"
+        r"((?:19|20|21)\d{2})\b", re.IGNORECASE,
+    )
+    # An explicit historical range is a fixed scope. Check it before the
+    # forecast rule: "from 2015 to 2024" must never become "2026–2024".
+    requested_range = range_re.search(q)
+    if requested_range:
+        start, end = (int(value) for value in requested_range.groups())
+        if 1900 <= start <= 2200 and 1900 <= end <= 2200:
+            label = f"{start}–{end}"
+            if range_re.search(text):
+                text = range_re.sub(label, text, count=1)
+            elif not re.search(r"\b(?:19|20|21)\d{2}\b", text):
+                suffix = f" ({label})"
+                text = text[:max(0, 120 - len(suffix))].rstrip(" -–—") + suffix
+            return text[:120]
+
     explicit_end = re.search(r"(?i)\b(?:through|until|to)\s+(20\d{2})\b", q)
     horizon = re.search(r"(?i)\bnext\s+(three|four|five|six|\d+)\s+years?\b", q)
     end_year = None
@@ -2600,7 +2618,6 @@ def _align_title_horizon(title: str, question: str) -> str:
     if not end_year or not (1900 <= end_year <= 2200):
         return text
     # Replace only a forecast-looking year range in the title, never years in body text.
-    range_re = re.compile(r"\b(?:19|20|21)\d{2}\s*(?:[-‐‑‒–—−]|to)\s*(?:19|20|21)\d{2}\b", re.I)
     if range_re.search(text):
         text = range_re.sub(f"{current_year}–{end_year}", text, count=1)
     elif re.search(r"(?i)\b(?:outlook|forecast|growth|analysis|sector|through)\b", text) and not re.search(r"\b20\d{2}\b", text):
@@ -2614,6 +2631,30 @@ async def fetch_page_content(url: str, max_chars: int = 8000) -> str:
         return ""
     from utils.source_extractor import fetch_source_content
     return await fetch_source_content(url, max_chars=max_chars, include_script_data=True, logger=log)
+
+
+def _structured_file_search_context(source: dict) -> str:
+    """Return a discovery query only for fetched, structured data files.
+
+    Some official exports encode the measure as an indicator ID and contain
+    only ISO codes in their rows. The targeted search query helps resolve that
+    schema for relevance checks; it is not appended to the cited source text or
+    used as numerical evidence.
+    """
+    if not isinstance(source, dict) or str(source.get("pageFetchStatus") or "").casefold() not in {"ok", "success", "fetched"}:
+        return ""
+    query = str(source.get("searchQuery") or "").strip()
+    body = str(source.get("pageContent") or source.get("page_content") or "")
+    if not query or not body:
+        return ""
+    try:
+        from utils.primary_sources import is_data_file
+        from utils.data_files import has_observation_table
+        if not is_data_file(str(source.get("url") or ""), str(source.get("pageFetchContentType") or "")):
+            return ""
+        return query if has_observation_table(body) else ""
+    except Exception:
+        return ""
 
 
 def _page_text_matches_source(text: str, source: dict, question: str, intent: "RequestIntent | None") -> bool:
@@ -2635,8 +2676,9 @@ def _page_text_matches_source(text: str, source: dict, question: str, intent: "R
     )):
         return False
     try:
+        context = _structured_file_search_context(source)
         score, hits = _source_relevance_score({**source, "fullContent": text, "snippet": ""}, question, intent)
-        title_tokens = {t for t in re.findall(r"[a-z0-9]{4,}", str(source.get("title") or "").casefold())}
+        title_tokens = {t for t in re.findall(r"[a-z0-9]{4,}", f"{source.get('title') or ''} {context}".casefold())}
         text_tokens = set(re.findall(r"[a-z0-9]{4,}", lower))
         title_overlap = len(title_tokens & text_tokens)
         word_count = len(re.findall(r"[A-Za-z]{3,}", text))
@@ -2777,7 +2819,8 @@ def _dedupe_enriched_sources(sources: list[dict]) -> list[dict]:
 async def _enrich_report_source(
     source: dict, index: int, question: str, intent: "RequestIntent | None",
     max_chars: int = 8000, semaphore: asyncio.Semaphore | None = None,
-    fetch_seconds: float | None = None,
+    fetch_seconds: float | None = None, data_entities: list[str] | None = None,
+    data_years: list[int] | None = None,
 ) -> dict:
     """Fetch the linked publisher page even when a search extract is long.
 
@@ -2801,11 +2844,13 @@ async def _enrich_report_source(
             from utils.source_extractor import fetch_source_document
             if semaphore is None:
                 fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True, logger=log,
-                                                           total_seconds=fetch_seconds)
+                                                           total_seconds=fetch_seconds, data_entities=data_entities,
+                                                           data_years=data_years)
             else:
                 async with semaphore:
                     fetch_result = await fetch_source_document(url, max_chars=max_chars, include_script_data=True,
-                                                               logger=log, total_seconds=fetch_seconds)
+                                                               logger=log, total_seconds=fetch_seconds,
+                                                               data_entities=data_entities, data_years=data_years)
     except Exception as exc:
         fetch_result = {"text": "", "status": "network_error", "http_status": None, "final_url": url, "content_type": ""}
         log.debug("Report source fetch failed index=%d host=%s error=%s", index + 1, urlparse(url).netloc, type(exc).__name__)
@@ -2817,7 +2862,9 @@ async def _enrich_report_source(
         item["pageDataLinks"] = list(fetch_result["data_links"])[:150]
     if fetch_result.get("data_format"):
         item["pageDataFormat"] = str(fetch_result["data_format"])
-    if _page_text_matches_source(fetched, item, question, intent):
+    _candidate_source = dict(item)
+    _candidate_source.update({"pageFetchStatus": "ok", "pageContent": fetched})
+    if _page_text_matches_source(fetched, _candidate_source, question, intent):
         item["pageContent"] = fetched
         item["pageFetchStatus"] = "ok"
         item["pageFetchRelevanceMatched"] = True
@@ -4128,6 +4175,41 @@ def _filter_gallery_dataset_for_question(dataset, question: str):
     filtered_dataset = copy.copy(dataset)
     filtered_dataset.observations = rows
     return filtered_dataset
+
+
+def _should_use_evidence_chart_gallery(
+    *, v2_used: bool, has_uploaded_data: bool, charts: list | None,
+    promoter_exit_request: bool,
+) -> bool:
+    """Use the strict source-row gallery only when it fills a web-report chart gap."""
+    if promoter_exit_request:
+        return False
+    if v2_used and (has_uploaded_data or charts):
+        return False
+    return True
+
+
+def _append_requested_measure_scope(
+    window_note: str, measure_plan, *, has_uploaded_data: bool,
+) -> str:
+    """Give web report planning the validated measures without changing file reports."""
+    note = str(window_note or "").strip()
+    if has_uploaded_data or measure_plan is None:
+        return note
+    try:
+        brief = str(measure_plan.brief() or "").strip()[:1200]
+    except Exception:
+        brief = ""
+    if not brief:
+        return note
+    scope = (
+        "REQUESTED QUANTITATIVE SCOPE (required):\n"
+        f"{brief}\n"
+        "Keep quantitative sections and charts aligned with these measures, entities, and the user's requested "
+        "period. Related evidence may explain an explicitly requested driver or limitation, but must be identified "
+        "as context and must not replace a requested measure."
+    )
+    return "\n".join(part for part in (note, scope) if part).strip()
 
 
 def _append_evidence_chart_gallery(
@@ -7447,12 +7529,20 @@ async def _llm_build_multi_angle_queries(question: str, conversation_context: st
 _EVIDENCE_ANGLE_SUFFIX = {
     "news": "latest news updates",
     "expert_opinion": "expert analyst opinion commentary",
-    "financials": "key financial metrics data numbers",
-    "market_data": "key financial metrics data numbers",
+    "financials": "company financial statements and filings",
+    "market_data": "official numeric datasets statistics time series",
     "regulatory": "regulatory policy compliance",
     "historical": "historical trend performance data",
-    "comparison": "sector peer comparison",
+    "comparison": "comparable data series benchmarks",
 }
+
+_FINANCIAL_RESEARCH_RE = re.compile(
+    r"\b(?:stock(?:s| market)?|share price|equity market|valuation|p/?e ratio|market cap|fundamentals?|"
+    r"financial statements?|financial performance|financial results|earnings|net profit|profitability|"
+    r"balance sheet|cash flow|dividend yield|return on equity|\bro[ae]\b|\bnim\b|\b(?:g|n)npa\b|"
+    r"bank credit growth|deposit growth|credit[- ]deposit ratio)\b",
+    re.IGNORECASE,
+)
 
 
 
@@ -7467,10 +7557,15 @@ def _research_domain_from_intent(question: str, intent: "RequestIntent | None") 
         return "scientific"
     if "regulat" in label or any(k in text for k in ("free trade agreement", "trade agreement", "fta", "regulation", "regulatory", "compliance", "sebi", "policy", "law")):
         return "regulatory"
+    # Evidence kinds describe what the answer needs, not the subject domain:
+    # country comparisons and scientific time series can need market_data without
+    # being company-finance research. Require finance language in the request.
+    if _FINANCIAL_RESEARCH_RE.search(text) or re.search(
+        r"\b(?:financial analysis|financial report|stock research|equity research|valuation analysis)\b", label
+    ):
+        return "financial"
     if "comparison" in evidence or " vs " in text or " versus " in text:
         return "comparison"
-    if "financials" in evidence or "market_data" in evidence or "market" in label:
-        return "financial"
     return "generic"
 
 
@@ -7544,7 +7639,7 @@ def _source_relevance_score(src: dict, question: str, intent: "RequestIntent | N
     title = str(src.get("title") or "")
     snippet = str(src.get("snippet") or "")
     content = str(src.get("fullContent") or "")
-    raw_hay = f"{title} {snippet} {content}".lower()
+    raw_hay = f"{title} {snippet} {content} {_structured_file_search_context(src)}".lower()
     hay = raw_hay.replace("data-centre", "data center").replace("data centre", "data center")
     hay = hay.replace("two-wheeler", "two wheeler").replace("two wheeler", "two wheeler")
     terms = _subject_terms(question, intent)
@@ -7930,7 +8025,8 @@ def _filter_relevant_sources(
         return internal
 
     def _hay(src: dict) -> str:
-        return " ".join(str(src.get(k) or "") for k in ("title", "snippet", "fullContent", "pageContent", "page_content")).casefold()
+        fields = " ".join(str(src.get(k) or "") for k in ("title", "snippet", "fullContent", "pageContent", "page_content"))
+        return f"{fields} {_structured_file_search_context(src)}".casefold()
 
     def _term_hits(src: dict, candidate_terms: list[str]) -> int:
         hay = _hay(src).replace("data-centre", "data center").replace("data centre", "data center")
@@ -9532,6 +9628,14 @@ async def _build_multi_angle_search_queries(
             # the government-data, policy, and investment angles are considered.
             if kind == "historical" and query_domain not in {"scientific", "regulatory", "financial", "comparison"}:
                 continue
+            if kind == "financials" and query_domain != "financial":
+                continue
+            if kind == "market_data":
+                suffix = (
+                    "official company financial metrics and market price time series"
+                    if query_domain == "financial"
+                    else "official numeric datasets statistics and time series tables"
+                )
             candidate = f"{topic} {suffix}"
             # Skip a suffix that would just repeat what the base query
             # already reads as (e.g. don't add "...sector peer comparison"
@@ -9574,11 +9678,17 @@ async def _build_multi_angle_search_queries(
                 f"{topic} compliance obligations implementation official documents",
                 f"{topic} recent regulatory decisions and primary sources",
             ]
-        elif domain in {"financial", "comparison"} or qtype == "finance":
+        elif domain == "financial" or qtype == "finance":
             fallback_angles = [
                 f"{topic} official filings financial statements primary data",
                 f"{topic} company or sector results independent analysis",
                 f"{topic} outlook risks competitive evidence and sources",
+            ]
+        elif domain == "comparison":
+            fallback_angles = [
+                f"{topic} official comparable statistics datasets and time series",
+                f"{topic} benchmark definitions methodology and comparable groups",
+                f"{topic} source coverage and limits to comparison",
             ]
         else:
             evidence_angles = {
@@ -9668,13 +9778,25 @@ async def _build_multi_angle_search_queries(
                 "implementation results compliance risks outlook",
                 "historical trends annual reports and data",
             ]
+        elif domain == "comparison":
+            suffixes = [
+                "official comparable statistics datasets and time series",
+                "benchmark definitions methodology and comparable groups",
+                "source coverage and limits to comparison",
+            ]
         else:
             suffixes = [
-                "official government statistics annual report primary data",
-                "government policy targets regulation programme results",
-                "historical trends annual data and performance",
-                "investment outlook forecasts projections opportunities risks",
+                "official government statistics datasets primary data",
+                "historical trends annual data and reported outcomes",
             ]
+            if re.search(r"(?i)\b(?:policy|regulat\w*|government|law|compliance)\b", question):
+                suffixes.append("policy targets and official implementation results")
+            if re.search(r"(?i)\b(?:outlook|forecast|projection|investment|funding|financing|capex)\b", question):
+                suffixes.append("outlook forecasts assumptions and financing evidence")
+            if re.search(r"(?i)\b(?:driver|cause|impact|effect|barrier|risk|limitation)\w*\b", question):
+                suffixes.append("documented drivers causes outcomes and limitations")
+            if re.search(r"(?i)\b(?:news|latest|recent|current|today)\b", question):
+                suffixes.append("recent developments and case studies")
         queries = [base]
         for suffix in suffixes:
             candidate = f"{topic} {suffix}".strip()
@@ -9764,6 +9886,25 @@ async def _build_multi_angle_search_queries(
     return queries[:query_cap]
 
 
+def _prioritize_measure_search_queries(
+    topic_queries: list[str], measure_queries: list[str], *, tier: str,
+) -> list[str]:
+    """Keep each requested measure inside the bounded search-angle budget."""
+    cap = 12 if tier == "in_depth" else 6 if tier == "detailed" else 4
+    ordered = ([topic_queries[0]] if topic_queries else []) + list(measure_queries or [])
+    ordered.extend(topic_queries[1:] if topic_queries else [])
+    result: list[str] = []
+    seen: set[str] = set()
+    for query in ordered:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(query or "").casefold()).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(" ".join(str(query).split()))
+        if len(result) >= cap:
+            break
+    return result
+
+
 # Signals that a question is actually about specific company/companies'
 # stock rather than the market in general — valuation multiples, debt,
 # margins, or an explicit "X vs Y" comparison. Deliberately broader than
@@ -9773,8 +9914,7 @@ _STOCK_COMPANY_INTENT_RE = re.compile(
     r"\b(stock|share price|shares of|valuation|p/?e ratio|price[- ]to[- ]earnings|"
     r"market cap|debt[- ]to[- ]equity|debt[- ]equity|roe|return on equity|"
     r"eps\b|earnings per share|dividend yield|fundamentals?|"
-    r"undervalued|overvalued|buy or sell|investment case|"
-    r"\bvs\.?\b|\bversus\b)\b",
+    r"undervalued|overvalued|buy or sell|investment case)\b",
     re.IGNORECASE,
 )
 
@@ -9782,9 +9922,17 @@ _STOCK_COMPANY_INTENT_RE = re.compile(
 _FINANCIAL_METRIC_REQUEST_RE = re.compile(
     r"\b(net\s+profit|profit|revenue|total\s+assets|assets|deposits?|advances|loans?|npas?|gnpa|"
     r"margins?|earnings|annual\s+reports?|quarterly\s+results|results|financials?|balance\s+sheet|"
-    r"roe|roa|nim|casa|capital\s+adequacy|market\s+share|compare|comparison)\b",
+    r"roe|roa|nim|casa|capital\s+adequacy)\b",
     re.IGNORECASE,
 )
+
+
+def _should_fetch_company_fundamentals(question: str, company_candidates: list[str] | None) -> bool:
+    """A named comparison alone is not a request for stock or company financial data."""
+    return bool(company_candidates and (
+        _STOCK_COMPANY_INTENT_RE.search(str(question or ""))
+        or _FINANCIAL_METRIC_REQUEST_RE.search(str(question or ""))
+    ))
 
 # Common trailing corporate suffixes/legal forms — stripped when matching but
 # also used as a signal that a capitalized phrase names a company.
@@ -11893,7 +12041,8 @@ def _quality_render_snapshot(report_text: str, title: str, question: str, summar
                            key_stats: list, charts: list, sources: object,
                            presentation: object, report_tier: str,
                            web_images: list | None = None, file_images: list | None = None,
-                           theme: dict | None = None) -> dict:
+                           theme: dict | None = None,
+                           report_style: str | None = None, kicker: str = "") -> dict:
     """Inspect the exact exported PDF, not a different renderer's approximation."""
     try:
         from routes.pdf import build_pdf
@@ -11906,6 +12055,7 @@ def _quality_render_snapshot(report_text: str, title: str, question: str, summar
             summary=summary or "", key_stats=key_stats or [], charts=charts or [],
             file_images=file_images or [], web_images=web_images or [], theme=theme,
             sources=sources, presentation=presentation, report_tier=report_tier,
+            report_style=report_style, kicker=kicker,
         )
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages = []
@@ -11986,7 +12136,8 @@ def _rendered_page_count_preflight(report_text: str, title: str, question: str,
                                   summary: str, key_stats: list, charts: list,
                                   sources: object, presentation: object,
                                   report_tier: str, web_images: list | None = None,
-                                  file_images: list | None = None, theme: dict | None = None) -> int | None:
+                                  file_images: list | None = None, theme: dict | None = None,
+                                  report_style: str | None = None, kicker: str = "") -> int | None:
     """Count pages using the same PDF builder, content, theme, and images as export.
 
     WeasyPrint and Chromium can paginate grid-heavy reports very differently. A
@@ -12004,6 +12155,7 @@ def _rendered_page_count_preflight(report_text: str, title: str, question: str,
             summary=summary or "", key_stats=key_stats or [], charts=charts or [],
             file_images=file_images or [], web_images=web_images or [], theme=theme,
             sources=sources, presentation=presentation, report_tier=report_tier,
+            report_style=report_style, kicker=kicker,
         )
         pages = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
         log.info("Report: export-renderer pagination preflight — pages=%d chars=%d tier=%s",
@@ -12015,9 +12167,313 @@ def _rendered_page_count_preflight(report_text: str, title: str, question: str,
         return None
 
 
+def _audit_excerpt_for_claims(text: object, source_id: str, claim_groups: list, limit: int) -> str:
+    """Prefer excerpt lines containing values from claims that cite this source."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    source_id = str(source_id or "").upper()
+    numeric_tokens: list[str] = []
+    for group in claim_groups or []:
+        if not isinstance(group, dict):
+            continue
+        group_source_ids = {str(value).upper() for value in (group.get("sourceIds") or [])}
+        if source_id not in group_source_ids:
+            continue
+        numeric_tokens.extend(str(token) for token in (group.get("claimTokens") or []))
+    token_values = []
+    for token in numeric_tokens:
+        _family, separator, raw_value = token.partition(":")
+        value_text = raw_value.split("~", 1)[0] if separator else token
+        token_values.extend(_source_numeric_values(value_text))
+    # Source extractors can expose the same chart rows through both their
+    # publisher-table and chart-evidence channels. Keep the first occurrence
+    # only so reviewers see the complete evidence without paying twice for it.
+    lines = list(dict.fromkeys(line.strip() for line in re.split(r"\r?\n+", raw) if line.strip()))
+    matching_indexes: set[int] = set()
+    if token_values and len(lines) > 1:
+        for index, line in enumerate(lines):
+            line_values = _source_numeric_values(line)
+            if any(abs(left - right) <= max(0.001, abs(left) * 0.002)
+                   for left in token_values for right in line_values):
+                matching_indexes.add(index)
+    if matching_indexes:
+        selected_indexes = set(matching_indexes)
+        for index in range(min(3, len(lines))):
+            if (not _source_numeric_values(lines[index])
+                    and re.search(r"\b(?:year|country|metric|measure|value|capacity|generation|share|rate|period)\b|^#\s*\|", lines[index], re.I)):
+                selected_indexes.add(index)
+                break
+        selected_lines = [lines[index] for index in sorted(selected_indexes)]
+        bounded_lines: list[str] = []
+        for line in selected_lines:
+            candidate = "\n".join([*bounded_lines, line])
+            if len(candidate) <= max(0, limit):
+                bounded_lines.append(line)
+        return "\n".join(bounded_lines)
+    if token_values:
+        number_pattern = re.compile(r"(?<![\d.,])[-+]?\d[\d,]*(?:\.\d+)?(?![\d.,])")
+        source_numbers = []
+        for match in number_pattern.finditer(raw):
+            try:
+                source_numbers.append((match, float(match.group(0).replace(",", ""))))
+            except ValueError:
+                continue
+        distinct_targets = list(dict.fromkeys(token_values))
+        relevant_matches = []
+        for target in distinct_targets:
+            matched = next((match for match, value in source_numbers
+                            if abs(value - target) <= max(0.001, abs(target) * 0.002)), None)
+            if matched is not None:
+                relevant_matches.append(matched)
+        if relevant_matches:
+            radius = max(8, min(24, (max(0, limit - 4 * (len(relevant_matches) - 1))
+                                     // max(1, len(relevant_matches)) - 18) // 2))
+            while True:
+                excerpts = []
+                for match in relevant_matches:
+                    start = max(0, match.start() - radius)
+                    end = min(len(raw), match.end() + radius)
+                    if start:
+                        previous_space = raw.rfind(" ", 0, start)
+                        if previous_space >= 0:
+                            start = previous_space + 1
+                    if end < len(raw):
+                        next_space = raw.find(" ", end)
+                        if next_space >= 0:
+                            end = next_space
+                    snippet = raw[start:end].strip(" \t,;|")
+                    if start:
+                        snippet = "…" + snippet
+                    if end < len(raw):
+                        snippet += "…"
+                    if snippet and snippet not in excerpts:
+                        excerpts.append(snippet)
+                bounded = " … ".join(excerpts)
+                if len(bounded) <= max(0, limit) or radius == 0:
+                    return bounded[:max(0, limit)]
+                radius = max(0, radius - 2)
+    return raw[:limit]
+
+
+def _independent_audit_source_metadata(report_text: str, charts: list, sources: list) -> tuple[list[dict], dict]:
+    """Select cited source records and retain their evidence provenance channels.
+
+    This only prepares reviewer input. Deterministic source checks and their
+    thresholds remain unchanged.
+    """
+    source_rows = [row for row in (sources or []) if isinstance(row, dict)]
+    by_id: dict[str, dict] = {}
+    for row in source_rows:
+        source_id = str(row.get("id") or "").strip().upper()
+        if source_id:
+            by_id.setdefault(source_id, row)
+
+    cited_ids = list(extract_source_citation_ids(report_text))
+    chart_ids: list[str] = []
+
+    def collect_ids(value: object) -> None:
+        if isinstance(value, dict):
+            collect_ids(value.get("id") or value.get("sourceId") or value.get("source_id") or "")
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect_ids(item)
+        else:
+            for match in re.findall(r"(?<![A-Za-z0-9])S\d+(?![A-Za-z0-9])", str(value or ""), re.I):
+                normalized = match.upper()
+                if normalized not in chart_ids:
+                    chart_ids.append(normalized)
+
+    for chart in charts or []:
+        if isinstance(chart, dict):
+            for key in ("sourceIds", "source_ids", "sources", "source"):
+                collect_ids(chart.get(key))
+
+    selected_ids = list(cited_ids)
+    for source_id in chart_ids:
+        if source_id not in selected_ids:
+            selected_ids.append(source_id)
+    fallback = not selected_ids
+    selected_rows = (
+        source_rows[:24] if fallback
+        else [by_id[source_id] for source_id in selected_ids if source_id in by_id]
+    )
+
+    source_meta: list[dict] = []
+    included_ids: list[str] = []
+    for row in selected_rows:
+        source_id = str(row.get("id") or "").strip().upper()
+        if source_id:
+            included_ids.append(source_id)
+        title = str(row.get("title") or "")[:180]
+        url = str(row.get("url") or row.get("publisher_page_url") or row.get("publisherPageUrl") or "")[:500]
+        evidence = str(
+            row.get("evidenceExcerpt") or row.get("evidence_excerpt") or row.get("fullContent")
+            or row.get("full_content") or row.get("content") or row.get("snippet")
+            or row.get("description") or row.get("evidenceContent") or ""
+        ).strip()
+        claim_groups = [
+            {key: group.get(key) for key in (
+                "groupId", "sourceIds", "claim", "claimTokens", "supportByToken",
+                "unsupportedTokens", "supportingSourceIds", "groupEvidenceMatched",
+            )}
+            for group in (row.get("_citedClaimGroups") or row.get("citedClaimGroups") or [])
+            if isinstance(group, dict)
+        ]
+        fetch_status_values = [
+            str(row.get(key) or "").strip().casefold()
+            for key in ("pageFetchStatus", "page_fetch_status")
+        ]
+        fetched_statuses = {"ok", "success", "fetched"}
+        fetch_status = next((value for value in fetch_status_values if value in fetched_statuses), "")
+        if not fetch_status:
+            fetch_status = next((value for value in fetch_status_values if value), "unknown")
+        excerpt_origins = [
+            str(row.get(key) or "").strip().casefold()
+            for key in ("evidence_excerpt_origin", "evidenceExcerptOrigin")
+        ]
+        source_origins = [
+            str(row.get(key) or "").strip().casefold()
+            for key in ("evidence_origin", "evidenceOrigin")
+        ]
+        origin = next((value for value in excerpt_origins + source_origins if value and value != "unknown"), "unknown")
+        relevance = row.get("pageFetchRelevanceMatched", row.get("page_fetch_relevance_matched"))
+        reject_reason = str(row.get("pageFetchRejectReason") or row.get("page_fetch_reject_reason") or "").strip()
+        fetched = fetch_status in fetched_statuses
+        has_http_url = url.startswith(("https://", "http://"))
+        page_eligible = fetched and has_http_url and relevance is not False and not reject_reason and "okf_retrieval" not in origin
+
+        publisher_excerpt = str(row.get("publisherEvidenceExcerpt") or row.get("publisher_evidence_excerpt") or "").strip()
+        page_text = str(row.get("pageContent") or row.get("page_content") or "").strip()
+        if not publisher_excerpt and not page_text and origin == "publisher_page":
+            publisher_excerpt = evidence
+        verified_publisher_excerpt = (
+            _audit_excerpt_for_claims(publisher_excerpt or page_text, source_id, claim_groups, 2400)
+            if page_eligible else ""
+        )
+
+        table_verified = row.get("publisher_table_chart_evidence_verified") is True or str(
+            row.get("publisher_table_chart_evidence_verified") or ""
+        ).casefold() == "true"
+        gallery_verified = row.get("publisher_gallery_chart_evidence_verified") is True or str(
+            row.get("publisher_gallery_chart_evidence_verified") or ""
+        ).casefold() == "true"
+        structured_excerpt = ""
+        structured_kind = ""
+        if page_eligible and (table_verified or gallery_verified):
+            structured_excerpt = _audit_excerpt_for_claims(
+                row.get("publisherChartEvidenceExcerpt") or row.get("publisher_chart_evidence_excerpt")
+                or row.get("chartEvidenceExcerpt") or "",
+                source_id, claim_groups, 4200,
+            )
+            if structured_excerpt:
+                structured_kind = "verified_publisher_chart_rows" if gallery_verified else "verified_publisher_table_rows"
+
+        calculated_excerpt = ""
+        if is_trusted_calculated_sector_source(row):
+            calculated_excerpt = _audit_excerpt_for_claims(
+                row.get("chartEvidenceExcerpt") or "", source_id, claim_groups, 4200,
+            )
+
+        source_kind = str(row.get("source_type") or row.get("sourceType") or row.get("kind") or "").strip().casefold()
+        attachment_origin = str(row.get("sourceOrigin") or row.get("source_origin") or "").strip().casefold()
+        attachment_marked = (
+            attachment_origin in {"uploaded_workbook", "uploaded_attachment"}
+            or "uploaded" in source_kind or "attachment" in source_kind
+            or ("okf_retrieval" in origin and "document" in source_kind)
+            or (not has_http_url and bool(re.search(r"\.(?:xlsx?|xlsm|csv|tsv|pdf|docx?|jpe?g|png)$", title, re.I)))
+        )
+        attached_excerpt = ""
+        if attachment_marked:
+            attached_excerpt = _audit_excerpt_for_claims(
+                row.get("chartEvidenceExcerpt") or row.get("chart_evidence_excerpt") or evidence,
+                source_id, claim_groups, 4200,
+            )
+
+        search_excerpt = str(row.get("searchEvidenceExcerpt") or row.get("search_evidence_excerpt") or "").strip()
+        search_chart_excerpt = str(row.get("searchChartEvidenceExcerpt") or row.get("search_chart_evidence_excerpt") or "").strip()
+        if not search_excerpt and ("search_extract" in origin or not fetched):
+            search_excerpt = evidence
+        if not search_chart_excerpt and (
+            row.get("search_extract_chart_evidence_verified") is True
+            or str(row.get("search_extract_chart_evidence_verified") or "").casefold() == "true"
+        ):
+            search_chart_excerpt = str(row.get("chartEvidenceExcerpt") or "").strip()
+
+        if calculated_excerpt:
+            evidence_basis = "trusted_server_calculation"
+        elif attached_excerpt:
+            evidence_basis = "uploaded_file"
+        elif verified_publisher_excerpt or structured_excerpt:
+            evidence_basis = "fetched_publisher_page"
+        elif search_excerpt or search_chart_excerpt or "search_extract" in origin:
+            evidence_basis = "search_excerpt_only"
+        elif evidence:
+            evidence_basis = "unverified_retrieved_excerpt"
+        else:
+            evidence_basis = "metadata_only"
+
+        source_meta.append({
+            "id": source_id,
+            "title": title,
+            "url": url,
+            "evidenceExcerpt": evidence[:1400],
+            "evidenceBasis": evidence_basis,
+            "evidenceExcerptOrigin": origin,
+            "sourceStatus": str(row.get("source_status") or row.get("sourceStatus") or "resolved").casefold(),
+            "pageFetchStatus": fetch_status,
+            "pageFetchRelevanceMatched": relevance,
+            "pageFetchRejectReason": reject_reason[:300],
+            "matchedEvidenceUrl": str(row.get("matchedEvidenceUrl") or row.get("matched_evidence_url") or "")[:500],
+            "claimEvidenceMatched": bool(row.get("claimEvidenceMatched", row.get("claim_evidence_matched", False))),
+            "numericClaimMatches": int(row.get("numericClaimMatches") or row.get("numeric_claim_matches") or 0),
+            "citedNumericClaimCount": int(row.get("citedNumericClaimCount") or row.get("cited_numeric_claim_count") or 0),
+            "claimEvidenceCoverage": float(row.get("claimEvidenceCoverage") or row.get("claim_evidence_coverage") or 0),
+            "unmatchedNumericClaims": list(row.get("unmatchedNumericClaims") or row.get("unmatched_numeric_claims") or [])[:20],
+            "matchedNumericClaimTokens": list(row.get("_matchedNumericClaimTokens") or row.get("matchedNumericClaimTokens") or [])[:30],
+            "citationClaimGroups": claim_groups,
+            "verifiedPublisherEvidenceExcerpt": verified_publisher_excerpt,
+            "verifiedStructuredDataExcerpt": structured_excerpt,
+            "verifiedStructuredDataKind": structured_kind,
+            "trustedCalculatedEvidenceExcerpt": calculated_excerpt,
+            "uploadedFileEvidenceExcerpt": attached_excerpt,
+            "searchOnlyEvidenceExcerpt": search_excerpt[:1800],
+            "searchOnlyChartExcerpt": search_chart_excerpt[:1800],
+        })
+
+    supplied_ids = set(included_ids)
+    missing_ids = [source_id for source_id in selected_ids if source_id not in supplied_ids]
+    for source_id in missing_ids:
+        source_meta.append({
+            "id": source_id,
+            "title": f"Source record missing for [{source_id}]",
+            "evidenceBasis": "unresolved_source_record",
+            "pageFetchStatus": "unavailable",
+            "claimEvidenceMatched": False,
+            "citationClaimGroups": [],
+            "evidenceExcerpt": "",
+            "verifiedPublisherEvidenceExcerpt": "",
+            "verifiedStructuredDataExcerpt": "",
+            "trustedCalculatedEvidenceExcerpt": "",
+            "uploadedFileEvidenceExcerpt": "",
+            "searchOnlyEvidenceExcerpt": "",
+            "searchOnlyChartExcerpt": "",
+        })
+    coverage = {
+        "selectionBasis": "first_24_fallback" if fallback else "report_and_chart_citations",
+        "citedIds": selected_ids,
+        "includedIds": [str(row.get("id") or "").upper() for row in source_meta if row.get("id")],
+        "missingSourceRecordIds": missing_ids,
+        "allReferencedIdsIncluded": not missing_ids,
+        "uncitedSourceRecordsOmitted": max(0, len(source_rows) - len(selected_rows)),
+    }
+    return source_meta, coverage
+
+
 async def _gemini_independent_report_audit(
     *, title: str, question: str, report_text: str, report_tier: str,
     charts: list, images: list, sources: list, deterministic_audits: dict | None = None,
+    _force_groq_fallback: bool = False,
 ) -> dict:
     """Ask Gemini to independently review the final report without rewriting it.
 
@@ -12026,8 +12482,7 @@ async def _gemini_independent_report_audit(
     Only a bounded excerpt and metadata are sent to control latency and token cost.
     """
     keys = get_gemini_keys()
-    if not keys:
-        return {"status": "unavailable", "reason": "no_gemini_api_key", "findings": [], "blocking": False}
+    gemini_unavailable_reason = "no_gemini_api_key" if not keys else "provider_unavailable"
 
     models = [m for m in (globals().get("GEMINI_MODELS") or ["gemini-3.5-flash-lite", "gemini-3-flash-preview"]) if m]
     if not models:
@@ -12044,28 +12499,7 @@ async def _gemini_independent_report_audit(
             "density": assessment,
             "source": chart.get("source") or chart.get("sources") or chart.get("sourceIds"),
         })
-    source_meta = [{
-        "id": str(x.get("id") or ""),
-        "title": str(x.get("title") or "")[:180],
-        "url": str(x.get("url") or "")[:500],
-        # Include retrieved evidence snippets so the audit can compare claims
-        # with the source material actually collected by the research pipeline.
-        # The reviewer must not claim to have opened URLs independently.
-        "evidenceExcerpt": str(x.get("evidenceExcerpt") or x.get("fullContent") or x.get("content") or x.get("snippet") or x.get("description") or "")[:1400],
-        "evidenceExcerptOrigin": str(x.get("evidenceExcerptOrigin") or x.get("evidenceOrigin") or "unknown"),
-        "pageFetchStatus": str(x.get("pageFetchStatus") or "unknown"),
-        "matchedEvidenceUrl": str(x.get("matchedEvidenceUrl") or "")[:500],
-        "claimEvidenceMatched": bool(x.get("claimEvidenceMatched", False)),
-        "numericClaimMatches": int(x.get("numericClaimMatches") or 0),
-        "citedNumericClaimCount": int(x.get("citedNumericClaimCount") or 0),
-        "claimEvidenceCoverage": float(x.get("claimEvidenceCoverage") or 0),
-        "unmatchedNumericClaims": list(x.get("unmatchedNumericClaims") or [])[:20],
-        "matchedNumericClaimTokens": list(x.get("_matchedNumericClaimTokens") or [])[:30],
-        "citationClaimGroups": [
-            {k: group.get(k) for k in ("groupId", "sourceIds", "claim", "claimTokens", "supportByToken", "unsupportedTokens", "supportingSourceIds", "groupEvidenceMatched")}
-            for group in (x.get("_citedClaimGroups") or [])[:12] if isinstance(group, dict)
-        ],
-    } for x in (sources or [])[:24] if isinstance(x, dict)]
+    source_meta, source_coverage = _independent_audit_source_metadata(report_text, charts, sources)
     image_meta = [{"caption": str(x.get("caption") or x.get("alt") or "")[:180],
                    "sourcePageUrl": str(x.get("sourcePageUrl") or x.get("source_page_url") or x.get("sourceUrl") or "")[:500],
                    "url": str(x.get("url") or "")[:500]}
@@ -12073,7 +12507,7 @@ async def _gemini_independent_report_audit(
 
     prompt = {
         "current_date": time.strftime("%Y-%m-%d", time.localtime()),
-        "task": "Independently audit this generated research report. Do not rewrite it. Compare each numeric claim with supplied excerpts. Inspect citationClaimGroups and supportByToken first: adjacent/grouped citations may collectively support different numbers in one claim, so do not require every co-cited source to repeat every number. A claim is source-covered only if every numeric token is supported by at least one source cited with that claim. Still flag a claim whose token has no supporting cited source. Individual-source claimEvidenceMatched=false is diagnostic, not by itself proof the whole citation group is unsupported. A URL or title alone is not evidence. Do not claim to have opened URLs or verified facts beyond supplied excerpts. A chart is not defective merely because it has fewer than five points: two-period comparisons and short authentic time series are valid when every observation is supported. Never recommend adding invented points to meet a preferred density band.",
+        "task": "Independently audit this generated research report. Do not rewrite it. Compare each numeric claim with supplied evidence and the source IDs actually cited by that claim. Adjacent/grouped citations may collectively support different numbers; one matching cited source is sufficient. supportByToken, groupEvidenceMatched, and claimEvidenceMatched are heuristic diagnostics and can be misattributed: never treat them as proof and never let them override source evidence. Inspect the evidence from every source cited with each claim, even when a token map names another source. Accept a value only when entity, measure, period, unit and value agree. Still flag a claim with no matching cited evidence. Individual-source claimEvidenceMatched=false is not by itself proof the whole citation group is unsupported. Do not derive a ratio or percentage to challenge a claim unless the report explicitly states that calculation and cites its inputs; compare only evidence for the same entity, measure, period and unit. Evidence provenance fields are distinct: verifiedPublisherEvidenceExcerpt is fetched publisher-page text; verifiedStructuredDataExcerpt contains exact fetched publisher table/chart rows; trustedCalculatedEvidenceExcerpt is a server-calculated dataset; uploadedFileEvidenceExcerpt comes from an explicitly marked user attachment; searchOnlyEvidenceExcerpt and searchOnlyChartExcerpt are search extracts and must never be described as fetched publisher pages. Do not treat an excerpt being absent or clipped as proof that a value is false when the cited claim group or a verified data excerpt supports it. A URL or title alone is not evidence. Do not claim to have opened URLs or verified facts beyond supplied excerpts. A chart is not defective merely because it has fewer than five points: two-period comparisons and short authentic time series are valid when every observation is supported. Never recommend adding invented points to meet a preferred density band.",
         "required_output": {
             "status": "PASS, WARNING, or FAIL",
             "summary": "short summary",
@@ -12085,6 +12519,7 @@ async def _gemini_independent_report_audit(
         "report": {"title": title, "user_request": question[:2000], "tier": report_tier,
                    "body": report_text[:42000], "body_truncated": len(report_text) > 42000,
                    "charts": chart_meta, "images": image_meta, "sources": source_meta,
+                   "sourceCoverage": source_coverage,
                    "deterministic_audits": deterministic_audits or {}},
         "rules": [
             "Use current_date when judging whether a reporting period is complete. A period ending on or before current_date is completed; do not mark 2025 or 2026 incomplete solely because it is recent.",
@@ -12101,6 +12536,350 @@ async def _gemini_independent_report_audit(
         "contents": [{"role": "user", "parts": [{"text": json.dumps(prompt, ensure_ascii=False)}]}],
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 5000},
     }
+
+    async def _groq_fallback(gemini_reason: str) -> dict:
+        """Use one bounded, compact Groq review only after Gemini is unavailable."""
+        groq_keys = get_groq_keys()
+        if not groq_keys:
+            return {"status": "unavailable", "reason": gemini_reason, "findings": [], "blocking": False,
+                    "provider": "Gemini API", "fallbackProvider": "Groq API",
+                    "note": "Report generation continued; independent audit providers were unavailable."}
+        try:
+            max_chars = max(4000, min(18000, int(os.getenv("GG_GROQ_AUDIT_SAFE_CHARS", "10500"))))
+        except (TypeError, ValueError):
+            max_chars = 10500
+        # The fallback audit uses the explicit claim inventory below. A tiny
+        # report-body fragment adds no useful context and can make the model
+        # overfit to unrelated numbers, so keep the claim/source mapping as the
+        # sole numeric audit input.
+        body_limit = 0
+        body = str(report_text or "")
+        if len(body) > body_limit:
+            marker = "\n[...excerpt...]\n"
+            content_limit = max(0, body_limit - len(marker))
+            if content_limit:
+                head = int(content_limit * 0.72)
+                tail = content_limit - head
+                body = body[:head] + marker + (body[-tail:] if tail else "")
+            else:
+                body = body[:body_limit]
+
+        def _compact_source_excerpt(row: dict, limit: int = 300) -> str:
+            evidence_text = str(
+                row.get("verifiedStructuredDataExcerpt") or row.get("trustedCalculatedEvidenceExcerpt")
+                or row.get("uploadedFileEvidenceExcerpt") or row.get("verifiedPublisherEvidenceExcerpt")
+                or row.get("evidenceExcerpt") or row.get("searchOnlyChartExcerpt")
+                or row.get("searchOnlyEvidenceExcerpt") or ""
+            ).strip()
+            return _audit_excerpt_for_claims(
+                evidence_text, str(row.get("id") or ""), row.get("citationClaimGroups") or [], limit,
+            )
+
+        def _compact_source_ids(value: object) -> list[str]:
+            found: list[str] = []
+            if isinstance(value, dict):
+                for key in ("id", "sourceId", "source_id"):
+                    found.extend(_compact_source_ids(value.get(key)))
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    found.extend(_compact_source_ids(item))
+            else:
+                found.extend(re.findall(
+                    r"(?<![A-Za-z0-9])S\d+(?![A-Za-z0-9])", str(value or ""), re.I,
+                ))
+            return list(dict.fromkeys(source_id.upper() for source_id in found))
+
+        chart_source_ids = {
+            source_id
+            for item in chart_meta
+            for source_id in _compact_source_ids(item.get("source"))
+        }
+        def _compact_source_title(value: object) -> str:
+            title_text = re.sub(r"\s+", " ", str(value or "")).strip()
+            title_text = re.sub(r"^Our World in Data:\s*", "", title_text, flags=re.I)
+            title_text = re.sub(
+                r"^Countries that generate the most renewable electricity",
+                "Renewable generation by country", title_text, flags=re.I,
+            )
+            title_text = re.sub(
+                r"^Solar power generation\.\s*Data by Countries",
+                "Solar generation by country", title_text, flags=re.I,
+            )
+            title_text = re.sub(r"\s+-\s+Zero Carbon Analytics$", "", title_text, flags=re.I)
+            title_text = re.sub(r"\s+from\s+\d{4}\s+to\s+\d{4}$", "", title_text, flags=re.I)
+            title_text = re.sub(r",\s*\d{4}\s*[-–]\s*\d{4}$", "", title_text)
+            title_text = re.sub(r"\s*\(\d{4}\)$", "", title_text)
+            return title_text[:48]
+
+        compact_sources = {}
+        source_basis_codes = {
+            "fetched_publisher_page": "p",
+            "trusted_server_calculation": "c",
+            "uploaded_file": "a",
+            "search_excerpt_only": "s",
+            "unverified_retrieved_excerpt": "u",
+            "metadata_only": "m",
+            "unresolved_source_record": "x",
+        }
+        structured_kind_codes = {
+            "verified_publisher_table_rows": "table",
+            "verified_publisher_chart_rows": "chart",
+        }
+        for row in source_meta:
+            has_numeric_claim = any(
+                isinstance(group, dict) and bool(group.get("claimTokens"))
+                for group in (row.get("citationClaimGroups") or [])
+            )
+            if not has_numeric_claim:
+                # Keep a short excerpt for chart sources even when the report
+                # text has no numeric claim group tied to that source.
+                excerpt_limit = (
+                    40 if str(row.get("id") or "").upper() in chart_source_ids
+                    and row.get("evidenceBasis") != "search_excerpt_only" else 0
+                )
+            elif row.get("verifiedStructuredDataKind") or row.get("evidenceBasis") in {
+                "trusted_server_calculation", "uploaded_file",
+            }:
+                excerpt_limit = 800
+            elif row.get("evidenceBasis") == "search_excerpt_only":
+                excerpt_limit = 0
+            else:
+                excerpt_limit = 220
+            source_id = str(row.get("id") or "").strip().upper()
+            if not source_id:
+                continue
+            compact_sources[source_id] = {
+                "t": _compact_source_title(row.get("title")),
+                "b": source_basis_codes.get(str(row.get("evidenceBasis") or ""), "metadata"),
+                "f": row.get("pageFetchStatus"),
+                "k": structured_kind_codes.get(str(row.get("verifiedStructuredDataKind") or ""), ""),
+                "e": _compact_source_excerpt(row, limit=excerpt_limit),
+            }
+        compact_claim_groups: list[list] = []
+        seen_group_ids: set[str] = set()
+        for row in source_meta:
+            for group in row.get("citationClaimGroups") or []:
+                if not isinstance(group, dict):
+                    continue
+                group_id = str(group.get("groupId") or "")
+                dedupe_key = group_id or json.dumps(group, ensure_ascii=False, sort_keys=True, default=str)
+                if dedupe_key in seen_group_ids:
+                    continue
+                seen_group_ids.add(dedupe_key)
+                tokens = list(group.get("claimTokens") or [])
+                if not tokens:
+                    continue
+                token_support = []
+                for token in tokens:
+                    family, separator, value = str(token).partition(":")
+                    # Preserve the typed measure in full. Single-letter codes
+                    # made the fallback confuse percentages and TWh values in
+                    # different cited tables. Omit supportByToken because its
+                    # heuristic matches can name the wrong source.
+                    compact_token = f"{family}:{value}" if separator else str(token)
+                    token_support.append(compact_token)
+                claim_text = re.sub(r"\s+", " ", str(group.get("claim") or "")).strip()
+                if len(claim_text) > 36:
+                    claim_text = claim_text[:36].rsplit(" ", 1)[0]
+                compact_claim_groups.append([
+                    ",".join(str(value).upper() for value in (group.get("sourceIds") or [])),
+                    claim_text, ";".join(token_support),
+                ])
+        compact_charts = [_compact_source_ids(item.get("source")) for item in chart_meta[:6]]
+        audit_summary = {}
+        for name, item in (deterministic_audits or {}).items():
+            if not isinstance(item, dict):
+                continue
+            summary = {key: item.get(key) for key in ("blocking", "status") if key in item}
+            audit_summary[name] = summary
+        compact = {
+            "current_date": time.strftime("%Y-%m-%d", time.localtime()),
+            "task": "Audit each numericClaimEvidence row against only its listed cited IDs. `sources` is keyed by citation ID; never transfer evidence between keys. Each source is {t:title,b:basis,f:fetch,k:dataKind,e:evidence}; basis p/c/a/s/u/m/x means publisher/calculated/attachment/search/unverified/metadata/missing; k=table/chart means verified structured rows. Each chart is [sourceIDs]. Each claim is [citedIDs,text,typed tokens]. supportByToken and source-level match flags are heuristic and can be wrong: ignore them; inspect every cited source. Token families stay distinct: energy_twh=TWh, percent=percent, capacity_gw=GW, scalar=number, count=count; currencies retain named units. Never compare different types. A token is covered when ANY ONE cited source matches entity, measure, period, unit and value; an extra/unavailable citation does not erase a match. Do not derive ratios across rows or sources; flag only direct contradictions for the same entity, measure and period. Headers apply to following rows. Ignore leading #/Rank ordinals. Share of world differs from renewable mix share. Search excerpts are not publisher evidence. Missing source records are findings; clipped/absent excerpts alone do not prove a claim false. Do not invent issues. Return concise JSON with at most five grouped findings. Deterministic audits are authoritative.",
+            "requiredOutput": {
+                "status": "PASS|WARNING|FAIL", "summary": "brief audit result",
+                "findings": [{"category": "numeric|source|chart", "location": "claim or source ID", "issue": "brief finding", "evidence": "short supplied excerpt"}],
+                "blocking": False,
+            },
+            "report": {"title": title[:180], "user_request": question[:1600], "tier": report_tier,
+                       "body": body, "charts": compact_charts, "sources": compact_sources,
+                       "sourceCoverage": {
+                           "allReferencedIdsIncluded": source_coverage.get("allReferencedIdsIncluded"),
+                           "missingSourceRecordIds": source_coverage.get("missingSourceRecordIds") or [],
+                       },
+                       "numericClaimEvidence": compact_claim_groups,
+                       "deterministic_audits": audit_summary},
+        }
+        serialized = json.dumps(compact, ensure_ascii=False)
+        for _ in range(250):
+            if len(serialized) <= max_chars:
+                break
+            report_compact = compact["report"]
+            # Drop weak prose first, then compact descriptions. Keep every
+            # cited source ID and numeric claim-token mapping throughout.
+            expendable_excerpt = next((
+                row for row in report_compact["sources"].values()
+                if row.get("e") and row.get("b") in {"s", "u"}
+            ), None)
+            if expendable_excerpt is not None:
+                expendable_excerpt["e"] = ""
+            elif any(len(row) > 1 and len(str(row[1] or "")) > 32
+                     for row in report_compact["numericClaimEvidence"]):
+                for row in report_compact["numericClaimEvidence"]:
+                    if len(row) > 1 and len(str(row[1] or "")) > 32:
+                        row[1] = str(row[1])[:32].rsplit(" ", 1)[0]
+            elif len(report_compact["body"]) > 220:
+                report_compact["body"] = report_compact["body"][:220]
+            elif any(len(str(row.get("t") or "")) > 44
+                     for row in report_compact["sources"].values()):
+                for row in report_compact["sources"].values():
+                    row["t"] = str(row.get("t") or "")[:44]
+            elif report_compact["body"]:
+                report_compact["body"] = ""
+            elif report_compact["deterministic_audits"]:
+                report_compact["deterministic_audits"] = {}
+            else:
+                # Only trim verified excerpts after the descriptive context has
+                # been reduced. Remove whole trailing rows, never half a row.
+                excerpt_row = max(
+                    (row for row in report_compact["sources"].values() if row.get("e")),
+                    key=lambda row: len(row["e"]), default=None,
+                )
+                if excerpt_row is None:
+                    break
+                excerpt_lines = excerpt_row["e"].splitlines()
+                excerpt_row["e"] = "\n".join(excerpt_lines[:-1]) if len(excerpt_lines) > 1 else ""
+            serialized = json.dumps(compact, ensure_ascii=False)
+        if len(serialized) > max_chars:
+            log.warning(
+                "Groq independent audit skipped: compact payload still exceeds its character budget (%d > %d)",
+                len(serialized), max_chars,
+            )
+            return {"status": "unavailable", "reason": "audit_payload_exceeds_safe_limit", "findings": [],
+                    "blocking": False, "provider": "Gemini API", "fallbackProvider": "Groq API",
+                    "geminiUnavailableReason": gemini_reason,
+                    "note": "Report generation continued; independent audit context exceeded the provider budget."}
+        model = str(os.getenv("GG_GROQ_AUDIT_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-20b").strip()
+        plain_json_model = model.casefold().startswith("openai/gpt-oss-")
+        groq_reason = "provider_unavailable"
+        for key in iter_reserved_groq_keys(groq_keys, max_keys=1):
+            if is_rate_limited(f"report:groq:{key}") or is_rate_limited(f"report:groq:{key}:{model}"):
+                groq_reason = "rate_limited"
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=2.5, read=7.0, write=2.5, pool=2.5)) as client:
+                    groq_payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": (
+                                "Return exactly one valid JSON object matching the requiredOutput schema. "
+                                "Do not include markdown or explanations."
+                                if plain_json_model else
+                                "You are an independent publication-quality auditor. Return valid JSON only."
+                            )},
+                            {"role": "user", "content": serialized},
+                        ],
+                        "max_tokens": 1800, "temperature": 0.0,
+                        "response_format": {"type": "json_object"},
+                    }
+                    if plain_json_model:
+                        groq_payload["reasoning_effort"] = "low"
+                    groq_headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+                    response = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=groq_headers, json=groq_payload,
+                    )
+                    if response.status_code == 400:
+                        # Some models reject a long constrained-JSON completion
+                        # even though they can return valid JSON when asked
+                        # directly. Retry this specific validation error once
+                        # without response_format; never retry other 400s.
+                        try:
+                            error_body = response.json()
+                            error = error_body.get("error") if isinstance(error_body, dict) else None
+                            error_code = str(error.get("code") or "") if isinstance(error, dict) else ""
+                        except Exception:
+                            error_code = ""
+                        if error_code == "json_validate_failed":
+                            plain_json_payload = dict(groq_payload)
+                            plain_json_payload.pop("response_format", None)
+                            plain_json_payload["messages"] = [
+                                {"role": "system", "content": "Return exactly one valid JSON object matching the requiredOutput schema. Do not include markdown or explanations."},
+                                {"role": "user", "content": serialized},
+                            ]
+                            response = await client.post(
+                                "https://api.groq.com/openai/v1/chat/completions",
+                                headers=groq_headers, json=plain_json_payload,
+                            )
+                if response.status_code in (401, 403):
+                    mark_rate_limited(key, 24 * 60 * 60_000)
+                    mark_rate_limited(f"report:groq:{key}", 24 * 60 * 60_000)
+                    groq_reason = "invalid_or_forbidden_key"
+                    continue
+                if response.status_code == 429:
+                    cooldown = 60_000
+                    try:
+                        cooldown = max(cooldown, int(float(response.headers.get("retry-after", "60")) * 1000))
+                    except (TypeError, ValueError):
+                        pass
+                    mark_rate_limited(key, cooldown)
+                    mark_rate_limited(f"report:groq:{key}", cooldown)
+                    groq_reason = "rate_limited"
+                    continue
+                if not response.is_success:
+                    groq_reason = f"http_{response.status_code}"
+                    continue
+                response_payload = response.json()
+                choice = response_payload.get("choices", [{}])[0]
+                message = choice.get("message", {}) if isinstance(choice, dict) else {}
+                content = message.get("content", "") if isinstance(message, dict) else ""
+                finish_reason = str(choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(content or "").strip(), flags=re.I).strip()
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    if finish_reason == "length":
+                        groq_reason = "response_truncated"
+                        continue
+                    # The plain-JSON retry can include a short preamble on
+                    # models that do not support constrained JSON output.
+                    start = cleaned.find("{")
+                    if start < 0:
+                        groq_reason = "invalid_json_shape"
+                        continue
+                    try:
+                        parsed, _end = json.JSONDecoder().raw_decode(cleaned[start:])
+                    except json.JSONDecodeError:
+                        groq_reason = "invalid_json_shape"
+                        continue
+                if not isinstance(parsed, dict):
+                    groq_reason = "invalid_json_shape"
+                    continue
+                status = str(parsed.get("status") or "WARNING").upper()
+                if status not in {"PASS", "WARNING", "FAIL"}:
+                    status = "WARNING"
+                findings = parsed.get("findings") if isinstance(parsed.get("findings"), list) else []
+                return {
+                    "status": status, "summary": str(parsed.get("summary") or "")[:1200],
+                    "checks": parsed.get("checks") if isinstance(parsed.get("checks"), dict) else {},
+                    "criticalIssues": parsed.get("critical_issues") if isinstance(parsed.get("critical_issues"), list) else [],
+                    "findings": findings[:50], "blocking": bool(parsed.get("blocking")) or status == "FAIL",
+                    "provider": "Groq API", "model": model, "fallbackFrom": "Gemini API",
+                    "geminiUnavailableReason": gemini_reason,
+                    "reviewedBodyChars": min(len(report_text), len(body)),
+                    "bodyTruncated": len(report_text) > body_limit,
+                }
+            except Exception as exc:
+                groq_reason = type(exc).__name__
+                log.warning("Groq independent report audit fallback failed: %s", groq_reason)
+        return {"status": "unavailable", "reason": groq_reason, "findings": [], "blocking": False,
+                "provider": "Gemini API", "fallbackProvider": "Groq API",
+                "geminiUnavailableReason": gemini_reason,
+                "note": "Report generation continued; independent audit providers were unavailable."}
+
+    if _force_groq_fallback:
+        return await _groq_fallback("gemini_audit_timeout")
+    if not keys:
+        return await _groq_fallback(gemini_unavailable_reason)
     _audit_base_config = request_body["generationConfig"]
     last_reason = "provider_unavailable"
     # The old 10 s read timeout was shorter than a ~60 KB prompt with up to
@@ -12260,8 +13039,7 @@ async def _gemini_independent_report_audit(
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-        return {"status": "unavailable", "reason": last_reason, "findings": [], "blocking": False,
-                "provider": "Gemini API", "note": "Report generation continued; independent Gemini review was unavailable."}
+        return await _groq_fallback(last_reason)
 
     # ── legacy parallel strategy ──
     first_wave = [(model, key) for model in models[:2] for key in keys[:2]]
@@ -12286,8 +13064,7 @@ async def _gemini_independent_report_audit(
         for item in results:
             if item.get("reason"):
                 last_reason = str(item["reason"])
-    return {"status": "unavailable", "reason": last_reason, "findings": [], "blocking": False,
-            "provider": "Gemini API", "note": "Report generation continued; independent Gemini review was unavailable."}
+    return await _groq_fallback(last_reason)
 
 
 
@@ -12362,7 +13139,7 @@ def _metric_denominator(text: str) -> str:
 
 def _source_numeric_values(text: str) -> list[float]:
     values = []
-    for raw in re.findall(r"(?<![A-Za-z0-9])[-+−]?\d[\d,]*(?:\.\d+)?(?![A-Za-z0-9])", str(text or "")):
+    for raw in re.findall(r"(?<![A-Za-z0-9])[-+−]?\d[\d,]*(?:\.\d+)?(?![\d.,])", str(text or "")):
         try:
             values.append(float(raw.replace(",", "").replace("−", "-")))
         except (TypeError, ValueError):
@@ -14682,9 +15459,13 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
                 and _search_extract_evidence_allowed() and source_url_ok and search_chart_lines):
             item["searchChartEvidenceExcerpt"] = search_chart_lines[-16000:]
             item["search_extract_chart_evidence_verified"] = True
+        _table_origin = str(evidence.get("evidenceOrigin") or evidence.get("evidence_origin") or "").casefold() if evidence else ""
+        _table_relevance = evidence.get("pageFetchRelevanceMatched", evidence.get("page_fetch_relevance_matched")) if evidence else False
+        _table_reject_reason = str(evidence.get("pageFetchRejectReason") or evidence.get("page_fetch_reject_reason") or "").strip() if evidence else ""
         if (sid in set(_PUBLISHER_TABLE_CHART_EVIDENCE_IDS.get() or set()) and evidence
                 and str(evidence.get("pageFetchStatus") or evidence.get("page_fetch_status") or "").casefold() == "ok"
-                and str(item.get("url") or "").startswith(("https://", "http://"))):
+                and str(item.get("url") or "").startswith(("https://", "http://"))
+                and _table_origin != "okf_retrieval" and _table_relevance is not False and not _table_reject_reason):
             # These chart-specific excerpts were admitted only after every plotted
             # point was matched against a fetched publisher table. This is more
             # precise than the source's general mixed search/publisher provenance.
@@ -14723,6 +15504,102 @@ def _attach_audit_source_evidence(
     def norm_title(value: object) -> str:
         return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
+    def official_dataset_claim_evidence(source: dict) -> str:
+        """Expand verified API table cells into entity/period-aligned evidence lines.
+
+        Official datasets are emitted as compact ``Year | entity...`` tables. The
+        ordinary prose splitter drops short numeric rows, which makes a fetched
+        series look like a header-only search snippet. Parse only the server-built
+        official-dataset shape and bind each value to its exact row label, column
+        label, measure, and unit before it enters the claim audit.
+        """
+        metadata = source.get("officialDataset")
+        if not isinstance(metadata, dict) or not str(metadata.get("code") or "").strip():
+            return ""
+        if str(metadata.get("fit") or "direct").strip().casefold() != "direct":
+            return ""
+        status = str(source.get("pageFetchStatus") or source.get("page_fetch_status") or "").casefold()
+        origin = str(source.get("evidenceOrigin") or source.get("evidence_origin") or "").casefold()
+        kind = str(source.get("sourceType") or source.get("kind") or source.get("source_type") or "").casefold()
+        authority = str(source.get("authorityTier") or source.get("authority_tier") or "").casefold()
+        url = str(source.get("url") or source.get("sourceUrl") or source.get("source_url") or "")
+        if (status != "ok" or origin not in {"publisher_page", "publisher_page_and_search_extract"}
+                or kind != "official dataset" or authority != "primary_official"
+                or not url.startswith(("https://", "http://"))):
+            return ""
+
+        entities = [str(value).strip() for value in (metadata.get("entities") or []) if str(value).strip()]
+        try:
+            years = {int(value) for value in (metadata.get("years") or [])}
+        except (TypeError, ValueError):
+            return ""
+        if not entities or not years:
+            return ""
+        content = str(source.get("pageContent") or source.get("page_content") or
+                      source.get("fullContent") or source.get("full_content") or "")
+        if not content:
+            return ""
+
+        def entity_key(value: object) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+        expected = {entity_key(entity): entity for entity in entities}
+        table_header: list[str] | None = None
+        header_entities: list[str] = []
+        table_rows: list[list[str]] = []
+        for line in content.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if table_header is None:
+                if not cells or cells[0].casefold() != "year":
+                    continue
+                observed = [entity_key(cell) for cell in cells[1:]]
+                if len(observed) != len(entities) or set(observed) != set(expected):
+                    continue
+                table_header = cells
+                header_entities = [expected[key] for key in observed]
+                continue
+            if len(cells) != len(table_header):
+                if table_rows:
+                    break
+                continue
+            table_rows.append(cells)
+        if table_header is None:
+            return ""
+
+        caption = ""
+        for line in content.splitlines():
+            match = re.match(r"\s*TABLE\s+\d+\s*[â€”â€“-]\s*(.+?)\s*$", line, re.I)
+            if match:
+                caption = match.group(1)
+                break
+        caption = re.sub(r"\s*,?\s*(?:19|20)\d{2}\s*[â€”â€“-]\s*(?:19|20)?\d{2}\s*$", "", caption).strip()
+        measure = caption or str(metadata.get("measure") or source.get("title") or "Official dataset").strip()
+        unit = str(metadata.get("unit") or "").strip()
+        lines: list[str] = []
+        for cells in table_rows:
+            try:
+                year = int(cells[0])
+            except (TypeError, ValueError):
+                continue
+            if year not in years:
+                continue
+            for index, entity in enumerate(header_entities, start=1):
+                raw_value = cells[index].replace(",", "").strip()
+                if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", raw_value):
+                    continue
+                try:
+                    numeric_value = float(raw_value)
+                except ValueError:
+                    continue
+                if not math.isfinite(numeric_value):
+                    continue
+                if "%" in unit or "percent" in unit.casefold():
+                    displayed_value = f"{raw_value}%"
+                else:
+                    displayed_value = f"{raw_value} {unit}".strip()
+                lines.append(f"{entity} — {measure}, {year}: {displayed_value}.")
+        return "\n".join(lines)
+
     def numbers(value: str, evidence: bool = False) -> set[str]:
         """Extract comparable numeric quantities with conservative unit normalization.
 
@@ -14749,10 +15626,12 @@ def _attach_audit_source_evidence(
         text = re.sub(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{month_names})\.?[,]?\s+20\d{{2}}\b", " ", text, flags=re.I)
         text = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-]20\d{2}\b", " ", text)
         token_re = re.compile(
-            r"(?<![A-Za-z0-9])(?P<currency>US\$|USD|INR|₹|Rs\.?|rupees?)?\s*"
+            r"(?<![A-Za-z0-9])(?P<currency>US\$|\$|USD|INR|₹|Rs\.?|rupees?|€|EUR|euros?|£|GBP|pounds?|¥|JPY|yen)?\s*"
             r"(?P<number>-?\d[\d,]*(?:\.\d+)?)\s*"
-            r"(?P<unit>lakh\s+crores?|lakh\s+crs?\.?|billion\s+units|trillion|billion|million|thousand|"
-            r"TWh|GWh|MWh|kWh|GW|MW|KW|TW|BU|crores|crore|crs?\.?|lakhs|lakh|per\s?cent|%|bn|[TBMK])?"
+            r"(?P<unit>lakh\s+crores?|lakh\s+crs?\.?|(?:million|billion|thousand)\s+tonnes?|"
+            r"million\s+units|billion\s+units|trillion|billion|million|thousand|"
+            r"TWh|GWh|MWh|kWh|GW|MW|KW|TW|BU|crores|crore|crs?\.?|lakhs|lakh|per\s?cent|%|bn|[TBMK]|"
+            r"years?|yrs?|tonnes?|metric\s+tons?|mt|kt|kg|km|ha|times?|x|×)?"
             r"(?![A-Za-z0-9])",
             re.I,
         )
@@ -14768,11 +15647,19 @@ def _attach_audit_source_evidence(
             if amount.is_integer() and 1900 <= amount <= 2100:
                 continue
             currency = (match.group("currency") or "").casefold().replace(".", "")
+            currency = {
+                chr(0x20b9): "inr", "rs": "inr", "rupee": "inr", "rupees": "inr",
+                chr(0x20ac): "eur", "euro": "eur", "euros": "eur",
+                chr(0x00a3): "gbp", "pound": "gbp", "pounds": "gbp",
+                chr(0x00a5): "jpy", "yen": "jpy",
+                "us$": "usd", "$": "usd",
+            }.get(currency, currency)
             unit = re.sub(r"\s+", " ", (match.group("unit") or "").casefold()).strip()
             unit = unit.rstrip(".")
             # "cr" / "crs" is the standard Indian abbreviation of crore ("Rs 1.95 lakh cr").
             unit = {"lakhs": "lakh", "crores": "crore", "lakh crores": "lakh crore", "cr": "crore", "crs": "crore",
-                    "lakh cr": "lakh crore", "lakh crs": "lakh crore"}.get(unit, unit)
+                    "lakh cr": "lakh crore", "lakh crs": "lakh crore", "year": "years", "yr": "years",
+                    "yrs": "years", "tonne": "tonnes", "metric ton": "tonnes", "metric tons": "tonnes"}.get(unit, unit)
             family = "scalar"
             scale = 1.0
             # RBI/Government of India publications write "2.7 per cent"; the
@@ -14787,6 +15674,17 @@ def _attach_audit_source_evidence(
             elif unit in {"twh", "billion units", "bu", "gwh", "mwh", "kwh"}:
                 family = "energy_twh"
                 scale = {"twh": 1.0, "billion units": 1.0, "bu": 1.0, "gwh": 0.001, "mwh": 0.000001, "kwh": 0.000000001}[unit]
+            elif unit == "years":
+                family = "duration_years"
+            elif unit in {"tonnes", "mt", "kt", "kg", "million tonnes", "billion tonnes", "thousand tonnes"}:
+                family = "mass_tonnes"
+                scale = {"tonnes": 1.0, "mt": 1_000_000.0, "kt": 1_000.0, "kg": 0.001,
+                         "million tonnes": 1_000_000.0, "billion tonnes": 1_000_000_000.0,
+                         "thousand tonnes": 1_000.0}[unit]
+            elif unit == "km":
+                family = "distance_km"
+            elif unit == "ha":
+                family = "area_hectares"
             elif (unit in {"lakh crore", "crore", "lakh", "lakhs"} and not currency
                   and (re.match(r"\s*(?:units?|cards?|accounts?|customers?|people|persons|households|transactions?|borrowers?|"
                                r"machines|atms|crms|branches|subscribers|users|beneficiaries|farmers|tonnes|vehicles|homes|"
@@ -14800,29 +15698,34 @@ def _attach_audit_source_evidence(
                 # absolute units with "1.2 million units" and "(in lakhs) | 12".
                 family = "count"
                 scale = {"lakh crore": 1e12, "crore": 1e7, "lakh": 1e5}[unit]
-            elif unit in {"lakh crore", "crore", "lakh"} or (unit in {"million", "billion", "trillion", "thousand"} and currency in {"inr", "₹", "rs", "rupees"}):
+            elif currency == "inr" and unit in {"lakh crore", "crore", "lakh", "million", "billion", "trillion", "thousand", "bn", "t", "b", "m", "k"}:
                 family = "inr_crore"
                 scale = {
                     "lakh crore": 100000.0, "crore": 1.0, "lakh": 0.01,
                     "million": 0.1, "billion": 100.0, "trillion": 100000.0, "thousand": 0.000001,
+                    "bn": 100.0, "t": 100000.0, "b": 100.0, "m": 0.1, "k": 0.000001,
                 }.get(unit, 1.0)
-            elif unit in {"million", "billion", "trillion", "thousand", "bn", "t", "b", "m", "k"}:
-                # Currency scales only when the source labels the value as USD.
-                if currency in {"usd", "us$", "$"} or currency == "" and "$" in text[max(0, match.start()-4):match.start()]:
-                    family = "usd_million"
+            elif currency in {"usd", "eur", "gbp", "jpy"}:
+                if unit in {"lakh crore", "crore", "lakh", "million", "billion", "trillion", "thousand", "bn", "t", "b", "m", "k"}:
+                    family = f"{currency}_million"
                     scale = {
+                        "lakh crore": 1000000.0, "crore": 0.1, "lakh": 0.001,
                         "million": 1.0, "billion": 1000.0, "trillion": 1000000.0,
-                        "thousand": 0.001, "bn": 1000.0, "t": 1000000.0, "b": 1000.0,
-                        "m": 1.0, "k": 0.001,
+                        "thousand": 0.001, "bn": 1000.0, "t": 1000000.0,
+                        "b": 1000.0, "m": 1.0, "k": 0.001,
                     }.get(unit, 1.0)
-                elif unit in {"bn", "t", "b", "m", "k"}:
-                    # A suffix without currency is ambiguous; do not infer USD.
+                else:
+                    family = f"{currency}_units"
+            elif unit in {"lakh crore", "crore", "lakh"}:
+                family = "inr_crore"
+                scale = {"lakh crore": 100000.0, "crore": 1.0, "lakh": 0.01}[unit]
+            elif unit in {"million", "billion", "trillion", "thousand", "bn", "t", "b", "m", "k"}:
+                if unit in {"bn", "t", "b", "m", "k"}:
+                    # A suffix without currency is ambiguous; do not infer a currency family.
                     family = "ambiguous_scaled_number"
                     scale = {"bn": 1000.0, "t": 1000000.0, "b": 1000.0, "m": 1.0, "k": 0.001}[unit]
                 else:
-                    # "1.33 billion subscribers" / "1,330.58 million": counts in
-                    # absolute units. Previously the word was dropped and the two
-                    # forms could never match.
+                    # Unqualified long scales describe counts unless a currency was explicit above.
                     family = "count"
                     scale = {"million": 1e6, "billion": 1e9, "trillion": 1e12, "thousand": 1e3}[unit]
             normalized = amount * scale
@@ -14872,7 +15775,7 @@ def _attach_audit_source_evidence(
     # (used for claim-subject checks; never added to evidence excerpts).
     _TABLE_ROW_CONTEXT: dict[str, str] = {}
 
-    def split_sentences(value: str) -> list[str]:
+    def split_sentences(value: str, *, allow_short_table_rows: bool = False) -> list[str]:
         """Split prose/table rows while preserving headers and inheriting column units.
 
         Publisher extractors commonly render a table as `Metric | 150.26 | 56.09`
@@ -15014,7 +15917,13 @@ def _attach_audit_source_evidence(
                 # example, "Mr. Rao") detached the citation from the issuer and
                 # other columns, causing false numeric subject mismatches.
                 row = block.strip()
-                if len(row) >= 35:
+                short_numeric_row = (
+                    allow_short_table_rows
+                    and len(row) >= 8
+                    and bool(re.search(r"\d", row))
+                    and bool(row_context.get(block))
+                )
+                if len(row) >= 35 or short_numeric_row:
                     parts.append(row)
                     _TABLE_ROW_CONTEXT[row] = row_context[block]
                 continue
@@ -15160,9 +16069,39 @@ def _attach_audit_source_evidence(
             item["pageFetchRelevanceMatched"] = _fetch_relevance
             item["pageFetchRejectReason"] = _fetch_reject_reason
 
+        # A verified chart can quote compact table rows that the general prose
+        # splitter intentionally omits (for example, `2024 | 886.12`). Admit
+        # those lines only when they are registered for a chart and match the
+        # directly fetched publisher text byte-for-byte after pipe/whitespace
+        # normalization. Search snippets and unrelated chart rows never qualify.
+        publisher_chart_table_text = ""
+        publisher_chart_table_eligible = bool(
+            source_id in set(_PUBLISHER_TABLE_CHART_EVIDENCE_IDS.get() or set())
+            and _fetch_status == "ok"
+            and _fetch_url.startswith(("https://", "http://"))
+            and _fetch_origin != "okf_retrieval"
+            and _fetch_relevance is not False
+            and not _fetch_reject_reason
+        )
+        if publisher_chart_table_eligible:
+            registered_lines = _chart_evidence_lines_for(source_id)
+            direct_page_text = str(original.get("pageContent") or item.get("pageContent") or "")
+            publisher_chart_table_text = "\n".join(
+                line.strip() for line in registered_lines.splitlines()
+                if line.strip() and _chart_excerpt_matches_source_text(line, direct_page_text)
+            )
+            publisher_chart_table_eligible = bool(publisher_chart_table_text)
+
         content_candidates: list[tuple[str, str]] = []
         seen_candidate_text: set[str] = set()
         evidence_rows = []
+        _official_claim_evidence = official_dataset_claim_evidence(original)
+        if not _official_claim_evidence and original is not item:
+            _official_claim_evidence = official_dataset_claim_evidence(item)
+        if _official_claim_evidence:
+            # These lines are deterministically expanded from the exact cells,
+            # entity headers, years, and unit in the verified publisher API table.
+            evidence_rows.append((_official_claim_evidence, "publisher_page"))
         if trusted_calculated_sector:
             evidence_rows.append((
                 original.get("chartEvidenceExcerpt") or item.get("chartEvidenceExcerpt"),
@@ -15194,6 +16133,8 @@ def _attach_audit_source_evidence(
             (item.get("snippet"), "search_extract"),
             (item.get("description"), "search_extract"),
         ])
+        if publisher_chart_table_eligible:
+            evidence_rows.append((publisher_chart_table_text, "publisher_chart_table"))
         for candidate, origin in evidence_rows:
             if not isinstance(candidate, str) or not candidate.strip():
                 continue
@@ -15204,12 +16145,19 @@ def _attach_audit_source_evidence(
             cleaned = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in candidate.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
             cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
             dedupe_key = re.sub(r"\s+", " ", cleaned).strip()
-            if len(dedupe_key) >= 35 and dedupe_key not in seen_candidate_text:
-                seen_candidate_text.add(dedupe_key)
+            candidate_key = f"{origin}:{dedupe_key}" if origin == "publisher_chart_table" else dedupe_key
+            minimum_candidate_chars = 8 if origin == "publisher_chart_table" else 35
+            if len(dedupe_key) >= minimum_candidate_chars and candidate_key not in seen_candidate_text:
+                seen_candidate_text.add(candidate_key)
                 content_candidates.append((cleaned, origin))
         all_sentences: list[tuple[str, str]] = []
         for candidate, origin in content_candidates:
-            all_sentences.extend((sentence, origin) for sentence in split_sentences(candidate))
+            all_sentences.extend(
+                (sentence, origin)
+                for sentence in split_sentences(
+                    candidate, allow_short_table_rows=(origin == "publisher_chart_table"),
+                )
+            )
         # Deduplicate same sentences but prefer directly fetched publisher text.
         sentence_origin: dict[str, str] = {}
         for sentence, origin in all_sentences:
@@ -15712,15 +16660,39 @@ async def _run_independent_report_audit(
     started = time.perf_counter()
     log.info("Gemini independent report audit started — tier=%s chars=%d charts=%d sources=%d",
              report_tier, len(report_text or ""), len(charts or []), len(sources or []))
+    audit_args = {
+        "title": title, "question": question, "report_text": report_text,
+        "report_tier": report_tier, "charts": charts, "images": images,
+        "sources": sources, "deterministic_audits": deterministic,
+    }
     try:
         audit = await asyncio.wait_for(
-            _gemini_independent_report_audit(
-                title=title, question=question, report_text=report_text, report_tier=report_tier,
-                charts=charts, images=images, sources=sources, deterministic_audits=deterministic,
-            ), timeout=timeout_seconds,
+            _gemini_independent_report_audit(**audit_args), timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
-        audit = {"status": "unavailable", "reason": "audit_timeout", "blocking": False, "findings": [], "provider": "Gemini API"}
+        # Reserve a separate, bounded window for the compact Groq fallback.
+        # Gemini can consume the full report-audit deadline while cycling through
+        # 429/503/read-timeout responses; without this second window the wrapper
+        # cancels the coroutine just before it can issue its Groq request.
+        try:
+            fallback_timeout = max(6.0, min(12.0, float(os.getenv("GG_GROQ_AUDIT_FALLBACK_TIMEOUT_SECONDS", "10"))))
+        except (TypeError, ValueError):
+            fallback_timeout = 10.0
+        log.warning("Gemini independent audit timed out after %.1fs; trying bounded Groq fallback", timeout_seconds)
+        try:
+            audit = await asyncio.wait_for(
+                _gemini_independent_report_audit(**audit_args, _force_groq_fallback=True),
+                timeout=fallback_timeout,
+            )
+        except asyncio.TimeoutError:
+            audit = {"status": "unavailable", "reason": "gemini_and_groq_audit_timeout",
+                     "blocking": False, "findings": [], "provider": "Gemini API",
+                     "fallbackProvider": "Groq API"}
+        except Exception as exc:
+            log.warning("Groq audit fallback after Gemini timeout failed: %s", type(exc).__name__)
+            audit = {"status": "unavailable", "reason": type(exc).__name__,
+                     "blocking": False, "findings": [], "provider": "Gemini API",
+                     "fallbackProvider": "Groq API"}
     except Exception as exc:
         log.warning("Gemini independent audit failed: %s", type(exc).__name__)
         audit = {"status": "unavailable", "reason": type(exc).__name__, "blocking": False, "findings": [], "provider": "Gemini API"}
@@ -15745,6 +16717,7 @@ async def _ensure_report_page_budget(
     evidence_text: str, title: str, summary: str, key_stats: list, charts: list,
     sources: object, presentation: object, web_images: list | None = None,
     file_images: list | None = None, theme: dict | None = None,
+    report_style: str | None = None, kicker: str = "",
     requested_pages: int | None = None,
     allow_floor_expansion: bool = True,
 ) -> tuple[str, int | None]:
@@ -15768,7 +16741,7 @@ async def _ensure_report_page_budget(
     pages = _rendered_page_count_preflight(
         expanded, title, question, summary, key_stats, charts, sources,
         presentation, report_tier, web_images=web_images,
-        file_images=file_images, theme=theme,
+        file_images=file_images, theme=theme, report_style=report_style, kicker=kicker,
     )
     if pages is None:
         log.warning("Report page target unavailable: final PDF renderer could not measure tier=%s", report_tier)
@@ -15892,7 +16865,7 @@ async def _ensure_report_page_budget(
                 refreshed = _rendered_page_count_preflight(
                     expanded, title, question, summary, key_stats, charts, sources,
                     presentation, report_tier, web_images=web_images,
-                    file_images=file_images, theme=theme,
+                    file_images=file_images, theme=theme, report_style=report_style, kicker=kicker,
                 )
                 if refreshed is None:
                     log.warning("Report page-band remeasurement failed; preserving expanded evidence-backed content")
@@ -15919,7 +16892,7 @@ async def _ensure_report_page_budget(
             remeasured = _rendered_page_count_preflight(
                 expanded, title, question, summary, key_stats, charts, sources,
                 presentation, report_tier, web_images=web_images,
-                file_images=file_images, theme=theme,
+                file_images=file_images, theme=theme, report_style=report_style, kicker=kicker,
             )
             if remeasured is not None:
                 pages = remeasured
@@ -20881,6 +21854,11 @@ async def generate_report(request: Request):
         or bool(rag_source_rows)
         or any(str(document.get("text") or "").strip() for document in source_documents if isinstance(document, dict))
     )
+    _has_uploaded_data = (
+        bool(file_context.strip()) or bool(extracted_image_context.strip()) or bool(file_images)
+        or bool(embedded_file_images)
+        or any(str(document.get("text") or "").strip() for document in source_documents if isinstance(document, dict))
+    )
 
     if file_only_report and not has_file_data:
         return JSONResponse({
@@ -20888,6 +21866,59 @@ async def generate_report(request: Request):
             "report": "", "charts": [], "images": [], "keyStats": [], "summary": "",
             "failedStage": "source_evidence", "publicationOutcome": "structural_failure",
         }, status_code=422)
+
+    # Stage M: plan measurable evidence once for web research, including runs
+    # where the client already supplied search results. Dataset selection and
+    # the section writer reuse this gateway, so optional planning shares the
+    # same per-report LLM allowance. Uploaded-file reports stay on their
+    # existing source-of-truth path.
+    _measure_plan = None
+    _report_llm_gateway = None
+    _measure_question = str(getattr(intent, "resolved_topic", "") or question).strip()
+    if not _has_uploaded_data and not search_audit_mode:
+        try:
+            from datetime import date as _mp_date
+            from utils.llm_gateway import LLMGateway as _ReportGateway
+            from utils.measure_plan import fallback_plan as _fallback_measure_plan, plan_measures as _plan_measures
+
+            _report_llm_gateway = _ReportGateway(_sys.modules[__name__], report_tier)
+            _measure_topic = _measure_question
+            if _measure_topic.casefold() != str(question or "").strip().casefold():
+                _measure_topic = f"{_measure_topic}\n\nCurrent request: {question}"
+            _measure_question = _measure_topic
+            try:
+                _measure_reserve = max(0, int(_os.getenv("GG_V2_REPORT_WRITER_CALL_RESERVE", "4")))
+            except (TypeError, ValueError):
+                _measure_reserve = 4
+            _planner_gateway = _report_llm_gateway if _report_llm_gateway.remaining > _measure_reserve else None
+            if _os.getenv("GG_MEASURE_PLAN", "1").strip() == "0":
+                _measure_plan = _fallback_measure_plan(_measure_topic, tier=report_tier)
+                _measure_plan.method = "keywords (planner disabled)"
+            else:
+                _measure_plan = await _plan_measures(_measure_topic, _planner_gateway,
+                                                     today=_mp_date.today(), tier=report_tier)
+            record_research_stage("measure_plan", _measure_plan.to_dict())
+            log.info("Report: measure plan method=%s measures=%d shared_llm_remaining=%d",
+                     _measure_plan.method, len(_measure_plan.measures), _report_llm_gateway.remaining)
+        except Exception as _mp_exc:
+            log.warning("Report: measure planning skipped: %s", type(_mp_exc).__name__)
+            try:
+                from utils.measure_plan import fallback_plan as _fallback_measure_plan
+                _measure_plan = _fallback_measure_plan(_measure_question, tier=report_tier)
+            except Exception:
+                _measure_plan = None
+
+    def _measure_search_queries(existing: list[str]) -> list[str]:
+        if _measure_plan is None or not getattr(_measure_plan, "measures", None):
+            return []
+        try:
+            from datetime import date as _measure_date
+            from utils.measure_plan import measure_queries as _measure_queries
+            return _measure_queries(_measure_plan, _measure_question, today=_measure_date.today(),
+                                    tier=report_tier, existing=list(existing or []))
+        except Exception as _mq_exc:
+            log.warning("Report: targeted measure queries skipped: %s", type(_mq_exc).__name__)
+            return []
 
     if file_only_report and has_file_data:
         sources = []
@@ -20913,6 +21944,10 @@ async def generate_report(request: Request):
             search_queries = await _build_multi_angle_search_queries(
                 question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
             )
+            _measure_angles = _measure_search_queries(search_queries)
+            if _measure_angles:
+                search_queries.extend(_measure_angles)
+                log.info("Report: added %d planned data search(es) to the file-first web supplement", len(_measure_angles))
             if len(search_queries) > 1:
                 log.info("Report: file-first mode — %d-angle search: %r",
                           len(search_queries), [q[:60] for q in search_queries])
@@ -20948,22 +21983,9 @@ async def generate_report(request: Request):
         search_queries = await _build_multi_angle_search_queries(
             question, conversation_context, _classify_query(str(getattr(intent, "resolved_topic", "") or question)), intent=intent, report_tier=report_tier,
         )
-        _extra_angles = []
-        try:  # Stage M: the measures the report must quantify -> data-seeking searches (any topic)
-            if os.getenv("GG_MEASURE_PLAN", "1") != "0":
-                from datetime import date as _mp_date
-                from utils.llm_gateway import LLMGateway as _MpGateway
-                from utils.measure_plan import measure_queries as _measure_queries, plan_measures as _plan_measures
-                _measure_plan = await _plan_measures(question, _MpGateway(_sys.modules[__name__], report_tier, budget=1),
-                                                     today=_mp_date.today(), tier=report_tier)
-                record_research_stage("measure_plan", _measure_plan.to_dict())
-                if _measure_plan.method == "llm":
-                    _extra_angles = _measure_queries(_measure_plan, question, today=_mp_date.today(), tier=report_tier,
-                                                     existing=list(search_queries))
-        except Exception as _mp_exc:
-            log.warning("Report: measure plan skipped: %s", type(_mp_exc).__name__)
+        _extra_angles = _measure_search_queries(search_queries)
         if _extra_angles:
-            search_queries = list(search_queries) + _extra_angles
+            search_queries = _prioritize_measure_search_queries(search_queries, _extra_angles, tier=report_tier)
             log.info("Report: added %d measure search(es): %r", len(_extra_angles), _extra_angles)
         try:  # Stage J: a data-seeking angle (year-wise statistics inside the window, official sources)
             from utils.data_angles import data_angles as _data_angles
@@ -20973,6 +21995,7 @@ async def generate_report(request: Request):
                 log.info("Report: added %d data-seeking angle(s): %r", len(_extra_angles), _extra_angles)
         except Exception as _angle_exc:
             log.warning("Report: data-seeking angles skipped: %s", type(_angle_exc).__name__)
+        search_queries = _prioritize_measure_search_queries(search_queries, [], tier=report_tier)
         if search_queries != [question]:
             log.info("Report: search enriched into %d angle(s): %r",
                       len(search_queries), [q[:100] for q in search_queries])
@@ -21375,9 +22398,7 @@ async def generate_report(request: Request):
     # Named companies plus either stock language or a request for reported
     # financial metrics (profit, assets, NPAs, deposits…) — the Screener.in KB
     # and Yahoo fundamentals are exactly the multi-period data such reports need.
-    if (not search_audit_mode) and _early_company_candidates and (
-        _STOCK_COMPANY_INTENT_RE.search(question) or _FINANCIAL_METRIC_REQUEST_RE.search(question)
-    ):
+    if (not search_audit_mode) and _should_fetch_company_fundamentals(question, _early_company_candidates):
         try:
             company_candidates = _early_company_candidates or _extract_company_candidates(question, intent=intent)
             if company_candidates:
@@ -21502,6 +22523,29 @@ async def generate_report(request: Request):
     except (TypeError, ValueError):
         _source_fetch_concurrency = 10
     _source_fetch_semaphore = asyncio.Semaphore(_source_fetch_concurrency)
+    _report_data_entities: list[str] = []
+    _report_data_years: list[int] = []
+    try:
+        from datetime import date as _file_date
+        from utils.data_angles import window_years as _file_window_years
+        _report_data_years = _file_window_years(question, _file_date.today())
+        _entity_plan_for_files = locals().get("_measure_plan")
+        for _measure_for_files in getattr(_entity_plan_for_files, "measures", None) or []:
+            for _entity_for_file in getattr(_measure_for_files, "entities", None) or []:
+                _value = str(_entity_for_file or "").strip()
+                if _value and _value.casefold() not in {e.casefold() for e in _report_data_entities}:
+                    _report_data_entities.append(_value)
+        if not _report_data_entities:
+            _scope_for_files = str(getattr(_entity_plan_for_files, "scope", "") or "")
+            _scope_parts = [re.sub(r"\s+", " ", x).strip(" ,") for x in re.split(r",|\band\b", _scope_for_files, flags=re.I)]
+            _report_data_entities.extend(x for x in _scope_parts if len(x) >= 2)
+        if not _report_data_entities:
+            from utils.official_data import COUNTRIES as _country_names_for_files, mentioned_entities as _mentioned_country_codes
+            _report_data_entities.extend(_country_names_for_files[code] for code in _mentioned_country_codes(question)
+                                         if code in _country_names_for_files)
+        _report_data_entities = _report_data_entities[:50]
+    except Exception as _file_entity_exc:
+        log.debug("Report: data-file entity filter context unavailable: %s", type(_file_entity_exc).__name__)
 
     async def enrich(src: dict, idx: int) -> dict:
         clean_src = dict(src or {})
@@ -21511,7 +22555,8 @@ async def generate_report(request: Request):
             clean_src["fullContent"] = ""
         return await _enrich_report_source(
             clean_src, idx, question, intent, max_chars=ENRICH_FETCH_CHARS,
-            semaphore=_source_fetch_semaphore,
+            semaphore=_source_fetch_semaphore, data_entities=_report_data_entities,
+            data_years=_report_data_years,
         )
 
     log.info("Report: enriching %d source pages (limit=%d, concurrency=%d); long search extracts are not treated as proof of page fetching",
@@ -21565,7 +22610,8 @@ async def generate_report(request: Request):
                 async with _retry_sem, _host_limit.slot(str(src.get("url") or "")):
                     return i, await _enrich_report_source(
                         src, i, question, intent, max_chars=ENRICH_FETCH_CHARS, semaphore=None,
-                        fetch_seconds=_retry_seconds(src),
+                        fetch_seconds=_retry_seconds(src), data_entities=_report_data_entities,
+                        data_years=_report_data_years,
                     )
             except Exception:
                 return i, enriched_raw[i]
@@ -21625,7 +22671,9 @@ async def generate_report(request: Request):
                     async with _link_sem, _link_hosts.slot(str(row.get("url") or "")):
                         return await _enrich_report_source(row, len(enriched_raw) + i, question, intent,
                                                            max_chars=ENRICH_FETCH_CHARS, semaphore=None,
-                                                           fetch_seconds=_link_seconds(row))
+                                                           fetch_seconds=_link_seconds(row),
+                                                           data_entities=_report_data_entities,
+                                                           data_years=_report_data_years)
                 _link_done = list(await asyncio.gather(*[_fetch_link(i, r) for i, r in enumerate(_link_rows)],
                                                        return_exceptions=True))
                 _link_ok = [r for r in _link_done if isinstance(r, dict) and r.get("pageFetchStatus") == "ok"]
@@ -21645,18 +22693,22 @@ async def generate_report(request: Request):
     # fetched through the same tiers and relevance gate. No LLM call. GG_MEASURE_SLOTS=0 disables.
     _mp_slots = locals().get("_measure_plan")
     if (_os.getenv("GG_MEASURE_SLOTS", "1") != "0" and _mp_slots is not None
-            and getattr(_mp_slots, "method", "") == "llm" and not search_audit_mode):
+            and not search_audit_mode):
         try:
             from datetime import date as _slot_date
-            from utils.data_angles import window_years as _slot_years
             from utils.measure_slots import (gap_queries as _gap_queries, official_hosts as _slot_hosts,
+                                             requested_years as _requested_slot_years,
                                              slot_coverage as _slot_coverage, slot_limit as _slot_limit)
-            from utils.fetch_tiers import HostLimiter as _SlotHostLimiter, retry_order as _slot_order
-            _slots_before = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
-            _slot_qs = _gap_queries(_slots_before, _mp_slots, years=_slot_years(question, _slot_date.today()),
-                                    hosts=_slot_hosts(_slots_before), cap=_slot_limit(report_tier))
+            from utils.fetch_tiers import (HostLimiter as _SlotHostLimiter, retry_order as _slot_order,
+                                           retry_seconds as _slot_retry_seconds)
+            _slot_window = _requested_slot_years(question, _slot_date.today())
+            _slots_before = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)],
+                                           years=_slot_window)
+            _slot_qs = _gap_queries(_slots_before, _mp_slots, years=_slot_window,
+                                    hosts=_slot_hosts(_slots_before), question=question,
+                                    cap=_slot_limit(report_tier))
             _slot_stats: dict = {"slots": len(_slots_before), "coveredBefore": sum(s["covered"] for s in _slots_before),
-                                 "queries": _slot_qs}
+                                 "window": _slot_window, "queries": _slot_qs}
             if _slot_qs:
                 _report_progress("source_enrichment", f"Searching for data on {len(_slot_qs)} uncovered measures…", 34)
                 from routes.chat import exa_search_multi as _slot_search
@@ -21673,7 +22725,9 @@ async def generate_report(request: Request):
                 async def _slot_fetch(i: int, row: dict) -> dict:
                     async with _slot_sem, _slot_hosts_lim.slot(str(row.get("url") or "")):
                         return await _enrich_report_source(dict(row), len(enriched_raw) + i, question, intent,
-                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None)
+                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                                                           data_entities=_report_data_entities,
+                                                           data_years=_report_data_years)
                 _slot_rows = [r for r in await asyncio.gather(*[_slot_fetch(i, r) for i, r in enumerate(_slot_pick)],
                                                               return_exceptions=True) if isinstance(r, dict)]
                 try:
@@ -21683,10 +22737,55 @@ async def generate_report(request: Request):
                         matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent))
                 except Exception as _sb_exc:
                     _slot_stats["browser"] = {"error": type(_sb_exc).__name__}
+                # Targeted searches can land on an official indicator page whose observations are only in a
+                # linked workbook. Follow the same relevant CSV/XLSX/PDF links used by the first fetch pass.
+                # This keeps the fallback generic and lets the existing spreadsheet/table chart path consume it.
+                try:
+                    from utils.data_links import link_limit as _slot_link_limit, link_terms as _slot_link_terms, pick_links as _slot_pick_links
+                    _slot_measure_terms, _slot_question_terms = _slot_link_terms(
+                        question, [m.measure for m in getattr(_mp_slots, "measures", None) or []])
+                    _slot_file_rows = _slot_pick_links(
+                        _slot_rows, measure_terms=_slot_measure_terms, question_terms=_slot_question_terms,
+                        limit=max(0, _slot_link_limit(report_tier) // 2),
+                        existing_urls={str((r or {}).get("url") or "") for r in enriched_raw + _slot_rows})
+                    if _slot_file_rows:
+                        _slot_file_sem, _slot_file_hosts = asyncio.Semaphore(4), _SlotHostLimiter(per_host=2)
+
+                        async def _slot_file_fetch(i: int, row: dict) -> dict:
+                            async with _slot_file_sem, _slot_file_hosts.slot(str(row.get("url") or "")):
+                                return await _enrich_report_source(
+                                    row, len(enriched_raw) + len(_slot_rows) + i, question, intent,
+                                    max_chars=ENRICH_FETCH_CHARS, semaphore=None,
+                                    fetch_seconds=_slot_retry_seconds(row),
+                                    data_entities=_report_data_entities,
+                                    data_years=_report_data_years)
+
+                        _slot_files_done = await asyncio.gather(
+                            *[_slot_file_fetch(i, r) for i, r in enumerate(_slot_file_rows)], return_exceptions=True)
+                        _slot_files = [r for r in _slot_files_done if isinstance(r, dict)]
+                        try:
+                            _slot_stats["dataFileBrowser"] = await _slot_browser(
+                                _slot_files, report_tier=report_tier, max_chars=ENRICH_FETCH_CHARS,
+                                matches_source=lambda text, row: _page_text_matches_source(text, row, question, intent))
+                        except Exception as _sfb_exc:
+                            _slot_stats["dataFileBrowser"] = {"error": type(_sfb_exc).__name__}
+                        for _r in _slot_files:
+                            _r["discoveredVia"] = _r.get("discoveredVia") or "measure_slot_data_link"
+                        _slot_rows.extend(_slot_files)
+                        _slot_stats["dataFiles"] = {
+                            "followed": len(_slot_file_rows),
+                            "added": sum(1 for r in _slot_files if r.get("pageFetchStatus") == "ok"),
+                            "files": [{"url": r.get("url"), "status": r.get("pageFetchStatus"),
+                                       "format": r.get("pageDataFormat"), "parent": r.get("parentUrl")}
+                                      for r in _slot_files],
+                        }
+                except Exception as _sdl_exc:
+                    _slot_stats["dataFiles"] = {"error": type(_sdl_exc).__name__}
                 for _r in _slot_rows:
                     _r["discoveredVia"] = _r.get("discoveredVia") or "measure_slot"
                 enriched_raw.extend(_slot_rows)  # failed fetches keep their labelled search excerpt, as above
-                _slots_after = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)])
+                _slots_after = _slot_coverage(_mp_slots, [r for r in enriched_raw if isinstance(r, dict)],
+                                              years=_slot_window)
                 _slot_stats.update({"found": len(_slot_found), "new": len(_slot_fresh), "fetched": len(_slot_rows),
                                     "fetchedOk": sum(1 for r in _slot_rows if r.get("pageFetchStatus") == "ok"),
                                     "coveredAfter": sum(s["covered"] for s in _slots_after),
@@ -21939,8 +23038,18 @@ async def generate_report(request: Request):
             from utils.llm_gateway import LLMGateway as _OdGateway
             from utils.official_data import official_sources as _official_sources
             _mp = locals().get("_measure_plan")
+            _shared_gateway = locals().get("_report_llm_gateway")
+            if _shared_gateway is not None:
+                try:
+                    _od_reserve = max(0, int(_os.getenv("GG_V2_REPORT_WRITER_CALL_RESERVE", "4")))
+                except (TypeError, ValueError):
+                    _od_reserve = 4
+                _od_gateway = _shared_gateway if _shared_gateway.remaining > _od_reserve else None
+            else:
+                # Preserve the existing attachment-plus-external-context path.
+                _od_gateway = _OdGateway(_sys.modules[__name__], report_tier, budget=2)
             _od_rows, _od_note = await _official_sources(
-                question, _OdGateway(_sys.modules[__name__], report_tier, budget=2),
+                question, _od_gateway,
                 today=_od_date.today(), tier=report_tier, measures=_mp.brief() if _mp is not None else "")
             if _od_rows:
                 _od_urls = {str(r.get("url") or "").rstrip("/") for r in _od_rows}
@@ -22016,6 +23125,47 @@ async def generate_report(request: Request):
     # source IDs. The same canonical manifest is then used by charts, audit,
     # Show Report and PDF export.
     source_manifest = build_source_registry(enriched, source_documents)
+    # A linked CSV/XLSX can carry exact observations while its parent page
+    # supplies only the missing table units. Keep that relation explicit in
+    # the canonical manifest, and only when both direct fetches passed the
+    # same relevance gate. The parent context contains captions/headers, not
+    # its numeric observations.
+    try:
+        from utils.data_links import parent_data_context as _parent_data_context
+        _manifest_by_identity = {
+            source_identity_key(source): source for source in source_manifest
+            if isinstance(source, dict) and source_identity_key(source)
+        }
+        _rows_by_identity = {
+            source_identity_key(row): row for row in enriched
+            if isinstance(row, dict) and source_identity_key(row)
+        }
+        for _child_row in enriched:
+            if not isinstance(_child_row, dict) or not str(_child_row.get("parentUrl") or "").strip():
+                continue
+            if (_child_row.get("pageFetchStatus") != "ok"
+                    or _child_row.get("pageFetchRelevanceMatched") is not True):
+                continue
+            _child_identity = source_identity_key(_child_row)
+            _parent_identity = source_identity_key({"url": _child_row.get("parentUrl")})
+            _child_manifest = _manifest_by_identity.get(_child_identity)
+            _parent_row = _rows_by_identity.get(_parent_identity)
+            _parent_manifest = _manifest_by_identity.get(_parent_identity)
+            if (not _child_manifest or not _parent_row or not _parent_manifest
+                    or _parent_row.get("pageFetchStatus") != "ok"
+                    or _parent_row.get("pageFetchRelevanceMatched") is not True):
+                continue
+            _context = _parent_data_context(_parent_row.get("pageContent"))
+            if not _context:
+                continue
+            _child_manifest.update({
+                "data_parent_source_id": str(_parent_manifest.get("id") or "").upper(),
+                "data_parent_url": canonical_http_url(str(_parent_manifest.get("url") or "")),
+                "data_parent_title": str(_parent_manifest.get("title") or "")[:300],
+                "data_parent_context": _context,
+            })
+    except Exception as _parent_context_exc:
+        log.debug("Report: linked data parent context unavailable: %s", type(_parent_context_exc).__name__)
     workbook_source_id = ""
     workbook_source_ids_by_name: dict[str, str] = {}
     if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
@@ -22766,7 +23916,9 @@ async def generate_report(request: Request):
                                 async with sem, hosts.slot(str(done[i].get("url") or "")):
                                     return i, await _enrich_report_source(dict(rows[i]), i, question, intent,
                                                                           max_chars=ENRICH_FETCH_CHARS, semaphore=None,
-                                                                          fetch_seconds=_esec(done[i]))
+                                                                          fetch_seconds=_esec(done[i]),
+                                                                          data_entities=_report_data_entities,
+                                                                          data_years=_report_data_years)
                             for i, row in await asyncio.gather(*[again(i) for i in failed]):
                                 if row.get("pageFetchStatus") == "ok":
                                     done[i] = row
@@ -22842,10 +23994,15 @@ async def generate_report(request: Request):
                 return reasons
 
             from utils.evidence_check import manifest_auditor as _v2_manifest_auditor
+            _v2_window_note = _append_requested_measure_scope(
+                _past_n_quarters_anchor(question, _v2_today),
+                locals().get("_measure_plan"), has_uploaded_data=_has_uploaded_data,
+            )
             _v2_result = await run_pipeline_v2(
                 runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
                 manifest=source_manifest, today=_v2_today.isoformat(),
-                window_note=_past_n_quarters_anchor(question, _v2_today).strip(),
+                gateway=locals().get("_report_llm_gateway"),
+                window_note=_v2_window_note,
                 progress=lambda message: _report_progress("writing", message, 70),
                 tiers=_v2_tiers, chart_verifier=_v2_chart_preverify, entity_search_stats=_v2_entity_stats,
                 # V2 runs this same source-evidence check on its own text and drops what it flags.
@@ -22861,9 +24018,8 @@ async def generate_report(request: Request):
             record_research_stage("pipeline_v2", _v2_result["meta"])
             _v2_meta_for_publication = _v2_result["meta"]
             _v2_registered = _register_v2_chart_evidence(json.loads(raw).get("charts") or [], evidence_store)
-            # Stage F: one early validation; later topical-relevance pruning keeps these charts.
-            from utils.chart_evidence_audit import trust_validated_charts as _v2_trust_charts
-            _v2_trust_charts(json.loads(raw).get("charts") or [])
+            # V2 validates each value against its passage; publication still checks
+            # whether that verified source measures the topic and entities requested.
             log.info("Report: pipeline v2 registered chart evidence rows for %d source(s); V1 numeric redaction and "
                      "cross-section dedupe are skipped (v2 checks numbers per passage: %s unsupported)",
                      _v2_registered, _v2_result["meta"].get("unsupportedNumbers"))
@@ -24438,6 +25594,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             log.info("Workbook-only report: measured PDF preflight pages=%s without forcing page-band expansions", preflight_pages)
         else:
@@ -24448,6 +25606,7 @@ async def generate_report(request: Request):
                 key_stats=parsed.get("keyStats", []) or [], charts=charts, sources=source_manifest,
                 presentation=report_presentation, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style, kicker=str(parsed.get("kicker") or "")[:60],
                 requested_pages=requested_page_count, allow_floor_expansion=not _v2_used,
             )
         report_text = strip_generation_markers(report_text)
@@ -24467,6 +25626,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [],
                 charts, source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if hygiene_pages is not None:
                 preflight_pages = hygiene_pages
@@ -24488,6 +25649,8 @@ async def generate_report(request: Request):
                     str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [],
                     charts, source_manifest, report_presentation, report_tier, web_images=images,
                     file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                    report_style=report_style,
+                    kicker=str(parsed.get("kicker") or "")[:60],
                 )
                 if refreshed is not None:
                     preflight_pages = refreshed
@@ -24505,6 +25668,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if refreshed_pages is not None:
                 preflight_pages = refreshed_pages
@@ -24599,6 +25764,8 @@ async def generate_report(request: Request):
                     str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                     source_manifest, report_presentation, report_tier, web_images=images,
                     file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                    report_style=report_style,
+                    kicker=str(parsed.get("kicker") or "")[:60],
                 )
         except asyncio.TimeoutError:
             log.info("Report QA: secondary review exceeded its budget; shipping the already validated report")
@@ -24624,6 +25791,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if final_preflight is not None:
                 preflight_pages = final_preflight
@@ -24788,6 +25957,8 @@ async def generate_report(request: Request):
             str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
             source_manifest, report_presentation, report_tier, web_images=images,
             file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+            report_style=report_style,
+            kicker=str(parsed.get("kicker") or "")[:60],
         )
         if final_chart_gate_pages is not None:
             preflight_pages = final_chart_gate_pages
@@ -24855,6 +26026,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if _chart_pages is not None:
                 preflight_pages = _chart_pages
@@ -24942,6 +26115,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if _sanitized_pages is not None:
                 preflight_pages = _sanitized_pages
@@ -24986,14 +26161,22 @@ async def generate_report(request: Request):
         # source lines (not from the writer's prose, which the evidence gates
         # above may have pruned). Inserted after the chart evidence gate; its
         # charts carry per-point quotes that the final audits verify.
-        if _v2_used:
-            _gallery_meta = {"charts": 0, "coverageStatus": "pipeline_v2_planned_charts"}
-        elif promoter_exit_request:
-            _gallery_meta = {
-                "charts": 0,
-                "coverageStatus": "partial_research_sample",
-                "coverageReason": "A non-exhaustive filing sample cannot support a market-wide promoter-sales chart or denominator.",
-            }
+        if not _should_use_evidence_chart_gallery(
+            v2_used=_v2_used, has_uploaded_data=_has_uploaded_data,
+            charts=charts, promoter_exit_request=promoter_exit_request,
+        ):
+            if promoter_exit_request:
+                _gallery_meta = {
+                    "charts": 0,
+                    "coverageStatus": "partial_research_sample",
+                    "coverageReason": "A non-exhaustive filing sample cannot support a market-wide promoter-sales chart or denominator.",
+                }
+            else:
+                # Uploaded-file reports retain their isolated chart path. Web
+                # reports with no surviving V2 charts get one strict, deterministic
+                # extraction pass from fetched source rows; this branch preserves
+                # the prior V2 metadata for uploaded reports and existing charts.
+                _gallery_meta = {"charts": 0, "coverageStatus": "pipeline_v2_planned_charts"}
         else:
             try:
                 report_text, charts, _gallery_meta = _append_evidence_chart_gallery(
@@ -25027,6 +26210,8 @@ async def generate_report(request: Request):
                 str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                 source_manifest, report_presentation, report_tier, web_images=images,
                 file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
             )
             if _gallery_pages is not None:
                 preflight_pages = _gallery_pages
@@ -25091,6 +26276,8 @@ async def generate_report(request: Request):
                         str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                         source_manifest, report_presentation, report_tier, web_images=images,
                         file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                        report_style=report_style,
+                        kicker=str(parsed.get("kicker") or "")[:60],
                     )
                     if _fta_scope_pages is not None:
                         preflight_pages = _fta_scope_pages
@@ -25150,6 +26337,8 @@ async def generate_report(request: Request):
                     str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], _repair_charts,
                     source_manifest, report_presentation, report_tier, web_images=images,
                     file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                    report_style=report_style,
+                    kicker=str(parsed.get("kicker") or "")[:60],
                 )
                 _repair_manifest = ensure_cited_source_records(_repair_text, source_manifest)
                 _repair_audit_sources = _attach_audit_source_evidence(_repair_manifest, enriched, _repair_text)
@@ -25257,6 +26446,8 @@ async def generate_report(request: Request):
             str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
             source_manifest, report_presentation, report_tier, web_images=images,
             file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+            report_style=report_style,
+            kicker=str(parsed.get("kicker") or "")[:60],
         )
         if _final_measured_pages is not None:
             preflight_pages = _final_measured_pages
@@ -25469,6 +26660,8 @@ async def generate_report(request: Request):
                     str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
                     source_manifest, report_presentation, report_tier, web_images=images,
                     file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                    report_style=report_style,
+                    kicker=str(parsed.get("kicker") or "")[:60],
                 )
                 if _attachment_pages is not None:
                     preflight_pages = _attachment_pages
@@ -25509,7 +26702,10 @@ async def generate_report(request: Request):
             if _v2_figures.get("danglingRefsNeutralized"):
                 log.info("Report: pipeline v2 rewrote %d reference(s) to figures removed by later gates",
                          _v2_figures["danglingRefsNeutralized"])
-        clean_title = _align_title_horizon(_sanitize_title(parsed.get("title", ""), report_topic), question)
+        clean_title = _align_title_horizon(
+            _sanitize_title(parsed.get("title", ""), report_topic), question,
+            has_uploaded_data=_has_uploaded_data,
+        )
         clean_theme = _resolve_theme(parsed.get("theme"), question)
         final_format = recommended_format
         elapsed = (time.perf_counter() - t0) * 1000
@@ -25737,7 +26933,8 @@ async def generate_report(request: Request):
                         summary=payload.get("summary") or "", key_stats=payload.get("keyStats") or [],
                         charts=payload.get("charts") or [], file_images=[], web_images=payload.get("images") or [],
                         theme=payload.get("theme"), sources=payload.get("sources"), presentation=payload.get("presentation"),
-                        report_tier=report_tier)))
+                        report_tier=report_tier, report_style=payload.get("reportStyle"),
+                        kicker=str(payload.get("kicker") or "")[:60])))
 
                 def _si_audit_fn(pdf_bytes, payload):
                     return _si_audit(pdf_bytes, payload.get("report") or "", payload.get("title") or "",
@@ -25979,6 +27176,7 @@ async def generate_report(request: Request):
                         key_stats=salvaged.get("keyStats", []) or [], charts=salvaged["charts"], sources=source_manifest,
                         presentation=report_presentation, web_images=salvaged.get("images", []) or [],
                         file_images=embedded_file_images, theme=_resolve_theme(salvaged.get("theme"), question),
+                        report_style=report_style, kicker=str(salvaged.get("kicker") or "")[:60],
                         requested_pages=requested_page_count,
                     )
                     log.info("Report: salvage pagination preflight=%s advisoryMaximum=%d tier=%s",

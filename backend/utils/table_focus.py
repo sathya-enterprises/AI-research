@@ -43,13 +43,14 @@ def _period_end(label: str) -> int | None:
     return _period_end_year(label)
 
 
-def plan(header: list[str], rows: list[list[str]], *, entities: list[str], min_year: int | None) -> dict:
+def plan(header: list[str], rows: list[list[str]], *, entities: list[str], min_year: int | None,
+         max_year: int | None = None) -> dict:
     """{'cols': [...] | None, 'rows': {row labels} | None, 'reason': str} — None means "no restriction".
 
     * columns: when >= 2 of the question's entities are column headers, only those columns (the first column,
       the row label, is always kept);
     * rows: when >= 2 of the question's entities are row labels of a table with >= 5 rows, only those rows;
-    * periods: when the row labels are dated periods and some fall before ``min_year``, only the in-window rows.
+    * periods: when row labels or headers are dates, keep only periods inside the requested year bounds.
     """
     out: dict = {"cols": None, "rows": None, "reason": ""}
     if not header or not rows:
@@ -65,21 +66,23 @@ def plan(header: list[str], rows: list[list[str]], *, entities: list[str], min_y
         if len(keep) >= 2 and len(labels) >= 5 and len(keep) < len(labels):
             out["rows"] = keep
             reasons.append("rows: " + ", ".join(sorted(keep)))
-    if min_year:  # period COLUMNS ("Country | 1990 | ... | 2024"): only the in-window ones
+    if min_year or max_year:  # period COLUMNS ("Country | 1990 | ... | 2024"): only the in-window ones
         ends = {i: _period_end(h) for i, h in enumerate(header) if i > 0}
         dated = {i: y for i, y in ends.items() if y is not None}
         if len(dated) >= 3 and len(dated) >= 0.8 * len(ends):
-            inside = [i for i, y in dated.items() if y >= min_year]
+            inside = [i for i, y in dated.items()
+                      if (min_year is None or y >= min_year) and (max_year is None or y <= max_year)]
             if len(inside) >= 3 and len(inside) < len(dated):
                 base = out["cols"] if out["cols"] is not None else [i for i in ends]
                 out["cols"] = [i for i in base if i in inside or i not in dated]
-                reasons.append(f"period columns from {min_year}")
+                reasons.append(f"period columns {min_year or 'start'}-{max_year or 'latest'}")
         labels = [r[0] for r in rows if r]
         ends = {lab: _period_end(lab) for lab in labels}
         if labels and all(v is not None for v in ends.values()):
-            inside = {lab for lab, y in ends.items() if y >= min_year}
+            inside = {lab for lab, y in ends.items()
+                      if (min_year is None or y >= min_year) and (max_year is None or y <= max_year)}
             if len(inside) >= 3 and len(inside) < len(labels):
                 out["rows"] = inside if out["rows"] is None else (out["rows"] & inside)
-                reasons.append(f"periods from {min_year}")
+                reasons.append(f"periods {min_year or 'start'}-{max_year or 'latest'}")
     out["reason"] = "; ".join(reasons)
     return out

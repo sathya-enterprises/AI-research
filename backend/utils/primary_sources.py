@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 # second-level labels used by governments worldwide: <label>.<country> or <label> alone
 _GOV_LABELS = ("gov", "gob", "gouv", "go", "govt", "gv", "gc", "admin", "bund", "government", "nic", "mil")
@@ -71,12 +71,27 @@ def file_extension(url: str, content_type: str = "") -> str:
     if "opendocument.spreadsheet" in ctype:
         return ".ods"
     try:
-        path = urlparse(str(url or "")).path.casefold()
+        parts = urlparse(str(url or ""))
+        path = parts.path.casefold()
     except ValueError:
         return ""
     for ext in DATA_FILE_EXTENSIONS:
         if path.endswith(ext):
             return ext
+    # Data APIs often expose a format through a query parameter instead of a
+    # filename (for example UNICEF SDMX's ?format=csv). Recognize only explicit
+    # format/filename values so ordinary page parameters stay ordinary pages.
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        key, value = key.casefold(), value.strip().casefold()
+        if key in {"format", "output", "export", "extension", "ext", "type"}:
+            compact = value.rsplit("/", 1)[-1].split(";", 1)[0].lstrip(".")
+            candidate = f".{compact}"
+            if candidate in DATA_FILE_EXTENSIONS:
+                return candidate
+        if key in {"file", "filename", "download", "attachment"}:
+            for ext in DATA_FILE_EXTENSIONS:
+                if value.endswith(ext):
+                    return ext
     return ""
 
 

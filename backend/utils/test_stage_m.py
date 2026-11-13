@@ -41,13 +41,73 @@ def test_measure_plan_is_validated_and_becomes_data_searches():
                                                   "electric two-wheeler sales by maker"]
     assert len(plan.rejected) == 2
     queries = measure_queries(plan, "EV adoption in India past 5 years", today=TODAY, tier="in_depth")
-    assert queries[0].startswith("share of new car sales that are electric India China statistics by year")
+    assert queries[0].startswith("share of new car sales that are electric India China annual time series")
     assert len(queries) == 6 and all("official" in q or "table" in q for q in queries)
+
+
+def test_explicit_measure_units_override_related_but_unrequested_planner_suggestions():
+    question = (
+        "Compare internet use (% of individuals using the internet) and mobile-cellular subscriptions per 100 people "
+        "in India, Kenya, and Brazil from 2015 to 2024. Show annual trends, the latest country gaps, "
+        "and documented digital access drivers."
+    )
+    countries = ["India", "Kenya", "Brazil"]
+    gw = _Gateway({"scope": "India, Kenya, Brazil", "measures": [
+        {"measure": "percentage of individuals using the internet", "entities": countries, "chart": "trend"},
+        {"measure": "cost of 1GB of mobile data as a percentage of monthly GNI per capita", "entities": countries, "chart": "trend"},
+        {"measure": "4G or 5G network population coverage", "entities": countries, "chart": "comparison"},
+    ]})
+
+    plan = asyncio.run(plan_measures(question, gw, today=TODAY, tier="detailed"))
+
+    assert gw.calls == ["measure_plan"]  # deterministic reconciliation uses no extra LLM call
+    assert [m.measure for m in plan.measures] == [
+        "internet use (% of individuals using the internet)",
+        "mobile-cellular subscriptions per 100 people",
+    ]
+    assert all(m.entities == countries and m.chart == "trend" for m in plan.measures)
+    assert {item["measure"] for item in plan.rejected} == {
+        "cost of 1GB of mobile data as a percentage of monthly GNI per capita",
+        "4G or 5G network population coverage",
+    }
+    queries = measure_queries(plan, question, today=TODAY, tier="detailed")
+    assert len(queries) == 2
+    assert all("2015 to 2024" in query and "annual time series" in query for query in queries)
+    assert all(all(query.count(country) == 1 for country in countries) for query in queries)
+    assert "mobile-cellular subscriptions per 100 people" in queries[1]
+    assert not any("cost of 1GB" in query or "4G or 5G" in query for query in queries)
+
+
+def test_one_valid_measure_is_kept_for_a_single_metric_question():
+    gw = _Gateway({"scope": "India", "measures": [
+        {"measure": "life expectancy at birth", "entities": [], "chart": "trend"},
+    ]})
+    plan = asyncio.run(plan_measures("How has life expectancy in India changed?", gw, today=TODAY, tier="detailed"))
+    assert plan.method == "llm"
+    assert [measure.measure for measure in plan.measures] == ["life expectancy at birth"]
+    query = measure_queries(plan, "How has life expectancy in India changed?", today=TODAY,
+                            tier="detailed")[0]
+    assert "annual time series" in query and "life expectancy at birth" in query
+
+
+def test_measure_search_shape_follows_comparison_share_and_ranking_requests():
+    expected = {
+        "How does renewable energy share break down by source?": ("share", "composition breakdown"),
+        "How has electric vehicle share changed over time in India?": ("trend", "annual time series"),
+        "Compare unemployment rates between Canada and Brazil": ("comparison", "comparison across entities"),
+        "Rank countries by annual patent applications": ("ranking", "ranked values"),
+    }
+    for question, (kind, phrase) in expected.items():
+        plan = fallback_plan(question)
+        assert plan.measures and plan.measures[0].chart == kind
+        queries = measure_queries(plan, question, today=TODAY, tier="detailed")
+        assert queries and phrase in queries[0]
 
 
 def test_measure_plan_falls_back_without_the_llm():
     plan = asyncio.run(plan_measures("measles vaccination coverage in Africa", None, today=TODAY, tier="detailed"))
     assert plan.method.startswith("keywords") and plan.measures
+    assert fallback_plan("inflation").measures[0].measure == "inflation"
     assert fallback_plan("x").measures == []
     assert validate({"measures": "nope"}, tier="detailed").measures == []
 
@@ -96,3 +156,31 @@ def test_where_sources_disagree():
     assert "₹1,52,692 crore [S3] vs ₹1.8 trillion [S85]" in note and note.startswith("**Where sources disagree.**")
     same_source = "## A: X\n\nIndian sales of cars rose to ₹100 crore in FY26 [S1].\n\n## B: X\n\nIndian sales of cars were ₹300 crore in FY26 [S1]."
     assert find_disagreements(same_source) == []
+
+
+def test_disagreement_check_keeps_leading_country_entities_distinct():
+    from utils.disagreements import find_disagreements, statements
+
+    comparison = (
+        "## Internet use\n\n"
+        "In Brazil, internet usage was 84.46% in 2024 [S1].\n\n"
+        "Kenya's internet usage was 34.98% in 2024 [S2]."
+    )
+    parsed = statements(comparison)
+    assert [item["entities"] for item in parsed] == [{"brazil"}, {"kenya"}]
+    assert find_disagreements(comparison) == []
+
+    same_subject = (
+        "## Brazil: Internet use\n\n"
+        "Brazil's internet usage was 84.46% in 2024 [S1].\n\n"
+        "Brazil's internet usage was 65% in 2024 [S2]."
+    )
+    assert len(find_disagreements(same_subject)) == 1
+
+
+def test_disagreement_check_does_not_assume_an_unstated_shared_entity():
+    report = (
+        "## Internet use\n\nInternet usage was 84.46% in 2024 [S1].\n\n"
+        "Internet usage was 34.98% in 2024 [S2]."
+    )
+    assert find_disagreements(report) == []

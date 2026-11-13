@@ -77,8 +77,6 @@ def replay_run(run: Path) -> dict:
     text = str(result.get("report") or "")
     charts = [c for c in (result.get("charts") or []) if isinstance(c, dict)]
     images = list(result.get("images") or [])
-    from utils.chart_evidence_audit import trust_validated_charts
-    trust_validated_charts(charts if store is not None else [])
 
     def rerun(t, chs):
         srcs = R._attach_audit_source_evidence(manifest, enriched, t)

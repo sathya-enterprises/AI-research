@@ -468,19 +468,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # Charts: build from stored data, assign to sections, number in section order.
     try:
         from datetime import date as _date
-        from utils.source_quality import window_start
-        min_year = window_start(question, _date.fromisoformat(today[:10])).year
+        from utils.data_angles import requested_year_bounds
+        min_year, max_year = requested_year_bounds(question, _date.fromisoformat(today[:10]))
     except Exception:
-        min_year = None
+        min_year, max_year = None, None
     from utils.table_focus import focus_entities as _focus_entities
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
-                                                     today=today, focus=_focus_entities(question))
+                                                     max_year=max_year, today=today, focus=_focus_entities(question))
     table_chart_count = len(candidates) + len(chart_drops)
     series_warnings: list[dict] = []  # Stage M: sudden breaks in otherwise stable series (kept, said out loud)
     # Data first (Stage F): charts planned from fetched datasets before writing; they go through
     # the same verification below and are placed in their own sector's deep-dive.
     from utils.dataset_charts import build_dataset_charts, preassign
-    from utils.section_charts import verify_chart
+    from utils.section_charts import clip_to_window, verify_chart
     dataset_charts, dataset_note = build_dataset_charts(store)
     # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
     # flattened tables), code verifies every value and label against the passage.
@@ -508,7 +508,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         except Exception as exc:  # extraction must never abort a report
             log.warning("V2 dataset extraction skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     for chart in dataset_charts:
-        reason = verify_chart(chart, "\n".join(store.get(pid).text for pid in chart.passage_ids if store.get(pid)))
+        reason = clip_to_window(chart, min_year, max_year)
+        if not reason:
+            reason = verify_chart(chart, "\n".join(store.get(pid).text for pid in chart.passage_ids if store.get(pid)))
         if reason:
             chart.status, chart.drop_reason = "dropped", reason
             chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),

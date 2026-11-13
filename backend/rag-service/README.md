@@ -35,7 +35,7 @@ Compatibility note: the project pins sentence-transformers 3.0.1. The CrossEncod
 
 1. In Supabase, enable the `vector` extension.
 2. Confirm the already-provisioned Supabase `vector` extension, `public.rag_chunks` table, HNSW cosine index, and `rag_match_chunks` RPC exist. The one-time migration is intentionally omitted from this cleaned source bundle because it has already been applied.
-3. Configure `SUPABASE_URL` and a **server-only** `SUPABASE_SECRET_KEY` (preferred) or legacy `SUPABASE_SERVICE_ROLE_KEY` in `backend/rag-service/.env`. The service also reads `backend/.env` for local development. Do not place server credentials in frontend variables.
+3. Configure `SUPABASE_URL` and a **server-only** `SUPABASE_SECRET_KEY` (preferred) or legacy `SUPABASE_SERVICE_ROLE_KEY` in `backend/rag-service/.env`. When the REST server key is not configured, the service can use the backend-only `RESEARCH_DATABASE_URL` for direct PostgreSQL access; it never falls back to the public anon key for private RAG writes. The service also reads `backend/.env` for local development. Do not place server credentials in frontend variables.
 4. Restart the RAG service and verify `/health` reports `vector_storage.ready: true`.
 
 The migration expects the 384-dimensional `all-MiniLM-L6-v2` embedding model. If you change `EMBED_MODEL`, update the vector column, RPC argument, and HNSW index dimensions together. Existing sessions stored as OKF documents but not yet in pgvector are re-embedded once on first use and then persisted in Postgres.

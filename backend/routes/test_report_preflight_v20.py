@@ -21,6 +21,7 @@ def test_page_preflight_uses_same_build_pdf_renderer(monkeypatch):
         web_images=[{"url": "https://example.test/a.png"}],
         file_images=[{"name": "chart.png", "data": "Zm9v"}],
         theme={"primaryColor": "#17384F"},
+        report_style="market_currents", kicker="Solar outlook",
     )
     assert result == 23
     assert len(calls) == 1
@@ -28,6 +29,8 @@ def test_page_preflight_uses_same_build_pdf_renderer(monkeypatch):
     assert calls[0]["web_images"][0]["url"] == "https://example.test/a.png"
     assert calls[0]["file_images"][0]["name"] == "chart.png"
     assert calls[0]["theme"]["primaryColor"] == "#17384F"
+    assert calls[0]["report_style"] == "market_currents"
+    assert calls[0]["kicker"] == "Solar outlook"
 
 
 def test_pdf_preflight_output_is_not_built_from_weasyprint_first(monkeypatch):

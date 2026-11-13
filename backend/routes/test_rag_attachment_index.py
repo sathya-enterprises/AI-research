@@ -106,6 +106,40 @@ async def test_image_ocr_text_is_indexed_and_returned_for_report_context(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_all_workbook_sheets_and_csv_rows_are_handed_to_vector_indexing(monkeypatch):
+    captured = {}
+
+    async def fake_index(session_id, documents):
+        captured["session_id"] = session_id
+        captured["documents"] = documents
+        return _index_result(documents)
+
+    monkeypatch.setattr(rag_route, "rag_index", fake_index)
+    workbook_text = "\n".join(
+        f"[Sheet: Table {sheet}]\nFund | 1Y Return (%)\nScheme {sheet} | {sheet}.25"
+        for sheet in range(2, 27)
+    )
+    csv_text = "Period,China capacity (GW)\n2022,75.0\n2023,86.4\n2024,91.2"
+    response = await rag_route.index_documents(_request({
+        "session_id": "multi-sheet-session",
+        "documents": [
+            {"name": "PMSPRFFEB2026.xlsx", "file_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text": workbook_text},
+            {"name": "china-solar.csv", "file_type": "text/csv", "text": csv_text},
+        ],
+    }))
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["index_status"] == "indexed"
+    assert payload["vector_persistence"]["status"] == "persisted"
+    assert len(captured["documents"]) == 2
+    indexed_workbook = captured["documents"][0]["text"]
+    assert all(f"[Sheet: Table {sheet}]" in indexed_workbook for sheet in range(2, 27))
+    assert "Scheme 26 | 26.25" in indexed_workbook
+    assert "2024,91.2" in captured["documents"][1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_empty_or_unreadable_attachments_do_not_report_success(monkeypatch):
     called = False
 

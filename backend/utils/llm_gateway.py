@@ -104,15 +104,23 @@ class LLMGateway:
         self._model_429: dict[str, dict[str, float]] = {}
         self.stats_rate_limited_models = 0
 
+    @property
+    def remaining(self) -> int:
+        """Logical calls still available to this report, including concurrent work."""
+        return max(0, int(self.budget) - int(self.stats.calls))
+
     # ── public ────────────────────────────────────────────────────────────────
     async def generate(self, *, purpose: str, prompt: str, system: str = "", section_id: str = "",
                        max_tokens: int = 4096, temperature: float = 0.2, json_mode: bool = False,
                        timeout: float = 90.0, retries: int = 1) -> LLMResult:
-        if self.stats.calls >= self.budget:
-            self.stats.budget_refusals += 1
-            log.warning("V2 LLM budget exhausted (%d calls); %s/%s not run", self.budget, purpose, section_id)
-            return LLMResult(ok=False, error="budget_exhausted")
         async with self.semaphore:
+            # Reserve a logical call only after entering the semaphore. Checking
+            # before awaiting allowed many queued coroutines to all pass the
+            # budget check and overspend the per-report allowance.
+            if self.stats.calls >= self.budget:
+                self.stats.budget_refusals += 1
+                log.warning("V2 LLM budget exhausted (%d calls); %s/%s not run", self.budget, purpose, section_id)
+                return LLMResult(ok=False, error="budget_exhausted")
             self.stats.calls += 1
             self.stats.by_purpose[purpose] += 1
             started = time.perf_counter()

@@ -360,13 +360,20 @@ def test_extracted_datasets_are_verified_against_the_passage():
 
 
 def test_data_seeking_angles():
-    from utils.data_angles import data_angles
+    from utils.data_angles import data_angles, window_years
     q = "How has India's electric vehicle market evolved over the past 3 years, and what are the key growth drivers?"
     angles = data_angles(q, ["India EV policy"], tier="in_depth", today=date(2026, 11, 10))
     assert len(angles) == 2 and angles[0].startswith("India electric vehicle market year-wise statistics 2023")
     assert data_angles(q, ["India EV sales statistics by year"], tier="detailed", today=date(2026, 11, 10)) == []
     since = data_angles("Impacts of semiconductor supply chain shifts since 2022?", ["x"], tier="detailed", today=date(2026, 11, 10))
     assert "2022 2023 2024 2025 2026" in since[0]
+    years = list(range(2010, 2025))
+    historic = "Compare health outcomes from 2010 through 2024."
+    assert window_years(historic, date(2026, 11, 10)) == years
+    assert data_angles(historic, ["health outcomes"], tier="detailed", today=date(2026, 11, 10))[0].endswith(" ".join(map(str, years)) + " official data")
+    from utils.measure_plan import Measure, MeasurePlan, measure_queries
+    plan = MeasurePlan(scope="Brazil", measures=[Measure("life expectancy", entities=["Brazil"])])
+    assert "2010 to 2024" in measure_queries(plan, historic, today=date(2026, 11, 10), tier="detailed")[0]
 
 
 def test_question_windows_since_and_past_years():
@@ -378,6 +385,62 @@ def test_question_windows_since_and_past_years():
     assert window_start("trends from 2022 to 2024", date(2026, 11, 10)) == date(2022, 1, 1)
     p3 = "How has the market evolved over the past 3 years?"
     assert outside(p3, ["2022"], {}) and not outside(p3, ["2023"], {}) and not outside(p3, ["2024"], {})
+
+
+def test_official_dataset_chart_ignores_api_retrieval_date_for_data_window():
+    from types import SimpleNamespace
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency, drop_charts_outside_requested_window
+    from utils.official_data import CATALOG, Dataset, as_source, official_charts
+
+    row = as_source(Dataset(
+        entry=CATALOG["wb.internet"], years=list(range(2015, 2025)),
+        series={
+            "Brazil": [58.33, 60.87, 67.47, 70.43, 73.91, 81.34, 80.69, 80.53, 84.15, 84.46],
+            "India": [14.90, 16.50, 18.20, 20.08, 29.52, 43.41, 49.26, 55.90, 60.25, 64.94],
+            "Kenya": [16.59, 16.60, 17.83, 19.50, 22.67, 24.72, 26.96, 29.41, 32.07, 34.98],
+        },
+        retrieved="2026-11-13", latest=2024,
+    ))
+    passage = SimpleNamespace(
+        kind="table", title=row["title"], text=row["fullContent"],
+        source_id="S1", passage_id="S1.1",
+    )
+    chart = official_charts(SimpleNamespace(passages=[passage]),
+                            "Compare internet use in Brazil, India, and Kenya from 2015 to 2024")[0]
+    source = {
+        "id": "S1", "title": row["title"], "url": row["url"], "publisher": row["publisher"],
+        "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page",
+        "publisherEvidenceExcerpt": row["fullContent"], "pageContent": row["fullContent"],
+        "publication_date": row["published"], "source_type": row["sourceType"],
+    }
+    audit = audit_chart_evidence_consistency(
+        "", [dict(chart.spec, evidencePassages=chart.passage_ids)], [source],
+        require_publisher_verification=True,
+        question="Compare internet use in Brazil, India, and Kenya from 2015 to 2024",
+    )
+    assert audit["chartEvidenceFailures"] == []
+    assert audit["chartTableVerificationConflicts"] == []
+    _, kept, period_gate = drop_charts_outside_requested_window(
+        "", [dict(chart.spec, evidencePassages=chart.passage_ids)], [source],
+        "Compare internet use in Brazil, India, and Kenya from 2015 to 2024",
+    )
+    assert len(kept) == 1 and period_gate["removedCharts"] == 0
+
+
+def test_uploaded_source_period_handling_keeps_existing_path():
+    from utils.chart_evidence_audit import _periods_outside_question_window, _source_period_metadata
+
+    source = {
+        "id": "S1", "title": "Workbook observations 2015-2024.xlsx",
+        "source_type": "Official dataset", "kind": "uploaded attachment",
+        "evidence_origin": "uploaded_workbook",
+        "publication_date": "2026-11-13",
+    }
+    metadata = _source_period_metadata(source)
+    assert "2026-11-13" in metadata
+    assert _periods_outside_question_window(
+        "Compare data from 2015 to 2024", ["Latest ranked"], metadata,
+    ) == ["2026-11-13"]
 
 
 def test_quality_gate_drops_teaser_tables_and_unlabelled_forecasts():

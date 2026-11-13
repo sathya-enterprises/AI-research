@@ -3,10 +3,10 @@ import asyncio
 import json
 
 from utils.entity_research import plan_entity_queries, run_entity_search
-from utils.entity_tiers import canonical, entity_tiers
+from utils.entity_tiers import EntityEvidence, canonical, entity_tiers
 from utils.evidence_store import build_evidence_store
 from utils.llm_gateway import GatewayStats, LLMResult
-from utils.report_outline import Section, build_outline, repair_outline, validate_outline
+from utils.report_outline import Section, build_outline, repair_outline, tiers_block, validate_outline
 
 
 def _store():
@@ -55,6 +55,31 @@ def test_validator_rejects_small_outline_and_repair_adds_missing_entities():
     assert any(s.role == "compact" for s in repaired)
     assert not any("deep-dive" in e or "compact" in e for e in validate_outline(repaired, "in_depth", tiers))
     assert len(decisions) == 2
+
+
+def test_outline_ignores_unrequested_places_but_keeps_explicitly_named_publishers_and_peers():
+    tiers = {"deep_dive": [], "compact": [
+        EntityEvidence(name="Canada", role="out_of_scope", tier="compact", table_passages={"S1"}),
+        EntityEvidence(name="United States", aliases={"US"}, role="out_of_scope", tier="compact",
+                       table_passages={"S1"}),
+        EntityEvidence(name="World Health Organization", aliases={"WHO"}, role="body", tier="compact",
+                       table_passages={"S2"}),
+    ], "coverage_note": []}
+    question = "Compare India and the US; use WHO indicators, with other countries only as context."
+    block = tiers_block(tiers, question)
+    assert "Canada" not in block
+    assert "United States" in block and "World Health Organization" in block
+
+    sections = [Section(f"sec-{i}", f"Cross-cutting {i}") for i in range(1, 12)]
+    sections.append(Section("sec-12", "Named comparison", role="compact",
+                            entities=["United States", "World Health Organization"]))
+    assert validate_outline(sections, "in_depth", tiers, question=question) == []
+
+    repaired = repair_outline([Section(f"sec-{i}", f"Cross-cutting {i}") for i in range(1, 13)],
+                              "in_depth", tiers, [], question=question)
+    compact = [s for s in repaired if s.role == "compact"]
+    assert len(compact) == 1
+    assert set(compact[0].entities) == {"United States", "World Health Organization"}
 
 
 class _Gw:

@@ -47,6 +47,8 @@ class Passage:
     authority_tier: str = "unknown"
     reliability: float = 0.45
     numbers: list[str] = field(default_factory=list)
+    parent_source_id: str = ""
+    parent_data_context: str = ""
 
     def to_dict(self, max_text: int | None = None) -> dict:
         return {
@@ -54,6 +56,8 @@ class Passage:
             "title": self.title, "publisher": self.publisher, "published": self.published,
             "authorityTier": self.authority_tier, "reliability": self.reliability,
             "numbers": self.numbers[:40], "text": self.text if max_text is None else self.text[:max_text],
+            "parentSourceId": self.parent_source_id,
+            "parentDataContext": self.parent_data_context,
         }
 
 
@@ -165,6 +169,8 @@ class EvidenceStore:
             published=str(row.get("publication_date") or row.get("publisherPagePublishedAt") or row.get("published") or "")[:40],
             authority_tier=str(row.get("authorityTier") or "unknown"),
             reliability=float(row.get("reliabilityScore") or 0.45),
+            parent_source_id=str(row.get("data_parent_source_id") or row.get("parentSourceId") or "").upper(),
+            parent_data_context=str(row.get("data_parent_context") or row.get("parentDataContext") or "")[:1200],
         )
         page = str(row.get("pageContent") or "")
         internal = not url.startswith(("http://", "https://"))
@@ -293,6 +299,8 @@ def store_from_passages(passages: dict | list) -> EvidenceStore:
             title=str(item.get("title") or ""), publisher=str(item.get("publisher") or ""),
             published=str(item.get("published") or ""), authority_tier=str(item.get("authorityTier") or "unknown"),
             reliability=float(item.get("reliability") or 0.45), numbers=_NUMBER_RE.findall(str(item.get("text") or ""))[:60],
+            parent_source_id=str(item.get("parentSourceId") or "").upper(),
+            parent_data_context=str(item.get("parentDataContext") or "")[:1200],
         )
         store.passages.append(passage)
         store._by_id[passage.passage_id] = passage
@@ -318,6 +326,7 @@ def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list
     """
     store = EvidenceStore()
     id_for: dict[str, str] = {}
+    manifest_by_id: dict[str, dict] = {}
     if manifest:
         try:
             from utils.source_identity import source_identity_key
@@ -325,6 +334,8 @@ def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list
             source_identity_key = None  # type: ignore
         for entry in manifest:
             sid = str(entry.get("id") or "").upper()
+            if sid:
+                manifest_by_id[sid] = entry
             for key in (str(entry.get("url") or ""), str(entry.get("publisher_page_url") or "")):
                 if key:
                     id_for.setdefault("url:" + key.rstrip("/"), sid)
@@ -360,5 +371,10 @@ def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list
         else:
             sid = f"S{index}"
         used.add(sid)
+        relation = manifest_by_id.get(sid)
+        if relation and relation.get("data_parent_source_id") and relation.get("data_parent_context"):
+            row = dict(row)
+            row["data_parent_source_id"] = relation.get("data_parent_source_id")
+            row["data_parent_context"] = relation.get("data_parent_context")
         store.add_source(sid, row)
     return store.finalize()

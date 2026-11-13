@@ -65,6 +65,63 @@ def is_market_topic(question: str) -> bool:
     return bool(_MARKET_TOPIC_RE.search(str(question or ""))) if question else True
 
 
+def _requested_outline_focuses(question: str) -> list[str]:
+    """Select report sections from the request's actions and evidence needs."""
+    text = str(question or "")
+    focuses = ["the direct answer and the evidence needed to establish it"]
+    if re.search(r"(?i)\b(?:trend|annual|yearly|quarterly|monthly|over\s+time|since\s+(?:19|20)\d{2}|from\s+(?:19|20)\d{2})\b", text):
+        focuses.append("the requested time trend and period coverage")
+    if re.search(r"(?i)\b(?:compar\w*|versus|vs\.?|between|gap|difference|rank\w*)\b", text):
+        focuses.append("the requested comparisons, ranks, or gaps")
+    if re.search(r"(?i)\b(?:driver\w*|cause\w*|reason\w*|why|explain|impact|effect|barrier\w*)\b", text):
+        focuses.append("documented causes or drivers named in the request")
+    if re.search(r"(?i)\b(?:polic\w*|regulat\w*|law|compliance|standard\w*)\b", text):
+        focuses.append("policy or regulatory evidence named in the request")
+    if re.search(r"(?i)\b(?:risk\w*|uncertain\w*|limitation\w*|challenge\w*)\b", text):
+        focuses.append("the requested risks and evidence limitations")
+    if re.search(r"(?i)\b(?:outlook|forecast\w*|projection\w*|future|scenario\w*)\b", text):
+        focuses.append("the requested outlook or scenarios")
+    if re.search(r"(?i)\b(?:recommend\w*|should|implication\w*|what\s+it\s+means|takeaway\w*)\b", text):
+        focuses.append("the requested implications or recommendations")
+    if len(focuses) == 1:
+        focuses.append("definitions, scope, and source coverage needed to interpret the answer")
+    return focuses
+
+
+_NON_SUBJECT_ENTITY_ROLES = {"body", "out_of_scope"}
+
+
+def _named_in_question(entity, question: str) -> bool:
+    """Treat a publisher/place as a subject when the user explicitly asks about it."""
+    text = str(question or "")
+    names = {str(getattr(entity, "name", "") or ""),
+             *[str(alias or "") for alias in getattr(entity, "aliases", ())]}
+    for name in names:
+        if not name or name.startswith("__"):
+            continue
+        flags = 0 if name.isupper() and len(name) <= 4 else re.I
+        if re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", text, flags):
+            return True
+    return False
+
+
+def _outline_tiers(tiers: dict | None, question: str = "") -> dict | None:
+    """Keep source publishers and unrelated places out of the report's required subject list.
+
+    They can still appear in retrieved evidence and charts, but should not force a section
+    unless the question or measure plan explicitly names them.
+    """
+    if not tiers:
+        return tiers
+    filtered = {}
+    for key, entities in tiers.items():
+        filtered[key] = [entity for entity in entities
+                         if (getattr(entity, "role", "") not in _NON_SUBJECT_ENTITY_ROLES
+                             or getattr(entity, "seeded", False)
+                             or _named_in_question(entity, question))]
+    return filtered
+
+
 MIN_LEAF_PASSAGES = 3
 MIN_LEAF_SOURCES = 2
 MIN_ENTITY_PASSAGES = 2
@@ -138,18 +195,21 @@ def evidence_overview(store, *, max_sources: int = 60, max_tables: int = 40) -> 
     return "\n".join(lines)
 
 
-def tiers_block(tiers: dict | None) -> str:
+def tiers_block(tiers: dict | None, question: str = "") -> str:
     if not tiers:
         return ""
+    tiers = _outline_tiers(tiers, question)
     deep = [e.name for e in tiers.get("deep_dive", [])]
     compact = [e.name for e in tiers.get("compact", [])]
     return ("\nENTITY EVIDENCE TIERS (computed from the evidence; follow them):\n"
             f"- DEEP-DIVE entities (substantive text from 3+ good sources): {', '.join(deep) or 'none'}\n"
-            f"- COMPACT entities (data tables, thin text): {', '.join(compact) or 'none'}\n")
+            f"- COMPACT entities (data tables, thin text): {', '.join(compact) or 'none'}\n"
+            "- Unlisted source publishers and places outside the requested scope are context, not report subjects; do not give those entities dedicated sections.\n")
 
 
 def outline_prompt(question: str, tier: str, overview: str, today: str, window_note: str,
                    tiers: dict | None = None, rejection: str = "", asks_block: str = "") -> tuple[str, str]:
+    tiers = _outline_tiers(tiers, question)
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     market = is_market_topic(question)
     system = (
@@ -173,7 +233,7 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "   c. At least 4 cross-cutting sections (role \"cross_cutting\") chosen for THIS topic, for example: background "
             "and context, the data trends, drivers and causes, policy and regulation, comparisons, risks/scenarios and outlook. "
             "Every cross-cutting section has 2-5 subsections."
-            + tiers_block(tiers)
+            + tiers_block(tiers, question)
         )
     elif tier == "in_depth":
         structure = (
@@ -191,12 +251,14 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "   b. 1-3 COMPACT comparison sections (role \"compact\") that together name EVERY compact entity in \"entities\".\n"
             "   c. At least 4 cross-cutting sections (role \"cross_cutting\"): the market regime, flows, valuation/earnings, "
             "macro drivers, risks/scenarios and outlook. Every cross-cutting section has 2-5 subsections."
-            + tiers_block(tiers)
+            + tiers_block(tiers, question)
         )
     else:
+        focus_text = "; ".join(_requested_outline_focuses(question))
         structure = (
-            f"Plan {rules['sections']} analysis sections that answer the question as one argument: context, the main evidence, "
-            "the drivers, comparisons, risks and an outlook/implications section. Subsections are optional (use 0-3 per section)."
+            f"Plan {rules['sections']} analysis sections around only the applicable request dimensions: {focus_text}. "
+            "Use remaining sections to deepen the requested evidence, definitions, and source limitations; do not add "
+            "unrequested themes merely because they appear in the available sources. Subsections are optional (use 0-3 per section)."
         )
     query_hint = "index names, metric names, periods" if market else "names, metric names, periods"
     prompt = f"""QUESTION: {question}
@@ -476,9 +538,10 @@ def _has_own_deep_dive(sections: list[Section], entity, qualifying: list) -> boo
     return False
 
 
-def validate_outline(sections: list[Section], tier: str, tiers: dict | None) -> list[str]:
+def validate_outline(sections: list[Section], tier: str, tiers: dict | None, question: str = "") -> list[str]:
     """Structural rules the outline must meet (rejected outlines get one retry)."""
     errors = []
+    tiers = _outline_tiers(tiers, question)
     minimum = MIN_ANALYSIS_SECTIONS.get(tier, 5)
     if len(sections) < minimum:
         errors.append(f"only {len(sections)} analysis sections; at least {minimum} are required")
@@ -501,6 +564,7 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
     """Deterministically add what the LLM outline still omitted after its retry (each addition logged)."""
     if not tiers or tier != "in_depth":
         return sections
+    tiers = _outline_tiers(tiers, question)
     next_id = len(sections) + 1
     qualifying = list(tiers.get("deep_dive", []))
     # Split merged deep-dives: the section keeps one sector, the others get their own sections below.
@@ -559,10 +623,11 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
     return sections
 
 
-def seed_entity_evidence(store, sections: list[Section], tiers: dict | None) -> None:
+def seed_entity_evidence(store, sections: list[Section], tiers: dict | None, question: str = "") -> None:
     """Entity sections get their entity's own evidence, not only what lexical search finds."""
     if not tiers:
         return
+    tiers = _outline_tiers(tiers, question)
     by_name = {e.name: e for group in tiers.values() for e in group}
     for sec in sections:
         if sec.role == "deep_dive":
@@ -591,6 +656,7 @@ def seed_entity_evidence(store, sections: list[Section], tiers: dict | None) -> 
 
 async def build_outline(store, gateway, *, question: str, tier: str, today: str, window_note: str = "",
                         tiers: dict | None = None, asks=None) -> Outline:
+    tiers = _outline_tiers(tiers, question)
     overview = evidence_overview(store)
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     decisions: list[str] = []
@@ -608,7 +674,7 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
                 raise OutlineError(f"outline call failed: {result.error or 'invalid JSON'}")
             continue
         candidate_sections = _sections_from_json(candidate, tier)
-        errors = validate_outline(candidate_sections, tier, tiers)
+        errors = validate_outline(candidate_sections, tier, tiers, question=question)
         attempts.append({"attempt": attempt, "sections": len(candidate_sections), "errors": errors})
         if data is None or len(candidate_sections) >= len(sections):
             data, sections = candidate, candidate_sections
@@ -619,10 +685,10 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
                      + "\n".join(f"- {e}" for e in errors) + "\n\n")
     if len(sections) < 3:
         raise OutlineError(f"outline returned {len(sections)} usable sections")
-    remaining = validate_outline(sections, tier, tiers)
+    remaining = validate_outline(sections, tier, tiers, question=question)
     if remaining:
         sections = repair_outline(sections, tier, tiers, decisions, question=question)
-        for error in validate_outline(sections, tier, tiers):
+        for error in validate_outline(sections, tier, tiers, question=question):
             decisions.append(f"Outline still below the structural minimum after repair: {error}.")
     if asks is not None and asks.asks:
         # Stage F: every ask in the question maps to a section; missing ones are added.
@@ -661,7 +727,7 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         from utils.subsection_planner import diversify_deep_dives
         diversify_deep_dives(store, sections, decisions)
     assign_passages(store, sections, rules["k_leaf"])
-    seed_entity_evidence(store, sections, tiers)
+    seed_entity_evidence(store, sections, tiers, question=question)
     resolve_thin_evidence(store, sections, decisions)
     meta: dict = {"tier": tier, "outlineModel": result.model if result else "", "outlineAttempts": attempts}
     if asks is not None:

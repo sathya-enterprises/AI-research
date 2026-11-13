@@ -7,7 +7,7 @@ import pytest
 
 from utils.evidence_store import build_evidence_store
 from utils.llm_gateway import GatewayStats, LLMResult
-from utils.report_outline import Section, resolve_thin_evidence, size_budgets
+from utils.report_outline import Section, _requested_outline_focuses, outline_prompt, resolve_thin_evidence, size_budgets
 from utils.report_pipeline_v2 import PipelineV2Error, run_pipeline_v2
 from utils.section_charts import build_chart_candidates, charts_from_passage, verify_chart
 from utils.section_writer import SectionDraft, postprocess, unsupported_numbers
@@ -48,6 +48,21 @@ def _store():
 
 
 # ── charts ────────────────────────────────────────────────────────────────────
+def test_detailed_outline_sections_follow_requested_dimensions():
+    question = (
+        "Compare internet use and mobile subscriptions from 2015 to 2024. "
+        "Show annual trends, country gaps, and documented access drivers."
+    )
+    focuses = _requested_outline_focuses(question)
+    assert any("time trend" in focus for focus in focuses)
+    assert any("comparisons" in focus for focus in focuses)
+    assert any("drivers" in focus for focus in focuses)
+    assert not any("risks" in focus or "outlook" in focus for focus in focuses)
+    _system, prompt = outline_prompt(question, "detailed", "evidence", "2026-11-13", "")
+    assert "only the applicable request dimensions" in prompt
+    assert "unrequested themes" in prompt
+
+
 def test_charts_are_built_from_stored_tables_with_exact_cell_evidence():
     store, _ = _store()
     charts, dropped = build_chart_candidates(store)
@@ -247,6 +262,52 @@ def test_chart_unit_comes_from_the_plotted_column_and_old_periods_are_dropped():
     assert charts[0].spec["unit"] == "%" and "1 Week" in charts[0].spec["title"] and "Index Level" not in charts[0].spec["title"]
     reasons = " | ".join(d["reason"] for d in dropped)
     assert "outside the requested window" in reasons and "reliability 0.30 below 0.50" in reasons
+
+
+def test_time_series_columns_with_different_header_units_become_separate_charts():
+    from types import SimpleNamespace
+
+    text = ("TABLE 1 - China Solar PV Capacity by Year vs World\n"
+            "Period | China (GW) | World total (GW) | Rest of world (GW) | China share (%)\n"
+            "2025 | 1200.359 | 2383.162 | 1182.803 | 50.4\n"
+            "2024 | 886.12 | 1872.813 | 986.693 | 47.3\n"
+            "2023 | 609.351 | 1415.161 | 805.810 | 43.1\n"
+            "2022 | 392.462 | 1051.471 | 659.009 | 37.3\n"
+            "2021 | 306.403 | 859.674 | 553.271 | 35.6")
+    passage = SimpleNamespace(text=text, kind="table", source_id="S42", passage_id="S42.1", merged_ids=["S42.1"],
+                              title="China Solar PV Capacity by Year vs World", reliability=0.7,
+                              publisher="ChinaData")
+
+    charts = charts_from_passage(passage, 1)
+
+    assert {chart.spec["unit"] for chart in charts} == {"GW", "%"}
+    capacity = next(chart for chart in charts if chart.spec["unit"] == "GW")
+    share = next(chart for chart in charts if chart.spec["unit"] == "%")
+    assert [series["name"] for series in capacity.spec["series"]] == ["China", "Rest of world"]
+    assert len(capacity.points) == 10
+    assert capacity.spec["series"][0]["data"][0]["value"] == 306.403
+    assert len(share.points) == 5 and share.spec["series"][0]["data"][0]["label"] == "2021"
+    assert share.spec["series"][0]["data"][0]["value"] == 35.6
+    from utils.chart_lint import run_chart_lint
+    kept, dropped, _ = run_chart_lint([chart.spec for chart in charts])
+    assert len(kept) == 2 and dropped == []
+
+
+def test_chart_lint_rejects_explicitly_mixed_series_units():
+    from utils.chart_lint import run_chart_lint
+
+    chart = {"type": "grouped_bar", "title": "Capacity and share", "unit": "%", "yLabel": "%",
+             "series": [{"name": "China (GW)", "data": [{"label": "2021", "value": 306.4},
+                                                              {"label": "2022", "value": 392.5},
+                                                              {"label": "2023", "value": 609.4}]},
+                        {"name": "China share (%)", "data": [{"label": "2021", "value": 35.6},
+                                                                {"label": "2022", "value": 37.3},
+                                                                {"label": "2023", "value": 43.1}]}]}
+
+    kept, dropped, _ = run_chart_lint([chart])
+
+    assert kept == []
+    assert dropped and "incompatible explicit units" in dropped[0]["reason"]
 
 
 def test_short_section_is_extended_only_from_its_unused_passages():

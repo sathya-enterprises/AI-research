@@ -433,6 +433,8 @@ async def fetch_source_document(
     include_script_data: bool = False,
     logger: logging.Logger | None = None,
     total_seconds: float | None = None,
+    data_entities: list[str] | None = None,
+    data_years: list[int] | None = None,
 ) -> dict[str, Any]:
     """Fetch and extract a source with explicit diagnostics for provenance logs.
 
@@ -499,7 +501,8 @@ async def fetch_source_document(
         if sheet_ext in SPREADSHEET_EXTENSIONS or body[:4] == b"PK\x03\x04":
             from utils.data_files import spreadsheet_text
             extracted = await asyncio.to_thread(spreadsheet_text, body, sheet_ext or ".xlsx", max_chars=max_chars,
-                                                title=final_path.rsplit("/", 1)[-1])
+                                                title=final_path.rsplit("/", 1)[-1], entities=data_entities,
+                                                years=data_years)
             base["status"] = "ok" if extracted.strip() else "empty_spreadsheet"
             base["text"] = extracted
             base["data_format"] = (sheet_ext or ".xlsx").lstrip(".")

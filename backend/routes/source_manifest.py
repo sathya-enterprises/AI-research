@@ -34,6 +34,12 @@ def _clean_text(value: object, limit: int = 300) -> str:
     return text[:limit]
 
 
+def _clean_context(value: object, limit: int = 1200) -> str:
+    """Bound publisher header context while keeping table row boundaries."""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(value or "").replace("\x00", " ").splitlines()]
+    return "\n".join(line for line in lines if line)[:limit]
+
+
 def _safe_http_url(value: object) -> str:
     """Keep a clickable HTTP(S) URL while stripping embedded credentials."""
     raw = _clean_text(value, 2_000)
@@ -131,6 +137,18 @@ def _display_entry(entry: dict, source_id: str) -> dict:
         "unmatched_numeric_claims_count": int(entry.get("unmatched_numeric_claims_count", len(entry.get("unmatchedNumericClaims") or [])) or 0),
         _REGISTRY_MARKER: _REGISTRY_VERSION,
     }
+    parent_id = str(entry.get("data_parent_source_id") or entry.get("dataParentSourceId") or "").strip().upper()
+    if _ID_RE.fullmatch(parent_id):
+        result["data_parent_source_id"] = parent_id
+    parent_url = _safe_http_url(entry.get("data_parent_url") or entry.get("dataParentUrl") or "")
+    if parent_url:
+        result["data_parent_url"] = parent_url
+    parent_title = _clean_text(entry.get("data_parent_title") or entry.get("dataParentTitle") or "", 300)
+    if parent_title:
+        result["data_parent_title"] = parent_title
+    parent_context = _clean_context(entry.get("data_parent_context") or entry.get("dataParentContext") or "")
+    if parent_context:
+        result["data_parent_context"] = parent_context
     # Source-quality assessment (utils/source_quality.py) travels with the
     # canonical record so the appendix can show reliability per source.
     for key in ("authority_tier", "reliability_score", "recency_score", "reliability_note"):

@@ -1,5 +1,5 @@
 """Stage F item 2: data-first charts from fetched datasets, protected from later relevance pruning."""
-from utils.chart_evidence_audit import _dedupe_chart_specs, trust_validated_charts
+from utils.chart_evidence_audit import _dedupe_chart_specs
 from utils.dataset_charts import build_dataset_charts, preassign
 from utils.evidence_store import EvidenceStore, build_evidence_store
 from utils.fact_sheet import FactSheet, lookup
@@ -75,17 +75,49 @@ def test_deep_dives_get_their_sector_chart_and_overview_gets_cross_sector_charts
     assert all(c.section_id == "sec-1" for c in charts if c.points[0][0] in {"Compounded return", "QTD return"})
 
 
-def test_v2_validated_charts_survive_the_relevance_heuristic():
+def test_source_verified_charts_still_have_to_match_the_requested_topic():
     chart = {"type": "bar", "title": "Quarterly return (%): Nifty Pharma", "unit": "%",
              "series": [{"name": "Nifty Pharma", "data": [{"label": q, "value": v} for q, v in zip(QUARTERS, [1, 2, 3, 4])]}]}
     question = "Explain the proportion and reasons for stake sales by Indian business promoters"
-    trust_validated_charts([])
     _, kept, removed = _dedupe_chart_specs("[CHART_1]", [dict(chart)], question)
     assert removed == 1  # off-topic for this question: pruned
-    trust_validated_charts([chart])
-    _, kept, removed = _dedupe_chart_specs("[CHART_1]", [dict(chart)], question)
-    assert removed == 0 and kept
-    trust_validated_charts([])
+
+
+def test_health_charts_use_source_metric_and_reject_world_or_finance_scope():
+    question = (
+        "Prepare an in-depth comparison of health outcomes in India, China, Brazil, and Nigeria "
+        "from 2010 through 2024. Cover life expectancy, child and under-five mortality, HIV, "
+        "leading causes of death, and health-related Sustainable Development Goals."
+    )
+    world_only = {
+        "type": "horizontal_bar", "title": "Every year: World, 2010 to 2024", "source": ["S67"],
+        "series": [{"name": "World", "data": [{"label": str(y), "value": 70 + y % 3} for y in range(2010, 2025)]}],
+    }
+    financial_heatmap = {
+        "type": "heatmap", "title": "Quarterly return: 63 periods, 2010-12 to 2018-20", "source": ["S87"],
+        "rows": ["NIFTY AUTO", "NIFTY BANK"], "columns": ["Q1", "Q2", "Q3"],
+        "values": [[1, 2, 3], [4, 5, 6]],
+    }
+    sources = [
+        {"id": "S67", "title": "Brazil vs Nigeria: Child mortality since 1931 · TAKIP", "url": "https://takip.dev/compare/brazil-vs-nigeria/child-mortality"},
+        {"id": "S87", "title": "Publications | Official Website of Reserve Bank of India", "url": "https://rbi.org.in/scripts/publicationsview.aspx?id=22800"},
+    ]
+    _, kept, removed = _dedupe_chart_specs("[CHART_1]\n[CHART_2]", [world_only, financial_heatmap], question, sources=sources)
+    assert kept == [] and removed == 2
+
+
+def test_generic_value_chart_gets_its_metric_from_the_cited_source_title():
+    question = "Compare child mortality in India, China, Brazil and Nigeria from 2010 to 2024."
+    chart = {
+        "type": "line", "title": "Figure 1: Value: China, India, Brazil and Nigeria, 2010 to 2024",
+        "source": ["S15"],
+        "series": [{"name": country, "data": [{"label": str(year), "value": 10.0} for year in range(2010, 2024)]}
+                   for country in ("China", "India", "Brazil", "Nigeria")],
+    }
+    sources = [{"id": "S15", "title": "Child Mortality Rate by Country: Chart, Data Table and CSV"}]
+    _, kept, removed = _dedupe_chart_specs("[CHART_1]", [chart], question, sources=sources)
+    assert removed == 0 and len(kept) == 1
+    assert kept[0]["title"].startswith("Figure 1: Child Mortality Rate:")
 
 
 def test_dataset_quarters_use_the_report_fiscal_labels():

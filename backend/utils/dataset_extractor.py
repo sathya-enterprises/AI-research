@@ -19,12 +19,18 @@ import logging
 import re
 from datetime import date
 
-from utils.section_charts import PlannedChart
+from utils.section_charts import (PlannedChart, _MACHINE_ID_RE, _chart_data_problem, charts_from_passage,
+                                  _header_units, _heading_unit, _parse_number, verify_chart)
 
 log = logging.getLogger("dataset_extractor")
 
 _NUM_RE = re.compile(r"(?<![\w.])[+\-−]?\d[\d,]*(?:\.\d+)?")
-_PERIOD_RE = re.compile(r"\b(?:19|20)\d{2}\b|\b(?:FY|CY)\s?'?\d{2,4}\b|\bQ[1-4]\s?(?:FY)?\s?\d{2,4}\b|\bH[12]\s?FY\d{2}\b")
+_PERIOD_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:FY\s*'?(?:(?:19|20)?\d{2})(?:\s*[-\u2013/]\s*(?:19|20)?\d{2,4})?|"
+    r"CY\s*'?(?:(?:19|20)?\d{2})|Q[1-4]\s*(?:(?:FY|CY)\s*)?'?(?:19|20)?\d{2,4}|"
+    r"H[12]\s*(?:FY\s*)?'?(?:19|20)?\d{2,4}|(?:19|20)\d{2}(?:\s*[-\u2013/]\s*\d{2,4})?|"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?[-/' ]\s*'?[\d]{2,4})"
+    r"(?![A-Za-z0-9])")
 _FORECAST_RE = re.compile(r"(?i)forecast|projection|projected|estimate|target|outlook|expected|\bE\b|\(e\)")
 
 SYSTEM = (
@@ -79,6 +85,40 @@ def _data_profile(text: str, window_year: int | None) -> tuple[int, int, int] | 
     return nums, len(period_labels), in_window
 
 
+_SCHEMA_HEADER_RE = re.compile(r"(?i)(?:\b(?:id|identifier|code|status|flag|description|definition|metadata)\b|"
+                               r"_(?:id|identifier|code|status|flag)(?:_|$))")
+
+
+def _schema_export(passage) -> bool:
+    """A catalog export with machine IDs and schema fields is not a time-series proposal target."""
+    lines = [line for line in str(getattr(passage, "text", "") or "").splitlines() if " | " in line]
+    if len(lines) < 4:
+        return False
+    header = [cell.strip() for cell in lines[0].strip().strip("|").split("|")]
+    if len(header) < 6:
+        return False
+    schema_fields = sum(bool(_SCHEMA_HEADER_RE.search(cell)) for cell in header)
+    if schema_fields < 3:
+        return False
+    data_labels = [line.strip().strip("|").split("|")[0].strip() for line in lines[1:]]
+    if not data_labels:
+        return False
+    return sum(bool(_MACHINE_ID_RE.fullmatch(label)) for label in data_labels) / len(data_labels) >= 0.6
+
+
+def _already_charted_table(passage) -> bool:
+    """Let the deterministic table path handle well-formed tables; reserve LLM calls for unstructured data."""
+    if str(getattr(passage, "kind", "")) != "table" or _schema_export(passage):
+        return False
+    try:
+        for chart in charts_from_passage(passage, 1):
+            if not verify_chart(chart, str(passage.text or "")) and not _chart_data_problem(chart):
+                return True
+    except Exception:  # a malformed table must not stop the report's fallback extraction
+        return False
+    return False
+
+
 def candidate_passages(store, question: str, *, limit: int = 6, window_year: int | None = None,
                        queries: list[str] | None = None) -> list:
     """Relevant (BM25 x reliability, against the question and the outline's sections), data-dense passages
@@ -93,6 +133,8 @@ def candidate_passages(store, question: str, *, limit: int = 6, window_year: int
         p = store.get(pid)
         if p is None or p.kind in {"calculated", "search_excerpt"} or str(p.title or "").startswith(
                 ("World Bank: ", "International Monetary Fund: ", "Our World in Data: ")):  # official data has its own charts
+            continue
+        if _already_charted_table(p):
             continue
         profile = _data_profile(str(p.text or ""), window_year)
         if profile is None:
@@ -292,7 +334,9 @@ def to_chart(ds: dict, passage, source_title: str, index: int) -> PlannedChart:
         data = []
         for p in s["points"]:
             data.append({"label": p["label"], "value": p["value"], "evidenceSource": passage.source_id,
-                         "evidenceQuote": _quote_line(text, p["raw"], p["label"]), "evidenceValue": p["raw"]})
+                         "evidenceQuote": _quote_line(text, p["raw"], p["label"]), "evidenceValue": p["raw"],
+                         "evidenceEntity": s["name"], "evidenceMetric": ds.get("metric") or s["name"],
+                         **({"evidencePeriod": p["label"]} if ds.get("x") == "time" else {})})
             points.append((s["name"], p["label"], p["value"]))
         series.append({"name": s["name"], "data": data})
     multi = len(series) > 1
@@ -335,10 +379,155 @@ def clip_to_window(ds: dict, window_year: int | None, question: str = "") -> tup
     return clipped, ""
 
 
+def _dataset_caption(passage) -> str:
+    lines = [line.strip() for line in str(getattr(passage, "text", "") or "").splitlines() if line.strip()]
+    caption = next((line for line in lines if "|" not in line and not _PERIOD_TOKEN.fullmatch(line)), "")
+    caption = re.sub(r"(?i)^TABLE\s+\d+\s*(?:[-:\u2013\u2014]\s*)?", "", caption).strip()
+    if not caption:
+        caption = str(getattr(passage, "title", "") or "").strip()
+    words = set(re.findall(r"[a-z]{3,}", caption.casefold()))
+    generic = {"table", "data", "dataset", "statistics", "statistic", "series", "download", "excel", "csv", "pdf"}
+    if not caption or not words - generic or len(caption) > 220:
+        return ""
+    return caption
+
+
+def _dataset_context_units(line: str) -> set[str]:
+    if "|" not in line:
+        return _header_units(line)
+    units: set[str] = set()
+    for cell in line.strip().strip("|").split("|"):
+        label = cell.strip()
+        if re.fullmatch(r"(?i)(?:year|years|date|period|month|quarter|time)", label):
+            continue
+        units.update(_header_units(label))
+    return units
+
+
+def _period_sort_key(label: str) -> tuple[int, int, int]:
+    text = str(label or "").strip()
+    year_match = re.search(r"(?:19|20)\d{2}", text)
+    year = int(year_match.group(0)) if year_match else (2000 + int(re.search(r"\d{2}", text).group(0)) if re.search(r"\d{2}", text) else 0)
+    quarter = re.search(r"(?i)Q([1-4])", text)
+    half = re.search(r"(?i)H([12])", text)
+    month_names = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+    month = next((index + 1 for index, name in enumerate(month_names)
+                  if re.search(rf"(?i)\b{name}[a-z]*\b", text)), 0)
+    if quarter:
+        return year, 20 + int(quarter.group(1)), 0
+    if half:
+        return year, 10 + int(half.group(1)), 0
+    return year, month, 0
+
+
+def _inline_value_unit(line: str, number_match: re.Match, period_match: re.Match) -> str:
+    """Read an explicit unit adjacent to a single value/period pair."""
+    before = line[max(0, number_match.start() - 20):number_match.start()]
+    currency_match = re.search(
+        r"(?i)(US\$|USD|INR|EUR|GBP|JPY|Rs\.?|rupees?|dollars?|euros?|pounds?|yen|\$|\u20b9|\u20ac|\u00a3|\u00a5)\s*$",
+        before,
+    )
+    if period_match.start() >= number_match.end():
+        suffix = line[number_match.end():period_match.start()]
+    else:
+        suffix = line[number_match.end():]
+        suffix = re.split(r"(?i)\s+(?:in|during|for|over|by)\s*$", suffix, maxsplit=1)[0]
+    suffix = re.sub(r"(?i)^\s*(?:in|of)\s+", " ", suffix)
+    candidate = f"{currency_match.group(1) if currency_match else ''} {number_match.group(0)} {suffix}".strip()
+    parsed = _parse_number(candidate)
+    return parsed[1] if parsed else ""
+
+
+def _deterministic_period_dataset(passage) -> tuple[dict | None, str]:
+    """Conservative fallback for explicit one-period/one-value rows in any domain."""
+    text = str(getattr(passage, "text", "") or "")
+    caption = _dataset_caption(passage)
+    if not caption:
+        return None, "no specific metric caption"
+    rows: list[dict] = []
+    row_units: set[str] = set()
+    explicit_context_units = set(_header_units(caption))
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or re.fullmatch(r"\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?", stripped):
+            continue
+        if "|" in stripped:
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            periods = [(index, cell) for index, cell in enumerate(cells) if _PERIOD_TOKEN.fullmatch(cell)]
+            if len(periods) != 1:
+                explicit_context_units.update(_dataset_context_units(stripped))
+                continue
+            period_index, label = periods[0]
+            values = []
+            for index, cell in enumerate(cells):
+                if index == period_index:
+                    continue
+                found = _NUM_RE.findall(cell)
+                parsed = _parse_number(cell)
+                if len(found) == 1 and parsed:
+                    values.append((found[0], parsed[0], parsed[1]))
+                elif found:
+                    values = []
+                    break
+            if len(values) != 1:
+                continue
+            raw, value, unit = values[0]
+            rows.append({"label": label, "value": value, "raw": raw})
+            if unit:
+                row_units.add(unit)
+            continue
+
+        periods = list(_PERIOD_RE.finditer(stripped))
+        if len(periods) != 1:
+            explicit_context_units.update(_dataset_context_units(stripped))
+            continue
+        period = periods[0]
+        numeric = [match for match in _NUM_RE.finditer(stripped)
+                   if match.end() <= period.start() or match.start() >= period.end()]
+        if len(numeric) != 1:
+            continue
+        number = numeric[0]
+        if period.start() < number.start():
+            connector = stripped[period.end():number.start()]
+            if connector.strip() and not re.fullmatch(r"\s*(?:[:,=|\-\u2013\u2014]|was|is|at|of|value|reported|reached|had|stood\s+at)\s*", connector, re.I):
+                continue
+        else:
+            connector = stripped[number.end():period.start()]
+            if not re.search(r"(?i)(?:\bin\b|\bduring\b|\bas\s+of\b|[:,=])", connector):
+                continue
+        value = _value(number.group(0))
+        if value is None:
+            continue
+        unit = _inline_value_unit(stripped, number, period)
+        rows.append({"label": period.group(0).strip(), "value": value, "raw": number.group(0)})
+        if unit:
+            row_units.add(unit)
+        explicit_context_units.update(_dataset_context_units(stripped))
+
+    if len(rows) < 3:
+        return None, "fewer than 3 explicit period/value pairs"
+    if len({row["label"].casefold() for row in rows}) != len(rows):
+        return None, "duplicate period labels are ambiguous"
+    if len({row["value"] for row in rows}) < 3:
+        return None, "fewer than 3 distinct values"
+    units = row_units | explicit_context_units
+    if len(units) > 1:
+        return None, "mixed or ambiguous units"
+    rows.sort(key=lambda row: _period_sort_key(row["label"]))
+    unit = next(iter(units)) if units else ""
+    return {
+        "metric": caption, "unit": unit, "x": "time", "period": "",
+        "series": [{"name": caption, "points": rows}],
+    }, ""
+
+
 async def extract_dataset_charts(store, gateway, *, question: str, today: str, limit: int = 6,
                                  queries: list[str] | None = None) -> tuple[list[PlannedChart], dict]:
     """Propose (LLM) + verify (code). Returns (charts, funnel note)."""
-    note = {"passages": 0, "proposed": 0, "accepted": 0, "rejected": []}
+    note = {"passages": 0, "responses": 0, "successfulResponses": 0, "emptyResponses": 0,
+            "invalidResponses": 0, "failedResponses": [], "proposed": 0, "accepted": 0, "rejected": [],
+            "deterministicFallbackCandidates": 0, "deterministicFallbackProposed": 0,
+            "deterministicFallbackAccepted": 0, "deterministicFallbackRejected": 0}
     today_d = date.fromisoformat(today[:10])
     charts: list[PlannedChart] = []
     seen_values: list[list[float]] = []
@@ -359,11 +548,35 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
                          prompt=PROMPT.format(question=question, pid=passage.passage_id, source=_title(passage)[:120],
                                               text=str(passage.text)[:6000]),
                          max_tokens=2048, temperature=0.0, json_mode=True, timeout=60, retries=1)
-        for passage in passages])
+        for passage in passages], return_exceptions=True)
+    note["responses"] = len(results)
     for passage, result in zip(passages, results):
         title = _title(passage)
-        data = result.json() if getattr(result, "ok", False) else None
-        for ds in (data or {}).get("datasets") or [] if isinstance(data, dict) else []:
+        accepted_before = len(charts)
+        datasets = []
+        if isinstance(result, BaseException):
+            error = str(result) or type(result).__name__
+            error_type = re.search(r"\b[A-Za-z][A-Za-z0-9]*Error\b", error)
+            note["failedResponses"].append({"passage": passage.passage_id,
+                                            "reason": error_type.group(0) if error_type else "request failed"})
+        elif not getattr(result, "ok", False):
+            error = str(getattr(result, "error", "") or type(result).__name__)
+            error_type = re.search(r"\b[A-Za-z][A-Za-z0-9]*Error\b", error)
+            note["failedResponses"].append({"passage": passage.passage_id,
+                                            "reason": error_type.group(0) if error_type else "request failed"})
+        else:
+            note["successfulResponses"] += 1
+            try:
+                data = result.json()
+            except Exception:
+                data = None
+            if not isinstance(data, dict) or not isinstance(data.get("datasets"), list):
+                note["invalidResponses"] += 1
+            else:
+                datasets = data.get("datasets") or []
+                if not datasets:
+                    note["emptyResponses"] += 1
+        for ds in datasets:
             note["proposed"] += 1
             clean, reason = verify_dataset(ds if isinstance(ds, dict) else {}, str(passage.text), today_d)
             if clean:
@@ -373,6 +586,26 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
                 continue
             charts.append(to_chart(clean, passage, title, len(charts) + 1))
             note["accepted"] += 1
+        if len(charts) == accepted_before:
+            note["deterministicFallbackCandidates"] += 1
+            fallback, reason = _deterministic_period_dataset(passage)
+            if fallback:
+                note["deterministicFallbackProposed"] += 1
+                clean, reason = verify_dataset(fallback, str(passage.text), today_d)
+                if clean:
+                    clean, reason = clip_to_window(clean, window_year, question)
+                if clean:
+                    charts.append(to_chart(clean, passage, title, len(charts) + 1))
+                    note["accepted"] += 1
+                    note["deterministicFallbackAccepted"] += 1
+                else:
+                    reason = reason or "dataset verification failed"
+            if not fallback or reason:
+                note["deterministicFallbackRejected"] += 1
+                note["rejected"].append({"passage": passage.passage_id,
+                                         "metric": str((fallback or {}).get("metric") or _dataset_caption(passage))[:80],
+                                         "reason": reason or "no conservative deterministic series found",
+                                         "stage": "deterministic_fallback"})
     # a dataset whose every series repeats a series of a richer dataset is dropped (keep the richer one)
     def _series_values(chart):
         return [tuple(round(p[2], 4) for p in chart.points if p[0] == name)

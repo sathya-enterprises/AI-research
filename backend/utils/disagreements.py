@@ -33,6 +33,11 @@ _NOT_ENTITY = {"The", "In", "On", "At", "By", "For", "From", "During", "While", 
                "Despite", "However", "Meanwhile", "As", "With", "Between", "After", "Before", "When", "Although", "According",
                "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
                "November", "December", "Rs", "INR", "US", "FY", "CY", "QTD", "YTD", "YoY", "QoQ"}
+_LEADING_ENTITY_PREDICATES = {
+    "began", "declined", "expanded", "fell", "grew", "increased", "led", "maintained", "overtook",
+    "posted", "ranked", "reached", "recorded", "remained", "reported", "rose", "saw", "stood",
+    "surpassed", "experienced", "registered", "continued", "ended", "averaged",
+}
 _SCALE = {"lakh crore": 1e12, "crore": 1e7, "cr": 1e7, "trillion": 1e12, "tn": 1e12, "billion": 1e9, "bn": 1e9,
           "million": 1e6, "mn": 1e6}
 _FAMILY = {"₹": "inr", "rs": "inr", "inr": "inr", "us$": "usd", "$": "usd", "€": "eur", "£": "gbp"}
@@ -55,13 +60,19 @@ def _entities(sentence: str) -> set[str]:
         defined.add(m.group(2))
         defined.add(m.group(1).strip())
     sentence = re.sub(r"\(([A-Z]{2,6})\)", " ", sentence)
-    stripped = sentence.lstrip()
-    for name in re.findall(r"\b[A-Z][A-Za-z&]+(?:\s+[A-Z][A-Za-z&]+)*", sentence):
+    for match in re.finditer(r"\b[A-Z][A-Za-z&]+(?:\s+[A-Z][A-Za-z&]+)*", sentence):
+        name = match.group(0)
         if name in defined or any(name.endswith(d) and len(d) > 6 for d in defined) or name in {d for d in defined if d.isupper()}:
             continue
         parts = [x for x in name.split() if x not in _NOT_ENTITY]
-        if not parts or (stripped.startswith(name) and len(parts) == 1):
+        # Grammar words are filtered above; a sentence-initial proper noun is
+        # still its subject (for example, "Brazil ..." or "Kenya ...").
+        if not parts:
             continue
+        if sentence[:match.start()].strip() == "" and len(parts) == 1 and len(name.split()) == 1:
+            tail = sentence[match.end():]
+            if not re.match(r"(?i)^(?:['\u2019]s\b|,|\s+(?:" + "|".join(sorted(_LEADING_ENTITY_PREDICATES)) + r")\b)", tail):
+                continue  # don't turn a capitalized sentence-initial metric noun into an entity
         out.add(" ".join(parts).casefold())
     return out
 
@@ -120,6 +131,8 @@ def find_disagreements(report: str, *, max_items: int = 6) -> list[dict]:
         for b in items[i + 1:]:
             if a["period"] != b["period"] or a["family"] != b["family"] or not a["value"] or not b["value"]:
                 continue
+            if not a["entities"] or not b["entities"]:
+                continue  # without a named subject, the same entity cannot be established
             if (a["value"] > 0) != (b["value"] > 0) and a["family"] != "%":
                 continue  # an inflow and an outflow are different measures
             if a["entities"] != b["entities"]:

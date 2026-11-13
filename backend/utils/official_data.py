@@ -314,8 +314,10 @@ async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, 
 
 
 # ── fetching ─────────────────────────────────────────────────────────────────────────────────────
-def _years(start_year: int, today: date, *, allow_current: bool) -> list[int]:
+def _years(start_year: int, today: date, *, allow_current: bool, end_year: int | None = None) -> list[int]:
     end = today.year if allow_current else today.year - 1
+    if end_year is not None:
+        end = min(end, int(end_year))
     return list(range(start_year, end + 1))
 
 
@@ -406,9 +408,11 @@ async def _fetch_fred(client, entry: CatalogEntry, entities: list[str], years: l
     return {_FRED_ENTITY.get(entry.id, "United States"): values} if values else {}
 
 
-async def fetch_dataset(client, item: dict, *, start_year: int, today: date) -> Dataset | None:
+async def fetch_dataset(client, item: dict, *, start_year: int, today: date,
+                        end_year: int | None = None) -> Dataset | None:
     entry = CATALOG[item["id"]]
-    years = _years(start_year, today, allow_current=entry.connector not in {"imf", "fred"})
+    years = _years(start_year, today, allow_current=entry.connector not in {"imf", "fred"},
+                   end_year=end_year)
     if len(years) < 2:
         return None
     fetcher = {"wb": _fetch_wb, "imf": _fetch_imf, "owid": _fetch_owid, "fred": _fetch_fred}[entry.connector]
@@ -431,6 +435,22 @@ async def fetch_dataset(client, item: dict, *, start_year: int, today: date) -> 
     series = {name: [vals.get(y) for y in observed] for name, vals in raw.items()}
     ds = Dataset(entry=entry, years=observed, series=series, retrieved=today.isoformat(), latest=observed[-1])
     return scale_dataset(ds)
+
+
+def equivalent_dataset_alternative(item: dict) -> str | None:
+    """Find one other catalog connector that publishes the same measure in the same unit.
+
+    This is a safe provider fallback for transient API failures; related indicators with different definitions
+    or units are never substituted.
+    """
+    entry = CATALOG.get(str(item.get("id") or ""))
+    if entry is None:
+        return None
+    alternatives = [candidate.id for candidate in CATALOG.values()
+                    if candidate.connector != entry.connector
+                    and candidate.title.strip().casefold() == entry.title.strip().casefold()
+                    and candidate.unit.strip().casefold() == entry.unit.strip().casefold()]
+    return alternatives[0] if len(alternatives) == 1 else None
 
 
 def scale_dataset(ds: Dataset) -> Dataset:
@@ -496,20 +516,33 @@ async def official_sources(question: str, gateway, *, today: date, tier: str, me
     """Plan, fetch and format; never raises. (source rows, capture note)."""
     import httpx
     limit = 5 if tier == "in_depth" else 3
-    note: dict = {"plan": [], "fetched": [], "skipped": []}
+    note: dict = {"plan": [], "fetched": [], "skipped": [], "fallbacks": []}
     try:
-        from utils.source_quality import window_start
-        start_year = window_start(question, today).year
+        from utils.data_angles import requested_year_bounds
+        start_year, end_year = requested_year_bounds(question, today)
     except Exception:
-        start_year = today.year - 3
-    start_year = min(start_year, today.year - 2)  # at least 3 whole years of context for an annual series
+        start_year, end_year = today.year - 3, today.year
     plan, plan_note = await plan_datasets(question, gateway, today=today, limit=limit, measures=measures)
-    note["plan"], note["planNote"] = plan, plan_note
+    note["plan"], note["planNote"], note["window"] = plan, plan_note, [start_year, end_year]
     rows: list[dict] = []
     async with httpx.AsyncClient(timeout=45, follow_redirects=True,
                                  headers={"User-Agent": "GrowthGradual-Research/1.0 (official open data)"}) as client:
         import asyncio
-        results = await asyncio.gather(*[fetch_dataset(client, item, start_year=start_year, today=today) for item in plan])
+        results = await asyncio.gather(*[fetch_dataset(client, item, start_year=start_year, today=today,
+                                                       end_year=end_year) for item in plan])
+        for index, item in enumerate(plan):
+            if results[index] is not None:
+                continue
+            alternative_id = equivalent_dataset_alternative(item)
+            if not alternative_id:
+                continue
+            alternative = {**item, "id": alternative_id}
+            fallback = await fetch_dataset(client, alternative, start_year=start_year, today=today,
+                                           end_year=end_year)
+            results[index] = fallback
+            note["fallbacks"].append({"requested": item["id"], "used": alternative_id,
+                                      "recovered": fallback is not None,
+                                      "reason": "equivalent title and unit from another catalog connector"})
     for item, ds in zip(plan, results):
         if ds is None:
             note["skipped"].append({"id": item["id"], "reason": "no data for the window / entities"})
