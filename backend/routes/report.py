@@ -31,7 +31,10 @@ from utils.keys import (
     iter_reserved_groq_keys, reserve_provider_key, release_provider_key,
 )
 
-from utils.rag_client import rag_report as _rag_report
+from utils.rag_client import (
+    rag_report as _rag_report,
+    filter_rag_report_evidence_to_attachments as _filter_rag_report_evidence_to_attachments,
+)
 from utils.research_engine import build_research_engine_context, format_engine_context
 from utils.datawrapper import attach_datawrapper_charts
 from utils.market_data import (
@@ -86,7 +89,7 @@ from utils.report_integrity import (
 from utils.evidence_dataset import build_evidence_dataset, extract_requested_entities, EntityResolver, entity_key as _evidence_entity_key
 from utils.chart_gallery import (
     blend_gallery_into_report, build_chart_gallery, cohere_chart_placements,
-    gallery_markdown, gallery_types_for,
+    chart_horizons, explicit_horizons, gallery_markdown, gallery_types_for,
 )
 from utils.chart_planner import (
     assess_chart_coverage as _assess_chart_coverage, gap_queries as _chart_gap_queries,
@@ -101,7 +104,9 @@ from utils.source_ids import (
 from utils.uploaded_workbook_analytics import (
     is_file_only_workbook_report, build_attachment_analytics,
     attachment_analytics_section, append_attachment_analytics_section,
+    ensure_server_workbook_chart_markers,
     assign_workbook_source, workbook_charts_section,
+    pms_report_cover, rewrite_pms_report_sections,
 )
 import contextvars as _contextvars
 
@@ -115,6 +120,10 @@ _PUBLISHER_GALLERY_CHART_EVIDENCE_IDS: "_contextvars.ContextVar[set]" = _context
 _SEARCH_GALLERY_CHART_EVIDENCE_IDS: "_contextvars.ContextVar[set]" = _contextvars.ContextVar("gg_search_gallery_chart_evidence_ids", default=set())
 _PUBLISHER_GALLERY_CHART_EVIDENCE_LINES: "_contextvars.ContextVar[dict]" = _contextvars.ContextVar("gg_publisher_gallery_chart_evidence_lines", default={})
 _SEARCH_GALLERY_CHART_EVIDENCE_LINES: "_contextvars.ContextVar[dict]" = _contextvars.ContextVar("gg_search_gallery_chart_evidence_lines", default={})
+_UPLOADED_FILE_EVIDENCE_TEXTS: "_contextvars.ContextVar[dict]" = _contextvars.ContextVar(
+    "gg_uploaded_file_evidence_texts", default={},
+)
+_UPLOADED_EVIDENCE_ORIGINS = frozenset({"uploaded_workbook", "uploaded_attachment"})
 
 
 def _search_extract_evidence_allowed() -> bool:
@@ -915,6 +924,121 @@ def _normalize_filename(s: str) -> str:
     between OKF frontmatter titles and the raw filenames sent by the client
     (which may differ slightly in spacing/quoting)."""
     return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _explicit_uploaded_evidence_origin(source: object) -> str:
+    """Return a trusted upload marker; titles/extensions alone are not provenance."""
+    if not isinstance(source, dict):
+        return ""
+    for key in ("evidence_origin", "evidenceOrigin", "source_origin", "sourceOrigin"):
+        value = str(source.get(key) or "").strip().casefold()
+        if value:
+            return value if value in _UPLOADED_EVIDENCE_ORIGINS else ""
+    return ""
+
+
+def _is_uploaded_evidence_source(source: object) -> bool:
+    return bool(_explicit_uploaded_evidence_origin(source))
+
+
+def _uploaded_origin_for_filename(name: str) -> str:
+    extension = os.path.splitext(str(name or "").casefold())[1]
+    if extension in {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}:
+        return "uploaded_workbook"
+    return "uploaded_attachment"
+
+
+def _record_uploaded_file_evidence(
+    name: str, text: str, source_documents: list[dict],
+) -> dict:
+    """Tie extracted text to a current request upload and its explicit provenance."""
+    clean_name = str(name or "").strip() or "Attached data"
+    key = _normalize_filename(clean_name)
+    if not key:
+        return {}
+    document = next((
+        item for item in source_documents
+        if isinstance(item, dict)
+        and _normalize_filename(str(item.get("name") or item.get("title") or "")) == key
+    ), None)
+    if document is None:
+        document = {
+            "name": clean_name,
+            "title": clean_name,
+            "kind": "Uploaded document",
+            "sourceType": "Uploaded document",
+        }
+        source_documents.append(document)
+    origin = _uploaded_origin_for_filename(clean_name)
+    document.update({
+        "kind": "Uploaded workbook" if origin == "uploaded_workbook" else "Uploaded attachment",
+        "sourceType": "Uploaded workbook" if origin == "uploaded_workbook" else "Uploaded attachment",
+        "evidenceOrigin": origin,
+        "evidence_origin": origin,
+        "pageFetchStatus": "not_applicable",
+        "page_fetch_status": "not_applicable",
+    })
+
+    extracted = str(text or "").strip()
+    existing = str(document.get("text") or document.get("extractedText") or "").strip()
+    if not extracted or extracted in existing:
+        merged_text = existing or extracted
+    elif existing and existing in extracted:
+        merged_text = extracted
+    elif existing and extracted:
+        merged_text = f"{existing}\n\n{extracted}"
+    else:
+        merged_text = existing or extracted
+    if merged_text:
+        document["text"] = merged_text[:500_000]
+        document["chartEvidenceExcerpt"] = merged_text[:16_000]
+    document["evidenceAvailable"] = bool(merged_text)
+    document["evidence_available"] = bool(merged_text)
+
+    evidence_texts = dict(_UPLOADED_FILE_EVIDENCE_TEXTS.get() or {})
+    if merged_text:
+        prior = str(evidence_texts.get(key) or "")
+        if not merged_text or merged_text in prior:
+            combined = prior or merged_text
+        elif prior and prior in merged_text:
+            combined = merged_text
+        else:
+            combined = f"{prior}\n\n{merged_text}" if prior else merged_text
+        evidence_texts[key] = combined[:500_000]
+        _UPLOADED_FILE_EVIDENCE_TEXTS.set(evidence_texts)
+    return document
+
+
+def _seed_uploaded_file_evidence(file_context: str, source_documents: list[dict]) -> None:
+    """Mark only request-supplied documents and named file blocks as upload evidence."""
+    raw_context = str(file_context or "")
+    file_marker = re.compile(r"(?im)^\s*\[File:\s*([^\]\r\n]+)\]\s*$")
+    markers = list(file_marker.finditer(raw_context))
+    if markers:
+        for index, marker in enumerate(markers):
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(raw_context)
+            _record_uploaded_file_evidence(
+                marker.group(1).strip(), raw_context[marker.end():end], source_documents,
+            )
+    elif raw_context.strip():
+        if len(source_documents) == 1:
+            document = source_documents[0]
+            _record_uploaded_file_evidence(
+                str(document.get("name") or document.get("title") or "Attached data"),
+                raw_context,
+                source_documents,
+            )
+        elif not source_documents:
+            _record_uploaded_file_evidence("Attached data", raw_context, source_documents)
+
+    for document in list(source_documents):
+        if not isinstance(document, dict):
+            continue
+        name = str(document.get("name") or document.get("title") or "").strip()
+        if not name:
+            continue
+        text = str(document.get("text") or document.get("extractedText") or "").strip()
+        _record_uploaded_file_evidence(name, text, source_documents)
 
 
 async def _fetch_okf_context(session_id: str, max_chars: int = 12000,
@@ -13103,6 +13227,11 @@ _METRIC_CONTEXT_STOPWORDS = {
     "source", "reference", "evidence", "retrieved", "verified", "publisher", "page", "total",
     "reported", "report", "value", "data", "growth", "period", "annual", "crore", "lakh",
     "million", "billion", "exports", "export", "portfolio", "stage", "check", "size", "rupees",
+    # Generic schema/measure words are not entity evidence. Without these,
+    # "Beta strategy return" could pass against an Alpha row because the shared
+    # words "strategy" and "return" satisfied the minimum token overlap.
+    "strategy", "strategies", "approach", "return", "returns", "year", "years", "yr", "yrs",
+    "month", "months", "mth", "mths", "quarter", "quarters", "qtr", "qtrs", "amc",
 }
 
 
@@ -13137,6 +13266,46 @@ def _metric_denominator(text: str) -> str:
     return ""
 
 
+def _metric_period_terms(text: str) -> set[str]:
+    """Normalize explicitly named horizons and calendar periods for same-row checks."""
+    raw = str(text or "").casefold()
+    terms: set[str] = set()
+    for match in re.finditer(
+        r"\b(\d{1,2})\s*[- ]?\s*(months?|mths?|mth|mos?|years?|yrs?|yr|quarters?|qtrs?|qtr)\b", raw,
+    ):
+        unit = match.group(2)
+        normalized_unit = "m" if unit.startswith(("m", "mo")) else "q" if unit.startswith(("q",)) else "y"
+        terms.add(f"duration:{int(match.group(1))}{normalized_unit}")
+
+    def year_number(value: str) -> int:
+        number = int(value)
+        return number if number >= 100 else (2000 + number if number <= 68 else 1900 + number)
+
+    for match in re.finditer(r"\bq([1-4])\s*(?:fy\s*)?((?:19|20)?\d{2})?\b", raw):
+        if match.group(2):
+            terms.add(f"quarter:{match.group(1)}fy{year_number(match.group(2))}")
+    for match in re.finditer(r"\bfy\s*((?:19|20)?\d{2})(?:\s*[-/]\s*((?:19|20)?\d{2}))?\b", raw):
+        terms.add(f"fy:{year_number(match.group(1))}")
+        if match.group(2):
+            terms.add(f"fy:{year_number(match.group(2))}")
+
+    month_pattern = (
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+        r"[\s,/.-]+((?:19|20)\d{2})\b"
+    )
+    month_number = {name: index for index, name in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
+    )}
+    for match in re.finditer(month_pattern, raw):
+        terms.add(f"month:{int(match.group(2))}-{month_number[match.group(1)[:3]]:02d}")
+    for match in re.finditer(r"\b((?:19|20)\d{2})[-/](0?[1-9]|1[0-2])(?:[-/]\d{1,2})?\b", raw):
+        terms.add(f"month:{int(match.group(1))}-{int(match.group(2)):02d}")
+    for match in re.finditer(r"\b((?:19|20)\d{2})\b", raw):
+        terms.add(f"year:{match.group(1)}")
+    return terms
+
+
 def _source_numeric_values(text: str) -> list[float]:
     values = []
     for raw in re.findall(r"(?<![A-Za-z0-9])[-+−]?\d[\d,]*(?:\.\d+)?(?![\d.,])", str(text or "")):
@@ -13148,7 +13317,11 @@ def _source_numeric_values(text: str) -> list[float]:
 
 
 def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: list[str], sources: list[dict]) -> bool:
-    """Only count a metric as verified when a cited, fetched publisher page supports its value and subject."""
+    """Require a cited evidence source to support a metric's value, subject, period, and units.
+
+    Uploaded attachments are checked against text extracted from the current
+    request; web sources must provide eligible publisher-page evidence.
+    """
     if not source_ids or not metric:
         return False
     metric_numbers = _source_numeric_values(metric)
@@ -13160,6 +13333,7 @@ def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: l
         if token not in _METRIC_CONTEXT_STOPWORDS and not token.isdigit()
     }
     claim_denominator = _metric_denominator(f"{metric} {context or ''}")
+    claim_periods = _metric_period_terms(context)
     by_id = {
         str(item.get("id") or "").strip().upper(): item
         for item in sources or [] if isinstance(item, dict)
@@ -13168,30 +13342,47 @@ def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: l
         source = by_id.get(str(sid).strip().upper())
         if not source:
             continue
-        url = str(source.get("url") or source.get("matchedEvidenceUrl") or "").strip()
-        fetch_status = str(source.get("pageFetchStatus") or source.get("page_fetch_status") or "").casefold()
-        origin = str(source.get("evidenceExcerptOrigin") or source.get("evidence_origin") or "").casefold()
-        if not url.startswith(("https://", "http://")):
-            continue
-        if str(source.get("evidenceOrigin") or "").casefold() == "okf_retrieval":
-            continue
-        publisher_excerpt = str(source.get("publisherEvidenceExcerpt") or "").strip()
-        evidence = ""
-        if fetch_status == "ok":
-            if publisher_excerpt:
-                evidence = publisher_excerpt
-            elif origin == "publisher_page":
-                evidence = str(source.get("evidenceExcerpt") or "").strip()
-        if _search_extract_evidence_allowed():
-            # Search-index extract of the same URL (and the exact source lines
-            # quoted by evidence-gallery charts). Matching below stays strict.
-            extra_evidence = [
-                str(source.get("searchEvidenceExcerpt") or "").strip(),
-                str(source.get("chartEvidenceExcerpt") or "").strip() or _chart_evidence_lines_for(sid),
-            ]
-            if not evidence and "search_extract" in origin:
-                extra_evidence.insert(0, str(source.get("evidenceExcerpt") or "").strip())
-            evidence = "\n".join(part for part in [evidence, *extra_evidence] if part)
+        uploaded_source = _is_uploaded_evidence_source(source)
+        origin = str(
+            source.get("evidenceExcerptOrigin") or source.get("evidence_origin") or ""
+        ).casefold()
+        if uploaded_source:
+            # Uploaded evidence has no publisher URL or HTTP fetch. Use only
+            # text explicitly tied to this request's marked file; the checks
+            # below still require the exact value, unit, subject and period to
+            # align in one sentence/table row.
+            evidence = "\n".join(
+                str(source.get(key) or "").strip()
+                for key in (
+                    "_uploadedFileEvidenceExcerpt", "evidenceExcerpt",
+                    "chartEvidenceExcerpt", "_uploadedFileEvidenceText",
+                )
+                if str(source.get(key) or "").strip()
+            )
+        else:
+            url = str(source.get("url") or source.get("matchedEvidenceUrl") or "").strip()
+            fetch_status = str(source.get("pageFetchStatus") or source.get("page_fetch_status") or "").casefold()
+            if not url.startswith(("https://", "http://")):
+                continue
+            if str(source.get("evidenceOrigin") or "").casefold() == "okf_retrieval":
+                continue
+            publisher_excerpt = str(source.get("publisherEvidenceExcerpt") or "").strip()
+            evidence = ""
+            if fetch_status == "ok":
+                if publisher_excerpt:
+                    evidence = publisher_excerpt
+                elif origin == "publisher_page":
+                    evidence = str(source.get("evidenceExcerpt") or "").strip()
+            if _search_extract_evidence_allowed():
+                # Search-index extract of the same URL (and the exact source lines
+                # quoted by evidence-gallery charts). Matching below stays strict.
+                extra_evidence = [
+                    str(source.get("searchEvidenceExcerpt") or "").strip(),
+                    str(source.get("chartEvidenceExcerpt") or "").strip() or _chart_evidence_lines_for(sid),
+                ]
+                if not evidence and "search_extract" in origin:
+                    extra_evidence.insert(0, str(source.get("evidenceExcerpt") or "").strip())
+                evidence = "\n".join(part for part in [evidence, *extra_evidence] if part)
         if not evidence:
             continue
         evidence_numbers = _source_numeric_values(evidence)
@@ -13304,6 +13495,8 @@ def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: l
             overlap = context_terms & chunk_words
             if context_terms and len(overlap) < min(2, len(context_terms)):
                 continue
+            if claim_periods and not claim_periods.issubset(_metric_period_terms(chunk)):
+                continue
             if claim_denominator and _metric_denominator(chunk) != claim_denominator:
                 continue
             chunk_supported = True
@@ -13325,6 +13518,15 @@ def _replace_unsupported_financial_claims(text: str, sources: list[dict], contex
     ids = source_ids if source_ids is not None else _citation_ids_anywhere(raw)
     context_text = context or raw
     count = 0
+    by_id = {
+        str(source.get("id") or "").strip().upper(): source
+        for source in sources or [] if isinstance(source, dict)
+    }
+    upload_cited = any(
+        _is_uploaded_evidence_source(by_id.get(str(source_id).upper()))
+        for source_id in ids
+    )
+    evidence_basis = "the cited attachment" if upload_cited else "retrieved publisher-page evidence"
 
     def replacement_for(metric: str, after: str = "") -> str:
         nonlocal count
@@ -13337,8 +13539,8 @@ def _replace_unsupported_financial_claims(text: str, sources: list[dict], contex
         if ("%" in metric or re.search(r"\bpercent\b", metric, re.I)) and re.match(r"\s*export[- ]oriented unit\b", after, re.I):
             return ""
         if "%" in metric or re.search(r"\bpercent\b", metric, re.I):
-            return "a percentage not verified in retrieved publisher-page evidence"
-        return "an amount not verified in retrieved publisher-page evidence"
+            return f"a percentage not verified in {evidence_basis}"
+        return f"an amount not verified in {evidence_basis}"
 
     # Validate percentages/basis-point/currency ranges before individual values.
     # A range with one unsupported endpoint is replaced once as a whole.
@@ -14288,16 +14490,27 @@ def _reattach_charts_lost_in_repair(pre_text: str, pre_charts: list, post_text: 
 
 
 _CHART_OMISSION_NOTE_RE = re.compile(r"(?im)^[ \t]*(?:[-*][ \t]*)?>[ \t]*\*\*Chart not included:\*\*.*$")
+_CHART_DATA_LIMITATION_NOTE_RE = re.compile(
+    r"(?im)^[ \t]*(?:[-*][ \t]*)?>[ \t]*\*\*Data limitation:\*\*(?=[^\n]*\b(?:chart(?:ed|ing)?|visual(?:ization)?)\b)[^\n]*$"
+)
 _NOTICE_LINE_RE = re.compile(r"(?m)^[ \t]*>[ \t]*\*\*[^*\n]{3,60}:\*\*.*$")
 
 
-def _resolve_chart_omission_notes(report_text: str, charts: list | None) -> tuple[str, dict]:
+def _resolve_chart_omission_notes(
+    report_text: str,
+    charts: list | None,
+    *,
+    attachment_only: bool = False,
+    allow_moves: bool = True,
+) -> tuple[str, dict]:
     """Replace generic "Chart not included" notes with something useful.
 
     * A note in a section that already shows a validated chart is removed.
     * Otherwise, a validated chart placed in a different section whose subject
       matches this section's heading (taken from a data/evidence section or a
       section that keeps another visual) is moved here in place of the note.
+      When chart placement has already been finalized, a matching chart in its
+      own section only clears the stale note; its marker is not moved again.
     * Otherwise the note becomes one concise, section-specific limitation.
     * The end-of-report "request called for a chart" disclosure is kept only
       when the report has no validated chart at all.
@@ -14325,14 +14538,34 @@ def _resolve_chart_omission_notes(report_text: str, charts: list | None) -> tupl
         parts += [str(sr.get("name") or "") for sr in (chart.get("series") or []) if isinstance(sr, dict)]
         return stems(" ".join(parts))
 
+    def chart_matches_heading(index: int, heading: str) -> bool:
+        if not (stems(heading) & chart_stems(index)):
+            return False
+        chart = chart_list[index - 1] if 1 <= index <= len(chart_list) else None
+        if not isinstance(chart, dict):
+            return False
+        chart_periods = chart_horizons(chart)
+        heading_periods = explicit_horizons(heading)
+        if chart_periods and heading_periods:
+            if not (chart_periods & heading_periods):
+                return False
+            if len(heading_periods) == 1 and chart_periods != heading_periods:
+                return False
+        return True
+
     keep_notes: set[str] = set()
     for _iteration in range(60):
         has_any_chart = bool(re.search(r"\[CHART_\d+\]", text)) and any(isinstance(c, dict) for c in chart_list)
         action = None
         for start, end, heading in sections(text):
             block = text[start:end]
-            for note in _CHART_OMISSION_NOTE_RE.finditer(block):
+            notes = [
+                *_CHART_OMISSION_NOTE_RE.finditer(block),
+                *_CHART_DATA_LIMITATION_NOTE_RE.finditer(block),
+            ]
+            for note in sorted(notes, key=lambda item: item.start()):
                 note_text = note.group(0)
+                is_chart_data_limitation = note.re is _CHART_DATA_LIMITATION_NOTE_RE
                 if note_text in keep_notes:
                     continue
                 note_start = start + note.start()
@@ -14351,19 +14584,46 @@ def _resolve_chart_omission_notes(report_text: str, charts: list | None) -> tupl
                             continue
                         o_block = text[o_start:o_end]
                         refs = [int(r) for r in re.findall(r"\[CHART_(\d+)\]", o_block)]
-                        if not refs or not (len(refs) > 1 or re.search(r"(?i)\b(?:data|evidence|charts?|source-extracted|appendix)\b", o_heading or "")):
+                        if not refs:
                             continue
-                        hit = next((i for i in refs if head_stems & chart_stems(i)), None)
+                        if allow_moves and not (
+                            len(refs) > 1
+                            or re.search(r"(?i)\b(?:data|evidence|charts?|source-extracted|appendix)\b", o_heading or "")
+                        ):
+                            continue
+                        hit = next((i for i in refs if chart_matches_heading(i, heading)), None)
                         if hit:
                             donor = (o_start + o_block.find(f"[CHART_{hit}]"), f"[CHART_{hit}]")
                             break
                 if donor:
-                    action = ("move", note_start, note_text, donor)
+                    action = ("move", note_start, note_text, donor) if allow_moves else (
+                        "remove", note_start, note_text, None,
+                    )
+                elif is_chart_data_limitation and not attachment_only:
+                    # This may describe a genuine web-source limitation. Keep
+                    # it unless an attachment-only report needs upload-specific wording.
+                    keep_notes.add(note_text)
+                    continue
+                elif is_chart_data_limitation and attachment_only and (
+                    "attached data did not provide enough row-verifiable observations" in note_text.casefold()
+                ):
+                    # This is already the accurate attachment-specific wording
+                    # emitted below; leave it in place if no verified chart exists.
+                    keep_notes.add(note_text)
+                    continue
                 else:
                     subject = (heading or "this section").strip()[:90]
-                    action = ("rewrite", note_start, note_text,
-                              f"> **Data limitation:** the retrieved sources did not provide a period-matched, "
-                              f"source-verified series for {subject}; the figures in this section are cited in the text instead of charted.")
+                    if attachment_only:
+                        replacement = (
+                            f"> **Data limitation:** the attached data did not provide enough row-verifiable "
+                            f"observations for a {subject} chart; this comparison is omitted."
+                        )
+                    else:
+                        replacement = (
+                            f"> **Data limitation:** the retrieved sources did not provide a period-matched, "
+                            f"source-verified series for {subject}; the figures in this section are cited in the text instead of charted."
+                        )
+                    action = ("rewrite", note_start, note_text, replacement)
                 break
             if action:
                 break
@@ -14375,6 +14635,7 @@ def _resolve_chart_omission_notes(report_text: str, charts: list | None) -> tupl
             meta["removed"] += 1
         elif kind == "rewrite":
             text = text[:pos] + payload + text[pos + len(note_text):]
+            keep_notes.add(payload)
             meta["rewritten"] += 1
         else:
             donor_pos, marker = payload
@@ -14949,6 +15210,18 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
                 source.get("evidenceAvailable", source.get("evidence_available"))
                 or source.get("chartEvidenceExcerpt")
             )
+            if _is_uploaded_evidence_source(source):
+                if calculated_evidence_available or source.get("_uploadedFileEvidenceExcerpt"):
+                    # A user file is not expected to have a URL or publisher
+                    # fetch; its extractable rows are checked at claim level.
+                    continue
+                unverified.append({
+                    "id": str(source.get("id") or ""),
+                    "title": str(source.get("title") or "")[:160],
+                    "pageFetchStatus": "no_extractable_file_text",
+                    "evidenceExcerptOrigin": origin or _explicit_uploaded_evidence_origin(source),
+                })
+                continue
             if is_trusted_calculated_sector_source(source) and calculated_evidence_available:
                 # The full quarter matrix is locally calculated from observed
                 # daily closes and retained as exact source evidence. It has no
@@ -14973,7 +15246,12 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
 
     provenance_warnings = _unverified_cited_sources()
     provenance_flags = [
-        f"{item['id'] or 'A cited source'} uses search-extract or unavailable publisher-page evidence; verify the linked page before relying on it."
+        (
+            f"{item['id'] or 'A cited source'} is an uploaded file with no extractable text; "
+            "numeric claims attributed to it cannot be checked."
+            if item.get("pageFetchStatus") == "no_extractable_file_text"
+            else f"{item['id'] or 'A cited source'} uses search-extract or unavailable publisher-page evidence; verify the linked page before relying on it."
+        )
         for item in provenance_warnings
     ]
 
@@ -15060,22 +15338,46 @@ def _source_evidence_quality_audit(sources: list | None) -> dict:
 
 
 def _report_source_evidence_audit(sources: list | None, *, attachment_only: bool = False) -> dict:
-    """Use the uploaded files as evidence without applying publisher-page checks."""
+    """Check uploaded-file claims while skipping only publisher-fetch requirements."""
     if not attachment_only:
         return _source_evidence_quality_audit(sources)
-    return {
-        "blocking": False,
-        "flags": [],
-        "provenanceWarnings": [],
-        "mismatchedCitationGroups": [],
-        "individualSourceDiagnostics": [],
-        "sourceMode": "uploaded_attachment",
-        "note": (
-            "Attachment-only report: the attached file is the data source of truth; "
-            "publisher-page fetching and external numeric-citation checks do not apply. "
-            "Deterministic attachment tables, chart evidence, structure, consistency, and scope checks remain active."
-        ),
+    audit = _source_evidence_quality_audit(sources)
+    # Lack of a web URL is expected for a user file. Keep the row/value/subject
+    # mismatch findings blocking, and surface only genuinely unreadable uploads
+    # as file-evidence warnings.
+    upload_ids = {
+        str(source.get("id") or "").strip().upper()
+        for source in (sources or [])
+        if isinstance(source, dict) and _is_uploaded_evidence_source(source)
+        and str(source.get("id") or "").strip()
     }
+    unreadable_ids = {
+        str(source.get("id") or "").strip().upper()
+        for source in (sources or [])
+        if isinstance(source, dict) and _is_uploaded_evidence_source(source)
+        and not (
+            source.get("evidenceAvailable", source.get("evidence_available"))
+            or source.get("chartEvidenceExcerpt")
+            or source.get("_uploadedFileEvidenceExcerpt")
+        )
+    }
+    audit["flags"] = [
+        flag for flag in (audit.get("flags") or [])
+        if not (
+            "uses search-extract or unavailable publisher-page evidence" in str(flag)
+            and any(source_id in str(flag) for source_id in upload_ids)
+        )
+    ]
+    audit["provenanceWarnings"] = [
+        warning for warning in (audit.get("provenanceWarnings") or [])
+        if str(warning.get("id") or "").strip().upper() in unreadable_ids
+    ]
+    audit["sourceMode"] = "uploaded_attachment"
+    audit["note"] = (
+        "Attachment-only report: cited numeric claims are matched to extracted file rows or sentences. "
+        "Publisher-page fetching is not required; unreadable attachments and unmatched values remain visible."
+    )
+    return audit
 
 
 def _redact_unsupported_cited_claim_sentences(
@@ -15359,6 +15661,7 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
             continue
         item = dict(raw)
         trusted_calculated_sector = is_trusted_calculated_sector_source(raw)
+        uploaded_origin = _explicit_uploaded_evidence_origin(raw)
         evidence = evidence_by_id.get(str(item.get("id") or "").strip().upper())
         if evidence:
             # Carry publisher-extracted metadata alongside the stable source ID.
@@ -15384,10 +15687,19 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
             page_modified_at = str(evidence.get("publisherPageModifiedAt") or evidence.get("publisher_page_modified_at") or "").strip()
             if page_modified_at:
                 item["publisher_page_modified_at"] = page_modified_at[:120]
-            item["evidence_origin"] = str(evidence.get("evidenceExcerptOrigin") or evidence.get("evidenceOrigin") or "")
-            item["page_fetch_status"] = str(evidence.get("pageFetchStatus") or "unknown")
+            if uploaded_origin:
+                item["evidence_origin"] = uploaded_origin
+                item["evidenceExcerptOrigin"] = uploaded_origin
+                item["evidence_excerpt_origin"] = uploaded_origin
+                item["page_fetch_status"] = "not_applicable"
+            else:
+                item["evidence_origin"] = str(evidence.get("evidenceExcerptOrigin") or evidence.get("evidenceOrigin") or "")
+                item["page_fetch_status"] = str(evidence.get("pageFetchStatus") or "unknown")
             item["page_fetch_http_status"] = evidence.get("pageFetchHttpStatus")
-            item["evidence_available"] = bool(evidence.get("evidenceAvailable"))
+            item["evidence_available"] = bool(
+                evidence.get("evidenceAvailable")
+                or (uploaded_origin and (item.get("chartEvidenceExcerpt") or evidence.get("_uploadedFileEvidenceExcerpt")))
+            )
             item["claim_evidence_matched"] = bool(evidence.get("claimEvidenceMatched"))
             item["unmatched_numeric_claims_count"] = len(evidence.get("unmatchedNumericClaims") or [])
             # Distinguish a source's own numerical match from overall claim-group
@@ -15406,6 +15718,13 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
                 item["evidence_excerpt_origin"] = "calculated_from_daily_market_data"
                 item["page_fetch_status"] = "not_applicable"
                 item["evidence_available"] = bool(str(item.get("chartEvidenceExcerpt") or "").strip())
+            elif uploaded_origin:
+                # This remains file evidence after audit; the RAG adapter may
+                # have supplied matching private chunks, but they are not a
+                # publisher URL or a successful HTTP fetch.
+                item["evidence_origin"] = uploaded_origin
+                item["evidence_excerpt_origin"] = uploaded_origin
+                item["page_fetch_status"] = "not_applicable"
             # PDF chart validation needs actual public source text, not only status flags.
             # Expose a small excerpt ONLY from a successfully fetched public publisher page.
             # Never expose search-only snippets, private/OKF retrieval, or uploaded document text.
@@ -15472,6 +15791,19 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
             item["evidence_excerpt_origin"] = "publisher_page"
             item["evidence_origin"] = "publisher_page"
             item["publisher_table_chart_evidence_verified"] = True
+        if uploaded_origin:
+            # An attachment is checkable against its extracted cells/text, but
+            # it has no publisher-page verification or authority score.
+            item["evidence_origin"] = uploaded_origin
+            item["evidence_excerpt_origin"] = uploaded_origin
+            item["page_fetch_status"] = "not_applicable"
+            item["authority_tier"] = "unknown"
+            item["reliability_score"] = None
+            item["recency_score"] = None
+            item["reliability_note"] = (
+                "User-provided attachment; extracted evidence is checked against the current file, "
+                "not independently publisher-verified."
+            )
         result.append(item)
     return result
 
@@ -15635,6 +15967,35 @@ def _attach_audit_source_evidence(
             r"(?![A-Za-z0-9])",
             re.I,
         )
+
+        def local_measure_context(source_text: str, number_match: re.Match) -> str:
+            """Use the nearby sentence or table header to classify ambiguous ``million units``."""
+            line_start = source_text.rfind("\n", 0, number_match.start()) + 1
+            line_end = source_text.find("\n", number_match.end())
+            if line_end < 0:
+                line_end = len(source_text)
+            line = source_text[line_start:line_end]
+            if "|" in line:
+                context = [line]
+                prior_lines = source_text[:line_start].splitlines()
+                for prior in reversed(prior_lines[-3:]):
+                    if not prior.strip() or re.search(r"\d", prior):
+                        break
+                    context.append(prior.strip())
+                return " ".join(reversed(context))
+
+            left = max(0, source_text.rfind("\n", 0, number_match.start()) + 1)
+            for boundary in re.finditer(r"(?<=[.!?])\s+", source_text[:number_match.start()]):
+                left = max(left, boundary.end())
+            right = len(source_text)
+            next_line = source_text.find("\n", number_match.end())
+            if next_line >= 0:
+                right = min(right, next_line)
+            boundary = re.search(r"(?<=[.!?])\s+", source_text[number_match.end():])
+            if boundary:
+                right = min(right, number_match.end() + boundary.start())
+            return source_text[left:right]
+
         found: set[str] = set()
         for match in token_re.finditer(text):
             raw = match.group("number").replace(",", "")
@@ -15672,14 +16033,17 @@ def _attach_audit_source_evidence(
                 family = "capacity_gw"
                 scale = {"gw": 1.0, "mw": 0.001, "kw": 0.000001, "tw": 1000.0}[unit]
             elif unit == "million units":
-                # "MU" (million kWh) in power statistics; otherwise a count ("1.15 million units" of vehicles
-                # must still match "11.5 lakh units").
-                if re.search(r"(?i)electric(?:ity)?\s+(?:generation|consumption|demand|supply)|power\s+(?:generation|"
-                             r"consumption|demand|supply)|\bgenerat\w*|\benergy\b|\bkwh\b|\bMU\b",
-                             text[max(0, match.start() - 160):match.end() + 60]):
-                    family, scale = "energy_twh", 0.001
+                # ``million units`` can mean a count (e.g. vehicles sold) or
+                # million kWh in electricity reporting. Use only the nearby
+                # sentence/table context; a remote mention on the same page
+                # must not change the numeric family.
+                measure_context = local_measure_context(text, match)
+                if re.search(r"(?i)\b(?:electricity|power|energy|grid|generation|generated|consumption|consumed|twh|gwh|mwh|kwh|bu)\b", measure_context):
+                    family = "energy_twh"
+                    scale = 0.001
                 else:
-                    family, scale = "count", 1e6
+                    family = "count"
+                    scale = 1_000_000.0
             elif unit in {"twh", "billion units", "bu", "gwh", "mwh", "kwh"}:
                 family = "energy_twh"
                 scale = {"twh": 1.0, "billion units": 1.0, "bu": 1.0, "gwh": 0.001, "mwh": 0.000001, "kwh": 0.000000001}[unit]
@@ -16052,6 +16416,18 @@ def _attach_audit_source_evidence(
         if original is None and is_trusted_calculated_sector_source(item) and len(calculated_sector_sources) == 1:
             original = calculated_sector_sources[0]
         original = original or {}
+        uploaded_origin = _explicit_uploaded_evidence_origin(item)
+        uploaded_text = ""
+        if uploaded_origin:
+            uploaded_text = str(
+                (_UPLOADED_FILE_EVIDENCE_TEXTS.get() or {}).get(_normalize_filename(str(item.get("title") or "")))
+                or ""
+            )
+            item["evidenceOrigin"] = uploaded_origin
+            item["evidence_origin"] = uploaded_origin
+            item["pageFetchStatus"] = "not_applicable"
+            item["page_fetch_status"] = "not_applicable"
+            item["_uploadedFileEvidenceText"] = uploaded_text[:500_000]
         trusted_calculated_sector = (
             is_trusted_calculated_sector_source(item)
             or is_trusted_calculated_sector_source(original)
@@ -16104,44 +16480,53 @@ def _attach_audit_source_evidence(
         content_candidates: list[tuple[str, str]] = []
         seen_candidate_text: set[str] = set()
         evidence_rows = []
-        _official_claim_evidence = official_dataset_claim_evidence(original)
-        if not _official_claim_evidence and original is not item:
-            _official_claim_evidence = official_dataset_claim_evidence(item)
-        if _official_claim_evidence:
-            # These lines are deterministically expanded from the exact cells,
-            # entity headers, years, and unit in the verified publisher API table.
-            evidence_rows.append((_official_claim_evidence, "publisher_page"))
-        if trusted_calculated_sector:
-            evidence_rows.append((
-                original.get("chartEvidenceExcerpt") or item.get("chartEvidenceExcerpt"),
-                "calculated_from_daily_market_data",
-            ))
-        evidence_rows.extend([
-            (original.get("pageContent"), "publisher_page"),
-            (item.get("pageContent"), "publisher_page"),
-            (original.get("evidenceContent"), "source_evidence"),
-            (item.get("evidenceContent"), "source_evidence"),
-            (original.get("fullContent"), "search_extract"),
-            (original.get("full_content"), "search_extract"),
-            (original.get("content"), "search_extract"),
-            (original.get("text"), "search_extract"),
-            (original.get("body"), "search_extract"),
-            (original.get("extractedText"), "search_extract"),
-            (original.get("evidence"), "search_extract"),
-            (original.get("evidenceExcerpt"), "search_extract"),
-            (original.get("snippet"), "search_extract"),
-            (original.get("description"), "search_extract"),
-            (original.get("summary"), "search_extract"),
-            (item.get("fullContent"), "search_extract"),
-            (item.get("full_content"), "search_extract"),
-            (item.get("content"), "search_extract"),
-            (item.get("text"), "search_extract"),
-            (item.get("body"), "search_extract"),
-            (item.get("evidence"), "search_extract"),
-            (item.get("evidenceExcerpt"), "search_extract"),
-            (item.get("snippet"), "search_extract"),
-            (item.get("description"), "search_extract"),
-        ])
+        if uploaded_origin:
+            # A current request's explicitly marked upload is the evidence for
+            # this source ID. Do not let a similarly titled saved OKF chunk or
+            # stale RAG excerpt stand in for the actual file.
+            evidence_rows.extend([
+                (uploaded_text, "uploaded_file"),
+                (item.get("chartEvidenceExcerpt"), "uploaded_file"),
+            ])
+        else:
+            _official_claim_evidence = official_dataset_claim_evidence(original)
+            if not _official_claim_evidence and original is not item:
+                _official_claim_evidence = official_dataset_claim_evidence(item)
+            if _official_claim_evidence:
+                # These lines are deterministically expanded from the exact cells,
+                # entity headers, years, and unit in the verified publisher API table.
+                evidence_rows.append((_official_claim_evidence, "publisher_page"))
+            if trusted_calculated_sector:
+                evidence_rows.append((
+                    original.get("chartEvidenceExcerpt") or item.get("chartEvidenceExcerpt"),
+                    "calculated_from_daily_market_data",
+                ))
+            evidence_rows.extend([
+                (original.get("pageContent"), "publisher_page"),
+                (item.get("pageContent"), "publisher_page"),
+                (original.get("evidenceContent"), "source_evidence"),
+                (item.get("evidenceContent"), "source_evidence"),
+                (original.get("fullContent"), "search_extract"),
+                (original.get("full_content"), "search_extract"),
+                (original.get("content"), "search_extract"),
+                (original.get("text"), "search_extract"),
+                (original.get("body"), "search_extract"),
+                (original.get("extractedText"), "search_extract"),
+                (original.get("evidence"), "search_extract"),
+                (original.get("evidenceExcerpt"), "search_extract"),
+                (original.get("snippet"), "search_extract"),
+                (original.get("description"), "search_extract"),
+                (original.get("summary"), "search_extract"),
+                (item.get("fullContent"), "search_extract"),
+                (item.get("full_content"), "search_extract"),
+                (item.get("content"), "search_extract"),
+                (item.get("text"), "search_extract"),
+                (item.get("body"), "search_extract"),
+                (item.get("evidence"), "search_extract"),
+                (item.get("evidenceExcerpt"), "search_extract"),
+                (item.get("snippet"), "search_extract"),
+                (item.get("description"), "search_extract"),
+            ])
         if publisher_chart_table_eligible:
             evidence_rows.append((publisher_chart_table_text, "publisher_chart_table"))
         for candidate, origin in evidence_rows:
@@ -16164,14 +16549,18 @@ def _attach_audit_source_evidence(
             all_sentences.extend(
                 (sentence, origin)
                 for sentence in split_sentences(
-                    candidate, allow_short_table_rows=(origin == "publisher_chart_table"),
+                    candidate, allow_short_table_rows=(origin in {"publisher_chart_table", "uploaded_file"}),
                 )
             )
         # Deduplicate same sentences but prefer directly fetched publisher text.
         sentence_origin: dict[str, str] = {}
         for sentence, origin in all_sentences:
             prior = sentence_origin.get(sentence)
-            if prior is None or (origin == "publisher_page" and prior != "publisher_page"):
+            if prior is None or (
+                origin == "publisher_page" and prior != "publisher_page"
+            ) or (
+                origin == "uploaded_file" and prior in {"search_extract", "source_evidence"}
+            ):
                 sentence_origin[sentence] = origin
         deduped_sentences = list(sentence_origin.items())
 
@@ -16224,22 +16613,25 @@ def _attach_audit_source_evidence(
         token_subject_stems: dict[str, list[list[str]]] = {}
         previous_source_sentence = ""
         for sentence, origin in deduped_sentences:
-            sent_numbers = numbers(sentence, evidence=True)
+            row_context = _TABLE_ROW_CONTEXT.get(sentence, "")
+            subject_evidence = f"{row_context} | {sentence}" if row_context else sentence
+            numeric_evidence = subject_evidence if origin == "uploaded_file" else sentence
+            sent_numbers = numbers(numeric_evidence, evidence=True)
             # A bare cell on a table line that declares percentages or growth
             # ("Percentage variation", "(Per cent)") is a percent value even
             # though the cell itself carries no unit. Subject overlap is still
             # required at claim-group level, so this cannot certify an
             # unrelated equal number.
-            if "|" in sentence and re.search(r"(?i)\bper\s?cent\b|\bpercent(?:age)?\b|%|\bvariation\b|\bgrowth\b|\by-o-y\b", sentence):
+            if "|" in numeric_evidence and re.search(r"(?i)\bper\s?cent\b|\bpercent(?:age)?\b|%|\bvariation\b|\bgrowth\b|\by-o-y\b", numeric_evidence):
                 sent_numbers = set(sent_numbers) | {
                     "percent:" + token.split(":", 1)[1].partition("~")[0] for token in sent_numbers if token.startswith("scalar:")
                 }
             # A table row labelled "(in lakhs)" with a count noun states counts in
             # lakhs: add absolute-count variants of its bare cells.
-            _count_label = re.search(r"(?i)\(\s*(?:in\s+)?(lakhs?|crores?|millions?|thousands?|billions?)\s*\)", sentence)
-            if "|" in sentence and _count_label and re.search(
+            _count_label = re.search(r"(?i)\(\s*(?:in\s+)?(lakhs?|crores?|millions?|thousands?|billions?)\s*\)", numeric_evidence)
+            if "|" in numeric_evidence and _count_label and re.search(
                     r"(?i)\bnumber\s+of\b|\bcards?\b|\baccounts?\b|\bunits?\b|\bsubscribers?\b|\bvehicles?\b|\bcomplaints?\b|"
-                    r"\bmachines\b|\batms\b|\bbranches\b|\busers\b|\bsales\b|\bconnections\b", sentence):
+                r"\bmachines\b|\batms\b|\bbranches\b|\busers\b|\bsales\b|\bconnections\b", numeric_evidence):
                 _mult = {"lakh": 1e5, "crore": 1e7, "million": 1e6, "thousand": 1e3, "billion": 1e9}[_count_label.group(1).casefold().rstrip("s")]
                 sent_numbers = set(sent_numbers) | {
                     f"count:{float(token.split(':', 1)[1].partition('~')[0]) * _mult:.10g}"
@@ -16264,7 +16656,7 @@ def _attach_audit_source_evidence(
                         bucket.append(sorted(subject))
             previous_source_sentence = sentence
             numeric_hits = len(matched_claim_numbers)
-            word_hits = len(claim_words & words(sentence))
+            word_hits = len(claim_words & words(subject_evidence if origin == "uploaded_file" else sentence))
             # Prefer source-page text when scores are otherwise comparable; a
             # search-index excerpt remains a useful fallback, but it is marked as such.
             direct_bonus = 3 if origin == "publisher_page" else 1 if origin == "source_evidence" else 0
@@ -16280,7 +16672,10 @@ def _attach_audit_source_evidence(
         for _, _, _, sentence, matched_claim_numbers, origin in scored:
             if has_numeric_claim and not matched_claim_numbers:
                 continue
-            excerpt_parts.append(sentence)
+            row_context = _TABLE_ROW_CONTEXT.get(sentence, "")
+            excerpt_parts.append(
+                f"{row_context} | {sentence}" if origin == "uploaded_file" and row_context else sentence
+            )
             excerpt_numbers.update(matched_claim_numbers)
             excerpt_origins.add(origin)
             if len(" ".join(excerpt_parts)) >= 1800 or len(excerpt_parts) >= 5:
@@ -16322,6 +16717,18 @@ def _attach_audit_source_evidence(
         item["publisherEvidenceExcerpt"] = " ".join(publisher_parts)[:5200]
         item["evidenceExcerpt"] = excerpt
         item["evidenceAvailable"] = bool(excerpt)
+        if uploaded_origin:
+            uploaded_parts = []
+            for _score, _hits, _words, sentence, matched_claim_numbers, origin in scored:
+                if origin != "uploaded_file" or (has_numeric_claim and not matched_claim_numbers):
+                    continue
+                row_context = _TABLE_ROW_CONTEXT.get(sentence, "")
+                uploaded_parts.append(
+                    f"{row_context} | {sentence}" if row_context else sentence
+                )
+                if len("\n".join(uploaded_parts)) >= 16000:
+                    break
+            item["_uploadedFileEvidenceExcerpt"] = "\n".join(uploaded_parts)[:16000]
         if "publisher_page" in excerpt_origins and any(x in excerpt_origins for x in {"search_extract", "source_evidence"}):
             item["evidenceExcerptOrigin"] = "publisher_page_and_search_extract"
         elif "publisher_page" in excerpt_origins:
@@ -16332,6 +16739,10 @@ def _attach_audit_source_evidence(
                 if str(original.get("evidenceOrigin") or item.get("evidenceOrigin") or "").casefold() == "okf_retrieval"
                 else "source_evidence"
             )
+        elif uploaded_origin and excerpt_origins:
+            item["evidenceExcerptOrigin"] = uploaded_origin
+            item["evidenceOrigin"] = uploaded_origin
+            item["evidence_origin"] = uploaded_origin
         elif trusted_calculated_sector and excerpt_origins:
             item["evidenceExcerptOrigin"] = "calculated_from_daily_market_data"
         elif excerpt_origins:
@@ -16339,7 +16750,7 @@ def _attach_audit_source_evidence(
         else:
             item["evidenceExcerptOrigin"] = str(original.get("evidenceOrigin") or item.get("evidenceOrigin") or "metadata_only")
         item["pageFetchStatus"] = (
-            "not_applicable" if trusted_calculated_sector
+            "not_applicable" if trusted_calculated_sector or uploaded_origin
             else str(original.get("pageFetchStatus") or item.get("pageFetchStatus") or "unknown")
         )
         item["pageFetchRelevanceMatched"] = original.get("pageFetchRelevanceMatched")
@@ -21417,6 +21828,7 @@ async def generate_report(request: Request):
     _PUBLISHER_TABLE_CHART_EVIDENCE_IDS.set(set())
     _PUBLISHER_GALLERY_CHART_EVIDENCE_IDS.set(set())
     _SEARCH_GALLERY_CHART_EVIDENCE_IDS.set(set())
+    _UPLOADED_FILE_EVIDENCE_TEXTS.set({})
     t0 = time.perf_counter()
     try:
         body = await request.json()
@@ -21447,8 +21859,9 @@ async def generate_report(request: Request):
         [d for d in raw_source_documents if isinstance(d, dict)]
         if isinstance(raw_source_documents, list) else []
     )
-    file_context: str   = body.get("fileContext", "")
-    file_images: list[dict] = body.get("fileImages", [])
+    file_context: str   = str(body.get("fileContext") or "")
+    file_images: list[dict] = body.get("fileImages", []) if isinstance(body.get("fileImages"), list) else []
+    _seed_uploaded_file_evidence(file_context, source_documents)
     # These are DIFFERENT from file_images above: file_images is full-page
     # renders of the uploaded PDF, used only for Gemini Vision text extraction
     # (extract_data_from_images below, which needs to read whole pages).
@@ -21760,6 +22173,25 @@ async def generate_report(request: Request):
     # being put in front of the LLM.
     image_candidates_raw: list = []
 
+    current_attachment_text_available = bool(str(file_context or "").strip()) or any(
+        isinstance(item, dict)
+        and bool(str(item.get("text") or item.get("extractedText") or "").strip())
+        for item in source_documents
+    )
+    if file_only_report and has_rag and current_attachment_text_available:
+        # The current request already carries the uploaded file's extracted text.
+        # Reusing a long-lived RAG session by filename can mix an older revision
+        # of the same file into a report, so direct attachment evidence wins.
+        has_rag = False
+        rag_status.update({
+            "status": "skipped_current_attachment_text_available",
+            "message": "Used the file text attached to this request; skipped indexed session retrieval.",
+        })
+        log.info(
+            "Report: skipped session RAG; current attachment text is available (chars=%d)",
+            len(str(file_context or "")),
+        )
+
     # ── RAG-grounded report: if files were indexed, use RAG full-coverage retrieval ──
     if has_rag:
         if not session_id:
@@ -21769,15 +22201,48 @@ async def generate_report(request: Request):
             rag_result = await _rag_report(session_id=session_id, report_spec=question, report_type=report_tier)
             evidence_rows = [row for row in (rag_result.get("evidence") or []) if isinstance(row, dict) and str(row.get("text") or "").strip()]
             returned_sources = [str(value) for value in (rag_result.get("source_files") or []) if str(value).strip()]
-            current_filenames = set(re.findall(r"\[File:\s*([^\]]+?)\]", file_context))
+            current_filenames = set(re.findall(r"(?i)\[(?:Attached\s+)?File:\s*([^\]\r\n]+?)\]", file_context))
+            for document in source_documents:
+                if not isinstance(document, dict):
+                    continue
+                for key in ("filename", "fileName", "name", "title", "originalName"):
+                    value = str(document.get(key) or "").strip()
+                    if value:
+                        current_filenames.add(value)
+            for key in ("files", "additionalFiles", "datasets"):
+                for item in (workbook_analytics.get(key) or []):
+                    if isinstance(item, dict) and item.get("filename"):
+                        current_filenames.add(str(item["filename"]).strip())
+
+            rag_filter_meta = {"discardedRows": 0, "discardedFiles": 0}
+            if file_only_report:
+                evidence_rows, returned_sources, rag_filter_meta = _filter_rag_report_evidence_to_attachments(
+                    evidence_rows, returned_sources, current_filenames,
+                )
+                if rag_filter_meta.get("discardedRows") or rag_filter_meta.get("discardedFiles"):
+                    log.warning(
+                        "Attachment-only RAG filtered stale session content: chunks=%d files=%d current_files=%d matched_files=%d",
+                        rag_filter_meta.get("discardedRows", 0), rag_filter_meta.get("discardedFiles", 0),
+                        rag_filter_meta.get("requestedFiles", 0), rag_filter_meta.get("matchedFiles", 0),
+                    )
             stale = False
-            if current_filenames and returned_sources:
+            if file_only_report:
+                # Current attachment text is authoritative. RAG is an optional
+                # retrieval aid and must not admit a previous file just because
+                # another file in the same long-lived session matches.
+                stale = not current_filenames or not evidence_rows
+            elif current_filenames and returned_sources:
                 norm_current = {_normalize_filename(n) for n in current_filenames}
                 norm_returned = {_normalize_filename(n) for n in returned_sources}
                 stale = not any(a in b or b in a for a in norm_current for b in norm_returned)
             if stale:
-                rag_status.update({"status": "stale_session_sources", "message": "Retrieved OKF sources did not match the files attached to this request."})
-                log.warning("Report: rejected stale OKF retrieval because indexed sources did not match current attachments")
+                rag_status.update({
+                    "status": "stale_session_sources",
+                    "message": "Retrieved OKF evidence did not match a file attached to this request.",
+                    "filteredOutChunks": rag_filter_meta.get("discardedRows", 0),
+                    "filteredOutSources": rag_filter_meta.get("discardedFiles", 0),
+                })
+                log.warning("Report: rejected stale OKF retrieval because indexed evidence did not match the current request")
             elif rag_result.get("has_content") and evidence_rows:
                 grouped: dict[str, list[dict]] = {}
                 for item in evidence_rows:
@@ -21807,6 +22272,8 @@ async def generate_report(request: Request):
                     "sourceCount": len(rag_source_rows), "restoreStatus": rag_result.get("restore_status"),
                     "rerankerRan": bool(rag_result.get("reranker_ran")),
                     "sourceIdsPending": True,
+                    "filteredOutChunks": rag_filter_meta.get("discardedRows", 0),
+                    "filteredOutSources": rag_filter_meta.get("discardedFiles", 0),
                 })
                 # Canonical source blocks below carry this evidence together
                 # with its [S#] identity. Avoid inserting the RAG service's
@@ -21826,34 +22293,22 @@ async def generate_report(request: Request):
         extracted_image_context = await extract_data_from_images(question, file_images)
         if extracted_image_context:
             log.info("Report: extracted %d chars from images", len(extracted_image_context))
-            if file_only_report and workbook_analytics.get("kind") not in {"pms_strategy_performance", "generic_tabular_data"}:
-                _image_names = list(dict.fromkeys(
-                    re.sub(r"\s+page\s+\d+$", "", str(image.get("name") or "").strip(), flags=re.I)
-                    for image in file_images if isinstance(image, dict) and image.get("name")
-                ))
-                _ocr_source_name = _image_names[0] if len(_image_names) == 1 else "Vision-extracted attachment images"
-                _ocr_file_block = f"[File: {_ocr_source_name}]\n{extracted_image_context.strip()}"
-                file_context = "\n\n".join(part for part in (file_context.strip(), _ocr_file_block) if part)
-                _matching_source = next((
-                    document for document in source_documents
-                    if str(document.get("name") or document.get("title") or "").casefold() == _ocr_source_name.casefold()
-                ), None)
-                if _matching_source is None:
-                    _matching_source = {
-                        "name": _ocr_source_name, "title": _ocr_source_name,
-                        "kind": "Uploaded attachment", "sourceType": "Uploaded attachment",
-                    }
-                    source_documents.append(_matching_source)
-                _existing_source_text = str(_matching_source.get("text") or "").strip()
-                _matching_source["text"] = "\n\n".join(
-                    part for part in (_existing_source_text, extracted_image_context.strip()) if part
-                )
-                try:
-                    workbook_analytics = build_attachment_analytics(file_context)
-                    log.info("Attachment analytics refreshed from vision extraction; kind=%s charts=%d",
-                             workbook_analytics.get("kind"), len(workbook_analytics.get("charts") or []))
-                except Exception as _vision_analytics_exc:
-                    log.warning("Vision attachment analytics failed safely: %s", type(_vision_analytics_exc).__name__)
+            _image_names = list(dict.fromkeys(
+                re.sub(r"\s+page\s+\d+$", "", str(image.get("name") or "").strip(), flags=re.I)
+                for image in file_images if isinstance(image, dict) and image.get("name")
+            ))
+            if not _image_names and len(source_documents) == 1:
+                _image_names = [str(source_documents[0].get("name") or source_documents[0].get("title") or "")]
+            _ocr_source_name = _image_names[0] if len(_image_names) == 1 else "Vision-extracted attachment images"
+            _ocr_file_block = f"[File: {_ocr_source_name}]\n{extracted_image_context.strip()}"
+            file_context = "\n\n".join(part for part in (file_context.strip(), _ocr_file_block) if part)
+            _record_uploaded_file_evidence(_ocr_source_name, extracted_image_context, source_documents)
+            try:
+                workbook_analytics = build_attachment_analytics(file_context)
+                log.info("Attachment analytics refreshed from vision extraction; kind=%s charts=%d",
+                         workbook_analytics.get("kind"), len(workbook_analytics.get("charts") or []))
+            except Exception as _vision_analytics_exc:
+                log.warning("Vision attachment analytics failed safely: %s", type(_vision_analytics_exc).__name__)
 
     # ── Decide source strategy ─────────────────────────────────────────────────
     search_queries: list[str] = []
@@ -23718,6 +24173,21 @@ async def generate_report(request: Request):
             "research product rather than a padded summary."
         ),
     }.get(report_tier, "")
+    attachment_analysis_rules = ""
+    if file_only_report:
+        attachment_analysis_rules = (
+            "\n\nATTACHED-DATA ANALYSIS RULES: For each material finding, identify the workbook worksheet and the column headers "
+            "used. Separate raw observations from calculations and show the calculation basis and observation count for derived "
+            "statistics. Preserve missing values, signs, reported periods, and units. Do not infer a cause, investment quality, "
+            "or market-wide conclusion unless the attached data directly establishes it."
+        )
+        if workbook_analytics.get("kind") == "pms_strategy_performance":
+            attachment_analysis_rules += (
+                " PMS horizon columns such as 1 Mth, 1 Yr, and 5 Yr are separate lookback windows in a dated snapshot; they are "
+                "not sequential time-series observations. Do not call them a trend, recovery, or sector rotation, and do not "
+                "attribute returns to causes the workbook does not record. Compare distributions, categories, sample coverage, "
+                "and reported rankings only."
+            )
     if file_only_report:
         tier_execution = (
             f"\n\nSELECTED REPORT DEPTH: {tier_spec.label}\n"
@@ -23786,6 +24256,7 @@ async def generate_report(request: Request):
         + "\n\n"
         f"Research Question / Topic (this — and ONLY this — defines the report's title and subject): {report_topic}\n"
         + tier_execution
+        + attachment_analysis_rules
         + coverage_prompt_block
         + fpi_methodology_contract
         + writer_style_contract(report_style, report_topic, report_tier)
@@ -23838,7 +24309,10 @@ async def generate_report(request: Request):
         user_prompt += (
             "\n\nFINAL WORKBOOK-ONLY OVERRIDE: Ignore any generic instruction above that mentions web sources, external research, "
             "company-market APIs, publisher images, or fixed page targets. This request is grounded exclusively in the attached workbook. "
-            "Do not introduce external facts. Provide complete workbook-derived comparisons, include the supplied verified chart data, and stop "
+            "Do not introduce external facts. Explain only patterns directly shown by workbook fields; do not infer causes, market-wide events, "
+            "drivers, defensive effects, investor rotation, or future performance unless the workbook explicitly supports them. If the file cannot "
+            "establish why a pattern occurred, say so. Treat different lookback columns in one snapshot as separate windows, not a time series. "
+            "Provide complete workbook-derived comparisons, include the supplied verified chart data, and stop "
             "when the supported analysis is complete rather than repeating expansion passes."
         )
 
@@ -25348,6 +25822,9 @@ async def generate_report(request: Request):
                     _candidate_chart["_serverWorkbookEvidence"] = True
                     _candidate_chart["sourceIds"] = list(_assigned_raw_chart.get("sourceIds") or [])
                     _candidate_chart["source"] = list(_candidate_chart["sourceIds"])
+                    for _chart_meta_key in ("takeaway", "rationale", "chartRole", "workbookMetric"):
+                        if _raw_workbook_chart.get(_chart_meta_key) is not None:
+                            _candidate_chart[_chart_meta_key] = _raw_workbook_chart[_chart_meta_key]
                     _raw_series_by_name = {
                         str(_series.get("name") or _series.get("label") or "").strip().casefold(): _series
                         for _series in (_raw_workbook_chart.get("series") or []) if isinstance(_series, dict)
@@ -26007,6 +26484,8 @@ async def generate_report(request: Request):
             "redactedValues": int(_unverified_metric_redactions or 0),
             "charsBefore": _guard_chars_before,
             "charsAfter": len(report_text or ""),
+            "evidenceBasis": "current_attachment_extract" if file_only_report else "eligible_source_excerpts",
+            "rule": "A cited value must match evidence with its subject and any stated unit or period; uploads do not need a publisher URL.",
         })
         # Do this before the publication audit: unsupported financial figures
         # are removed or neutralized, invalid table rows are dropped, and model-
@@ -26557,12 +27036,19 @@ async def generate_report(request: Request):
         except Exception as _polish_exc:
             log.warning("Report presentation polish failed safely: %s", type(_polish_exc).__name__)
         try:
-            report_text, _chart_omission_meta = _resolve_chart_omission_notes(report_text, charts)
-            if any(_chart_omission_meta.get(k) for k in ("removed", "moved", "rewritten", "duplicateNoticesRemoved")):
-                log.info("Chart omission notes resolved: %s", _chart_omission_meta)
+            report_text, _attachment_marker_meta = ensure_server_workbook_chart_markers(report_text, charts)
+            if _attachment_marker_meta.get("restored") or _attachment_marker_meta.get("relocated"):
                 _final_chart_gate_changed = True
-        except Exception as _omission_exc:
-            log.warning("Chart omission note resolution failed safely: %s", type(_omission_exc).__name__)
+                _chart_pipeline.record(
+                    "attachment_chart_markers_restored", charts,
+                    note=_attachment_marker_meta,
+                )
+                log.warning(
+                    "Restored or relocated visible markers for %d evidence-validated attachment chart(s)",
+                    _attachment_marker_meta.get("restored", 0) + _attachment_marker_meta.get("relocated", 0),
+                )
+        except Exception as _attachment_marker_exc:
+            log.warning("Attachment chart marker restoration failed safely: %s", type(_attachment_marker_exc).__name__)
         report_text, charts, _chart_registry_meta = _canonicalize_chart_registry(report_text, charts)
         _chart_pipeline.record("registry_canonicalized", charts, removed=_removed_chart_reasons(
             _charts_before_registry, charts, None, "no visible [CHART_n] placeholder remained in the report text"))
@@ -26661,20 +27147,89 @@ async def generate_report(request: Request):
             report_text, _attachment_tables_added = append_attachment_analytics_section(
                 report_text, workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
             )
+            if workbook_analytics.get("kind") == "pms_strategy_performance":
+                report_text = rewrite_pms_report_sections(
+                    report_text, workbook_analytics, workbook_source_ids_by_name,
+                )
+                _pms_title, _pms_summary = pms_report_cover(workbook_analytics)
+                if _pms_title:
+                    parsed["title"] = _pms_title
+                if _pms_summary:
+                    parsed["summary"] = (
+                        f"{_pms_summary} [{workbook_source_id}]" if workbook_source_id else _pms_summary
+                    )
+                _final_chart_gate_changed = True
             if _attachment_tables_added:
                 source_manifest = ensure_cited_source_records(report_text, source_manifest)
                 audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
-                _attachment_pages = _rendered_page_count_preflight(
-                    report_text, str(parsed.get("title") or report_topic), question,
-                    str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
-                    source_manifest, report_presentation, report_tier, web_images=images,
-                    file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
-                    report_style=report_style,
-                    kicker=str(parsed.get("kicker") or "")[:60],
-                )
-                if _attachment_pages is not None:
-                    preflight_pages = _attachment_pages
                 _final_chart_gate_changed = True
+
+        # Attachment-table replacement can remove chart markers from a table
+        # section that also hosted inline visuals. Restore any such verified
+        # upload charts after the replacement and rebuild the one-to-one registry.
+        if file_only_report and charts:
+            _charts_before_attachment_registry = list(charts)
+            try:
+                report_text, _final_attachment_marker_meta = ensure_server_workbook_chart_markers(
+                    report_text, charts,
+                )
+                if _final_attachment_marker_meta.get("restored") or _final_attachment_marker_meta.get("relocated"):
+                    _final_chart_gate_changed = True
+                    _chart_pipeline.record(
+                        "attachment_chart_markers_finalized", charts,
+                        note=_final_attachment_marker_meta,
+                    )
+                    log.info(
+                        "Finalized attachment chart markers: restored=%d relocated=%d",
+                        _final_attachment_marker_meta.get("restored", 0),
+                        _final_attachment_marker_meta.get("relocated", 0),
+                    )
+                report_text, charts, _final_attachment_registry_meta = _canonicalize_chart_registry(
+                    report_text, charts,
+                )
+                if _final_attachment_registry_meta.get("changed"):
+                    _final_chart_gate_changed = True
+                _chart_pipeline.record(
+                    "attachment_chart_registry_finalized", charts,
+                    removed=_removed_chart_reasons(
+                        _charts_before_attachment_registry, charts, None,
+                        "attachment table replacement removed the chart marker",
+                    ),
+                    note=_final_attachment_registry_meta,
+                )
+            except Exception as _attachment_finalization_exc:
+                log.warning(
+                    "Final attachment chart restoration failed safely: %s",
+                    type(_attachment_finalization_exc).__name__,
+                )
+
+        # Resolve omission notices only after attachment markers, chart placement,
+        # and attachment-derived prose have reached their final shape. Earlier
+        # resolution could report a workbook chart as absent before its marker
+        # was restored, or leave stale model prose beside the restored chart.
+        try:
+            report_text, _chart_omission_meta = _resolve_chart_omission_notes(
+                report_text, charts, attachment_only=file_only_report, allow_moves=False,
+            )
+            if any(_chart_omission_meta.get(k) for k in ("removed", "moved", "rewritten", "duplicateNoticesRemoved")):
+                log.info("Chart omission notes resolved: %s", _chart_omission_meta)
+                _final_chart_gate_changed = True
+        except Exception as _omission_exc:
+            log.warning("Chart omission note resolution failed safely: %s", type(_omission_exc).__name__)
+
+        # Measure attachment reports after the restored chart markers and
+        # reconciled omission notes are final, so the page count matches the PDF.
+        if file_only_report and workbook_analytics.get("kind") in {"pms_strategy_performance", "generic_tabular_data"}:
+            _final_attachment_pages = _rendered_page_count_preflight(
+                report_text, str(parsed.get("title") or report_topic), question,
+                str(parsed.get("summary") or ""), parsed.get("keyStats", []) or [], charts,
+                source_manifest, report_presentation, report_tier, web_images=images,
+                file_images=embedded_file_images, theme=_resolve_theme(parsed.get("theme"), question),
+                report_style=report_style,
+                kicker=str(parsed.get("kicker") or "")[:60],
+            )
+            if _final_attachment_pages is not None:
+                preflight_pages = _final_attachment_pages
 
         if _final_chart_gate_changed or report_text != _text_before_final_guard or repr(charts) != _charts_before_final_guard:
             # A final sanitizer may have dropped table rows or otherwise changed

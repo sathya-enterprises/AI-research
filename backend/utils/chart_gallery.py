@@ -1784,6 +1784,69 @@ def _alignment_terms(value: str) -> set[str]:
     return terms
 
 
+_HORIZON_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_HORIZON_RE = re.compile(
+    r"(?<![a-z0-9])(?P<number>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"\s*[- ]?\s*(?P<unit>months?|mths?|mth|mos?|years?|yrs?|yr|quarters?|qtrs?|qtr)\b",
+    re.I,
+)
+
+
+def explicit_horizons(value: str, *, exact_label: bool = False) -> set[int]:
+    """Normalize explicit month/year/quarter horizons to a count of months."""
+    text = str(value or "")
+    matches = list(_HORIZON_RE.finditer(text))
+    if exact_label and matches:
+        remainder = _HORIZON_RE.sub("", text).strip(" \t|()[]{}:,.%")
+        if remainder:
+            return set()
+    horizons: set[int] = set()
+    for match in matches:
+        raw_number = match.group("number").casefold()
+        number = int(raw_number) if raw_number.isdigit() else _HORIZON_NUMBER_WORDS[raw_number]
+        unit = match.group("unit").casefold()
+        if unit.startswith("y"):
+            horizons.add(number * 12)
+        elif unit.startswith("q"):
+            horizons.add(number * 3)
+        else:
+            horizons.add(number)
+    return horizons
+
+
+def chart_horizons(chart: dict) -> set[int]:
+    """Read horizons from chart metadata and period labels, excluding entity names."""
+    parts = [
+        str(chart.get(key) or "")
+        for key in ("title", "name", "metric", "metricLabel", "workbookMetric", "period", "horizon", "timeHorizon", "xLabel", "yLabel")
+    ]
+    horizons: set[int] = set()
+    for key in ("periods", "columns"):
+        values = chart.get(key)
+        if isinstance(values, (list, tuple)):
+            for value in values:
+                horizons.update(explicit_horizons(str(value), exact_label=True))
+        elif isinstance(values, str):
+            horizons.update(explicit_horizons(values))
+    for series in chart.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        parts.extend(str(series.get(key) or "") for key in ("name", "label", "metric", "period", "horizon", "timeHorizon"))
+        for point in series.get("data") or []:
+            if not isinstance(point, dict):
+                continue
+            parts.extend(str(point.get(key) or "") for key in ("period", "horizon", "timeHorizon"))
+            label = point.get("label")
+            if label:
+                horizons.update(explicit_horizons(str(label), exact_label=True))
+    for part in parts:
+        horizons.update(explicit_horizons(part))
+    return horizons
+
+
 def _chart_terms(chart: dict) -> set[str]:
     parts = _chart_text_parts(chart)
     text = " ".join(parts).casefold()
@@ -1878,6 +1941,29 @@ def _chart_section_alignment_score(chart: dict, heading: str, body: str, questio
     chart_terms = _chart_terms(chart)
     if not chart_terms:
         return 0
+    chart_horizon_values = chart_horizons(chart)
+    heading_segments = [part.strip() for part in re.split(r"\s+/\s+", heading) if part.strip()]
+    segment_horizons = [explicit_horizons(part) for part in heading_segments]
+    explicit_heading_horizons = [periods for periods in segment_horizons if periods]
+    heading_horizons = set().union(*explicit_heading_horizons) if explicit_heading_horizons else set()
+    if chart_horizon_values and heading_horizons:
+        if not (chart_horizon_values & heading_horizons):
+            return 0
+        # Every heading level must agree with the plotted horizon. This keeps a
+        # one-month chart out of a one-year parent section even if its nested
+        # chart title mentions one month.
+        if any(len(periods) == 1 and chart_horizon_values != periods for periods in explicit_heading_horizons):
+            return 0
+        # A single-horizon section cannot host a multi-horizon chart, even if
+        # one plotted horizon happens to match the section title.
+        if len(heading_horizons) == 1 and chart_horizon_values != heading_horizons:
+            return 0
+    body_horizons = explicit_horizons(body)
+    if chart_horizon_values and body_horizons:
+        if not (chart_horizon_values & body_horizons):
+            return 0
+        if len(body_horizons) == 1 and chart_horizon_values != body_horizons:
+            return 0
     heading_terms = _alignment_terms(heading)
     body_terms = _alignment_terms(body)
     section_terms = heading_terms | body_terms
@@ -2274,6 +2360,17 @@ def cohere_chart_placements(
                 target_after = -best[4]
 
         if target_after is None:
+            if (
+                chart.get("_serverWorkbookEvidence") is True
+                and str(chart.get("sourceOrigin") or "").strip().casefold()
+                in {"uploaded_workbook", "uploaded_attachment"}
+            ):
+                # These charts were calculated from the uploaded rows and
+                # already passed the evidence gate. Preserve their marker when
+                # prose has no suitable local anchor; horizon mismatches are
+                # moved to a correctly titled attachment-chart section earlier.
+                decisions[old_index] = ("keep", marker_position)
+                continue
             decisions[old_index] = ("drop", None)
             dropped_titles.append(title[:120])
             continue

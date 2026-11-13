@@ -188,6 +188,61 @@ def test_cited_source_evidence_is_claim_aligned_per_source_id():
     assert "150.26" not in by_id["S2"]["evidenceExcerpt"]
 
 
+def test_official_dataset_chart_rows_survive_claim_scoped_source_excerpts():
+    from types import SimpleNamespace
+
+    from routes import report as R
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+    from utils.official_data import CATALOG, Dataset, as_source, official_charts
+
+    source = as_source(Dataset(
+        entry=CATALOG["wb.life_exp"],
+        years=[2020, 2021, 2022],
+        series={"India": [70.1, 71.0, 71.5], "Kenya": [66.3, 66.7, 67.0]},
+        retrieved="2026-11-13", latest=2022, fit="direct", measure="life expectancy",
+    ))
+    manifest = build_source_registry([source])
+    sid = manifest[0]["id"]
+    passage = SimpleNamespace(
+        passage_id=f"{sid}.1", source_id=sid, kind="table", title=source["title"],
+        text=source["pageContent"], url=source["url"], publisher=source["publisher"],
+        reliability=0.95, published=source["published"],
+    )
+
+    class _Store:
+        passages = [passage]
+
+        @staticmethod
+        def get(passage_id):
+            return passage if passage_id == passage.passage_id else None
+
+    tracked = [
+        (R._CHART_EVIDENCE_LINES, {}),
+        (R._PUBLISHER_TABLE_CHART_EVIDENCE_IDS, set()),
+    ]
+    tokens = [(variable, variable.set(value)) for variable, value in tracked]
+    try:
+        charts = official_charts(_Store(), "Compare life expectancy in India and Kenya from 2020 to 2022")
+        specs = [dict(chart.spec, evidencePassages=chart.passage_ids) for chart in charts]
+        assert specs and R._register_v2_chart_evidence(specs, _Store()) == 1
+
+        report_text = "Life expectancy in India was 70.1 years in 2020 [S1].\n\n[CHART_1]"
+        audited = _attach_audit_source_evidence(manifest, [source], report_text)
+        public_sources = _merge_source_evidence_statuses(manifest, audited)
+        source_row = next(item for item in public_sources if item["id"] == sid)
+        assert "2022 |" in source_row["chartEvidenceExcerpt"]
+
+        audit = audit_chart_evidence_consistency(
+            report_text, specs, public_sources, question="Compare life expectancy in India and Kenya from 2020 to 2022",
+            require_publisher_verification=True,
+        )
+        assert audit["chartEvidenceFailures"] == []
+        assert audit["chartTableVerificationConflicts"] == []
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
 def test_missing_citation_id_is_preserved_as_explicit_unresolved_record_and_blocks_pass():
     report = "The capacity target is 500 GW [S1]. Another unsupported claim is attributed to [S9]."
     manifest = build_source_registry([

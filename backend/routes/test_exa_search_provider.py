@@ -88,6 +88,8 @@ def test_exa_cache_is_exact_query_scoped_and_does_not_cache_empty_sets():
 def test_exa_key_loader_supports_two_explicit_keys_and_deduplicates(monkeypatch):
     from utils import keys
 
+    for name in ("EXA_API_KEY", "EXA_API_KEY_2", "EXA_API_KEY_3", "EXA_API_KEYS"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("EXA_API_KEY", "first-key")
     monkeypatch.setenv("EXA_API_KEY_2", "second-key")
     monkeypatch.setenv("EXA_API_KEYS", "second-key, third-key")

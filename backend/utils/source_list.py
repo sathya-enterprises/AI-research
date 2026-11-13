@@ -123,11 +123,24 @@ def display_date(raw) -> str:
 def is_calculated(source: dict) -> bool:
     """A dataset computed in this report (no public page): never shown as a 'primary official' source."""
     url = str(source.get("url") or "")
+    origin = str(
+        source.get("evidence_origin") or source.get("evidenceOrigin")
+        or source.get("source_origin") or source.get("sourceOrigin") or ""
+    ).casefold()
+    if origin in {"uploaded_workbook", "uploaded_attachment"}:
+        return False
     blob = " ".join(str(source.get(k) or "") for k in ("reliability_note", "publisher", "title", "kind", "evidence_origin"))
     return not url.startswith(("http://", "https://")) and bool(re.search(r"(?i)calculated|internal dataset|growth gradual market data", blob))
 
 
 def metadata_parts(source: dict) -> list[str]:
+    origin = str(
+        source.get("evidence_origin") or source.get("evidenceOrigin")
+        or source.get("source_origin") or source.get("sourceOrigin") or ""
+    ).casefold()
+    if origin in {"uploaded_workbook", "uploaded_attachment"}:
+        label = "User-provided workbook" if origin == "uploaded_workbook" else "User-provided attachment"
+        return [f"{label}; extracted evidence is not independently publisher-verified"]
     if is_calculated(source):
         # Stage I: an internal calculated dataset is labelled as such, not "primary official, reliability 1.00".
         publisher = display_publisher(source)

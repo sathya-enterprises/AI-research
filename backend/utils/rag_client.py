@@ -14,6 +14,8 @@ Endpoints used:
 import asyncio
 import logging
 import os
+import re
+import unicodedata
 
 import httpx
 
@@ -31,6 +33,68 @@ RAG_URL = os.environ.get(
 # while the Space container is still booting) and read=60 was cutting it
 # close too — both bumped with headroom below.
 _TIMEOUT = httpx.Timeout(connect=30, read=90, write=90, pool=10)
+
+
+def _attachment_filename_key(value: object) -> str:
+    """Normalize a filename for exact attachment-to-RAG matching."""
+    name = str(value or "").strip().strip("\"'")
+    name = re.sub(r"(?i)^\s*\[(?:attached\s+)?file:\s*", "", name).rstrip("] ")
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # Case and Unicode normalization are harmless for filenames on Windows;
+    # removing punctuation is not. `a-b.xlsx` and `ab.xlsx` are different files.
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def filter_rag_report_evidence_to_attachments(
+    evidence_rows: list[dict] | None,
+    source_files: list[str] | None,
+    attachment_names: list[str] | set[str] | tuple[str, ...] | None,
+) -> tuple[list[dict], list[str], dict]:
+    """Keep only retrieved report chunks whose filename exactly matches this upload.
+
+    RAG sessions can outlive a single attachment. In attachment-only reports,
+    matching one returned filename must not admit the session's other files.
+    """
+    allowed = {
+        key for key in (_attachment_filename_key(name) for name in (attachment_names or [])) if key
+    }
+    rows = [row for row in (evidence_rows or []) if isinstance(row, dict)]
+    files = [str(name).strip() for name in (source_files or []) if str(name).strip()]
+    if not allowed:
+        return [], [], {
+            "requestedFiles": 0,
+            "matchedFiles": 0,
+            "discardedRows": len(rows),
+            "discardedFiles": len(files),
+        }
+
+    def row_filename(row: dict) -> str:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        for values in (row, metadata):
+            for key in ("sourceName", "source_name", "filename", "fileName", "name"):
+                value = str(values.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
+
+    kept_rows = [
+        row for row in rows
+        if (key := _attachment_filename_key(row_filename(row))) and key in allowed
+    ]
+    kept_files: list[str] = []
+    seen: set[str] = set()
+    for name in [*files, *(row_filename(row) for row in kept_rows)]:
+        key = _attachment_filename_key(name)
+        if key in allowed and key not in seen:
+            kept_files.append(name)
+            seen.add(key)
+    matched_keys = {_attachment_filename_key(row_filename(row)) for row in kept_rows}
+    return kept_rows, kept_files, {
+        "requestedFiles": len(allowed),
+        "matchedFiles": len(matched_keys),
+        "discardedRows": len(rows) - len(kept_rows),
+        "discardedFiles": len(files) - len([name for name in files if _attachment_filename_key(name) in allowed]),
+    }
 
 
 def _exc_str(exc: Exception) -> str:

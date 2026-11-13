@@ -222,6 +222,65 @@ def test_chart_omission_notes_are_removed_moved_or_made_specific():
     assert "**Data limitation:**" in out and meta["moved"] == 1
 
 
+def test_attachment_omission_notes_resolve_after_matching_chart_markers_are_restored():
+    charts = [
+        {"type": "horizontal_bar", "title": "Top PMS Strategies by 1-Month Return",
+         "series": [{"name": "Reported return", "data": [{"label": "Alpha", "value": 4.2}]}]},
+        {"type": "horizontal_bar", "title": "Top PMS Strategies by 1-Year Return",
+         "series": [{"name": "Reported return", "data": [{"label": "Alpha", "value": 24.8}]}]},
+    ]
+    text = (
+        "## One-Year Strategy Performance\n"
+        "> **Chart not included:** no validated 1-year chart was available.\n\n"
+        "## One-Month Strategy Performance\n"
+        "> **Chart not included:** no validated 1-month chart was available.\n\n"
+        "## Benchmark Comparison\n"
+        "> **Chart not included:** no benchmark return series was available.\n\n"
+        "## Charts calculated from the attached data\n"
+        "### Top PMS Strategies by 1-Month Return\nReported 1-month returns.\n[CHART_1]\n\n"
+        "### Top PMS Strategies by 1-Year Return\nReported 1-year returns.\n[CHART_2]"
+    )
+
+    out, meta = R._resolve_chart_omission_notes(
+        text, charts, attachment_only=True, allow_moves=False,
+    )
+
+    assert "Chart not included" not in out
+    assert "One-Year Strategy Performance" in out and "One-Month Strategy Performance" in out
+    assert "attached data did not provide enough row-verifiable observations" in out
+    assert "retrieved sources" not in out
+    assert "[CHART_1]" in out and "[CHART_2]" in out
+    assert meta["removed"] == 2
+    assert meta["rewritten"] == 1
+    assert meta["moved"] == 0
+
+
+def test_attachment_chart_data_limitation_is_removed_when_verified_chart_is_in_section():
+    chart = {
+        "type": "horizontal_bar", "title": "Top PMS Strategies by 1-Year Return",
+        "sourceOrigin": "uploaded_workbook", "_serverWorkbookEvidence": True,
+        "series": [{"name": "Reported return", "data": [
+            {"label": "Alpha", "value": 24.8}, {"label": "Beta", "value": 19.0},
+        ]}],
+    }
+    text = (
+        "## One-Year Strategy Performance\n"
+        "### Top Performing Strategies (1-Year)\n"
+        "> **Data limitation:** the retrieved sources did not provide a period-matched, "
+        "source-verified series for Top Performing Strategies (1-Year); the figures in this "
+        "section are cited in the text instead of charted.\n\n"
+        "[CHART_1]"
+    )
+
+    out, meta = R._resolve_chart_omission_notes(
+        text, [chart], attachment_only=True, allow_moves=False,
+    )
+
+    assert "retrieved sources did not provide" not in out
+    assert "[CHART_1]" in out
+    assert meta["removed"] == 1
+
+
 def test_repair_that_drops_a_chart_placeholder_reattaches_it_to_its_section():
     chart = {"type": "line", "title": "Credit growth", "series": [{"name": "SCBs", "data": [{"label": "FY24", "value": 16}]}]}
     pre = "## Credit Growth\nCredit rose [S1].\n\n[CHART_1]\n\n## Outlook\nStable."

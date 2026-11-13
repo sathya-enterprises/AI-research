@@ -38,6 +38,152 @@ def _norm(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
+def _benchmark_key(value: object) -> str:
+    """Normalize common long/short benchmark labels for workbook row matching."""
+    text = _norm(value)
+    text = re.sub(r"(?i)\b(?:tri|idx|index)\b", " ", text)
+    text = re.sub(r"(?i)\bcomp\.?\b", "composite", text)
+    text = re.sub(r"(?i)\bhyb\.?\b", "hybrid", text)
+    text = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", text)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _matched_benchmark_chart(pms: dict, filename: str) -> tuple[dict | None, list[str]]:
+    """Build one auditable index-vs-matched-strategy comparison from source rows.
+
+    Benchmarks are compared only with strategies that name that same benchmark
+    in the workbook. This avoids comparing (for example) debt indexes with the
+    median of a mixed equity/debt PMS universe.
+    """
+    groups: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for row in pms.get("benchmarkRows") or []:
+        if not isinstance(row, dict) or str(row.get("filename") or "").casefold() != filename.casefold():
+            continue
+        label = re.sub(r"\s+", " ", str(row.get("label") or "")).strip()
+        key = _benchmark_key(label)
+        if not key:
+            continue
+        group = groups.setdefault(key, {
+            "label": label, "periodValues": {}, "periodRecords": {}, "conflicts": set(),
+        })
+        for period, raw_value in (row.get("periodValues") or {}).items():
+            if period in group["conflicts"]:
+                continue
+            prior = group["periodValues"].get(period)
+            if prior is None:
+                group["periodValues"][period] = float(raw_value)
+                group["periodRecords"][period] = row
+            elif abs(float(prior) - float(raw_value)) > max(0.001, abs(float(prior)) * 0.002):
+                # Repeated benchmark rows must agree before they are combined.
+                group["conflicts"].add(period)
+                group["periodValues"].pop(period, None)
+                group["periodRecords"].pop(period, None)
+
+    strategies_by_benchmark: dict[str, list[dict]] = {}
+    for row in pms.get("strategies") or []:
+        if not isinstance(row, dict) or str(row.get("filename") or "").casefold() != filename.casefold():
+            continue
+        key = _benchmark_key(row.get("benchmark"))
+        if key:
+            strategies_by_benchmark.setdefault(key, []).append(row)
+
+    choices = []
+    preferred_periods = ("1 Mth", "1 Yr", "3 Yr")
+    for key, group in groups.items():
+        matching = strategies_by_benchmark.get(key, [])
+        if len(matching) < MIN_CATEGORY_SIZE:
+            continue
+        paired: dict[str, tuple[float, list[dict], dict]] = {}
+        for period in _RETURN_PERIODS:
+            benchmark_value = group["periodValues"].get(period)
+            record = group["periodRecords"].get(period)
+            if benchmark_value is None or not isinstance(record, dict):
+                continue
+            strategy_rows = [
+                row for row in matching
+                if period in (row.get("periodValues") or {})
+            ]
+            if len(strategy_rows) >= MIN_CATEGORY_SIZE:
+                paired[period] = (float(benchmark_value), strategy_rows, record)
+        if len(paired) >= 2:
+            choices.append((len(matching), len(paired), key, group, paired))
+    if not choices:
+        return None, []
+
+    _match_count, _period_count, _key, group, paired = max(
+        choices, key=lambda item: (item[0], item[1], item[2]),
+    )
+    selected_periods = [period for period in preferred_periods if period in paired]
+    for period in _RETURN_PERIODS:
+        if period in paired and period not in selected_periods:
+            selected_periods.append(period)
+        if len(selected_periods) >= 3:
+            break
+    selected_periods = selected_periods[:3]
+
+    benchmark_points = []
+    strategy_median_points = []
+    evidence_lines = []
+    for period in selected_periods:
+        benchmark_value, strategy_rows, record = paired[period]
+        benchmark_raw = str((record.get("periodRaw") or {}).get(period) or "")
+        scale_note = "as reported in percent" if "%" in benchmark_raw else "decimal fraction converted to percent"
+        benchmark_quote = (
+            f"Deterministic uploaded-row observation; file: {filename}; sheet: {record.get('sheet')}; "
+            f"row: {record.get('rowNumber')}; benchmark index: {group['label']}; reported horizon: {period}; "
+            f"raw workbook cell value: {benchmark_raw}; plotted return: {benchmark_value:.4f}% ({scale_note}); "
+            f"original row: {record.get('rawLine') or ''}"
+        )
+        benchmark_points.append({
+            "label": period, "value": round(benchmark_value, 4),
+            "evidenceSource": "", "evidenceQuote": benchmark_quote,
+            "evidenceValue": benchmark_raw, "evidenceEntity": group["label"],
+            "evidenceMetric": "benchmark return", "evidencePeriod": period,
+            "evidenceUnit": "%", "sourceFile": filename,
+            "sourceSheet": record.get("sheet"), "sourceRow": record.get("rowNumber"),
+        })
+        evidence_lines.append(benchmark_quote)
+
+        values = [float(row["periodValues"][period]) for row in strategy_rows]
+        median_value = float(median(values))
+        median_quote = (
+            f"Deterministic calculation from {filename}; benchmark match: {group['label']}; "
+            f"metric: median PMS strategy return; reported horizon: {period}; "
+            f"value: {median_value:.4f}%; observations: {len(values)} unique strategies; "
+            "matched using the workbook benchmark field; missing return cells excluded."
+        )
+        strategy_median_points.append({
+            "label": period, "value": round(median_value, 4),
+            "evidenceSource": "", "evidenceQuote": median_quote,
+            "evidenceValue": f"{median_value:.4f}%", "evidenceEntity": group["label"],
+            "evidenceMetric": "median PMS strategy return for matching benchmark",
+            "evidencePeriod": period, "evidenceUnit": "%", "sourceFile": filename,
+            "sourceObservationCount": len(values),
+        })
+        evidence_lines.append(median_quote)
+
+    if len(benchmark_points) < 2 or len(strategy_median_points) != len(benchmark_points):
+        return None, []
+    label = group["label"]
+    chart = {
+        "type": "grouped_bar",
+        "title": f"{label} vs matched PMS strategy median by reported horizon",
+        "xLabel": "Reported return horizon", "yLabel": "Return as reported (%)", "unit": "%",
+        "series": [
+            {"name": f"{label} benchmark", "data": benchmark_points},
+            {"name": f"Median of strategies using {label}", "data": strategy_median_points},
+        ],
+        "sourceIds": [], "sourceOrigin": "uploaded_workbook",
+        "chartRole": "benchmark_comparison", "sourceFiles": [filename],
+        "rationale": "Compare an index with the median return of attached strategies that name that index as their benchmark.",
+        "takeaway": (
+            "The benchmark and strategy median are matched on the workbook's benchmark field. "
+            "Each label is a separate reported lookback horizon, not a time series."
+        ),
+    }
+    return chart, evidence_lines
+
+
 def is_file_only_workbook_report(question: str, file_context: str, source_documents: object = None,
                                  has_rag: bool = False) -> bool:
     """Identify attachment-first reports unless the user explicitly asks for outside research."""
@@ -124,65 +270,168 @@ def _csv_rows(sheet_body: str) -> tuple[list[list[str]], list[str]]:
 
 
 def _find_pms_table(rows: list[list[str]]) -> tuple[int, int, dict[str, int]] | None:
+    """Find a PMS-style strategy/return table by its header schema, independent of file name.
+
+    AMC/manager and strategy identity plus a recognized return horizon
+    identify the specialized adapter. Benchmark, AUM and category are useful fields,
+    but optional; tables without the strategy/return shape stay on the generic path.
+    """
     for header_index, row in enumerate(rows):
-        normalized = [_norm(cell).replace("_", " ") for cell in row]
-        joined = " ".join(normalized)
-        required = ("amc", "investment approach", "benchmark", "aum", "category", "returns")
-        if not all(term in joined for term in required):
+        header_indices: dict[str, int] = {}
+        for column, value in enumerate(row):
+            key = re.sub(r"[^a-z0-9]+", " ", _norm(value)).strip()
+            if key in {
+                "amc", "amc name", "asset management company", "asset manager",
+                "fund manager", "portfolio manager", "pms provider", "fund house",
+                "provider", "manager", "firm",
+            }:
+                header_indices.setdefault("amc", column)
+            elif key in {
+                "investment approach", "investment strategy", "strategy", "strategy name",
+                "pms strategy", "portfolio", "portfolio name", "scheme", "scheme name",
+                "product", "product name", "investment style",
+            }:
+                header_indices.setdefault("approach", column)
+            elif "benchmark" in key:
+                header_indices.setdefault("benchmark", column)
+            elif key.startswith("aum") or "assets under management" in key:
+                header_indices.setdefault("aum", column)
+            elif key in {"category", "investment category", "scheme category"}:
+                header_indices.setdefault("category", column)
+        if not {"amc", "approach"}.issubset(header_indices):
             continue
+
         period_index = None
         period_columns: dict[str, int] = {}
-        for candidate_index in range(header_index + 1, min(len(rows), header_index + 4)):
+        # Periods can share the main header row or sit in a second row below a
+        # merged "Returns" heading. Evaluate each row independently so unrelated
+        # labels from adjacent rows cannot combine into a false match.
+        for candidate_index in range(header_index, min(len(rows), header_index + 4)):
+            candidate_periods: dict[str, int] = {}
             for column, value in enumerate(rows[candidate_index]):
-                alias = _RETURN_ALIASES.get(_norm(value))
+                alias = _return_period_alias(value)
                 if alias:
-                    period_columns[alias] = column
-            if len(period_columns) >= 4:
+                    candidate_periods[alias] = column
+            if candidate_periods:
                 period_index = candidate_index
+                period_columns = candidate_periods
                 break
         if period_index is None:
-            # Some workbook exports flatten the two header rows.
-            for column, value in enumerate(row):
-                alias = _RETURN_ALIASES.get(_norm(value))
-                if alias:
-                    period_columns[alias] = column
-            period_index = header_index
-        indices = {}
-        for idx, value in enumerate(row):
-            key = _norm(value).replace("_", " ")
-            if key in {"amc", "asset management company"}:
-                indices["amc"] = idx
-            elif "investment approach" in key or key == "strategy":
-                indices["approach"] = idx
-            elif "benchmark" in key:
-                indices["benchmark"] = idx
-            elif key.startswith("aum") or "assets under management" in key:
-                indices["aum"] = idx
-            elif key == "category":
-                indices["category"] = idx
-        if all(key in indices for key in ("amc", "approach", "benchmark", "aum", "category")) and period_columns:
-            return header_index, period_index, {**indices, **{f"return:{period}": col for period, col in period_columns.items()}}
+            continue
+        return header_index, period_index, {
+            **header_indices,
+            **{f"return:{period}": col for period, col in period_columns.items()},
+        }
     return None
+
+
+def _return_period_alias(value: object) -> str | None:
+    """Normalize common return-horizon headers such as "1 Year Return (%)"."""
+    raw = _norm(value)
+    direct = _RETURN_ALIASES.get(raw)
+    if direct:
+        return direct
+    simplified = re.sub(r"\b(?:returns?|performance)\b", " ", raw)
+    simplified = re.sub(r"[^a-z0-9]+", " ", simplified).strip()
+    return _RETURN_ALIASES.get(simplified)
+
+
+def _return_column_scale(
+    rows: list[list[str]], header_index: int, period_index: int, column: int,
+) -> float:
+    """Infer whether numeric return cells are decimal fractions or percentage points."""
+    header_text = " ".join(
+        str(rows[index][column] or "")
+        for index in range(max(0, header_index - 1), period_index + 1)
+        if column < len(rows[index])
+    )
+    if "%" in header_text or re.search(r"(?i)\bpercent(?:age)?\b|\bper\s+cent\b", header_text):
+        return 1.0
+    values = []
+    for row in rows[period_index + 1:]:
+        if column >= len(row):
+            continue
+        raw = str(row[column] or "").strip()
+        if not raw or "%" in raw:
+            continue
+        value = _parse_num(raw)
+        if value is not None:
+            values.append(abs(value))
+    # Many spreadsheet exports store 0.248 for a displayed 24.8%; other files
+    # store 24.8 directly. A value outside the fractional interval identifies
+    # percentage-point storage. If every value is within [-1, 1], Excel's
+    # decimal-fraction convention is the best available inference absent a unit.
+    return 1.0 if any(value > 1.0 for value in values) else 100.0
+
+
+def _pms_header_fields(
+    rows: list[list[str]], header_index: int, period_index: int,
+) -> list[str]:
+    """Return the visible field names from a detected two-row PMS header."""
+    header = rows[header_index] if 0 <= header_index < len(rows) else []
+    periods = rows[period_index] if 0 <= period_index < len(rows) else []
+    names = []
+    for column in range(max(len(header), len(periods))):
+        label = str(header[column] if column < len(header) else "").strip()
+        period = str(periods[column] if column < len(periods) else "").strip()
+        alias = _return_period_alias(period)
+        if alias:
+            label = f"Returns - {alias}"
+        elif not label:
+            label = period
+        label = re.sub(r"\s+", " ", label).strip()
+        if label and label.casefold() not in {value.casefold() for value in names}:
+            names.append(label)
+    return names
+
+
+def _pms_semantic_field_map(
+    rows: list[list[str]], header_index: int, period_index: int, indices: dict[str, int],
+) -> dict[str, str]:
+    """Keep the source's actual labels for the semantic fields we recognize."""
+    result: dict[str, str] = {}
+    for field in ("amc", "approach", "benchmark", "aum", "category"):
+        column = indices.get(field)
+        if column is None:
+            continue
+        labels: list[str] = []
+        for row_index in dict.fromkeys((header_index, period_index)):
+            if row_index < 0 or row_index >= len(rows) or column >= len(rows[row_index]):
+                continue
+            value = re.sub(r"\s+", " ", str(rows[row_index][column] or "")).strip()
+            if value and _return_period_alias(value) is None and value.casefold() not in {x.casefold() for x in labels}:
+                labels.append(value)
+        if labels:
+            result[field] = " / ".join(labels)
+    return result
 
 
 def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
     """Parse PMS strategy tables and return measured rows, chart specs and source excerpts."""
     files_result: list[dict[str, Any]] = []
     merged: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
+    benchmark_rows: list[dict[str, Any]] = []
+    repeated_rows = 0
+    duplicate_return_conflicts = 0
+    duplicate_conflict_examples: list[dict[str, Any]] = []
     for filename, file_body in _split_file_blocks(file_context):
         sheet_records: list[dict[str, Any]] = []
+        file_benchmark_rows: list[dict[str, Any]] = []
         all_rows_for_evidence: list[str] = []
         workbook_date = ""
+        sheet_metadata: list[dict[str, Any]] = []
         for sheet_name, sheet_body in _sheet_blocks(file_body):
             rows, physical = _csv_rows(sheet_body)
             if not rows:
                 continue
-            if not workbook_date:
-                for row in rows[:3]:
-                    match = re.search(r"(?i)AS\s+ON\s+(.+)", " ".join(row))
-                    if match:
-                        workbook_date = match.group(1).strip()
-                        break
+            sheet_date = ""
+            for row in rows[:3]:
+                match = re.search(r"(?i)AS\s+(?:ON|OF)\s+(.+)", " ".join(row))
+                if match:
+                    sheet_date = match.group(1).strip()
+                    break
+            if sheet_date and not workbook_date:
+                workbook_date = sheet_date
             found = _find_pms_table(rows)
             if not found:
                 continue
@@ -195,13 +444,78 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                     break
             header_line = physical[header_index] if header_index < len(physical) else ",".join(rows[header_index])
             period_line = physical[period_index] if period_index < len(physical) else ",".join(rows[period_index])
+            header_fields = _pms_header_fields(rows, header_index, period_index)
+            field_map = _pms_semantic_field_map(rows, header_index, period_index, indices)
+            recognized_fields = list(field_map)
+            period_scales = {
+                period: _return_column_scale(rows, header_index, period_index, column)
+                for period, column in indices.items() if period.startswith("return:")
+            }
+            return_columns = [
+                column for key, column in indices.items() if key.startswith("return:")
+            ]
+            first_return_column = min(return_columns) if return_columns else len(rows[period_index])
+            in_benchmark_section = False
+            sheet_record_start = len(sheet_records)
             if header_line:
                 all_rows_for_evidence.append(f"[Sheet: {sheet_name}] {title} | {header_line} | {period_line}")
             for row_index in range(period_index + 1, len(rows)):
                 row = rows[row_index]
+
                 def cell(key: str) -> str:
                     return row[indices[key]].strip() if indices.get(key, 10**6) < len(row) else ""
+
                 amc, approach = cell("amc"), cell("approach")
+
+                # Some PMS exports place benchmark index observations after
+                # the strategy rows, under a small "Benchmark (TRI)" section.
+                # Those rows share the strategy return columns but have no AMC
+                # or investment-approach value, so the strategy parser used to
+                # discard them even when a report chart quoted their values.
+                section_label = next(
+                    (str(value or "").strip() for value in row[:first_return_column]
+                     if str(value or "").strip()),
+                    "",
+                )
+                if re.fullmatch(r"(?i)benchmarks?(?:\s*\([^)]*\))?", section_label):
+                    in_benchmark_section = True
+                    continue
+
+                if in_benchmark_section:
+                    # A new table or a ranked-strategy block can follow the
+                    # benchmark rows on the same worksheet. End the benchmark
+                    # block as soon as both identity fields are populated, so
+                    # those later strategy rows are never mislabeled as indexes.
+                    if amc and approach:
+                        in_benchmark_section = False
+                    else:
+                        period_values: dict[str, float] = {}
+                        period_raw: dict[str, str] = {}
+                        for period in _RETURN_PERIODS:
+                            column = indices.get(f"return:{period}")
+                            if column is None or column >= len(row):
+                                continue
+                            raw_value = str(row[column] or "").strip()
+                            number = _parse_num(raw_value)
+                            if number is None:
+                                continue
+                            period_values[period] = (
+                                number if "%" in raw_value
+                                else number * period_scales.get(f"return:{period}", 1.0)
+                            )
+                            period_raw[period] = raw_value
+                        if section_label and len(period_values) >= 2:
+                            raw_line = physical[row_index] if row_index < len(physical) else ",".join(row)
+                            file_benchmark_rows.append({
+                                "filename": filename, "sheet": sheet_name,
+                                "rowNumber": row_index + 1, "tableTitle": title,
+                                "asOf": sheet_date, "label": section_label,
+                                "periodValues": period_values, "periodRaw": period_raw,
+                                "rawLine": raw_line, "headerLine": header_line,
+                                "periodLine": period_line,
+                            })
+                        continue
+
                 if not amc or not approach or _norm(amc) in {"amc", "top performance", "strategy"}:
                     continue
                 period_values: dict[str, float] = {}
@@ -214,21 +528,24 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                     number = _parse_num(raw_value)
                     if number is None:
                         continue
-                    # Excel exports commonly expose percentage returns as decimal fractions
-                    # (0.248 = 24.8%). Some exports instead serialize the displayed percentage
-                    # ("24.8%"). Do not multiply the latter a second time.
-                    period_values[period] = number if "%" in raw_value else number * 100.0
+                    # Honor explicit units; otherwise infer the column's stored
+                    # representation once so values like 13.4 are not changed to 1,340%.
+                    period_values[period] = (
+                        number if "%" in raw_value
+                        else number * period_scales.get(f"return:{period}", 1.0)
+                    )
                     period_raw[period] = raw_value
                 aum_raw = cell("aum")
                 aum = _parse_num(aum_raw)
                 raw_line = physical[row_index] if row_index < len(physical) else ",".join(row)
                 record = {
                     "filename": filename, "sheet": sheet_name, "rowNumber": row_index + 1,
-                    "tableTitle": title, "asOf": workbook_date, "amc": amc, "approach": approach,
+                    "tableTitle": title, "asOf": sheet_date, "amc": amc, "approach": approach,
                     "benchmark": cell("benchmark"), "category": cell("category"),
                     "aum": aum, "aumRaw": aum_raw, "periodValues": period_values,
                     "periodRaw": period_raw, "rawLine": raw_line,
                     "headerLine": header_line, "periodLine": period_line,
+                    "recognizedFields": recognized_fields,
                 }
                 if not period_values and aum is None:
                     continue
@@ -240,17 +557,53 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                 if prior is None:
                     merged[key] = record.copy()
                 else:
+                    repeated_rows += 1
+                    prior["recognizedFields"] = sorted(
+                        set(prior.get("recognizedFields") or []) | set(recognized_fields)
+                    )
                     # Category tables are the base. Top-performance tables can fill gaps,
                     # but duplicate sheets never overwrite a real observation silently.
                     for period, value in period_values.items():
-                        if period not in prior["periodValues"]:
+                        prior_value = prior["periodValues"].get(period)
+                        if prior_value is not None:
+                            tolerance = max(0.001, abs(float(prior_value)) * 0.002)
+                            if abs(float(prior_value) - float(value)) > tolerance:
+                                duplicate_return_conflicts += 1
+                                if len(duplicate_conflict_examples) < 20:
+                                    duplicate_conflict_examples.append({
+                                        "file": filename, "amc": amc, "approach": approach,
+                                        "period": period, "firstSheet": prior.get("sheet"),
+                                        "repeatSheet": sheet_name, "firstValue": prior_value,
+                                        "repeatValue": value,
+                                    })
+                        else:
                             prior["periodValues"][period] = value
                             prior["periodRaw"][period] = period_raw[period]
                             prior.setdefault("periodEvidence", {})[period] = record
                     if prior.get("aum") is None and aum is not None:
                         prior["aum"], prior["aumRaw"] = aum, aum_raw
-        files_result.append({"filename": filename, "rows": sheet_records, "asOf": workbook_date,
-                             "evidenceHeaders": all_rows_for_evidence})
+            sheet_metadata.append({
+                "name": sheet_name, "title": title, "asOf": sheet_date,
+                "columnNames": header_fields,
+                "fieldMap": field_map, "recognizedFields": recognized_fields,
+                "rowCount": len(sheet_records) - sheet_record_start,
+                "sourceRows": len(sheet_records) - sheet_record_start,
+                "columnCount": len(header_fields),
+            })
+        methodology_notes = []
+        if re.search(r"(?i)time\s+weighted\s+rate\s+of\s+return|\bTWRR\b", file_body):
+            methodology_notes.append(
+                "Workbook footnote states returns use the Time Weighted Rate of Return (TWRR) method, as provided by the respective AMCs."
+            )
+        if re.search(r"(?i)returns?\s+over\s+a\s+1\s+year\s+period\s+are\s+annualized", file_body):
+            methodology_notes.append("Workbook footnote states 1-year returns are annualized.")
+        files_result.append({
+            "filename": filename, "rows": sheet_records, "asOf": workbook_date,
+            "sheets": sheet_metadata, "methodologyNotes": methodology_notes,
+            "evidenceHeaders": all_rows_for_evidence,
+            "benchmarkRows": file_benchmark_rows,
+        })
+        benchmark_rows.extend(file_benchmark_rows)
 
     if not merged:
         return {"kind": "generic", "files": [], "strategies": [], "charts": [], "keyStats": [], "evidenceByFile": {}}
@@ -267,10 +620,24 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
         "1 Yr": "1-Year", "2 Yr": "2-Year", "3 Yr": "3-Year",
         "5 Yr": "5-Year", "10 Yr": "10-Year", "Since Incp.": "Since-Inception",
     }
+    observed_periods = [
+        period for period in period_labels
+        if sum(1 for item in strategies if period in (item.get("periodValues") or {})) >= 2
+    ]
+    preferred_periods = [period for period in ("1 Mth", "1 Yr", "5 Yr") if period in observed_periods]
+    target_period_count = min(3, len(observed_periods))
+    if len(preferred_periods) < target_period_count:
+        middle_period = observed_periods[len(observed_periods) // 2] if observed_periods else ""
+        for period in (observed_periods[0], middle_period, observed_periods[-1], *observed_periods):
+            if period and period not in preferred_periods:
+                preferred_periods.append(period)
+            if len(preferred_periods) >= target_period_count:
+                break
+    selected_periods = set(preferred_periods[:target_period_count])
     chart_defs = [
         (period, f"Top PMS Strategies by {period_labels[period]} Return",
          f"Reported {period_labels[period].lower()} return")
-        for period in _RETURN_PERIODS if period in period_labels
+        for period in _RETURN_PERIODS if period in selected_periods
     ]
     multiple_filenames = len({str(row.get("filename") or "").casefold() for row in strategies}) > 1
     charts: list[dict] = []
@@ -297,6 +664,7 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
             # worksheet/row provenance. Every field here is taken from this source row.
             quote_parts = [f"Sheet: {sheet_name}", f"Row: {row_number}" if row_number is not None else "",
                            f"Table: {source_row.get('tableTitle')}" if source_row.get("tableTitle") else "",
+                           f"As of: {source_row.get('asOf')}" if source_row.get("asOf") else "",
                            f"Headers: {header_line}" if header_line else "",
                            f"Period: {period_line}" if period_line else "",
                            f"Metric: {period}; raw workbook cell value: {raw_value}; "
@@ -308,8 +676,8 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
             used_rows.setdefault(filename_key, []).append(quote)
             points.append({
                 "label": (
-                    f"{item['amc']} — {item['approach']} ({item['filename']})"
-                    if multiple_filenames else f"{item['amc']} — {item['approach']}"
+                    f"{item['amc']} - {item['approach']} ({item['filename']})"
+                    if multiple_filenames else f"{item['amc']} - {item['approach']}"
                 ),
                 "value": round(float(item["periodValues"][period]), 4),
                 "evidenceSource": "",  # assigned once the canonical source registry exists
@@ -322,6 +690,7 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
             "xLabel": "PMS strategy", "yLabel": f"{period} return (%)", "unit": "%",
             "series": [{"name": series_name, "data": points}],
             "sourceIds": [], "sourceOrigin": "uploaded_workbook", "workbookMetric": period,
+            "chartRole": "strategy_ranking",
             "sourceFiles": sorted({str(item.get("filename") or "") for item in observations}),
             "rationale": f"Ranked comparison of actual {period} return values from the uploaded workbook.",
             "takeaway": f"Shows up to ten highest reported {period} returns from the available workbook tables; missing values are excluded. This is a ranked slice, not the full universe.",
@@ -331,10 +700,10 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
     for filename, lines in used_rows.items():
         file_data = source_items.get(filename)
         header_lines = file_data.get("evidenceHeaders", []) if file_data else []
-        # Include the headers and raw rows supporting plotted observations, plus
-        # a transparent note of deterministic workbook-wide calculations used
-        # in KPI cards. The note is derived from workbook values, not external data.
-        deduped = list(OrderedDict((str(line), None) for line in [*header_lines, *lines]).keys())
+        # Reserve the evidence budget for exact plotted rows. Repeated headers
+        # across many worksheets used to fill the excerpt before a single value
+        # or deterministic calculation could be retained.
+        deduped = list(OrderedDict((str(line), None) for line in [*lines, *header_lines]).keys())
         evidence_by_file[filename] = "\n".join(deduped)[:16000]
 
     stats = []
@@ -344,24 +713,130 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
         stats.append({"label": "Strategies with 1-year return data", "value": str(len(one_year))})
         stats.append({"label": "Highest reported 1-year return", "value": f"{leader['periodValues']['1 Yr']:.2f}%"})
     if strategies:
-        stats.append({"label": "Distinct AMC / strategy combinations", "value": str(len(strategies))})
+        stats.append({"label": "Distinct manager / strategy pairs", "value": str(len(strategies))})
+    period_stat_notes = []
+    for period in _RETURN_PERIODS:
+        values = [
+            float(strategy["periodValues"][period])
+            for strategy in strategies if period in (strategy.get("periodValues") or {})
+        ]
+        if values:
+            period_stat_notes.append(
+                f"{period} median return = {median(values):.2f}% from {len(values)} reported rows"
+            )
+    category_groups: dict[str, list[float]] = {}
+    for strategy in strategies:
+        category = str(strategy.get("category") or "").strip()
+        value = (strategy.get("periodValues") or {}).get("1 Yr")
+        if category and value is not None:
+            category_groups.setdefault(category, []).append(float(value))
+    category_stat_notes = [
+        f"{category} 1 Yr median return = {median(values):.2f}% from {len(values)} reported rows"
+        for category, values in sorted(category_groups.items(), key=lambda item: item[0].casefold())
+        if len(values) >= MIN_CATEGORY_SIZE
+    ]
+    raw_strategy_row_count = sum(len(item.get("rows") or []) for item in files_result)
+    workbook_sheets = [
+        sheet for item in files_result for sheet in (item.get("sheets") or [])
+    ]
+    field_names = ("amc", "approach", "benchmark", "aum", "category")
+    field_sheet_counts = {
+        field: sum(1 for sheet in workbook_sheets if field in (sheet.get("recognizedFields") or []))
+        for field in field_names
+    }
+    field_presence = {field: count > 0 for field, count in field_sheet_counts.items()}
+    aum_field_strategies = [
+        strategy for strategy in strategies if "aum" in (strategy.get("recognizedFields") or [])
+    ]
+    benchmark_field_strategies = [
+        strategy for strategy in strategies if "benchmark" in (strategy.get("recognizedFields") or [])
+    ]
+    strategies_with_aum = sum(1 for strategy in aum_field_strategies if strategy.get("aum") is not None)
+    strategies_without_aum_in_field = len(aum_field_strategies) - strategies_with_aum
+    strategies_with_benchmark = sum(
+        1 for strategy in benchmark_field_strategies if _norm(strategy.get("benchmark")) not in _NA
+    )
+    strategies_without_benchmark_in_field = len(benchmark_field_strategies) - strategies_with_benchmark
+    dated_sheet_count = sum(1 for sheet in workbook_sheets if str(sheet.get("asOf") or "").strip())
+    workbook_dates = sorted({
+        str(sheet.get("asOf") or "").strip()
+        for sheet in workbook_sheets if str(sheet.get("asOf") or "").strip()
+    })
     # Ensure derived KPIs can be audited without pretending the derived count is
     # itself a literal cell in the workbook. The excerpt explicitly labels the
     # calculation and retains the raw worksheet rows that support chart points.
-    stats_note = "\n[Deterministic calculations from the uploaded workbook, not literal worksheet cells] " + "; ".join(
-        f"{item['label']} = {item['value']}" for item in stats
-    ) if stats else ""
+    stats_note = (
+        "\n[Deterministic calculations from the uploaded workbook, not literal worksheet cells] "
+        + "; ".join([
+            *(f"{item['label']} = {item['value']}" for item in stats),
+            f"raw strategy rows = {raw_strategy_row_count}; unique manager/strategy pairs = {len(strategies)}; "
+            f"repeated rows = {repeated_rows}; conflicting duplicate return values = {duplicate_return_conflicts}",
+            (f"AUM values recorded for {strategies_with_aum} of {len(aum_field_strategies)} strategies in tables with an AUM field"
+             if field_presence["aum"] else "no AUM field was recognized; AUM coverage is unavailable"),
+            (f"Benchmark recorded for {strategies_with_benchmark} of {len(benchmark_field_strategies)} strategies in tables with a benchmark field"
+             if field_presence["benchmark"] else "no benchmark field was recognized; benchmark coverage is unavailable"),
+            f"worksheets with as-of dates = {dated_sheet_count} of {len(workbook_sheets)}",
+            *(f"workbook as-of date = {value}" for value in workbook_dates),
+            *period_stat_notes,
+            *category_stat_notes,
+        ]) if strategies else ""
+    )
     if stats_note:
         for filename_key in list(evidence_by_file):
-            evidence_by_file[filename_key] = (evidence_by_file[filename_key] + "\n" + stats_note)[:16000]
+            evidence_by_file[filename_key] = (stats_note + "\n" + evidence_by_file[filename_key])[:16000]
     period_coverage = {
         period: sum(1 for strategy in strategies if period in (strategy.get("periodValues") or {}))
         for period in _RETURN_PERIODS
     }
+    raw_strategy_rows = sum(len(item.get("rows") or []) for item in files_result)
+    missing_benchmark_count = sum(
+        1 for strategy in strategies
+        if _norm(strategy.get("benchmark")) in _NA
+    )
+    missing_aum_count = sum(1 for strategy in strategies if strategy.get("aum") is None)
+    all_sheet_rows = [
+        (str(file_item.get("filename") or ""), sheet)
+        for file_item in files_result for sheet in (file_item.get("sheets") or [])
+    ]
+    snapshot_dates = sorted({
+        str(sheet.get("asOf") or "").strip()
+        for _filename, sheet in all_sheet_rows if str(sheet.get("asOf") or "").strip()
+    })
+    missing_date_sheets = [
+        {"file": filename, "sheet": str(sheet.get("name") or "")}
+        for filename, sheet in all_sheet_rows if not str(sheet.get("asOf") or "").strip()
+    ]
+    methodology_notes = list(dict.fromkeys(
+        note for item in files_result for note in (item.get("methodologyNotes") or [])
+    ))
     return {"kind": "pms_strategy_performance", "files": files_result,
             "strategies": strategies, "charts": charts, "keyStats": stats,
+            "benchmarkRows": benchmark_rows,
             "periodCoverage": period_coverage,
-            "evidenceByFile": evidence_by_file}
+            "evidenceByFile": evidence_by_file,
+            "snapshotDate": snapshot_dates[0] if len(snapshot_dates) == 1 else "",
+            "snapshotDates": snapshot_dates,
+            "methodologyNotes": methodology_notes,
+            "dataQuality": {
+                "rawStrategyRows": raw_strategy_rows,
+                "uniqueStrategies": len(strategies),
+                "repeatedRows": repeated_rows,
+                "duplicateReturnConflicts": duplicate_return_conflicts,
+                "duplicateConflictExamples": duplicate_conflict_examples,
+                "strategiesWithoutBenchmark": missing_benchmark_count,
+                "strategiesWithoutAum": missing_aum_count,
+                "fieldPresence": field_presence,
+                "fieldSheetCounts": field_sheet_counts,
+                "strategiesWithAumField": len(aum_field_strategies),
+                "strategiesWithAumValue": strategies_with_aum,
+                "strategiesWithoutAumAmongField": strategies_without_aum_in_field,
+                "strategiesWithBenchmarkField": len(benchmark_field_strategies),
+                "strategiesWithBenchmarkValue": strategies_with_benchmark,
+                "strategiesWithoutBenchmarkAmongField": strategies_without_benchmark_in_field,
+                "worksheetsWithDate": len(all_sheet_rows) - len(missing_date_sheets),
+                "worksheetCount": len(all_sheet_rows),
+                "worksheetsWithoutDate": missing_date_sheets,
+            }}
 
 
 _DATA_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$", re.I)
@@ -373,6 +848,9 @@ _LABEL_HEADER_RE = re.compile(
     re.I,
 )
 _IDENTIFIER_HEADER_RE = re.compile(r"\b(?:id|uuid|serial|index|row number|record number)\b", re.I)
+_OUTCOME_HEADER_RE = re.compile(
+    r"\b(?:price|revenue|sales|income|profit|cost|return|yield|margin|score|amount|value)\b", re.I,
+)
 
 
 def _parse_data_number(value: object) -> tuple[float, bool] | None:
@@ -780,6 +1258,96 @@ def _profile_tabular_section(
             ),
         })
 
+    # Numeric-only files have no category/date column for the ranked and time
+    # series paths above. When a header clearly names an outcome (for example,
+    # price), show its observed relationship to a few numeric inputs as paired
+    # scatter series. Every axis value retains the same source row and raw cell;
+    # this is descriptive evidence, not a fitted or causal relationship.
+    if not label_column and not time_column and len(charts) < max_charts:
+        outcomes = [summary for summary in numeric if _OUTCOME_HEADER_RE.search(summary["name"])]
+        outcome = outcomes[0] if outcomes else None
+        predictors = [
+            summary for summary in numeric
+            if summary is not outcome
+            and not _IDENTIFIER_HEADER_RE.search(summary["name"])
+            and not _DATE_HEADER_RE.search(summary["name"])
+        ]
+        if outcome:
+            def values_by_row(summary: dict[str, Any]) -> dict[int, tuple[str, float]]:
+                raw_values = summary.get("rawValues") or []
+                scaled_values = summary.get("scaledValues") or []
+                return {
+                    int(raw[0]): (str(raw[1]), float(scaled_values[index]))
+                    for index, raw in enumerate(raw_values)
+                    if len(raw) >= 2 and index < len(scaled_values)
+                }
+
+            y_by_row = values_by_row(outcome)
+            x_units = {summary["name"]: str(summary.get("unit") or "") for summary in predictors}
+            y_unit = str(outcome.get("unit") or "")
+            scatter_count = 0
+            for predictor in predictors:
+                if len(charts) >= max_charts or scatter_count >= 4:
+                    break
+                x_by_row = values_by_row(predictor)
+                paired_rows = [
+                    (row_index, x_by_row[row_index], y_by_row[row_index])
+                    for row_index in range(len(data_rows))
+                    if row_index in x_by_row and row_index in y_by_row
+                ]
+                if len(paired_rows) < 4:
+                    continue
+                x_unit = x_units[predictor["name"]]
+                x_label = f"{predictor['name']} ({x_unit})" if x_unit else predictor["name"]
+                y_label = f"{outcome['name']} ({y_unit})" if y_unit else outcome["name"]
+                x_points = []
+                y_points = []
+                for row_index, (raw_x, plotted_x), (raw_y, plotted_y) in paired_rows:
+                    row_number = source_row_numbers[row_index]
+                    raw_line = (
+                        physical[row_number - 1]
+                        if row_number - 1 < len(physical)
+                        else " | ".join(data_rows[row_index])
+                    )
+                    label = f"Row {row_number}"
+                    quote = (
+                        f"File: {filename} | Sheet: {sheet_name} | Row: {row_number} | "
+                        f"X metric: {predictor['name']} | raw cell value: {raw_x} | "
+                        f"Y metric: {outcome['name']} | raw cell value: {raw_y} | "
+                        f"Original row: {raw_line}"
+                    )
+                    common = {
+                        "label": label, "evidenceSource": "", "evidenceQuote": quote,
+                        "sourceSheet": sheet_name, "sourceRow": row_number, "sourceFile": filename,
+                    }
+                    x_points.append({
+                        **common, "value": round(float(plotted_x), 6), "evidenceValue": raw_x,
+                        "evidenceMetric": predictor["name"], "evidenceUnit": x_unit,
+                    })
+                    y_points.append({
+                        **common, "value": round(float(plotted_y), 6), "evidenceValue": raw_y,
+                        "evidenceMetric": outcome["name"], "evidenceUnit": y_unit,
+                    })
+                    evidence_lines.append(quote)
+                charts.append({
+                    "type": "scatter",
+                    "title": f"{outcome['name']} vs {predictor['name']} - {sheet_name}",
+                    "xLabel": x_label, "yLabel": y_label,
+                    "series": [
+                        {"name": predictor["name"], "data": x_points},
+                        {"name": outcome["name"], "data": y_points},
+                    ],
+                    "sourceFile": filename,
+                    "sourceIds": [], "sourceOrigin": "uploaded_attachment",
+                    "workbookMetric": outcome["name"],
+                    "rationale": "Paired numeric observations read from the same attached source rows.",
+                    "takeaway": (
+                        f"Shows {len(paired_rows)} observed {predictor['name']} and {outcome['name']} pairs. "
+                        "The chart describes the sample and does not establish causation."
+                    ),
+                })
+                scatter_count += 1
+
     return dataset, charts, evidence_lines
 
 
@@ -857,6 +1425,10 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
             (filename.casefold(), str(row.get("sheet") or "").casefold())
             for row in records if isinstance(row, dict)
         )
+        sheet_metadata_by_name = {
+            str(item.get("name") or "").casefold(): item
+            for item in file_info.get("sheets") or [] if isinstance(item, dict)
+        }
         file_body = next(
             (item[1] for item in _split_file_blocks(file_context)
              if item[0].casefold() == filename.casefold()),
@@ -869,16 +1441,63 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
             available_returns = sum(
                 len(row.get("periodValues") or {}) for row in sheet_records if isinstance(row, dict)
             )
+            sheet_metadata = sheet_metadata_by_name.get(sheet_name.casefold(), {})
+            table = _find_pms_table(sheet_rows)
+            supported_period_count = sum(
+                1 for period in _RETURN_PERIODS
+                if table and table[2].get(f"return:{period}") is not None
+            )
             sheets.append({
                 "name": sheet_name,
+                "title": str(sheet_metadata.get("title") or ""),
+                "asOf": str(sheet_metadata.get("asOf") or ""),
+                "columnNames": list(sheet_metadata.get("columnNames") or []),
+                "fieldMap": dict(sheet_metadata.get("fieldMap") or {}),
+                "recognizedFields": list(sheet_metadata.get("recognizedFields") or []),
                 "rowCount": len(sheet_records),
-                "sourceRows": max(0, len(sheet_rows) - 4),
-                "columnCount": max((len(row) for row in sheet_rows), default=0),
-                "missingReturnValues": max(0, len(sheet_records) * len(_RETURN_PERIODS) - available_returns),
+                "sourceRows": len(sheet_records),
+                "columnCount": int(sheet_metadata.get("columnCount") or max((len(row) for row in sheet_rows), default=0)),
+                "missingReturnValues": max(0, len(sheet_records) * supported_period_count - available_returns),
             })
         file_info["sheets"] = sheets
-
+    pms_sheet_rows = [
+        (str(file_info.get("filename") or ""), sheet)
+        for file_info in pms.get("files") or []
+        if isinstance(file_info, dict)
+        for sheet in (file_info.get("sheets") or []) if isinstance(sheet, dict)
+    ]
+    pms_quality = dict(pms.get("dataQuality") or {})
+    pms_quality["worksheetCount"] = len(pms_sheet_rows)
+    pms_quality["worksheetsWithDate"] = sum(1 for _name, sheet in pms_sheet_rows if sheet.get("asOf"))
+    pms_quality["worksheetsWithoutDate"] = [
+        {"file": filename, "sheet": str(sheet.get("name") or "")}
+        for filename, sheet in pms_sheet_rows if not sheet.get("asOf")
+    ]
+    semantic_fields = ("amc", "approach", "benchmark", "aum", "category")
+    field_sheet_counts = {
+        field: sum(1 for _filename, sheet in pms_sheet_rows if field in (sheet.get("recognizedFields") or []))
+        for field in semantic_fields
+    }
+    pms_quality["fieldPresence"] = {field: count > 0 for field, count in field_sheet_counts.items()}
+    pms_quality["fieldSheetCounts"] = field_sheet_counts
     strategies = pms.get("strategies") or []
+    for field, key in (("aum", "Aum"), ("benchmark", "Benchmark")):
+        applicable = [row for row in strategies if field in (row.get("recognizedFields") or [])]
+        if field == "aum":
+            value_count = sum(1 for row in applicable if row.get("aum") is not None)
+        else:
+            value_count = sum(1 for row in applicable if _norm(row.get("benchmark")) not in _NA)
+        pms_quality[f"strategiesWith{key}Field"] = len(applicable)
+        pms_quality[f"strategiesWith{key}Value"] = value_count
+        pms_quality[f"strategiesWithout{key}AmongField"] = len(applicable) - value_count
+    mapped_labels: dict[str, set[str]] = {field: set() for field in semantic_fields}
+    for _filename, sheet in pms_sheet_rows:
+        for field, label in (sheet.get("fieldMap") or {}).items():
+            if field in mapped_labels and str(label or "").strip():
+                mapped_labels[field].add(str(label).strip())
+    pms["fieldMap"] = {field: sorted(labels) for field, labels in mapped_labels.items() if labels}
+    pms["dataQuality"] = pms_quality
+
     periods = []
     for period in _RETURN_PERIODS:
         values = [
@@ -903,6 +1522,98 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
         {"category": category, "available": len(values), "mean1Year": mean(values), "median1Year": median(values)}
         for category, values in sorted(categories.items(), key=lambda item: mean(item[1]), reverse=True)
     ]
+
+    # These are snapshot summaries across independently reported lookback
+    # horizons, not sequential observations. Only aggregate across one PMS
+    # workbook so every plotted statistic has a single, unambiguous source.
+    pms_workbooks = [item for item in (pms.get("files") or []) if isinstance(item, dict) and item.get("filename")]
+    if len(pms_workbooks) == 1:
+        filename = str(pms_workbooks[0].get("filename") or "")
+
+        def summary_points(label_key: str, value_key: str, metric_label: str, rows: list[dict]) -> list[dict]:
+            points = []
+            for item in rows:
+                label = str(item.get(label_key) or "").strip()
+                try:
+                    value = round(float(item[value_key]), 4)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                observations = int(item.get("available") or 0)
+                quote = (
+                    f"Deterministic calculation from {filename}; {metric_label}; label: {label}; "
+                    f"value: {value:.4f}%; observations: {observations}; "
+                    "missing values excluded; calculated from the attached workbook rows."
+                )
+                points.append({
+                    "label": label, "value": value, "evidenceSource": "",
+                    "evidenceQuote": quote, "evidenceValue": f"{value:.4f}%",
+                    "sourceFile": filename,
+                })
+            return points
+
+        period_mean = summary_points("period", "mean", "mean reported PMS return by horizon", periods)
+        period_median = summary_points("period", "median", "median reported PMS return by horizon", periods)
+        ranked_categories = [
+            item for item in pms["categorySummaries"]
+            if int(item.get("available") or 0) >= MIN_CATEGORY_SIZE
+        ]
+        category_mean = summary_points("category", "mean1Year", "mean 1-year reported PMS return by category", ranked_categories)
+        category_median = summary_points("category", "median1Year", "median 1-year reported PMS return by category", ranked_categories)
+
+        summary_charts = []
+        if period_mean and period_median:
+            summary_charts.append({
+                "type": "grouped_bar",
+                "title": "PMS return averages by reported horizon (mean vs median)",
+                "xLabel": "Reported return horizon", "yLabel": "Return as reported (%)", "unit": "%",
+                "series": [
+                    {"name": "Mean reported return", "data": period_mean},
+                    {"name": "Median reported return", "data": period_median},
+                ],
+                "sourceIds": [], "sourceOrigin": "uploaded_workbook", "chartRole": "snapshot_summary",
+                "sourceFiles": [filename],
+                "rationale": "Compare the mean and median across the workbook's reported lookback columns.",
+                "takeaway": (
+                    "These are separate return horizons in one workbook snapshot, not a time series. "
+                    "Each mean and median uses only strategies with a value in that horizon."
+                ),
+            })
+        if category_mean and category_median:
+            summary_charts.append({
+                "type": "grouped_bar",
+                "title": "PMS 1-year return averages by category (mean vs median)",
+                "xLabel": "PMS category", "yLabel": "Reported 1-year return (%)", "unit": "%",
+                "series": [
+                    {"name": "Mean 1-year return", "data": category_mean},
+                    {"name": "Median 1-year return", "data": category_median},
+                ],
+                "sourceIds": [], "sourceOrigin": "uploaded_workbook", "chartRole": "snapshot_summary",
+                "sourceFiles": [filename],
+                "rationale": "Compare category means and medians for reported 1-year returns; small categories are excluded from the chart.",
+                "takeaway": (
+                    f"Only categories with at least {MIN_CATEGORY_SIZE} reported 1-year observations are shown. "
+                    "The mean and median describe this workbook snapshot and do not establish what caused performance."
+                ),
+            })
+        benchmark_chart, benchmark_evidence_lines = _matched_benchmark_chart(pms, filename)
+        if benchmark_chart:
+            summary_charts.append(benchmark_chart)
+
+        pms["charts"] = [*(pms.get("charts") or []), *summary_charts]
+        if summary_charts or benchmark_evidence_lines:
+            evidence_key = filename.casefold()
+            evidence_lines = [
+                point["evidenceQuote"]
+                for chart in summary_charts
+                for series in chart.get("series") or []
+                for point in series.get("data") or []
+                if point.get("evidenceQuote")
+            ]
+            evidence_lines = list(dict.fromkeys([*benchmark_evidence_lines, *evidence_lines]))
+            prior_excerpt = str((pms.get("evidenceByFile") or {}).get(evidence_key) or "")
+            pms.setdefault("evidenceByFile", {})[evidence_key] = "\n".join(
+                part for part in (*evidence_lines, prior_excerpt) if part
+            )[:16000]
 
     # Retain notes/summary sheets, other files, and OCR'd tables alongside a
     # specialized PMS workbook instead of returning as soon as it is detected.
@@ -933,6 +1644,420 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
     pms["sourceOrigin"] = "uploaded_workbook"
     pms["sourceLabel"] = "uploaded files"
     return pms
+
+
+def _pms_date_label(value: object) -> str:
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    match = re.search(r"(?i)\b(\d{1,2})\s+([a-z]{3,9})\.?[,]?\s+(20\d{2})\b", raw)
+    if not match:
+        return raw
+    month = match.group(2).casefold()[:3]
+    month_names = {
+        "jan": "January", "feb": "February", "mar": "March", "apr": "April",
+        "may": "May", "jun": "June", "jul": "July", "aug": "August",
+        "sep": "September", "oct": "October", "nov": "November", "dec": "December",
+    }
+    return f"{int(match.group(1))} {month_names.get(month, match.group(2).title())} {match.group(3)}"
+
+
+def _featured_pms_period_summaries(analytics: dict[str, Any]) -> list[dict[str, Any]]:
+    """Choose up to three observed horizons, adapting when common horizons are absent."""
+    summaries = [
+        item for item in (analytics.get("periodSummaries") or [])
+        if isinstance(item, dict) and str(item.get("period") or "").strip()
+    ]
+    by_period = {str(item.get("period")): item for item in summaries}
+    selected = [by_period[name] for name in ("1 Mth", "1 Yr", "5 Yr") if name in by_period]
+    for item in reversed(summaries):
+        if len(selected) >= min(3, len(summaries)):
+            break
+        if item not in selected:
+            selected.append(item)
+    return selected[:3]
+
+
+def pms_report_cover(analytics: dict[str, Any]) -> tuple[str, str]:
+    """Create a safe cover title and summary from cell-derived PMS statistics."""
+    if str((analytics or {}).get("kind") or "") != "pms_strategy_performance":
+        return "", ""
+    snapshot_dates = [str(value).strip() for value in (analytics.get("snapshotDates") or []) if str(value).strip()]
+    snapshot_label = _pms_date_label(snapshot_dates[0]) if len(snapshot_dates) == 1 else ""
+    title = f"PMS Strategy Performance Audit - {snapshot_label}" if snapshot_label else "PMS Strategy Performance Audit"
+    quality = analytics.get("dataQuality") if isinstance(analytics.get("dataQuality"), dict) else {}
+    unique_count = int(quality.get("uniqueStrategies") or len(analytics.get("strategies") or []))
+    sheet_count = int(quality.get("worksheetCount") or 0)
+    dated_count = int(quality.get("worksheetsWithDate") or 0)
+    summary_sentences = []
+    if snapshot_label:
+        snapshot_phrase = f"The attached-data snapshot is dated {snapshot_label}"
+    elif snapshot_dates:
+        snapshot_phrase = "The attached data contains more than one reporting date"
+    else:
+        snapshot_phrase = "The attached data does not provide one consistent reporting date"
+    summary_sentences.append(f"{snapshot_phrase} and covers {unique_count} unique manager / strategy pairs.")
+    if sheet_count and dated_count < sheet_count:
+        missing = sheet_count - dated_count
+        summary_sentences.append(
+            f"{dated_count} of {sheet_count} analyzed worksheets state an as-of date; {missing} do not."
+        )
+    returns = []
+    for item in _featured_pms_period_summaries(analytics):
+        period = str(item.get("period") or "")
+        try:
+            value = float(item["median"])
+            count = int(item.get("available") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        returns.append(f"{period} median {value:.2f}% (n={count})")
+    if returns:
+        summary_sentences.append("Reported returns: " + ", ".join(returns) + ".")
+    summary_sentences.append(
+        "These horizons are separate lookback measures in one attachment snapshot; they do not by themselves show quarter-by-quarter changes or establish causes."
+    )
+    return title, " ".join(summary_sentences)
+
+
+def rewrite_pms_report_sections(
+    report_text: str,
+    analytics: dict[str, Any],
+    source_ids_by_file: dict[str, str] | None = None,
+) -> str:
+    """Replace unsupported prose in PMS upload reports with measured workbook facts."""
+    if str((analytics or {}).get("kind") or "") != "pms_strategy_performance":
+        return str(report_text or "")
+
+    source_lookup = {
+        str(filename).casefold(): str(source_id or "").strip().upper()
+        for filename, source_id in (source_ids_by_file or {}).items() if source_id
+    }
+    citations = " ".join(dict.fromkeys(
+        f"[{source_lookup[str(item.get('filename') or '').casefold()]}]"
+        for item in (analytics.get("files") or [])
+        if isinstance(item, dict) and source_lookup.get(str(item.get("filename") or "").casefold())
+    ))
+    citation = f" {citations}" if citations else ""
+    title, summary = pms_report_cover(analytics)
+    quality = analytics.get("dataQuality") if isinstance(analytics.get("dataQuality"), dict) else {}
+    field_presence = quality.get("fieldPresence") if isinstance(quality.get("fieldPresence"), dict) else {}
+    field_map = analytics.get("fieldMap") if isinstance(analytics.get("fieldMap"), dict) else {}
+    has_aum_field = bool(field_presence.get("aum"))
+    has_benchmark_field = bool(field_presence.get("benchmark"))
+    has_category_field = bool(field_presence.get("category"))
+
+    def labels_for(field: str) -> list[str]:
+        values = field_map.get(field) or []
+        if isinstance(values, str):
+            values = [values]
+        return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+    def named_field(field: str, fallback: str) -> str:
+        labels = labels_for(field)
+        return ", ".join(labels) if labels else fallback
+
+    period_by_name = {
+        str(item.get("period") or ""): item
+        for item in (analytics.get("periodSummaries") or []) if isinstance(item, dict)
+    }
+    def period_fact(period: str) -> str:
+        item = period_by_name.get(period)
+        if not item:
+            return f"{period}: no usable observations"
+        try:
+            return f"{period}: median {float(item['median']):.2f}% across {int(item.get('available') or 0)} observations"
+        except (KeyError, TypeError, ValueError):
+            return f"{period}: no usable observations"
+
+    featured_periods = _featured_pms_period_summaries(analytics)
+    comparative_text = "; ".join(
+        period_fact(str(item.get("period") or "")) for item in featured_periods
+    ) or "No recognized return horizon has enough usable observations for a comparison"
+    since_inception_note = (
+        " Since-Inception returns can cover different start dates; use the source's inception-date field before comparing them."
+        if "Since Incp." in period_by_name else ""
+    )
+
+    categories = [
+        item for item in (analytics.get("categorySummaries") or [])
+        if isinstance(item, dict) and int(item.get("available") or 0) >= MIN_CATEGORY_SIZE
+    ]
+    highest = max(categories, key=lambda item: float(item.get("median1Year") or 0), default=None)
+    lowest = min(categories, key=lambda item: float(item.get("median1Year") or 0), default=None)
+    category_finding = (
+        "No category column was recognized, so category comparisons are unavailable."
+        if not has_category_field
+        else "Category medians are unavailable for a comparison with at least three observations per category."
+    )
+    if highest and lowest:
+        category_finding = (
+            f"Among categories with at least {MIN_CATEGORY_SIZE} reported 1-year values, the highest median was "
+            f"{float(highest.get('median1Year') or 0):.2f}% for {highest.get('category')} "
+            f"(n={int(highest.get('available') or 0)}); the lowest was "
+            f"{float(lowest.get('median1Year') or 0):.2f}% for {lowest.get('category')} "
+            f"(n={int(lowest.get('available') or 0)}). These are descriptive category comparisons, not evidence of a defensive effect or its cause."
+        )
+
+    sheets = [
+        sheet for file_info in (analytics.get("files") or []) if isinstance(file_info, dict)
+        for sheet in (file_info.get("sheets") or []) if isinstance(sheet, dict)
+    ]
+    core_sheets = [sheet for sheet in sheets if "top performance" not in str(sheet.get("title") or "").casefold()]
+    ranking_sheets = [sheet for sheet in sheets if "top performance" in str(sheet.get("title") or "").casefold()]
+
+    def sheet_names(items: list[dict]) -> str:
+        values = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
+        numbers = sorted({int(match.group(1)) for name in values if (match := re.fullmatch(r"(?i)Table\s+(\d+)", name))})
+        compressed = []
+        index = 0
+        while index < len(numbers):
+            end = index
+            while end + 1 < len(numbers) and numbers[end + 1] == numbers[end] + 1:
+                end += 1
+            if end - index >= 1:
+                compressed.append(f"Tables {numbers[index]}-{numbers[end]}")
+            else:
+                compressed.append(f"Table {numbers[index]}")
+            index = end + 1
+        non_table = [name for name in values if not re.fullmatch(r"(?i)Table\s+\d+", name)]
+        return ", ".join([*compressed, *non_table]) or "the detected PMS worksheets"
+
+    field_names = list(dict.fromkeys(
+        str(field).strip()
+        for sheet in core_sheets for field in (sheet.get("columnNames") or [])
+        if str(field).strip()
+    ))
+    field_text = ", ".join(field_names) if field_names else "the fields detected in the strategy and return table"
+    role_descriptions = [
+        f"manager/provider field: {named_field('amc', 'detected manager field')}",
+        f"strategy/portfolio field: {named_field('approach', 'detected strategy field')}",
+    ]
+    if has_category_field:
+        role_descriptions.append(f"category field: {named_field('category', 'detected category field')}")
+    else:
+        role_descriptions.append("category field: not recognized")
+    if has_benchmark_field:
+        role_descriptions.append(f"benchmark field: {named_field('benchmark', 'detected benchmark field')}")
+    else:
+        role_descriptions.append("benchmark field: not recognized")
+    if has_aum_field:
+        role_descriptions.append(f"AUM field: {named_field('aum', 'detected AUM field')}")
+    else:
+        role_descriptions.append("AUM field: not recognized")
+    missing_date_sheets = [
+        str(item.get("sheet") or "") for item in (quality.get("worksheetsWithoutDate") or [])
+        if isinstance(item, dict) and item.get("sheet")
+    ]
+    date_count = int(quality.get("worksheetsWithDate") or 0)
+    sheet_count = int(quality.get("worksheetCount") or len(sheets))
+    date_quality = (
+        f"{date_count} of {sheet_count} analyzed worksheets carry an explicit as-of date"
+        if sheet_count else "Worksheet date coverage could not be determined"
+    )
+    if missing_date_sheets:
+        date_quality += "; missing date: " + ", ".join(missing_date_sheets)
+    raw_rows = int(quality.get("rawStrategyRows") or 0)
+    unique = int(quality.get("uniqueStrategies") or len(analytics.get("strategies") or []))
+    repeated = int(quality.get("repeatedRows") or 0)
+    conflicts = int(quality.get("duplicateReturnConflicts") or 0)
+    benchmark_applicable = int(quality.get("strategiesWithBenchmarkField") or 0)
+    benchmark_reported = int(quality.get("strategiesWithBenchmarkValue") or 0)
+    benchmark_missing = int(quality.get("strategiesWithoutBenchmarkAmongField") or 0)
+    benchmark_values = [
+        str(row.get("benchmark") or "").strip()
+        for row in (analytics.get("strategies") or [])
+        if isinstance(row, dict) and str(row.get("benchmark") or "").strip()
+    ]
+    benchmark_labels_only = bool(benchmark_values) and all(_parse_num(value) is None for value in benchmark_values)
+    benchmark_comparison_chart = next((
+        chart for chart in (analytics.get("charts") or [])
+        if isinstance(chart, dict) and chart.get("chartRole") == "benchmark_comparison"
+    ), None)
+    aum_applicable = int(quality.get("strategiesWithAumField") or 0)
+    aum_reported = int(quality.get("strategiesWithAumValue") or 0)
+    aum_missing = int(quality.get("strategiesWithoutAumAmongField") or 0)
+    duplicate_text = (
+        f"Across {raw_rows} parsed strategy rows, {unique} unique AMC / investment-approach pairs remained after "
+        f"deduplicating {repeated} repeated rows; overlapping reported return conflicts: {conflicts}."
+    )
+    benchmark_text = (
+        "No benchmark column was recognized, so benchmark coverage cannot be assessed."
+        if not has_benchmark_field else (
+            f"{benchmark_missing} of {benchmark_applicable} strategies represented in tables with a benchmark field "
+            "have no usable benchmark value."
+            if benchmark_missing else
+            f"All {benchmark_reported} strategies represented in tables with a benchmark field have a benchmark value."
+        )
+    )
+    if has_benchmark_field and benchmark_labels_only:
+        benchmark_text += " Benchmark entries are labels rather than period-specific return observations in the detected strategy rows; "
+        if benchmark_comparison_chart:
+            comparison_periods = list(dict.fromkeys(
+                str(point.get("label") or "").strip()
+                for series in (benchmark_comparison_chart.get("series") or []) if isinstance(series, dict)
+                for point in (series.get("data") or []) if isinstance(point, dict) and str(point.get("label") or "").strip()
+            ))
+            period_note = f" for {', '.join(comparison_periods)}" if comparison_periods else ""
+            benchmark_text += (
+                "separate benchmark-return rows in the workbook support the matched comparison shown in "
+                f"'{benchmark_comparison_chart.get('title') or 'the benchmark comparison chart'}'{period_note}. "
+                "It covers only strategies that name that benchmark."
+            )
+        else:
+            benchmark_text += "no separate matched period-return series was detected elsewhere in the workbook."
+    aum_text = (
+        "No AUM column was recognized, so this attachment cannot support AUM disclosure or AUM-weighted comparisons."
+        if not has_aum_field else (
+            f"AUM values are present for {aum_reported} of {aum_applicable} strategies represented in tables with an AUM field; "
+            f"{aum_missing} have no usable AUM value. This coverage does not support full-universe market concentration "
+            "or AUM-weighted returns."
+        )
+    )
+    aum_section = (
+        "No AUM column was recognized; AUM disclosure and AUM-weighted returns cannot be assessed from this attachment."
+        if not has_aum_field else (
+            f"The detected {named_field('aum', 'AUM')} field contains values for {aum_reported} of {aum_applicable} "
+            f"strategies represented in tables with that field; {aum_missing} have no usable value. The disclosed subset "
+            "can be summarized, but it cannot establish full-universe market concentration or AUM-weighted returns."
+        )
+    )
+    methodology_notes = [
+        str(note).strip() for note in (analytics.get("methodologyNotes") or []) if str(note).strip()
+    ]
+    methodology = " ".join(methodology_notes) or "The attached data does not state a return calculation method in the extracted notes."
+
+    replacement_sections = [
+        (
+            lambda heading: bool(re.search(r"executive\s+(?:summary|findings)|executive", heading, re.I)),
+            "Executive Summary",
+            f"{summary}{citation}\n\nThe summary statistics are calculated from the attached rows. Missing values are excluded, and strategy counts are deduplicated by the detected manager/provider and strategy/portfolio fields.",
+        ),
+        (
+            lambda heading: bool(re.search(r"category", heading, re.I)) and not bool(re.search(r"coverage|map", heading, re.I)),
+            "Key Performance Findings by Category",
+            f"{category_finding} Where available, the comparison uses category labels and reported 1-year returns; each strategy contributes one value, regardless of AUM.{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(
+                r"comparative\s+(?:performance|horizon)|cross[- ]horizon|horizon\s+analysis", heading, re.I
+            )),
+            "Comparative Performance Analysis",
+            f"{comparative_text}.{citation} The recognized horizons are separate lookbacks ending around the attachment snapshot and have different observation counts. They do not by themselves establish quarter-by-quarter sector rotation or explain causes.",
+        ),
+        (
+            lambda heading: bool(re.search(r"\baum\b|assets\s+under\s+management", heading, re.I))
+            and not bool(re.search(r"quality|integrity", heading, re.I)),
+            "AUM Disclosure and Coverage",
+            f"{aum_section}{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(r"methodology|derived\s+calculation", heading, re.I)),
+            "Methodology and Derived Calculations",
+            f"{methodology} Strategy identity uses the detected manager/provider and strategy/portfolio fields. Return summaries are calculated separately for each detected horizon; missing values are excluded, not treated as zero. Return scale is inferred per column from its labels, explicit percent signs and observed numeric representation; explicit percentage strings are kept as displayed. {('AUM comparisons use the detected ' + named_field('aum', 'AUM') + ' field where values are available.') if has_aum_field else 'AUM comparisons are unavailable because no AUM field was recognized.'}{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(r"data\s+quality|integrity\s+audit", heading, re.I)),
+            "Data Quality and Integrity Audit",
+            f"{date_quality}. {duplicate_text} {benchmark_text} {aum_text}{since_inception_note}{citation}\n\n### Worksheet and field map\nPerformance summaries use {sheet_names(core_sheets)}: {field_text}. Detected field roles: {'; '.join(role_descriptions)}. Strategy identity and deduplication use the detected manager/provider plus strategy/portfolio values; return distributions use the detected return-horizon columns. {('Ranking worksheets ' + sheet_names(ranking_sheets) + ' repeat ranked observations and are not counted as additional unique strategies.') if ranking_sheets else ''}",
+        ),
+    ]
+    text = str(report_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    heading_matches = list(re.finditer(r"(?m)^[ \t]*##[ \t]+(?!#)([^\n]+)\s*$", text))
+    for matches, default_heading, body in replacement_sections:
+        heading_matches = list(re.finditer(r"(?m)^[ \t]*##[ \t]+(?!#)([^\n]+)\s*$", text))
+        selected = next((match for match in heading_matches if matches(match.group(1).strip())), None)
+        if selected:
+            next_heading = next((match for match in heading_matches if match.start() > selected.start()), None)
+            end = next_heading.start() if next_heading else len(text)
+            section_body = text[selected.end():end]
+            chart_markers = list(dict.fromkeys(re.findall(r"\[CHART_\d+\]", section_body)))
+            new_section = selected.group(0).rstrip() + "\n\n" + body.strip()
+            if chart_markers:
+                new_section += "\n\n" + "\n".join(chart_markers)
+            text = text[:selected.start()] + new_section + "\n\n" + text[end:].lstrip("\n")
+        else:
+            insert_at = next((match.start() for match in heading_matches
+                              if re.search(r"attached-data\s+coverage|quantitative\s+comparisons", match.group(1), re.I)), len(text))
+            new_section = f"## {default_heading}\n\n{body.strip()}\n\n"
+            text = text[:insert_at].rstrip() + "\n\n" + new_section + text[insert_at:].lstrip("\n")
+
+    # Replace model-written horizon analysis with a compact account calculated
+    # from the detected return column. This works from the schema-derived PMS
+    # rows, so it adapts to uploaded workbooks and CSV exports with different
+    # filenames and optional columns.
+    number_words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    horizon_pattern = re.compile(
+        r"(?i)\b(?P<number>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\s*[- ]?\s*(?P<unit>months?|mths?|mth|mos?|years?|yrs?|yr)\b"
+    )
+
+    def period_for_heading(heading: str) -> str | None:
+        if not re.search(r"\b(?:strategy|performance|returns?)\b", heading, re.I):
+            return None
+        if re.search(r"\b(?:coverage|quality|integrity|methodology|audit)\b", heading, re.I):
+            return None
+        match = horizon_pattern.search(heading)
+        if not match:
+            return None
+        raw_number = match.group("number").casefold()
+        number = int(raw_number) if raw_number.isdigit() else number_words[raw_number]
+        unit = match.group("unit").casefold()
+        alias = _return_period_alias(f"{number} {'month' if unit.startswith(('m', 'mo')) else 'year'}")
+        return alias if alias in period_by_name else None
+
+    def horizon_summary(period: str) -> str:
+        item = period_by_name.get(period)
+        if not item:
+            return f"No usable observations were detected for the {period} return horizon, so no ranking is reported.{citation}"
+        try:
+            available = int(item.get("available") or 0)
+            total = int(item.get("total") or unique)
+            median_value = float(item["median"])
+            minimum = float(item["min"])
+            maximum = float(item["max"])
+        except (KeyError, TypeError, ValueError):
+            return f"The {period} return values could not be summarized consistently from the detected rows.{citation}"
+        if available <= 0:
+            return f"No usable observations were detected for the {period} return horizon, so no ranking is reported.{citation}"
+
+        ranked = []
+        for row in analytics.get("strategies") or []:
+            if not isinstance(row, dict):
+                continue
+            value = (row.get("periodValues") or {}).get(period)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            identity = " / ".join(
+                str(row.get(key) or "").strip() for key in ("amc", "approach")
+                if str(row.get(key) or "").strip()
+            ) or "Unlabeled strategy"
+            ranked.append((numeric, identity))
+        ranked.sort(key=lambda pair: (-pair[0], pair[1].casefold()))
+        leaders = "; ".join(f"{name} ({value:.2f}%)" for value, name in ranked[:3])
+        ranking = f" Highest reported values were: {leaders}." if leaders else " Strategy names were unavailable for ranking."
+        return (
+            f"The attached data contains {available} usable {period} return observations out of {total} detected strategy rows. "
+            f"The median was {median_value:.2f}%, with a range of {minimum:.2f}% to {maximum:.2f}%."
+            f"{ranking} This is a cross-sectional lookback snapshot; it does not show quarter-by-quarter rotation or establish causes.{citation}"
+        )
+
+    period_headings = list(re.finditer(r"(?m)^[ \t]*##[ \t]+(?!#)([^\n]+)\s*$", text))
+    for selected in reversed(period_headings):
+        period = period_for_heading(selected.group(1).strip())
+        if not period:
+            continue
+        next_heading = next((match for match in period_headings if match.start() > selected.start()), None)
+        end = next_heading.start() if next_heading else len(text)
+        section_body = text[selected.end():end]
+        chart_markers = list(dict.fromkeys(re.findall(r"\[CHART_\d+\]", section_body)))
+        new_section = selected.group(0).rstrip() + "\n\n" + horizon_summary(period)
+        if chart_markers:
+            new_section += "\n\n" + "\n".join(chart_markers)
+        text = text[:selected.start()] + new_section + "\n\n" + text[end:].lstrip("\n")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _append_generic_analytics_tables(
@@ -988,6 +2113,51 @@ def _append_generic_analytics_tables(
             )
 
 
+def _remove_redundant_source_columns(lines: list[str]) -> list[str]:
+    """Drop redundant source-ID columns from one-file report tables.
+
+    The Sources section still resolves each in-body citation to the attachment.
+    """
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        current = lines[index]
+        if (
+            index + 1 >= len(lines)
+            or not current.strip().startswith("|")
+            or not current.strip().endswith("|")
+            or not lines[index + 1].strip().startswith("|")
+        ):
+            output.append(current)
+            index += 1
+            continue
+        header = [cell.strip().casefold() for cell in current.strip().strip("|").split("|")]
+        separator = [cell.strip().replace(" ", "") for cell in lines[index + 1].strip().strip("|").split("|")]
+        if len(header) != len(separator) or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+            output.append(current)
+            index += 1
+            continue
+        source_indices = [i for i, cell in enumerate(header) if cell in {"source", "sources", "source(s)"}]
+        if not source_indices:
+            output.extend([current, lines[index + 1]])
+            index += 2
+            continue
+
+        cursor = index
+        while cursor < len(lines):
+            row = lines[cursor].strip()
+            if not row.startswith("|") or not row.endswith("|"):
+                break
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            if len(cells) == len(header):
+                output.append("| " + " | ".join(cell for i, cell in enumerate(cells) if i not in source_indices) + " |")
+            else:
+                output.append(lines[cursor])
+            cursor += 1
+        index = cursor
+    return output
+
+
 def attachment_analytics_section(
     analytics: dict[str, Any],
     source_id: str = "",
@@ -1015,13 +2185,21 @@ def attachment_analytics_section(
         str(item.get("filename") or "")
         for item in (analytics.get("datasets") or []) if isinstance(item, dict)
     )
+    unique_source_files = {name.casefold() for name in source_file_names if name}
     aggregate_source_refs = list(dict.fromkeys(
         ref for ref in (source_ref(filename) for filename in source_file_names) if ref != "—"
     ))
     if not aggregate_source_refs and source_id:
         aggregate_source_refs = [source_ref()]
     aggregate_sources = ", ".join(aggregate_source_refs) or "—"
-    source_note = " Source markers are listed per file." if source_lookup else (f" Source: [{source_id}]." if source_id else "")
+    source_note = (
+        " In-body citations resolve to the attached file listed in the Sources section."
+        if len(unique_source_files) == 1 and source_lookup
+        else (
+            " Source IDs map to the files in this inventory and the Sources appendix."
+            if source_lookup else (f" Source: [{source_id}]." if source_id else "")
+        )
+    )
     lines = [
         "## Attached-data coverage",
         "",
@@ -1058,6 +2236,8 @@ def attachment_analytics_section(
         lines.extend([
             "",
             "## Return-horizon coverage and distribution",
+            "",
+            "The horizons are separate lookback columns in one dated snapshot, not sequential observations. Values are shown as reported; missing values are excluded and coverage differs by horizon.",
             "",
             "| Horizon | Source(s) | Records with values | Coverage | Mean return | Median return | Range |",
             "|---|---|---:|---:|---:|---:|---:|",
@@ -1118,14 +2298,14 @@ def attachment_analytics_section(
 
         ranked_charts = [
             chart for chart in (analytics.get("charts") or [])
-            if isinstance(chart, dict) and chart.get("workbookMetric")
+            if isinstance(chart, dict) and chart.get("chartRole") == "strategy_ranking"
         ]
         if ranked_charts:
             lines.extend([
                 "",
                 "## Highest reported strategies by return horizon",
                 "",
-                "The table lists the five highest reported observations in each horizon; the charts show up to ten. These are ranked workbook values, not forecasts.",
+                "The table lists the five highest reported observations, and charts show up to ten, for selected short-, medium-, and long-horizon windows. This is a ranked slice, not the full strategy universe or a forecast.",
                 "",
                 "| Horizon | Rank | Source | Worksheet | AMC / strategy | Reported return |",
                 "|---|---:|---|---|---|---:|",
@@ -1153,6 +2333,42 @@ def attachment_analytics_section(
         _append_generic_analytics_tables(lines, datasets, source_ref)
     else:
         _append_generic_analytics_tables(lines, datasets, source_ref)
+    if kind == "pms_strategy_performance":
+        quality = analytics.get("dataQuality") if isinstance(analytics.get("dataQuality"), dict) else {}
+        field_presence = quality.get("fieldPresence") if isinstance(quality.get("fieldPresence"), dict) else {}
+        if field_presence.get("aum"):
+            field_map = analytics.get("fieldMap") if isinstance(analytics.get("fieldMap"), dict) else {}
+            aum_labels = field_map.get("aum") or []
+            if isinstance(aum_labels, str):
+                aum_labels = [aum_labels]
+            aum_labels = list(dict.fromkeys(str(label).strip() for label in aum_labels if str(label).strip()))
+            if len(aum_labels) == 1:
+                for index, line in enumerate(lines):
+                    if line.startswith("| Total reported AUM ") or line.startswith("| Median reported AUM "):
+                        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                        if len(cells) == 3:
+                            measure = "Total" if line.startswith("| Total reported AUM ") else "Median"
+                            cells[0] = f"{measure} reported {_md_cell(aum_labels[0])}"
+                            lines[index] = "| " + " | ".join(cells) + " |"
+            elif len(aum_labels) > 1:
+                lines = [
+                    line for line in lines
+                    if not line.startswith("| Total reported AUM ") and not line.startswith("| Median reported AUM ")
+                ]
+                lines.append(
+                    "Combined AUM totals and medians are omitted because detected tables use different AUM headers: "
+                    + ", ".join(aum_labels) + "."
+                )
+        else:
+            start = next((i for i, line in enumerate(lines) if line.strip() == "## AUM disclosure"), None)
+            if start is not None:
+                end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("## ")), len(lines))
+                lines[start:end] = [
+                    "## AUM disclosure", "",
+                    "No AUM column was recognized, so AUM disclosure and AUM-weighted comparisons cannot be assessed from this attachment.",
+                ]
+    if len(unique_source_files) == 1:
+        lines = _remove_redundant_source_columns(lines)
     return "\n".join(lines).strip()
 
 
@@ -1184,6 +2400,117 @@ def append_attachment_analytics_section(
         text = pattern.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text).rstrip()
     return f"{text}\n\n{section}\n" if text else f"{section}\n", True
+
+
+def ensure_server_workbook_chart_markers(
+    report_text: str,
+    charts: list[dict] | None,
+) -> tuple[str, dict[str, Any]]:
+    """Keep verified attachment charts visible and out of incompatible horizon sections."""
+    text = str(report_text or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    chart_rows = [
+        (index, chart) for index, chart in enumerate(charts or [], start=1)
+        if isinstance(chart, dict)
+        and chart.get("_serverWorkbookEvidence") is True
+        and str(chart.get("sourceOrigin") or "").strip().casefold() in {"uploaded_workbook", "uploaded_attachment"}
+    ]
+    if not chart_rows:
+        return text, {"restored": 0, "relocated": 0, "titles": [], "relocatedTitles": []}
+
+    from utils.chart_gallery import chart_horizons, explicit_horizons
+
+    heading_re = re.compile(r"(?m)^(#{1,4})[ \t]+(.+?)[ \t]*$")
+    marker_re = re.compile(r"(?m)^[ \t]*\[CHART_(\d+)\][ \t]*$")
+
+    def heading_chain(position: int) -> str:
+        stack: list[tuple[int, str]] = []
+        for match in heading_re.finditer(text, 0, position):
+            level, title = len(match.group(1)), match.group(2).strip()
+            stack = [item for item in stack if item[0] < level]
+            stack.append((level, title))
+        return " / ".join(title for _level, title in stack)
+
+    def mismatched_horizon(chart: dict, heading: str) -> bool:
+        plotted = chart_horizons(chart)
+        segments = [part.strip() for part in heading.split(" / ") if part.strip()]
+        specified = [explicit_horizons(part) for part in segments]
+        specified = [periods for periods in specified if periods]
+        all_periods = set().union(*specified) if specified else set()
+        if not plotted or not all_periods:
+            return False
+        if not (plotted & all_periods):
+            return True
+        return any(len(periods) == 1 and plotted != periods for periods in specified)
+
+    marker_matches: dict[int, list[re.Match]] = {}
+    for match in marker_re.finditer(text):
+        marker_matches.setdefault(int(match.group(1)), []).append(match)
+
+    missing: list[tuple[int, dict]] = []
+    relocated: list[tuple[int, dict]] = []
+    remove_spans: list[tuple[int, int]] = []
+    for index, chart in chart_rows:
+        matches = marker_matches.get(index, [])
+        if not matches:
+            missing.append((index, chart))
+            continue
+        compatible = next(
+            (match for match in matches if not mismatched_horizon(chart, heading_chain(match.start()))),
+            None,
+        )
+        if compatible is None:
+            relocated.append((index, chart))
+            remove_spans.extend(match.span() for match in matches)
+        else:
+            remove_spans.extend(match.span() for match in matches if match is not compatible)
+
+    for start, end in sorted(remove_spans, reverse=True):
+        text = text[:start] + text[end:]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    def add_chart(index: int, chart: dict) -> None:
+        nonlocal text
+        title = re.sub(r"\s+", " ", str(chart.get("title") or f"Attachment chart {index}")).strip()
+        takeaway = re.sub(r"\s+", " ", str(chart.get("takeaway") or "")).strip()
+        if not takeaway:
+            takeaway = "This chart shows verified values calculated from the attached rows; missing values are excluded."
+        group = re.search(r"(?im)^##[ \t]+Charts calculated from the attached data[ \t]*$", text)
+        block = f"### {title}\n{takeaway}\n\n[CHART_{index}]"
+        if group:
+            following = re.search(r"(?m)^##[ \t]+", text[group.end():])
+            group_end = group.end() + following.start() if following else len(text)
+            group_body = text[group.end():group_end]
+            title_heading = re.search(rf"(?im)^###?[ \t]+{re.escape(title)}[ \t]*$", group_body)
+            if title_heading:
+                section_start = group.end() + title_heading.start()
+                next_heading = re.search(r"(?m)^#{2,3}[ \t]+", text[group.end() + title_heading.end():group_end])
+                section_end = group.end() + title_heading.end() + next_heading.start() if next_heading else group_end
+                section = text[section_start:section_end]
+                if f"[CHART_{index}]" not in section:
+                    addition = f"\n{takeaway}\n\n[CHART_{index}]"
+                    text = text[:section_end].rstrip() + addition + "\n\n" + text[section_end:].lstrip()
+                return
+            text = text[:group_end].rstrip() + "\n\n" + block + "\n\n" + text[group_end:].lstrip()
+            return
+
+        block = f"## Charts calculated from the attached data\n\n{block}"
+        source_heading = re.search(
+            r"(?im)^[ \t]{0,3}#{1,3}[ \t]+(?:sources?|references?|bibliography|works cited)\b[^\r\n]*$",
+            text,
+        )
+        if source_heading:
+            insert_at = source_heading.start()
+            text = text[:insert_at].rstrip() + "\n\n" + block + "\n\n" + text[insert_at:].lstrip()
+        else:
+            text = f"{text}\n\n{block}" if text else block
+
+    for index, chart in [*missing, *relocated]:
+        add_chart(index, chart)
+    return text, {
+        "restored": len(missing), "relocated": len(relocated),
+        "titles": [str(chart.get("title") or "")[:120] for _, chart in [*missing, *relocated]],
+        "relocatedTitles": [str(chart.get("title") or "")[:120] for _, chart in relocated],
+    }
 
 
 def _md_cell(value: object) -> str:
@@ -1254,6 +2581,7 @@ def workbook_charts_section(
         )
     lines = [f"## Quantitative comparisons from the {source_label}", "", intro, ""]
     for offset, chart in enumerate(charts, start=0):
-        lines.extend([f"### {chart.get('title', 'Workbook comparison')}", f"[CHART_{start_index + offset}]",
-                      str(chart.get("takeaway") or "This chart compares the available reported observations."), ""])
+        lines.extend([f"### {chart.get('title', 'Workbook comparison')}",
+                      str(chart.get("takeaway") or "This chart compares the available reported observations."),
+                      f"[CHART_{start_index + offset}]", ""])
     return "\n".join(lines).strip()

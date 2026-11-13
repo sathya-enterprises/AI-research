@@ -90,5 +90,6 @@ def test_pms_aum_disclosure_is_counted():
         "strategies": [{"aum": 100.0}, {"aum": 300.0}, {"aum": None}, {"aum": None}],
     }
     section = attachment_analytics_section(analytics, "S1", {"pms.xlsx": "S1"})
-    assert "| Strategies with AUM not disclosed | [S1] | 2 (50.0%) |" in section
-    assert "| Total reported AUM (₹ crore) | [S1] | 400.00 |" in section and "| Median reported AUM (₹ crore) | [S1] | 200.00 |" in section
+    assert "| File | Sheet / section |" in section
+    assert "| Strategies with AUM not disclosed | 2 (50.0%) |" in section
+    assert "| Total reported AUM (₹ crore) | 400.00 |" in section and "| Median reported AUM (₹ crore) | 200.00 |" in section

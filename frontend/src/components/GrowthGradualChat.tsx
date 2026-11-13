@@ -20,7 +20,7 @@ function proxyImg(url: string): string {
 }
 
 interface DatawrapperInfo { id: string; embedUrl: string; publicUrl: string; }
-interface ChartSpec { type: string; title: string; series?: ChartSeries[]; unit?: string; columns?: string[]; rows?: string[][]; datawrapper?: DatawrapperInfo; [key: string]: unknown; }
+interface ChartSpec { type: string; title: string; series?: ChartSeries[]; unit?: string; columns?: string[]; rows?: string[] | string[][]; values?: unknown[][]; datawrapper?: DatawrapperInfo; [key: string]: unknown; }
 interface WebImage { url: string; caption?: string; sourceUrl?: string; sourceURL?: string; sourceTitle?: string; publisher?: string; sourceId?: string; sourceIds?: string[]; assetUrl?: string; }
 // Mirrors backend/routes/report.py's _sanitize_theme output shape — only
 // ever set when the user's request explicitly asked for a visual style
@@ -50,6 +50,112 @@ interface ReportRagStatus { requested?: boolean; status?: string; retrievedChunk
 interface ReportRevision { revision: number; savedAt: number; note: string; report: string; title?: string; charts: ChartSpec[]; images?: WebImage[]; sources?: ReportSource[]; presentation?: Record<string, unknown>; keyStats?: {label:string;value:string;change?:string}[]; summary?: string; theme?: ReportTheme; qualityReview?: ReportQualityReview; publicationStatus?: string; sessionId?: string; ragStatus?: ReportRagStatus; }
 interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; reportStyle?: ReportStyle; kicker?: string; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
 interface ReportFailureItem { stage?: string; issue?: string; claim?: string; sources?: string[]; values?: string[]; }
+
+function requestedReportChartIndex(question: string, charts: ChartSpec[]): number | undefined {
+  const numbered = question.match(/\b(?:chart|figure|graph|plot|visualization|visualisation)\s*(?:number|no\.?|#)?\s*(\d+)\b/i);
+  if (numbered) {
+    const index = Number(numbered[1]) - 1;
+    return index >= 0 && index < charts.length ? index : undefined;
+  }
+  const queryWords = new Set((question.toLowerCase().match(/[a-z0-9]{3,}/g) || [])
+    .filter(word => !['about', 'chart', 'does', 'explain', 'figure', 'graph', 'report', 'show', 'that', 'the', 'this', 'what', 'with'].includes(word)));
+  let best: { index: number; score: number } | undefined;
+  charts.forEach((chart, index) => {
+    const chartText = [chart.title, chart.type, chart.xLabel, chart.yLabel].map(value => String(value || '')).join(' ');
+    const titleWords = new Set((chartText.toLowerCase().match(/[a-z0-9]{3,}/g) || [])
+      .filter(word => !['about', 'chart', 'does', 'explain', 'figure', 'graph', 'report', 'show', 'that', 'the', 'this', 'what', 'with'].includes(word)));
+    const overlap = [...queryWords].filter(word => titleWords.has(word)).length;
+    const typeWords = new Set((String(chart.type || '').toLowerCase().match(/[a-z0-9]{3,}/g) || []));
+    if (typeWords.has('heatmap')) typeWords.add('matrix');
+    const score = Math.max(overlap / Math.max(1, titleWords.size), [...queryWords].some(word => typeWords.has(word)) ? 0.5 : 0);
+    if (overlap && (!best || score > best.score)) best = { index, score };
+  });
+  return best && best.score >= 0.25 ? best.index : undefined;
+}
+
+function isReportReferenceQuestion(question: string, messages: Message[]): boolean {
+  const text = question.trim();
+  if (/\b(?:report|document|chart|graph|figure|table|section|chapter|appendix|visualization|visualisation|finding|key takeaway|executive summary|uploaded file|attached file)\b|\b(?:whole|entire|overall)\s+(?:report|document|analysis|file)\b|\b(?:summari[sz]e|overview|walk me through|inch by inch|section by section|chart by chart)\b/i.test(text)) return true;
+  const words = text.match(/[\w'-]+/g) || [];
+  if (words.length <= 12 && /\b(?:it|this|that|these|those|above|previous)\b/i.test(text)) return true;
+  return words.length <= 2 && /^\s*(?:why|how|what|which)\b/i.test(text)
+    && messages.some(message => message.role === 'assistant' && Boolean(message.text.trim()));
+}
+
+/** Send only readable report material and chart values to ordinary follow-up chat. */
+function buildReportChatContext(
+  reportData: ReportData | undefined,
+  originalQuestion: string,
+  chatQuestion: string,
+): Record<string, unknown> | undefined {
+  if (!reportData?.report) return undefined;
+  const sourceCharts = (reportData.charts || []).slice(0, 80);
+  const requestedIndex = requestedReportChartIndex(chatQuestion, sourceCharts);
+  let pointBudget = 2_500;
+  const charts = sourceCharts.map((chart, chartIndex) => {
+    if (requestedIndex !== undefined && chartIndex !== requestedIndex) {
+      return {
+        title: String(chart.title || '').slice(0, 220),
+        type: String(chart.type || '').slice(0, 40),
+        unit: String(chart.unit || '').slice(0, 80),
+        xLabel: String(chart.xLabel || '').slice(0, 100),
+        yLabel: String(chart.yLabel || '').slice(0, 100),
+        series: [],
+      };
+    }
+    const series = (chart.series || []).slice(0, 12).map(item => {
+      const sourcePoints = item.data || [];
+      let selectedPoints: ChartDataPoint[];
+      if (requestedIndex !== undefined) {
+        selectedPoints = sourcePoints.slice(0, Math.max(0, pointBudget));
+      } else {
+        selectedPoints = sourcePoints.length <= 2
+          ? sourcePoints
+          : [sourcePoints[0], sourcePoints[sourcePoints.length - 1]];
+        selectedPoints = selectedPoints.slice(0, Math.max(0, pointBudget));
+      }
+      pointBudget -= selectedPoints.length;
+      return {
+        name: String(item.name || 'Series').slice(0, 100),
+        data: selectedPoints.map(point => ({
+          label: String(point.label ?? '').slice(0, 120),
+          value: typeof point.value === 'number' || typeof point.value === 'string'
+            ? point.value
+            : String(point.value ?? ''),
+        })),
+      };
+    });
+    return {
+      title: String(chart.title || '').slice(0, 220),
+      type: String(chart.type || '').slice(0, 40),
+      unit: String(chart.unit || '').slice(0, 80),
+      xLabel: String(chart.xLabel || '').slice(0, 100),
+      yLabel: String(chart.yLabel || '').slice(0, 100),
+      series,
+      columns: Array.isArray(chart.columns) ? chart.columns.slice(0, 14).map(String) : undefined,
+      rows: Array.isArray(chart.rows) ? chart.rows.slice(0, 24).map(row =>
+        Array.isArray(row) ? row.slice(0, 14).map(cell => String(cell ?? '').slice(0, 120)) : String(row ?? '').slice(0, 120),
+      ) : undefined,
+      values: Array.isArray(chart.values) ? chart.values.slice(0, 24).map(row =>
+        Array.isArray(row) ? row.slice(0, 14).map(cell => cell == null ? null : cell) : [],
+      ) : undefined,
+    };
+  });
+  const report = String(reportData.report || '');
+  return {
+    title: String(reportData.title || '').slice(0, 300),
+    question: String(originalQuestion || '').slice(0, 500),
+    summary: String(reportData.summary || '').slice(0, 6_000),
+    report: report.slice(0, 250_000),
+    reportTruncated: report.length > 250_000,
+    keyStats: (reportData.keyStats || []).slice(0, 24).map(stat => ({
+      label: String(stat.label || '').slice(0, 120),
+      value: String(stat.value || '').slice(0, 120),
+      change: String(stat.change || '').slice(0, 100),
+    })),
+    charts,
+  };
+}
 
 // Human-readable names for the backend's failedStage values.
 const REPORT_STAGE_LABELS: Record<string, string> = {
@@ -1008,17 +1114,26 @@ function EdPieChart({ spec, donut = false }: { spec: ChartSpec; donut?: boolean 
 function TableChart({ spec }: { spec: ChartSpec }) {
   const columns = spec.columns ?? [];
   const rows = spec.rows ?? [];
-  if (columns.length < 2 || rows.length < 1) return null;
+  const isLabeledMatrix = typeof rows[0] === 'string' && Array.isArray(spec.values);
+  const tableRows: string[][] = rows.map((row, ri) => {
+    if (typeof row === 'string') {
+      const matrixRow = spec.values?.[ri];
+      return [row, ...(Array.isArray(matrixRow) ? matrixRow.map((cell) => String(cell ?? '—')) : [])];
+    }
+    return row.map((cell) => String(cell ?? '—'));
+  });
+  const tableColumns = isLabeledMatrix ? [String(spec.yLabel || 'Row'), ...columns] : columns;
+  if (tableColumns.length < 2 || tableRows.length < 1) return null;
   return (
     <div className="chart-wrap">
       <div className="chart-title">{spec.title}</div>
       <div style={{ overflowX: 'auto' }}>
         <table className="md-table">
           <thead>
-            <tr>{columns.map((c,i) => <th key={i} className="md-th">{c}</th>)}</tr>
+            <tr>{tableColumns.map((c,i) => <th key={i} className="md-th">{c}</th>)}</tr>
           </thead>
           <tbody>
-            {rows.map((r,ri) => (
+            {tableRows.map((r,ri) => (
               <tr key={ri}>{r.map((cell,ci) => <td key={ci} className="md-td">{cell}</td>)}</tr>
             ))}
           </tbody>
@@ -1031,18 +1146,36 @@ function TableChart({ spec }: { spec: ChartSpec }) {
 function StructuredChartPreview({ spec }: { spec: ChartSpec }) {
   const type = normalizeInlineChartType(spec.type);
   const title = spec.title || `${type.replace(/_/g, ' ')} chart`;
-  const rows = (spec.series ?? []).flatMap((s) => (s.data ?? []).map((p) => {
+  const chartSeries = spec.series ?? [];
+  const scatter = type === 'scatter' || type === 'bubble';
+  const rows = scatter
+    ? (() => {
+      const yByLabel = new Map((chartSeries[1]?.data ?? []).map((point) => [point.label, point]));
+      const sizeByLabel = new Map((chartSeries[2]?.data ?? []).map((point) => [point.label, point]));
+      return (chartSeries[0]?.data ?? []).flatMap((point) => {
+        const label = String(point.label ?? '');
+        const yPoint = yByLabel.get(label);
+        if (!yPoint) return [];
+        const row = [label, String(point.value ?? '—'), String(yPoint.value ?? '—')];
+        if (type === 'bubble') row.push(String(sizeByLabel.get(label)?.value ?? '—'));
+        return [row];
+      });
+    })()
+    : chartSeries.flatMap((s) => (s.data ?? []).map((p) => {
     if (type === 'candlestick' || type === 'ohlc') return [p.label, p.open, p.high, p.low, p.close].map((v) => String(v ?? '—'));
     if (type === 'boxplot') return [p.label, p.min, p.q1, p.median, p.q3, p.max].map((v) => String(v ?? '—'));
     if (type === 'bullet') return [p.label, p.value, p.target].map((v) => String(v ?? '—'));
     if (type === 'population_pyramid') return [p.label, p.left ?? p.value, p.right ?? p.value].map((v) => String(v ?? '—'));
     return [p.label, p.value].map((v) => String(v ?? '—'));
   }));
-  const cols = type === 'candlestick' || type === 'ohlc' ? ['Period', 'Open', 'High', 'Low', 'Close']
+  const cols = scatter
+    ? ['Observation', String(spec.xLabel || chartSeries[0]?.name || 'X'), String(spec.yLabel || chartSeries[1]?.name || 'Y'),
+      ...(type === 'bubble' ? [String(spec.sizeLabel || chartSeries[2]?.name || 'Size')] : [])]
+    : type === 'candlestick' || type === 'ohlc' ? ['Period', 'Open', 'High', 'Low', 'Close']
     : type === 'boxplot' ? ['Group', 'Min', 'Q1', 'Median', 'Q3', 'Max']
     : type === 'bullet' ? ['Metric', 'Actual', 'Target']
     : type === 'population_pyramid' ? ['Cohort', 'Left group', 'Right group']
-    : ['Label', (spec.series ?? [])[0]?.name ?? 'Value'];
+    : ['Label', chartSeries[0]?.name ?? 'Value'];
   const structured = type === 'heatmap' && Array.isArray(spec.rows) && Array.isArray(spec.columns) && Array.isArray(spec.values)
     ? (spec.rows as unknown as string[]).flatMap((r, i) => (spec.columns as string[]).map((c, j) => [String(r), String(c), String((spec.values as unknown[][])[i]?.[j] ?? '—')]))
     : rows;
@@ -1279,20 +1412,12 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
   // shown when there's actually prior conversation to include (i.e. not the
   // very first response in the thread).
   const [includeContext, setIncludeContext] = useState(true);
-  const [selectedTier, setSelectedTier] = useState<ReportTier>(msg.reportData?.reportTier ?? initialTier);
   const attachmentReport = (msg.reportFiles ?? []).some(file => file.status === 'attached');
-
-  useEffect(() => {
-    // Before a report is generated, mirror the current composer selection.
-    // After generation, the report's own tier remains authoritative for PDF export.
-    if (attachmentReport) {
-      setSelectedTier('detailed');
-    } else if (msg.reportData?.reportTier) {
-      setSelectedTier(msg.reportData.reportTier);
-    } else {
-      setSelectedTier(initialTier);
-    }
-  }, [msg.reportData?.reportTier, initialTier, attachmentReport]);
+  // Derive the depth from current report state. Attachment analysis stays at
+  // the data-focused tier without synchronizing props through an effect.
+  const selectedTier: ReportTier = attachmentReport
+    ? 'detailed'
+    : (msg.reportData?.reportTier ?? initialTier);
 
   const rd = msg.reportData;
   const loading = msg.reportLoading ?? false;
@@ -1925,11 +2050,44 @@ async function processFile(file: File): Promise<AttachedFile | null> {
     return { ...base, status: 'failed', error: (e as Error).message };
   }
 }
+function compactPdfTextForChat(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const markers = [...text.matchAll(/\[Page\s+(\d+)\]\s*/gi)];
+  if (!markers.length) return `${text.slice(0, maxChars - 45)}\n[PDF text shortened for chat context.]`;
+  const prefix = text.slice(0, markers[0].index).trim();
+  const pages = markers.map((marker, index) => ({
+    number: marker[1],
+    text: text.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index ?? text.length).trim(),
+  }));
+  const available = maxChars - Math.min(prefix.length, 500) - pages.length * 16 - 40;
+  if (available < pages.length * 40) return `${text.slice(0, maxChars - 45)}\n[Later PDF pages omitted.]`;
+  const perPage = Math.max(40, Math.floor(available / pages.length));
+  const parts = prefix ? [prefix.slice(0, 500)] : [];
+  for (const page of pages) {
+    let pageText = page.text;
+    if (pageText.length > perPage) {
+      const marker = ' [middle omitted] ';
+      const usable = Math.max(20, perPage - marker.length);
+      const head = Math.floor(usable * 0.68);
+      pageText = `${pageText.slice(0, head).trimEnd()}${marker}${pageText.slice(-Math.max(1, usable - head)).trimStart()}`;
+    }
+    parts.push(`[Page ${page.number}] ${pageText}`);
+  }
+  const compacted = parts.join('\n\n');
+  return compacted.length <= maxChars ? compacted : `${compacted.slice(0, maxChars - 45)}\n[PDF page excerpts shortened.]`;
+}
 function buildAttachmentContext(files: AttachedFile[], pasted: PastedText[]): string {
   const parts: string[] = [];
+  let remainingChars = 80_000;
   files.forEach((f, i) => {
     if (f.extractedText) {
-      parts.push(`[Attached File ${i+1}: ${f.name}]\n${f.extractedText.slice(0, 8000)}`);
+      const perFileCap = Math.min(remainingChars, isPdfAttachmentFile(f) ? remainingChars : 8_000);
+      if (perFileCap <= 0) return;
+      const text = isPdfAttachmentFile(f)
+        ? compactPdfTextForChat(f.extractedText, perFileCap)
+        : f.extractedText.slice(0, perFileCap);
+      parts.push(`[Attached File ${i+1}: ${f.name}]\n${text}`);
+      remainingChars -= text.length;
     } else if (f.type.startsWith('image/')) {
       parts.push(`[Attached Image ${i+1}: ${f.name}]`);
     } else {
@@ -1937,7 +2095,10 @@ function buildAttachmentContext(files: AttachedFile[], pasted: PastedText[]): st
     }
   });
   pasted.forEach((p, i) => {
-    parts.push(`[Pasted Context ${i+1}: ${p.label}]\n${p.text.slice(0, 6000)}`);
+    if (remainingChars <= 0) return;
+    const text = p.text.slice(0, Math.min(6_000, remainingChars));
+    parts.push(`[Pasted Context ${i+1}: ${p.label}]\n${text}`);
+    remainingChars -= text.length;
   });
   if (!parts.length) return '';
   return `\n\n---\n📎 USER-ATTACHED CONTEXT:\n${parts.join('\n\n')}\n---\n\nUse the attached content above when answering.`;
@@ -2956,6 +3117,12 @@ export default function GrowthGradualChat() {
     const newMessages = [...messages, userMsg, botMsg];
 
     const hasAttachments = attachedFiles.some(f => f.status === 'attached') || pastedTexts.length > 0;
+    const reportFileIds = new Set((lastReportMsg?.reportFiles || []).map(file => file.id));
+    const hasNewAttachment = pastedTexts.length > 0
+      || attachedFiles.some(file => file.status === 'attached' && !reportFileIds.has(file.id));
+    const reportContext = hasNewAttachment || !isReportReferenceQuestion(q, messages)
+      ? undefined
+      : buildReportChatContext(lastReportMsg?.reportData, lastReportMsg?.reportQuestion || '', q);
 
     setMessages(newMessages);
     setStreaming(true);
@@ -2978,12 +3145,19 @@ export default function GrowthGradualChat() {
     let finalText = '';
     const fileCtx = buildAttachmentContext(attachedFiles, pastedTexts);
 
-    // Build image payloads for vision-capable main chat (mirrors buildFilePayload logic)
+    // Build image payloads for vision-capable main chat, including image-only
+    // pages extracted from PDFs so chart pages are visible to the vision reader.
     const chatFileImages: { name:string; mimeType:string; data:string }[] = [];
     for (const f of attachedFiles) {
       if (f.status === 'attached' && f.type.startsWith('image/') && f.content) {
         const base64 = f.content.split(',')[1];
         if (base64) chatFileImages.push({ name: f.name, mimeType: f.type, data: base64 });
+      }
+      if (f.status === 'attached' && f.indexImages?.length) {
+        for (const image of f.indexImages) {
+          if (chatFileImages.length >= 8) break;
+          chatFileImages.push({ name: image.name, mimeType: image.mimeType, data: image.data });
+        }
       }
     }
 
@@ -3012,10 +3186,11 @@ export default function GrowthGradualChat() {
       sdkSendMessage({ text: q }, {
         headers: requestHeaders,
         body: {
-          fileContext: fileCtx,
+          fileContext: reportContext ? '' : fileCtx,
           sessionId: getOrCreateSessionId(),
           hasRag: ragIndexed,
-          fileImages: chatFileImages,
+          fileImages: reportContext ? [] : chatFileImages,
+          reportContext,
         },
       });
       finalText = await completion;

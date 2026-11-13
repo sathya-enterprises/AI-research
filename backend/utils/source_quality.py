@@ -212,6 +212,20 @@ def recency(row: dict, start: date, today: date) -> tuple[float, str]:
 
 
 def evidence_strength(row: dict) -> tuple[float, str]:
+    origin = str(
+        row.get("evidence_origin") or row.get("evidenceOrigin")
+        or row.get("source_origin") or row.get("sourceOrigin") or ""
+    ).casefold()
+    if origin in {"uploaded_workbook", "uploaded_attachment"}:
+        uploaded_text = str(
+            row.get("text") or row.get("extractedText") or row.get("chartEvidenceExcerpt") or ""
+        )
+        if not uploaded_text.strip():
+            return 0.1, "user-provided file has no extracted text"
+        digits = sum(ch.isdigit() for ch in uploaded_text[:20000])
+        table = "|" in uploaded_text or "\n" in uploaded_text
+        score = 0.45 + (0.2 if digits >= 20 else 0.0) + (0.15 if table else 0.0)
+        return min(0.8, score), "user-provided attachment text extracted; not publisher-authenticated"
     page = str(row.get("pageContent") or "")
     status = str(row.get("pageFetchStatus") or "")
     if status == "ok" and page:
@@ -273,8 +287,15 @@ def assess_sources(rows: list[dict], *, question: str = "", report_tier: str = "
         if not isinstance(row, dict):
             continue
         url = str(row.get("url") or "")
-        internal = not url.startswith(("http://", "https://"))
-        if internal:
+        origin = str(
+            row.get("evidence_origin") or row.get("evidenceOrigin")
+            or row.get("source_origin") or row.get("sourceOrigin") or ""
+        ).casefold()
+        uploaded = origin in {"uploaded_workbook", "uploaded_attachment"}
+        internal = not uploaded and not url.startswith(("http://", "https://"))
+        if uploaded:
+            tier, tier_reason = "unknown", "user-provided attachment; publisher identity not independently authenticated"
+        elif internal:
             tier, tier_reason = "primary_official", "calculated / internal dataset with recorded provenance"
         else:
             tier, tier_reason = authority(url)
@@ -286,8 +307,14 @@ def assess_sources(rows: list[dict], *, question: str = "", report_tier: str = "
         if not str(row.get("publication_date") or "").strip() and str(row.get("published") or "").strip():
             row["publication_date"] = str(row["published"])[:120]
             row.setdefault("publicationDateSource", "search_provider_metadata")
-        rec, rec_reason = (1.0, "calculated for the requested window") if internal else recency(row, start, today)
-        ev, ev_reason = (1.0, "computed dataset") if internal else evidence_strength(row)
+        rec, rec_reason = (
+            (0.5, "upload date is user-provided or not independently verified")
+            if uploaded else
+            ((1.0, "calculated for the requested window") if internal else recency(row, start, today))
+        )
+        ev, ev_reason = (
+            (evidence_strength(row) if uploaded else ((1.0, "computed dataset") if internal else evidence_strength(row)))
+        )
         reliability = round(0.55 * TIER_SCORES[tier] + 0.25 * rec + 0.20 * ev, 3)
         row["authorityTier"] = tier
         row["recencyScore"] = rec

@@ -481,7 +481,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # the same verification below and are placed in their own sector's deep-dive.
     from utils.dataset_charts import build_dataset_charts, preassign
     from utils.section_charts import clip_to_window, verify_chart
-    dataset_charts, dataset_note = build_dataset_charts(store)
+    dataset_charts, dataset_note = build_dataset_charts(store, question=question)
     # Stage J: domain-generic datasets - the model proposes series from data-dense passages (PDF chart text,
     # flattened tables), code verifies every value and label against the passage.
     extracted_ids: set[str] = set()

@@ -802,6 +802,22 @@ def _outside_window(chart: PlannedChart, min_year: int | None, max_year: int | N
 def _period_end_year(label: str) -> int | None:
     """The year a period label ends in: "2023" -> 2023, "FY 2014-15" -> 2015, "FY24" -> 2024, else None."""
     text = str(label or "")
+    # Indian fiscal quarters Q1-Q3 end in the calendar year before the FY
+    # label; Q4 ends in the FY's named year. For example, Q2 FY27 is Jul-Sep
+    # 2026, while Q4 FY27 is Jan-Mar 2027.
+    quarter_fy_range = re.search(
+        r"(?i)\bQ([1-4])\s*FY\s*'?((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)", text,
+    )
+    if quarter_fy_range:
+        quarter = int(quarter_fy_range.group(1))
+        fy_end = int(quarter_fy_range.group(2)[:2] + quarter_fy_range.group(3))
+        return fy_end if quarter == 4 else fy_end - 1
+    quarter_fy = re.search(r"(?i)\bQ([1-4])\s*FY\s*'?((?:19|20)\d{2}|\d{2})\b", text)
+    if quarter_fy:
+        quarter = int(quarter_fy.group(1))
+        year_text = quarter_fy.group(2)
+        fy_end = int(year_text) if len(year_text) == 4 else 2000 + int(year_text)
+        return fy_end if quarter == 4 else fy_end - 1
     m = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)", text)
     if m:
         return int(m.group(1)[:2] + m.group(2))

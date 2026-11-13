@@ -5069,6 +5069,16 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # disappeared, append an explicit unresolved placeholder instead of silently
     # stripping its citation during rendering.
     source_registry = ensure_cited_source_records(report, sources)
+    uploaded_origins = {"uploaded_workbook", "uploaded_attachment"}
+    source_origins = {
+        str(source.get("evidence_origin") or source.get("evidenceOrigin")
+            or source.get("source_origin") or source.get("sourceOrigin") or "").casefold()
+        for source in source_registry if isinstance(source, dict)
+    }
+    has_uploaded_sources = bool(source_origins & uploaded_origins)
+    attachment_only_sources = bool(source_registry) and all(
+        origin in uploaded_origins for origin in source_origins
+    )
     unlinked_sources = _unlinked_attribution_records(attribution_labels, source_registry)
     if unlinked_sources:
         source_registry = build_source_registry(source_registry, additional_sources=unlinked_sources)
@@ -5538,7 +5548,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
   <div class="gg-report-sections">{"".join(body_sections)}</div>
   {closing_summary}
   {sources_html}
-  {house_closing(house_style)}
+  {house_closing(house_style, has_uploaded_sources=has_uploaded_sources, attachment_only=attachment_only_sources)}
 </main>
 <footer class="gg-report-footer"><strong>Growth Gradual · Research Intelligence</strong><span>{safe_title}</span><span>Sources and methodology appear within this report.</span></footer>
 <script>{_JS}</script>

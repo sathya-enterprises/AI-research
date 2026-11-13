@@ -34,6 +34,14 @@ _COMPOUND_RE = re.compile(rf"^\s*(.+?) compounded return across ({_QUARTER}) to 
 _QTD_HEAD_RE = re.compile(r"^\s*Sector\s*\|\s*QTD return to (.+?) \(%\)\s*$")
 _COMPOUND_HEAD_RE = re.compile(rf"^\s*Sector\s*\|\s*Compounded return {_QUARTER} to {_QUARTER} \(%\)\s*$")
 _UPPER_WORDS = {"IT", "PSU", "FMCG", "PSE", "CPSE", "MNC", "50"}
+_MATRIX_VIEW_MIN_SECTORS = 6
+_MATRIX_VIEW_MIN_QUARTERS = 6
+_QTD_REQUEST_RE = re.compile(r"(?i)\b(?:qtd|quarter[- ]to[- ]date|current quarter|so far|to date)\b")
+_PAST_QUARTERS_RE = re.compile(
+    r"(?i)\b(?:past|last|previous|prior|preceding)\s+"
+    r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+    r"(?:completed\s+)?quarters?\b"
+)
 
 
 @dataclass
@@ -53,6 +61,7 @@ class QuarterlyDataset:
     compounded: dict[str, tuple[float, str, str, str]]  # label -> (value, raw, line, passage)
     qtd_as_of: str
     qtd: dict[str, tuple[float, str, str, str]]          # label -> (value, raw, line, passage)
+    source_quarters: list[str] = field(default_factory=list)
 
 
 def pretty(label: str) -> str:
@@ -83,6 +92,7 @@ def find_quarterly_dataset(store) -> QuarterlyDataset | None:
         by_source.setdefault(passage.source_id, []).append(passage)
     for source_id, passages in by_source.items():
         quarters: list[str] = []
+        source_quarters: list[str] = []
         rows: dict[str, Row] = {}
         compounded: dict = {}
         qtd: dict = {}
@@ -92,8 +102,11 @@ def find_quarterly_dataset(store) -> QuarterlyDataset | None:
             for line in str(passage.text or "").splitlines():
                 head = _HEAD_RE.match(line)
                 if head:
-                    # Shown in the report's Indian fiscal-quarter labels; the quoted rows keep their own.
-                    quarters = quarters or [fy_label(q.strip()) for q in head.group(1).split("|")]
+                    # Keep both labels: charts display Indian fiscal quarters,
+                    # while exact-cell evidence must point to the source's
+                    # original calendar-quarter columns.
+                    source_quarters = source_quarters or [q.strip() for q in head.group(1).split("|")]
+                    quarters = quarters or [fy_label(q) for q in source_quarters]
                     mode = "matrix"
                     continue
                 if _COMPOUND_HEAD_RE.match(line):
@@ -119,12 +132,21 @@ def find_quarterly_dataset(store) -> QuarterlyDataset | None:
                 elif mode == "matrix" and quarters and len(cells) == len(quarters) + 1:
                     rows[cells[0]] = Row(cells[0], line.strip(), passage.passage_id, cells[1:], [_num(c) for c in cells[1:]])
         if quarters and len(rows) >= 3:
-            return QuarterlyDataset(source_id, quarters, rows, compounded, qtd_as_of, qtd)
+            return QuarterlyDataset(
+                source_id, quarters, rows, compounded, qtd_as_of, qtd,
+                source_quarters=source_quarters,
+            )
     return None
 
 
-def _point(column: str, value: float, raw: str, line: str, source_id: str) -> dict:
-    return {"label": column, "value": value, "evidenceSource": source_id, "evidenceQuote": line, "evidenceValue": raw}
+def _point(column: str, value: float, raw: str, line: str, source_id: str, *,
+           source_column: str = "", column_index: int | None = None, row_label: str = "") -> dict:
+    point = {"label": column, "value": value, "evidenceSource": source_id,
+             "evidenceQuote": line, "evidenceValue": raw}
+    if source_column:
+        point.update({"evidenceColumn": source_column, "evidenceColumnIndex": column_index,
+                      "evidencePeriod": source_column, "evidenceRowLabel": row_label})
+    return point
 
 
 def _signed(value: float) -> str:
@@ -150,11 +172,16 @@ def sector_vs_benchmark(data: QuarterlyDataset, label: str, index: int) -> Plann
     if len(cols) < 3:
         return None
     quarters = [data.quarters[i] for i in cols]
-    series = [{"name": pretty(label), "data": [_point(data.quarters[i], row.values[i], row.raw[i], row.line, data.source_id) for i in cols]}]
+    def row_point(source_row: Row, i: int) -> dict:
+        source_column = data.source_quarters[i] if i < len(data.source_quarters) else data.quarters[i]
+        return _point(data.quarters[i], source_row.values[i], source_row.raw[i], source_row.line, data.source_id,
+                      source_column=source_column, column_index=i + 1, row_label=source_row.label)
+
+    series = [{"name": pretty(label), "data": [row_point(row, i) for i in cols]}]
     points = [(pretty(label), data.quarters[i], row.values[i]) for i in cols]
     passages = [row.passage_id]
     if bench is not None:
-        series.append({"name": "Nifty 50", "data": [_point(data.quarters[i], bench.values[i], bench.raw[i], bench.line, data.source_id) for i in cols]})
+        series.append({"name": "Nifty 50", "data": [row_point(bench, i) for i in cols]})
         points += [("Nifty 50", data.quarters[i], bench.values[i]) for i in cols]
         passages.append(bench.passage_id)
     passages = sorted(set(passages))
@@ -165,6 +192,81 @@ def sector_vs_benchmark(data: QuarterlyDataset, label: str, index: int) -> Plann
                          passage_ids=passages, source_ids=[data.source_id], points=points,
                          match_text=f"{title} {label} quarterly returns sector rotation", heading="fetched dataset")
     chart.interpretation = interpret_sector(data, label, cols)
+    return chart
+
+
+def _requested_sector_rows(data: QuarterlyDataset, question: str, *, limit: int = 4) -> list[str]:
+    """Find explicitly named sectors for focused charts without expanding a broad matrix into one chart per row."""
+    if not question:
+        return []
+    question_text = " " + " ".join(re.findall(r"[a-z0-9]+", str(question).casefold())) + " "
+    selected = []
+    for label in data.rows:
+        if label == BENCHMARK:
+            continue
+        display = pretty(label).casefold()
+        aliases = [display]
+        if display.startswith("nifty "):
+            aliases.append(display[len("nifty "):])
+        for alias in aliases:
+            words = re.findall(r"[a-z0-9]+", alias)
+            if not words:
+                continue
+            phrase = " ".join(words)
+            variants = [phrase]
+            if words[-1].endswith("y"):
+                variants.append(" ".join(words[:-1] + [words[-1][:-1] + "ies"]))
+            elif not words[-1].endswith("s"):
+                variants.append(" ".join(words[:-1] + [words[-1] + "s"]))
+            if any(f" {variant} " in question_text for variant in variants):
+                selected.append(label)
+                break
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def quarterly_heatmap(data: QuarterlyDataset, index: int = 0) -> PlannedChart | None:
+    """One auditable sector-by-quarter matrix for broad rotation questions."""
+    if len(data.rows) < 3 or len(data.quarters) < 3:
+        return None
+    labels = list(data.rows)
+    passages = sorted({row.passage_id for row in data.rows.values() if row.passage_id})
+    values = [[row.values[i] if i < len(row.values) else None for i in range(len(data.quarters))]
+              for row in (data.rows[label] for label in labels)]
+    points = [(pretty(label), data.quarters[i], value)
+              for label, row in zip(labels, (data.rows[name] for name in labels))
+              for i, value in enumerate(row.values[:len(data.quarters)]) if value is not None]
+    sectors = [label for label in labels if label != BENCHMARK]
+    benchmark_text = " and the Nifty 50 benchmark" if BENCHMARK in data.rows else ""
+    title = (f"Quarterly sector returns (%): {len(sectors)} sectors{benchmark_text}, "
+             f"{data.quarters[0]} to {data.quarters[-1]}")
+    spec = {
+        "type": "heatmap", "title": title, "xLabel": "Fiscal quarter", "yLabel": "Sector index", "unit": "%",
+        "rows": [pretty(label) for label in labels], "columns": list(data.quarters), "values": values,
+        "source": [data.source_id], "sourceIds": [data.source_id], "evidenceBasis": "calculated",
+        "provenance": "fetched dataset",
+        "basisNote": (f"Fetched dataset: values copied from evidence passage(s) {', '.join(passages)} "
+                      "(calculated from observed month-end NSE index closes)."),
+    }
+    chart = PlannedChart(chart_id=f"d_matrix{index}", spec=spec, passage_ids=passages,
+                         source_ids=[data.source_id], points=points,
+                         match_text=f"{title} sector rotation quarterly return matrix", heading="fetched dataset")
+
+    leaders = []
+    for i, quarter in enumerate(data.quarters):
+        available = [(row.values[i], label, row.raw[i]) for label, row in data.rows.items()
+                     if label != BENCHMARK and i < len(row.values) and row.values[i] is not None]
+        if available:
+            value, label, raw = max(available, key=lambda item: item[0])
+            leaders.append(f"{quarter}: {pretty(label)} ({raw})")
+    changes = sum(left.split(": ", 1)[1].split(" (", 1)[0] != right.split(": ", 1)[1].split(" (", 1)[0]
+                  for left, right in zip(leaders, leaders[1:]))
+    leader_summary = "; ".join(leaders)
+    chart.interpretation = (
+        f"The quarterly leader changed {changes} times across the completed-period matrix. "
+        f"Sector leaders by quarter were {leader_summary} {_cite(passages)}."
+    )
     return chart
 
 
@@ -250,21 +352,36 @@ def qtd_chart(data: QuarterlyDataset, index: int) -> PlannedChart | None:
     return chart
 
 
-def build_dataset_charts(store) -> tuple[list[PlannedChart], dict]:
+def build_dataset_charts(store, *, question: str = "") -> tuple[list[PlannedChart], dict]:
     """(charts, funnel note). Empty when no fetched dataset is in the store."""
     data = find_quarterly_dataset(store)
     if data is None:
         return [], {"dataset": "none in the evidence store"}
     charts: list[PlannedChart] = []
-    for i, label in enumerate(data.rows, 1):
-        chart = sector_vs_benchmark(data, label, i)
-        if chart:
-            charts.append(chart)
-    for chart in (compounded_chart(data, 900), qtd_chart(data, 901)):
+    sector_count = len(data.rows) - int(BENCHMARK in data.rows)
+    matrix_view = sector_count >= _MATRIX_VIEW_MIN_SECTORS and len(data.quarters) >= _MATRIX_VIEW_MIN_QUARTERS
+    if matrix_view:
+        matrix = quarterly_heatmap(data)
+        if matrix:
+            charts.append(matrix)
+        # Add a few focused series only when the question names those sectors.
+        for i, label in enumerate(_requested_sector_rows(data, question), 1):
+            chart = sector_vs_benchmark(data, label, i)
+            if chart:
+                charts.append(chart)
+    else:
+        for i, label in enumerate(data.rows, 1):
+            chart = sector_vs_benchmark(data, label, i)
+            if chart:
+                charts.append(chart)
+    past_quarters = bool(_PAST_QUARTERS_RE.search(str(question or "")))
+    include_qtd = not past_quarters or bool(_QTD_REQUEST_RE.search(str(question or "")))
+    for chart in (compounded_chart(data, 900), qtd_chart(data, 901) if include_qtd else None):
         if chart:
             charts.append(chart)
     note = {"dataset": data.source_id, "quarters": data.quarters, "sectors": len(data.rows),
-            "benchmark": BENCHMARK in data.rows, "qtdAsOf": data.qtd_as_of, "charts": len(charts)}
+            "benchmark": BENCHMARK in data.rows, "qtdAsOf": data.qtd_as_of, "charts": len(charts),
+            "matrixView": matrix_view, "qtdChartIncluded": include_qtd and bool(data.qtd)}
     log.info("V2 dataset charts: %d chart(s) from the fetched quarterly dataset %s (%d sectors, %d quarters)",
              len(charts), data.source_id, len(data.rows), len(data.quarters))
     return charts, note
@@ -299,18 +416,33 @@ def preassign(charts: list[PlannedChart], sections: list, *, side_charts: int = 
     if not overview:
         return
     target = max(overview, key=score)
-    cross = [c for c in charts if not c.section_id and c.points and c.points[0][0] in {"Compounded return", "QTD return"}]
+    cross = [c for c in charts if not c.section_id and c.points and (
+        c.spec.get("type") == "heatmap" or c.points[0][0] in {"Compounded return", "QTD return"})]
     for chart in cross:
         chart.section_id = target.section_id
     # Sectors without a deep-dive of their own: the two leaders and two laggards (compounded return
     # over the window) are shown beside the cross-sector charts, so the leadership claims have charts.
-    if len(taken) >= 4:
+    if len(taken) >= side_charts:
         return
     compounded = next((c for c in cross if c.points[0][0] == "Compounded return"), None)
     order = [b for _, b, _ in sorted(compounded.points, key=lambda p: -p[2])] if compounded else []
     half = max(1, side_charts // 2)
     picks = [name for name in order[:half] + order[-half:] if name != "Nifty 50"]
     for name in dict.fromkeys(picks):
+        if len(taken) >= side_charts:
+            break
         chart = next((c for c in charts if not c.section_id and {a for a, _, _ in c.points} - {"Nifty 50"} == {name}), None)
         if chart:
             chart.section_id = target.section_id
+            taken.add(name)
+
+    # An explicitly requested sector may not rank among the compounded leaders
+    # or laggards. Keep its focused chart in the overview when no deep-dive
+    # section claimed it, subject to the same small side-chart budget.
+    for chart in charts:
+        if len(taken) >= side_charts:
+            break
+        labels = {a for a, _, _ in chart.points} - {"Nifty 50"}
+        if not chart.section_id and len(labels) == 1:
+            chart.section_id = target.section_id
+            taken.add(next(iter(labels)))

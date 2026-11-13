@@ -34,6 +34,12 @@ from email.utils import parsedate_to_datetime as _parse_rfc2822
 from utils.observability import record_event, set_trace_id, reset_trace_id
 from utils.auth import get_user_id
 from utils.orchestrator import orchestrate, OrchestrationResult
+from utils.report_chat_context import (
+    build_report_chat_context,
+    compact_paginated_file_context,
+    report_followup_needs_live_sources,
+    report_followup_system_prompt,
+)
 
 # ─── Supabase persistence ──────────────────────────────────────────────────────
 from utils.supabase_env import clean_supabase_url as _clean_sb_url
@@ -2453,7 +2459,7 @@ async def chat(request: Request):
         body = {}
 
     messages: list[dict] = body.get("messages", [])
-    file_context: str = body.get("fileContext", "")
+    file_context: str = str(body.get("fileContext") or "")
     file_images: list[dict] = body.get("fileImages", [])
     has_rag:      bool = bool(body.get("hasRag", False))
     # UI-generated contextual follow-up chips are constrained generation from
@@ -2467,6 +2473,12 @@ async def chat(request: Request):
         return JSONResponse({"error": "No messages"}, status_code=400)
 
     last_user_msg = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+    report_payload = body.get("reportContext")
+    report_context = build_report_chat_context(report_payload, last_user_msg)
+    report_followup = bool(report_context)
+    report_refresh = report_followup and report_followup_needs_live_sources(last_user_msg)
+    if not report_followup:
+        file_context = compact_paginated_file_context(file_context, last_user_msg)
     # classify_query() is kept only as metadata (meta_event.queryType) and as
     # input to the deterministic query-rewrite rules below — it no longer
     # picks which persona/system-prompt the request gets. Tool selection for
@@ -2489,7 +2501,9 @@ async def chat(request: Request):
         await research_progress_queue.put(event)
 
     async def prepare_context() -> tuple[str, str]:
-        local_file_context = file_context
+        # A report follow-up already has the full report and chart values below.
+        # Avoid duplicating the same attachment or re-running vision extraction.
+        local_file_context = "" if report_followup and not report_refresh else file_context
         await queue_research_progress({
             "phase": "query_rewrite", "status": "started",
             "message": "Optimizing your question for research…",
@@ -2502,7 +2516,7 @@ async def chat(request: Request):
         # list is only used by the orchestrator's heuristic fallback path (when
         # Groq tool-calling itself is unavailable) and for logging/RAG defaults.
         search_queries = [last_user_msg]
-        if not is_smalltalk_msg and not follow_up_mode:
+        if not is_smalltalk_msg and not follow_up_mode and not (report_followup and not report_refresh):
             # Pass history excluding the current (last) user message so context is prior turns.
             # Follow-up-chip generation already includes the previous Q&A in its prompt;
             # query rewriting would be wasted work and can consume another Groq key.
@@ -2511,7 +2525,10 @@ async def chat(request: Request):
         search_query = search_queries[0]  # representative query, used for logging
         await queue_research_progress({
             "phase": "query_rewrite", "status": "completed",
-            "message": "Question ready. Checking relevant sources…",
+            "message": (
+                "Using the report and its chart data…" if report_followup and not report_refresh
+                else "Question ready. Checking relevant sources…"
+            ),
         })
 
         log.info(
@@ -2543,7 +2560,7 @@ async def chat(request: Request):
                 has_rag=has_rag,
                 has_files=bool(local_file_context or file_images),
                 search_queries=search_queries,
-                skip=(is_smalltalk_msg or follow_up_mode),
+            skip=(is_smalltalk_msg or follow_up_mode or (report_followup and not report_refresh)),
                 progress_callback=queue_research_progress,
             )
         except Exception as exc:
@@ -2588,11 +2605,15 @@ async def chat(request: Request):
             except Exception as exc:
                 log.warning("Chat: could not cache research context: %s", exc)
 
-        base_prompt = build_system(orch.context(), smalltalk=is_smalltalk_msg, limitations=orch.limitations)
+        base_prompt = (
+            report_followup_system_prompt(report_context, orch.context() if report_refresh else "")
+            if report_followup
+            else build_system(orch.context(), smalltalk=is_smalltalk_msg, limitations=orch.limitations)
+        )
 
         # ── Image vision: extract content from attached images via Gemini Vision ─
         # ── Image vision: check cache first, then Gemini Vision for new images ──
-        if file_images:
+        if file_images and not (report_followup and not report_refresh):
             try:
                 from routes.report import extract_data_from_images
 

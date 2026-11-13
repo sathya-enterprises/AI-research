@@ -1,6 +1,6 @@
 """Stage F item 2: data-first charts from fetched datasets, protected from later relevance pruning."""
-from utils.chart_evidence_audit import _dedupe_chart_specs
-from utils.dataset_charts import build_dataset_charts, preassign
+from utils.chart_evidence_audit import _dedupe_chart_specs, audit_chart_evidence_consistency
+from utils.dataset_charts import build_dataset_charts, find_quarterly_dataset, preassign, sector_vs_benchmark
 from utils.evidence_store import EvidenceStore, build_evidence_store
 from utils.fact_sheet import FactSheet, lookup
 from utils.market_data import format_sector_quarterly_returns_as_source
@@ -26,6 +26,31 @@ def _store():
     store = EvidenceStore()
     store.add_source("S2", source)
     return store.finalize()
+
+
+LONG_QUARTERS = ["Q4 2024", "Q1 2025", "Q2 2025", "Q3 2025",
+                 "Q4 2025", "Q1 2026", "Q2 2026", "Q3 2026"]
+SECTORS = ["NIFTY AUTO", "NIFTY BANK", "NIFTY ENERGY", "NIFTY FMCG", "NIFTY IT",
+           "NIFTY METAL", "NIFTY PHARMA", "NIFTY PSU BANK", "NIFTY REALTY", "NIFTY MEDIA", "NIFTY 50"]
+ROTATION_QUESTION = "How can you explain and analyse the sector rotation in Indian stock markets in the past 8 quarters?"
+
+
+def _long_store():
+    rows = []
+    for sector_index, label in enumerate(SECTORS):
+        returns = [round((sector_index - 5) * 0.63 + (quarter_index - 3.5) * 0.37, 2)
+                   for quarter_index in range(len(LONG_QUARTERS))]
+        rows.append({
+            "label": label, "quarters": LONG_QUARTERS, "returns": returns,
+            "quarter_end_closes": [100 + sector_index * 2 + index for index in range(8)],
+            "missing_quarters": [], "history_source": "Yahoo Finance monthly bars",
+            "qtd": {"from": LONG_QUARTERS[-1], "as_of_month": "Nov 2026", "close": 110,
+                    "return": round((sector_index - 4) * 0.8, 2)},
+        })
+    source = format_sector_quarterly_returns_as_source(rows)
+    store = EvidenceStore()
+    store.add_source("S2", source)
+    return store.finalize(), source
 
 
 def test_fetched_dataset_enters_the_store_under_its_renamed_registry_entry():
@@ -126,3 +151,107 @@ def test_dataset_quarters_use_the_report_fiscal_labels():
     charts, note = build_dataset_charts(_store())
     assert note["quarters"][0] == "Q2 FY26"
     assert any("Q2 FY26 to Q1 FY27" in c.spec["title"] for c in charts)
+
+
+def test_eight_quarter_rotation_uses_full_heatmap_without_partial_qtd():
+    store, source = _long_store()
+    charts, note = build_dataset_charts(store, question=ROTATION_QUESTION)
+
+    heatmap = next(chart for chart in charts if chart.spec.get("type") == "heatmap")
+    assert note["matrixView"] is True
+    assert note["quarters"] == ["Q3 FY25", "Q4 FY25", "Q1 FY26", "Q2 FY26",
+                                "Q3 FY26", "Q4 FY26", "Q1 FY27", "Q2 FY27"]
+    assert heatmap.spec["columns"] == note["quarters"]
+    assert len(heatmap.spec["rows"]) == 11
+    assert len(heatmap.spec["values"]) == 11
+    assert all(len(row) == 8 and all(value is not None for value in row) for row in heatmap.spec["values"])
+    assert not note["qtdChartIncluded"]
+    assert not any("QTD, partial" in chart.spec["title"] for chart in charts)
+    assert any(chart.spec["title"].startswith("Compounded return (%)") for chart in charts)
+    overview = Section("overview", "Sector rotation across Indian markets", role="cross_cutting")
+    preassign(charts, [overview])
+    assert all(chart.section_id == "overview" for chart in charts)
+    source["id"] = "S2"
+    placeholders = "\n".join(f"[CHART_{index}]" for index in range(1, len(charts) + 1))
+    _text, relevant, removed = _dedupe_chart_specs(
+        placeholders, [chart.spec for chart in charts], ROTATION_QUESTION, sources=[source],
+    )
+    assert removed == 0 and len(relevant) == 2
+
+
+def test_named_sector_in_a_broad_matrix_gets_one_focused_drilldown():
+    store, _source = _long_store()
+    charts, _note = build_dataset_charts(
+        store, question="How did the IT sector perform over the past 8 quarters?",
+    )
+    drilldowns = [chart for chart in charts if "Nifty IT vs Nifty 50" in chart.spec["title"]]
+    assert len(drilldowns) == 1
+    assert drilldowns[0].spec["series"][0]["name"] == "Nifty IT"
+    assert not any("Nifty Auto vs Nifty 50" in chart.spec["title"] for chart in charts)
+
+
+def test_sector_drilldown_retains_calendar_column_and_passes_evidence_audit():
+    store, source = _long_store()
+    source["id"] = "S2"
+    data = find_quarterly_dataset(store)
+    assert data is not None
+    assert data.source_quarters == LONG_QUARTERS
+
+    chart = sector_vs_benchmark(data, "NIFTY IT", 1)
+    assert chart is not None
+    point = chart.spec["series"][0]["data"][0]
+    assert point["label"] == "Q3 FY25"
+    assert point["evidencePeriod"] == "Q4 2024"
+    assert point["evidenceColumn"] == "Q4 2024"
+    assert point["evidenceColumnIndex"] == 1
+    assert point["evidenceRowLabel"] == "NIFTY IT"
+
+    from utils.section_charts import _period_end_year, clip_to_window
+    assert _period_end_year("Q3 FY25") == 2024
+    assert _period_end_year("Q1 FY27") == 2026
+    assert _period_end_year("Q2 FY27") == 2026
+    assert _period_end_year("Q4 FY27") == 2027
+    assert clip_to_window(chart, 2024, 2026) == ""
+    assert len(chart.spec["series"][0]["data"]) == 8
+
+    result = audit_chart_evidence_consistency("[CHART_1]", [chart.spec], [source],
+                                              question=ROTATION_QUESTION,
+                                              require_publisher_verification=True)
+    assert result.get("chartEvidenceFailures", []) == [], result
+
+
+def test_full_sector_heatmap_cells_audit_against_calendar_source_columns():
+    store, source = _long_store()
+    source["id"] = "S2"
+    charts, _note = build_dataset_charts(store, question=ROTATION_QUESTION)
+    heatmap = next(chart for chart in charts if chart.spec.get("type") == "heatmap")
+
+    result = audit_chart_evidence_consistency("[CHART_1]", [heatmap.spec], [source],
+                                              question=ROTATION_QUESTION,
+                                              require_publisher_verification=True)
+    assert result.get("chartEvidenceFailures", []) == [], result
+    assert result.get("chartTableVerificationConflicts", []) == [], result
+
+
+def test_past_eight_quarters_can_include_qtd_only_when_explicitly_requested():
+    store, _source = _long_store()
+    charts, note = build_dataset_charts(store, question=ROTATION_QUESTION + " Include current quarter-to-date too.")
+    assert note["qtdChartIncluded"]
+    assert any("QTD, partial" in chart.spec["title"] for chart in charts)
+
+
+def test_eight_quarter_request_drops_partial_and_subquarter_snapshot_charts():
+    short_horizon_charts = [
+        {"type": "horizontal_bar", "title": "Quarter-to-date return, QTD partial", "series": []},
+        {"type": "horizontal_bar", "title": "1-month return as of 31 Jan 2026", "series": []},
+        {"type": "horizontal_bar", "title": "Day return retrieved 13 Nov 2026", "series": []},
+        {"type": "line", "title": "Quarterly sector returns, Q3 FY25 to Q2 FY27", "series": []},
+    ]
+    placeholders = "\n".join(f"[CHART_{index}]" for index in range(1, len(short_horizon_charts) + 1))
+
+    _text, kept, removed = _dedupe_chart_specs(
+        placeholders, short_horizon_charts, ROTATION_QUESTION,
+    )
+
+    assert removed == 3
+    assert len(kept) == 1 and kept[0]["title"].startswith("Quarterly sector returns")

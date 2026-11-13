@@ -83,6 +83,8 @@ async def test_image_ocr_text_is_indexed_and_returned_for_report_context(monkeyp
 
     async def fake_ocr(question, images):
         assert len(images) == 1
+        assert images[0]["mimeType"] == "image/png"
+        assert base64.b64decode(images[0]["data"]) == b"image bytes"
         return "Revenue by region\nRegion,Revenue\nNorth,125\nSouth,98"
 
     async def fake_index(session_id, documents):
@@ -103,6 +105,55 @@ async def test_image_ocr_text_is_indexed_and_returned_for_report_context(monkeyp
     assert payload["index_status"] == "indexed"
     assert "North,125" in payload["extracted_documents"][0]["text"]
     assert payload["indexed_documents"][0]["status"] == "indexed"
+
+
+@pytest.mark.asyncio
+async def test_image_vision_request_preserves_image_payload_and_returns_extracted_text(monkeypatch):
+    import routes.report as report_route
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        is_success = True
+
+        @staticmethod
+        def json():
+            return {"candidates": [{"content": {"parts": [{"text": "Title: Software development tools\nVS Code | GitHub | Docker"}]}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            assert timeout == 20
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured.update(url=url, headers=headers, payload=json)
+            return FakeResponse()
+
+    monkeypatch.setattr(report_route, "get_gemini_keys", lambda: ["AIzaSyTestVisionKey"])
+    monkeypatch.setattr(report_route, "_is_rest_api_key", lambda _key: True)
+    monkeypatch.setattr(report_route, "is_rate_limited", lambda _key: False)
+    monkeypatch.setattr(report_route.httpx, "AsyncClient", FakeAsyncClient)
+    image_bytes = b"mocked PNG payload"
+
+    text = await report_route.extract_data_from_images(
+        "Explain this infographic",
+        [{"name": "tools.png", "mimeType": "image/png", "data": base64.b64encode(image_bytes).decode("ascii")}],
+    )
+
+    parts = captured["payload"]["contents"][0]["parts"]
+    image_part = next(part["inline_data"] for part in parts if "inline_data" in part)
+    prompt = next(part["text"] for part in parts if "text" in part)
+    assert text.startswith("Title: Software development tools")
+    assert "Explain this infographic" in prompt
+    assert image_part["mime_type"] == "image/png"
+    assert base64.b64decode(image_part["data"]) == image_bytes
+    assert captured["url"].endswith("gemini-2.5-flash-lite:generateContent")
 
 
 @pytest.mark.asyncio

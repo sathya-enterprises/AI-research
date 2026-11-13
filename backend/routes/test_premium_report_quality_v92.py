@@ -36,6 +36,15 @@ def test_lakh_counts_match_million_counts_and_lakh_tables():
                   "6.1 Total number of credit cards (in lakhs) | 1,018 | 1,099 | 19.3 | 7.9")["blocking"] is False
 
 
+def test_million_units_uses_nearby_power_context_without_leaking_across_sentences():
+    power_page = "Electricity generation reached 1,824 billion units (BU) in FY25, the ministry said."
+    assert _audit("Power generation reached 1,824,000 million units in FY25 [S1].", power_page)["blocking"] is False
+
+    mixed_page = ("Electricity generation reached 1,824 billion units in FY25. "
+                  "Separately, two-wheeler sales were 11.5 lakh units in FY25.")
+    assert _audit("Two-wheeler sales were 1.15 million units in FY25 [S1].", mixed_page)["blocking"] is False
+
+
 def test_rupee_lakh_crore_rounding_is_bounded():
     page = "Aggregate deposits of the banks rose to ₹2,47,500 crore at the end of the year."
     assert _audit("Deposits rose to Rs 2.5 lakh crore [S1].", page)["blocking"] is False

@@ -346,15 +346,31 @@ def transform_section_html(style: str | None, body_html: str) -> str:
     return body_html
 
 
-def house_closing(style: str | None) -> str:
+def house_closing(
+    style: str | None, *, has_uploaded_sources: bool = False, attachment_only: bool = False,
+) -> str:
     if style != "market_currents":
         return ""
+    if attachment_only:
+        data_note = (
+            "Data and figures referenced in this report were extracted from user-provided files and checked against "
+            "the available worksheet rows or document text; they have not been independently verified by "
+        )
+    elif has_uploaded_sources:
+        data_note = (
+            "Data and figures referenced in this report were compiled from the listed publisher sources and user-provided "
+            "attachments; attachment extracts have not been independently publisher-verified by "
+        )
+    else:
+        data_note = (
+            "Data and figures referenced in this report have been compiled from publicly available sources, including those "
+            "listed in this report, and while believed to be reliable, have not been independently verified by "
+        )
     return (
         '<section class="gg-house-disclaimer" aria-label="Disclaimer">'
         f'<p><strong>Disclaimer:</strong> This report has been prepared by the Research Desk of {FIRM_NAME} for private circulation to its clients only, '
-        'and is not intended for public distribution or as an offer or solicitation to buy or sell any security. Data and figures referenced in this report '
-        'have been compiled from publicly available sources, including those listed in this report, and while believed to be reliable, have not been '
-        f'independently verified by {FIRM_NAME}; no guarantee, representation or warranty, express or implied, is made as to their accuracy, completeness '
+        'and is not intended for public distribution or as an offer or solicitation to buy or sell any security. '
+        f'{data_note}{FIRM_NAME}; no guarantee, representation or warranty, express or implied, is made as to their accuracy, completeness '
         'or correctness. Figures marked with an asterisk (*) are indicative estimates derived from reported changes rather than directly reported values. '
         'The intent of this report is not recommendatory in nature. All information and opinions are subject to change without notice. The report is '
         'prepared solely for informational purposes and does not constitute an offer document or a solicitation of an offer to buy, sell or subscribe for '

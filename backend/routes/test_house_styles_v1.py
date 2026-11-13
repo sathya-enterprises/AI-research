@@ -88,6 +88,23 @@ def test_build_html_report_applies_style_and_keeps_default_unchanged():
     assert "data-report-style" not in plain and "gg-house-callout" not in plain and "Disclaimer:" not in plain
 
 
+def test_attachment_report_disclaimer_names_file_evidence_as_user_provided():
+    sources = [{
+        "id": "S1", "title": "PMSPRFFEB2026.xlsx", "kind": "Uploaded workbook",
+        "evidenceOrigin": "uploaded_workbook", "authority_tier": "unknown",
+    }]
+
+    html_doc = build_html_report(
+        "## Findings\n\nThe workbook reports a 5% return [S1].",
+        "Workbook analysis", "Analyze the attached workbook", "", [], [], [],
+        sources=sources, report_style="market_currents",
+    )
+
+    assert "extracted from user-provided files" in html_doc
+    assert "not been independently verified" in html_doc
+    assert "compiled from publicly available sources" not in html_doc
+
+
 def test_excluded_evidence_sections_never_render():
     report = ("## Evidence-Based Research Record\n\nProviders were unavailable.\n\n**Selected report depth:** brief\n\n"
               "## Policy Impact\n\n### Source-Derived Evidence\n\n- **S1 — RBI**: long excerpt [S1]\n\n"

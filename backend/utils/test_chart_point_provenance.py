@@ -1,4 +1,4 @@
-from utils.chart_evidence_audit import audit_chart_evidence_consistency
+from utils.chart_evidence_audit import _unit_is_in, audit_chart_evidence_consistency
 
 
 SOURCE_TEXT = """TABLE 1 - Solar installed capacity by country (GW)
@@ -59,3 +59,20 @@ def test_quoted_chart_point_requires_the_chart_measure_to_match_the_source():
 def test_quoted_chart_point_passes_when_row_column_period_and_measure_match():
     audit = _audit(_chart())
     assert audit["chartEvidenceFailures"] == []
+
+
+def test_chart_headline_is_not_used_as_a_declared_measure():
+    chart = _chart()
+    chart["series"][0]["data"][0].pop("evidenceMetric")
+    chart["title"] = "Promoter transaction value by company"
+    assert _audit(chart)["chartEvidenceFailures"] == []
+
+    chart["metric"] = "GDP growth"
+    audit = _audit(chart)
+    assert audit["chartEvidenceFailures"]
+    assert "stated measure" in audit["chartEvidenceFailures"][0]["reason"]
+
+
+def test_unlisted_chart_units_must_appear_in_the_quoted_evidence():
+    assert _unit_is_in({"unit": "shares"}, "The promoter sold 27 lakh shares.") is True
+    assert _unit_is_in({"unit": "shares"}, "The company reported 27 lakh units.") is False

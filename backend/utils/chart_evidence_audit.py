@@ -485,8 +485,16 @@ def _calculated_sector_heatmap_cell_matches(
     if not coverage:
         return False
     source_columns = [value.strip() for value in coverage.group(1).split(",") if value.strip()]
-    if [_matrix_key(value) for value in source_columns] != [_matrix_key(value) for value in columns]:
-        return False
+    source_keys = [_matrix_key(value) for value in source_columns]
+    chart_keys = [_matrix_key(value) for value in columns]
+    if chart_keys != source_keys:
+        # Calculated NSE data is stored under calendar-quarter headers, while
+        # the report displays the equivalent Indian fiscal-quarter labels.
+        # Keep the column order exact and validate the cell at the same index.
+        from utils.period_hygiene import fy_label
+        fiscal_keys = [_matrix_key(fy_label(value)) for value in source_columns]
+        if chart_keys != fiscal_keys:
+            return False
     target_row = _matrix_key(rows[row_index])
     source_cell = None
     for line in excerpt.splitlines():
@@ -666,6 +674,15 @@ def _contains_entity(text: object, entity: str) -> bool:
     return bool(needle.strip()) and needle in haystack
 
 
+_EXPLICIT_QUARTER_WINDOW_RE = re.compile(
+    r"(?i)\b(?:past|last|previous|prior|preceding)\s+\d+\s+(?:completed\s+)?quarters?\b"
+)
+_SHORT_HORIZON_CHART_RE = re.compile(
+    r"(?i)\b(?:qtd|quarter[- ]to[- ]date|mtd|month[- ]to[- ]date|daily|day|weekly|week|monthly|"
+    r"1\s*[- ]?(?:m|mo|month|w|wk|week|d|day))\b"
+)
+
+
 def _chart_is_relevant(chart: dict, report: str, question: str, index: int,
                        source_context: str = "") -> bool:
     """Require charts to match the requested topic and any explicit entity list."""
@@ -676,6 +693,14 @@ def _chart_is_relevant(chart: dict, report: str, question: str, index: int,
                          str(chart.get("yLabel") or "") + " " + source_context + " " +
                          " ".join(str(s.get("name") or s.get("label") or "") for s in chart.get("series", []) if isinstance(s, dict))).casefold()
     q = str(question or "").casefold()
+    if _EXPLICIT_QUARTER_WINDOW_RE.search(q):
+        chart_period_scope = " ".join([
+            title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""),
+            *[str(series.get("name") or series.get("label") or "")
+              for series in chart.get("series", []) if isinstance(series, dict)],
+        ])
+        if _SHORT_HORIZON_CHART_RE.search(chart_period_scope):
+            return False
     chart_subject = " ".join([
         title,
         str(chart.get("xLabel") or ""),
@@ -1706,7 +1731,10 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
                 continue
 
         previous_rows: list[list[str]] = []
-        for header_line in reversed(lines[max(0, row_index - 8):row_index]):
+        # A data row can be many rows below its table header (the calculated
+        # sector matrix has 11 sectors). Walk the contiguous pipe-table block
+        # back to its header instead of imposing a row-count limit.
+        for header_line in reversed(lines[:row_index]):
             header = _pipe_cells(header_line)
             if len(header) < 2:
                 if previous_rows:
@@ -1715,6 +1743,19 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
             if re.fullmatch(r"\s*:?-{2,}:?\s*", header_line.strip().strip("|")):
                 continue
             previous_rows.append(header)
+            if len(previous_rows) >= 100:
+                break
+        if expected_column or column_index is not None:
+            matching_headers = [header for header in previous_rows if (
+                (expected_column and any(_cell_label_matches(expected_column, cell) for cell in header))
+                or (period and any(_point_period_in_text(period, cell) for cell in header))
+            )]
+            if matching_headers:
+                # Rows of a large table also sit in this block. Only the rows
+                # that actually name the requested column or period can define
+                # the column index; otherwise a matching word in a data cell
+                # could be mistaken for a header.
+                previous_rows = matching_headers
 
         effective_column = expected_column
         if not effective_column and column_index is None and _is_point_period(label) and not _is_point_period(series):
@@ -1852,10 +1893,9 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
         return "The chart value does not match the quoted source row, period, or named table column."
 
     explicit_metric = str(point.get("evidenceMetric") or point.get("evidence_metric") or "").strip()
-    # Only a declared measure is checked against the quote. An axis label or title is a display name the
-    # chart builder chose ("Transaction value" for "sold a 0.53% stake for Rs 25 crore"); requiring those
-    # words in the source rejected correct prose-extracted points.
-    metric = explicit_metric or str(chart.get("metric") or chart.get("measure") or "").strip()
+    chart_metric = str(chart.get("metric") or chart.get("measure") or "").strip()
+    metric = explicit_metric or chart_metric
+    metric_is_declared = bool(explicit_metric or chart_metric)
     expected_period = str(point.get("evidencePeriod") or point.get("evidence_period") or "").strip()
     if not expected_period:
         expected_period = label if _is_point_period(label) else (series if _is_point_period(series) else "")
@@ -1909,7 +1949,7 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
             if shared_unit_context and _norm_quote(shared_unit_context) in _norm_quote(source_text):
                 unit_parts.append(shared_unit_context)
             unit_local = " ".join(unit_parts)
-        if metric and not _metric_label_supported(metric, metric_context, explicit=bool(explicit_metric)):
+        if metric and not _metric_label_supported(metric, metric_context, explicit=metric_is_declared):
             metric_miss = True
             continue
         point_unit = str(point.get("evidenceUnit") or point.get("evidence_unit") or "").strip()
@@ -2007,12 +2047,25 @@ def _unit_is_in(chart: dict, evidence: str) -> bool:
         patterns = unit_patterns.get(key, ())
     if patterns:
         return any(re.search(pattern, evidence, re.I) for pattern in patterns)
-    # A count unit not in the table above ("shares", "vehicles", "beds"): the word itself must be in the
-    # evidence (singular or plural). Rejecting every unlisted unit failed "sold 7,712 equity shares".
-    words = re.findall(r"[a-z]{3,}", key)
-    if words and len(words) <= 3:
-        return all(re.search(rf"\b{re.escape(w.rstrip('s'))}s?\b", evidence, re.I) for w in words)
-    return False
+    # Data extractors also encounter domain-specific units (shares, beds,
+    # households, applications, and similar labels) that cannot be enumerated
+    # here. Accept those only when the unit phrase itself occurs in this point's
+    # quoted/local evidence context; never infer it from the chart title alone.
+    words = re.findall(r"[a-z0-9]+", key)
+    if not words or any(len(word) < 3 for word in words):
+        return False
+    alternatives = []
+    for word in words:
+        forms = [word]
+        if word.endswith("ies") and len(word) > 4:
+            forms.append(word[:-3] + "y")
+        elif word.endswith("es") and len(word) > 4 and word[:-2].endswith(("ch", "sh", "x", "z", "s")):
+            forms.append(word[:-2])
+        elif word.endswith("s") and len(word) > 3 and not word.endswith(("ss", "us", "is")):
+            forms.append(word[:-1])
+        alternatives.append(r"(?:" + "|".join(re.escape(form) for form in forms) + r")")
+    phrase = r"\b" + r"[\s/-]+".join(alternatives) + r"\b"
+    return bool(re.search(phrase, evidence, re.I))
 
 
 def audit_chart_evidence_consistency(report: str, charts: list | None, sources: list | None,

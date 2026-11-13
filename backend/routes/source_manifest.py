@@ -129,7 +129,11 @@ def _display_entry(entry: dict, source_id: str) -> dict:
         # Keep retrieval/evidence diagnostics with the same canonical source ID
         # all the way into Show Report and PDF. Without these fields a source that
         # returned HTTP 403 looked identical to a fully fetched publisher page.
-        "evidence_origin": _clean_text(entry.get("evidence_origin") or entry.get("evidenceExcerptOrigin") or entry.get("evidenceOrigin") or "", 80).casefold(),
+        "evidence_origin": _clean_text(
+            entry.get("evidence_origin") or entry.get("evidenceOrigin")
+            or entry.get("source_origin") or entry.get("sourceOrigin")
+            or entry.get("evidenceExcerptOrigin") or "", 80,
+        ).casefold(),
         "page_fetch_status": _clean_text(entry.get("page_fetch_status") or entry.get("pageFetchStatus") or "unknown", 80).casefold(),
         "page_fetch_http_status": entry.get("page_fetch_http_status", entry.get("pageFetchHttpStatus")),
         "evidence_available": bool(entry.get("evidence_available", entry.get("evidenceAvailable", False))),
@@ -295,8 +299,14 @@ def source_provenance_note(source: object) -> str:
 
     if str(source.get("source_status") or source.get("sourceStatus") or "").casefold() == "unresolved":
         return "Source record missing; this citation is not verified."
-    if origin == "uploaded_workbook" and available and str(source.get("chartEvidenceExcerpt") or "").strip():
-        return "Evidence is derived from the user-uploaded workbook and is traceable to worksheet rows; it is not independently publisher-verified."
+    if origin in {"uploaded_workbook", "uploaded_attachment"}:
+        if not available and not str(source.get("chartEvidenceExcerpt") or "").strip():
+            return "The user-uploaded file did not yield usable text for checking its cited figures."
+        label = "workbook" if origin == "uploaded_workbook" else "attachment"
+        return (
+            f"Evidence is extracted from the user-uploaded {label} and is checked against the available rows or text; "
+            "it is not independently publisher-verified."
+        )
     if origin == "okf_retrieval" and available:
         if matched is True and missing_count == 0:
             return "Retrieved from the saved OKF document; the cited claim aligns with the available excerpt."
@@ -465,10 +475,8 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
         entry = {
             "title": name, "kind": "Uploaded document", "publisher": "User-provided", "url": "",
         }
-        # Retain bounded evidence excerpts for uploaded workbooks. This is a
-        # user-supplied evidence source, not a publisher-page verification; the
-        # chart audit handles that provenance explicitly. Do not copy extracted
-        # file text wholesale into the public source registry.
+        # Retain bounded evidence excerpts for explicitly marked current uploads.
+        # This is user-supplied evidence, not a publisher-page verification.
         for key in (
             "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
             "page_fetch_status", "pageFetchStatus", "evidence_available",
@@ -477,11 +485,14 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
             if document.get(key) is not None:
                 entry[key] = document.get(key)
         identity = source_identity_key(entry)
-        # A canonical manifest is immutable. Appended records may be deduped
-        # against it, but uploaded-workbook evidence metadata still needs to be
-        # attached when the same file already entered through RAG retrieval.
+        # A canonical manifest keeps its ID, while explicit current-upload
+        # evidence metadata takes precedence over a same-named saved RAG record.
         if identity and identity in seen:
-            if str(entry.get("evidence_origin") or entry.get("evidenceOrigin") or "").casefold() == "uploaded_workbook":
+            upload_origin = str(
+                entry.get("evidence_origin") or entry.get("evidenceOrigin")
+                or entry.get("source_origin") or entry.get("sourceOrigin") or ""
+            ).casefold()
+            if upload_origin in {"uploaded_workbook", "uploaded_attachment"}:
                 evidence_keys = (
                     "chartEvidenceExcerpt", "evidence_origin", "evidenceOrigin",
                     "page_fetch_status", "pageFetchStatus", "evidence_available",
@@ -492,6 +503,14 @@ def normalise_source_manifest(sources: object, source_documents: object = None) 
                         for key in evidence_keys:
                             if entry.get(key) is not None:
                                 current[key] = entry.get(key)
+                        current["evidence_origin"] = upload_origin
+                        current["page_fetch_status"] = "not_applicable"
+                        current["authority_tier"] = "unknown"
+                        current.pop("reliability_score", None)
+                        current.pop("recency_score", None)
+                        current["reliability_note"] = (
+                            "User-provided attachment; extracted content is not independently publisher-verified."
+                        )
                         break
             continue
         if identity:
