@@ -15671,6 +15671,15 @@ def _attach_audit_source_evidence(
             elif unit in {"gw", "mw", "kw", "tw"}:
                 family = "capacity_gw"
                 scale = {"gw": 1.0, "mw": 0.001, "kw": 0.000001, "tw": 1000.0}[unit]
+            elif unit == "million units":
+                # "MU" (million kWh) in power statistics; otherwise a count ("1.15 million units" of vehicles
+                # must still match "11.5 lakh units").
+                if re.search(r"(?i)electric(?:ity)?\s+(?:generation|consumption|demand|supply)|power\s+(?:generation|"
+                             r"consumption|demand|supply)|\bgenerat\w*|\benergy\b|\bkwh\b|\bMU\b",
+                             text[max(0, match.start() - 160):match.end() + 60]):
+                    family, scale = "energy_twh", 0.001
+                else:
+                    family, scale = "count", 1e6
             elif unit in {"twh", "billion units", "bu", "gwh", "mwh", "kwh"}:
                 family = "energy_twh"
                 scale = {"twh": 1.0, "billion units": 1.0, "bu": 1.0, "gwh": 0.001, "mwh": 0.000001, "kwh": 0.000000001}[unit]

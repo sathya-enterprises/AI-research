@@ -1852,7 +1852,10 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
         return "The chart value does not match the quoted source row, period, or named table column."
 
     explicit_metric = str(point.get("evidenceMetric") or point.get("evidence_metric") or "").strip()
-    metric = explicit_metric or str(chart.get("metric") or chart.get("measure") or chart.get("yLabel") or chart.get("title") or "").strip()
+    # Only a declared measure is checked against the quote. An axis label or title is a display name the
+    # chart builder chose ("Transaction value" for "sold a 0.53% stake for Rs 25 crore"); requiring those
+    # words in the source rejected correct prose-extracted points.
+    metric = explicit_metric or str(chart.get("metric") or chart.get("measure") or "").strip()
     expected_period = str(point.get("evidencePeriod") or point.get("evidence_period") or "").strip()
     if not expected_period:
         expected_period = label if _is_point_period(label) else (series if _is_point_period(series) else "")
@@ -2004,6 +2007,11 @@ def _unit_is_in(chart: dict, evidence: str) -> bool:
         patterns = unit_patterns.get(key, ())
     if patterns:
         return any(re.search(pattern, evidence, re.I) for pattern in patterns)
+    # A count unit not in the table above ("shares", "vehicles", "beds"): the word itself must be in the
+    # evidence (singular or plural). Rejecting every unlisted unit failed "sold 7,712 equity shares".
+    words = re.findall(r"[a-z]{3,}", key)
+    if words and len(words) <= 3:
+        return all(re.search(rf"\b{re.escape(w.rstrip('s'))}s?\b", evidence, re.I) for w in words)
     return False
 
 

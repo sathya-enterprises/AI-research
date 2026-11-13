@@ -138,3 +138,10 @@ def test_preflight_image_records_keep_their_credit():
     out = _prepare_pdf_images([], [{"url": "https://img.etimg.com/x.jpg", "caption": "Illustrative image — EV",
                                      "sourceUrl": "https://economictimes.indiatimes.com/ev"}], [])
     assert out[0]["sourceUrl"] == "https://economictimes.indiatimes.com/ev" and out[0]["caption"].startswith("Illustrative")
+
+
+def test_million_units_is_energy_only_in_a_power_context():
+    page = "Electricity generation reached 1,824 billion units (BU) in 2024-25, the ministry said."
+    assert _audit("Power generation reached 1,824,000 million units in FY25 [S1].", page)["blocking"] is False
+    assert _audit("Electric two-wheeler sales were 1.15 million units in FY25 [S1].",
+                  "Electric two-wheeler sales were 11.5 lakh units in 2024-25.")["blocking"] is False
