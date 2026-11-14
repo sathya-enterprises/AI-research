@@ -182,3 +182,119 @@ def test_large_upload_chart_evidence_is_not_cut_at_16k_in_the_manifest():
     manifest = build_source_registry([], [{"name": "PMS.xlsx", "evidence_origin": "uploaded_workbook",
                                            "chartEvidenceExcerpt": evidence}])
     assert manifest[0]["chartEvidenceExcerpt"] == evidence
+
+
+def test_uploaded_worksheets_enter_the_evidence_store_as_verifiable_tables():
+    """V2 removed correct workbook sentences: from raw CSV rows the fact sheet could bind no value."""
+    from utils.evidence_store import build_evidence_store
+    from utils.fact_sheet import FactSheet, lookup
+    from utils.uploaded_workbook_analytics import evidence_tables_for_store
+
+    sheet_text = (
+        "[Sheet: Table 2]\nAS ON 31 JAN 2026,,,,,,,\n"
+        "AMC,INVESTMENT APPROACH,BENCHMARK (TRI),AUM (IN Crs),CATEGORY,RETURNS,,\n"
+        ",,,,,1 Mth,1 Yr,5 Yr\n"
+        "2POINT2 CAPITAL,LONG TERM VALUE FUND,S&P BSE 500,1835.56,MULTI CAP & FLEXI CAP,0.90%,24.80%,22.70%\n"
+        "GREY SKY CAPITAL PRIVATE LIMITED,GSC SMART CORE PORTFOLIO,S&P BSE 500,19.70,MULTI CAP & FLEXI CAP,20.29%,11.10%,NA\n"
+        "AEQUITAS INVESTMENT CONSULTANCY PVT LTD,INDIA OPPORTUNITIES PRODUCT,S&P BSE 500,7200.10,SMALL CAP,15.60%,62.34%,49.21%\n"
+    )
+    converted = evidence_tables_for_store(sheet_text)
+    assert "| AMC - investment approach | BENCHMARK (TRI) | AUM (IN Crs) | CATEGORY | 1 Mth return | 1 Yr return | 5 Yr return |" in converted
+
+    rows = [{"_canonicalEvidenceSourceId": "S1", "title": "PMS.xlsx", "pageContent": converted,
+             "evidenceOrigin": "uploaded_workbook", "authorityTier": "unknown"}]
+    store = build_evidence_store(rows, question="PMS workbook", manifest=[{"id": "S1", "title": "PMS.xlsx"}])
+    sheet, pids = FactSheet(store.passages), {p.passage_id for p in store.passages}
+
+    def status(value, sentence):
+        return lookup(sheet, value, sign="", unit="%", sentence=sentence, passage_ids=pids).status
+
+    assert status("20.29", "Over one month, Grey Sky Capital Private Limited - GSC Smart Core Portfolio returned 20.29%.") == "ok"
+    assert status("62.34", "Over one year, Aequitas Investment Consultancy's India Opportunities Product returned 62.34%.") == "ok"
+    assert status("31.20", "Over one year, 2POINT2 Capital's Long Term Value Fund returned 31.20%.") != "ok"
+
+
+def test_numbers_inside_names_are_not_checked_as_statistics():
+    from utils.number_policy import _is_name_number
+
+    evidence = {"S1.1": "RIGHT HORIZONS | ALPHABOTS MIDCAP 29 | S&P BSE 500 | MID CAP | -1.96%\n"
+                        "ALCHEMY CAPITAL MANAGEMENT | ALPHA 100 | NIFTY 50 | LARGE CAP | 3.10%"}
+
+    def name_number(sentence, token):
+        at = sentence.find(token)
+        return _is_name_number(sentence, at, at + len(token), "", evidence, set())
+
+    assert name_number("The RIGHT HORIZONS - ALPHABOTS MIDCAP 29 strategy reports returns.", "29")
+    assert name_number("Strategies like ALCHEMY - ALPHA 100 or FRACTAL lack AUM.", "100")
+    assert not name_number("Kenya had 29 operators.", "29")
+    assert not name_number("MIDCAP 29% higher.", "29")
+
+
+def test_server_calculation_lines_become_tables_the_fact_sheet_can_bind():
+    from utils.evidence_store import build_evidence_store
+    from utils.fact_sheet import FactSheet, lookup
+    from utils.uploaded_workbook_analytics import calculation_lines_as_tables
+
+    lines = "\n".join(
+        f"Deterministic calculation from P.xlsx; mean 1-year reported PMS return by category; label: {label}; "
+        f"value: {value}%; observations: {n}; missing values excluded; calculated from the attached workbook rows."
+        for label, value, n in [("ETF", "15.1767", 3), ("MULTI ASSET", "13.9686", 22), ("DEBT", "9.1746", 13)])
+    tables = calculation_lines_as_tables(lines)
+    assert "| ETF | 15.1767% | 3 |" in tables
+    store = build_evidence_store([{"_canonicalEvidenceSourceId": "S1", "title": "P.xlsx", "pageContent": lines + "\n\n" + tables,
+                                   "evidenceOrigin": "uploaded_workbook"}], question="PMS", manifest=[{"id": "S1", "title": "P.xlsx"}])
+    sheet, pids = FactSheet(store.passages), {p.passage_id for p in store.passages}
+    assert lookup(sheet, "15.1767", sign="", unit="%", sentence="ETF: mean 1-year return of 15.1767%.", passage_ids=pids).status == "ok"
+    assert lookup(sheet, "19.9999", sign="", unit="%", sentence="ETF: mean 1-year return of 19.9999%.", passage_ids=pids).status != "ok"
+
+
+def test_table_numbering_keeps_worksheet_names_that_look_like_table_references():
+    from utils.chart_lint import number_tables
+
+    report = ("## Coverage\nThe workbook spans Table 2 through Table 26; Table 20 holds benchmark rows [S1].\n\n"
+              "| Sheet / Section | Data Rows Analyzed |\n|---|---|\n| Table 2 | 25 |\n| Table 3 | 25 |\n| Table 20 | 3 |\n\n"
+              "Source: [S1]\n")
+    out, _, _ = number_tables(report)
+    assert "Table 2 through Table 26; Table 20 holds" in out
+    assert "| Table 3 | 25 |" in out and "the table" not in out
+
+    web = ("## Returns\nAs Table 1 shows, returns vary. See Table 7 too.\n\n"
+           "| Horizon | Median |\n|---|---|\n| 1 Mth | -3.17% |\n| 1 Yr | 3.67% |\n\nSource: [S1]\n")
+    out, _, _ = number_tables(web)
+    assert "See the table too." in out  # a dangling reference in an ordinary report is still neutralized
+
+
+def test_tabulated_calculation_lines_replace_their_prose_in_the_store_text():
+    from utils.uploaded_workbook_analytics import tabulate_calculation_lines
+
+    lines = "\n".join(
+        f"Deterministic calculation from P.xlsx; mean 1-year reported PMS return by category; label: {label}; "
+        f"value: {value}%; observations: {n}; missing values excluded."
+        for label, value, n in [("ETF", "15.1767", 3), ("DEBT", "9.1746", 13)])
+    single = "Deterministic calculation from P.xlsx; total AUM; label: all; value: 152016.88; observations: 219."
+    out = tabulate_calculation_lines(lines + "\nSheet: Table 2 | Row: 5 | raw row\n" + single)
+    assert "| DEBT | 9.1746% | 13 |" in out
+    assert "label: DEBT" not in out           # the prose form is gone, so a section can only quote the table
+    assert single in out and "Sheet: Table 2 | Row: 5" in out  # ungrouped lines and row evidence stay
+
+
+def test_number_policy_keeps_a_value_verified_elsewhere_in_the_store_and_cites_it():
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import FactSheet
+    from utils.number_policy import apply_number_policy
+
+    section = {"S1.1": "Workbook overview: 506 strategies across 25 worksheets."}
+    elsewhere = SimpleNamespace(passage_id="S1.7", text=(
+        "TABLE — Table 3\n| AMC - investment approach | AUM (IN Crs) | 5 Yr return |\n|---|---|---|\n"
+        "| BUOYANT CAPITAL PVT LTD - OPPORTUNITIES | 8402.39 | 27.10% |\n"
+        "| STALLION ASSET PVT LTD - CORE FUND | 6361.36 | 25.40% |\n"))
+    store_sheet = FactSheet([SimpleNamespace(passage_id=k, text=v) for k, v in section.items()] + [elsewhere])
+    body = ("Buoyant Capital Pvt Ltd - Opportunities holds 8402.39 AUM (IN Crs) [S1.1]. "
+            "Stallion Asset Pvt Ltd - Core Fund holds 9999.99 AUM (IN Crs) [S1.1].")
+
+    without = apply_number_policy(body, passage_texts=section, allowed_numbers=set())
+    assert len(without.removed) == 2
+    result = apply_number_policy(body, passage_texts=section, allowed_numbers=set(), fallback_sheet=store_sheet)
+    assert "8402.39" in result.body and "S1.7" in result.body
+    assert "9999.99" not in result.body and len(result.removed) == 1

@@ -1699,6 +1699,149 @@ def _build_generic_attachment_analytics(
 _EXTRACTION_NOTES_RE = re.compile(r"(?im)^\s*\[Extraction notes:\s*(.+?)\]\s*$")
 
 
+def _pipe_cell(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).replace("|", "/").strip()
+
+
+def _sheet_as_pipe_table(sheet_name: str, body: str) -> str:
+    """One worksheet as a header + rows pipe table, or "" when no table header is recognized.
+
+    The evidence store's fact sheet binds a value to its row label (entity) and column header (metric)
+    only in pipe tables. Raw CSV lines carry neither: "GREY SKY ...,GSC SMART CORE ...,...,20.29%,..."
+    left 20.29% unbound, so V2 removed correct sentences as "in the evidence for another metric or entity".
+    """
+    rows, _physical = _csv_rows(body)
+    if len(rows) < 3:
+        return ""
+    width = max(len(row) for row in rows)
+    pms = _find_pms_table(rows)
+    if pms:
+        header_index, period_index, indices = pms
+        top = rows[header_index] + [""] * (width - len(rows[header_index]))
+        lower = rows[period_index] + [""] * (width - len(rows[period_index]))
+        return_columns = {col: period for key, col in indices.items() if key.startswith("return:")
+                          for period in [key.split(":", 1)[1]]}
+        identity = (indices["amc"], indices["approach"])
+        columns = [col for col in range(width) if col not in identity
+                   and (str(top[col]).strip() or str(lower[col]).strip() or col in return_columns)]
+        labels = []
+        for col in columns:
+            if col in return_columns:
+                labels.append(f"{return_columns[col]} return")
+            else:
+                parts = [str(top[col]).strip()]
+                if period_index != header_index and str(lower[col]).strip() and str(lower[col]).strip() != parts[0]:
+                    parts.append(str(lower[col]).strip())
+                labels.append(" ".join(part for part in parts if part))
+        header = ["AMC - investment approach", *labels]
+        body_rows = []
+        for row in rows[max(header_index, period_index) + 1:]:
+            row = row + [""] * (width - len(row))
+            amc, approach = str(row[identity[0]]).strip(), str(row[identity[1]]).strip()
+            label = f"{amc} - {approach}" if amc and approach else (amc or approach or next(
+                (str(cell).strip() for cell in row if str(cell).strip()), ""))
+            values = [str(row[col]).strip() for col in columns]
+            if label and any(values):
+                body_rows.append([label, *values])
+    else:
+        chosen = _choose_table_header(rows)
+        if not chosen:
+            return ""
+        header_index, names, data_start = chosen
+        header = [str(name or "").strip() or f"Column {i + 1}" for i, name in enumerate(names)]
+        body_rows = []
+        for row in rows[data_start:]:
+            cells = [str(cell).strip() for cell in row[:len(header)]] + [""] * max(0, len(header) - len(row))
+            if cells and cells[0] and any(cells[1:]):
+                body_rows.append(cells)
+    if len(body_rows) < 2:
+        return ""
+    lines = [f"TABLE — {sheet_name}", "| " + " | ".join(_pipe_cell(cell) for cell in header) + " |",
+             "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(_pipe_cell(cell) for cell in row) + " |" for row in body_rows]
+    return "\n".join(lines)
+
+
+def tabulate_calculation_lines(text: str) -> str:
+    """``text`` with its grouped "Deterministic calculation ..." lines replaced by their tables.
+
+    Appending the tables was not enough: a section writer that saw only the prose line quoted its value,
+    and the section's fact sheet (built from that section's passages) still could not bind it.
+    """
+    tables = calculation_lines_as_tables(text)
+    if not tables:
+        return str(text or "")
+    tabulated = {label for label in re.findall(r"(?m)^TABLE — (.+)$", tables)}
+    kept = []
+    for line in str(text or "").splitlines():
+        if line.startswith("Deterministic calculation from "):
+            parts = [part.strip() for part in line.split(";")]
+            free = [part for part in parts[1:] if ":" not in part]
+            metric_field = next((part.split(":", 1)[1].strip() for part in parts[1:]
+                                 if part.casefold().startswith("metric:")), "")
+            metric = _pipe_cell(metric_field or (free[0] if free else ""))
+            benchmark = next((part.split(":", 1)[1].strip() for part in parts[1:]
+                              if part.casefold().startswith("benchmark match:")), "")
+            if benchmark and any(part.casefold().startswith("reported horizon:") for part in parts[1:]):
+                metric = _pipe_cell(f"{metric_field} ({benchmark} benchmark)")
+            if metric in tabulated:
+                continue
+        kept.append(line)
+    return "\n".join(kept).rstrip() + "\n\n" + tables
+
+
+def calculation_lines_as_tables(text: str) -> str:
+    """The server's "Deterministic calculation ...; <metric>; label: X; value: V" lines as one table per metric.
+
+    As prose the fact sheet could not tie a category mean ("label: ETF; value: 15.1767%") to its category,
+    so V2 removed the writer's correct sentence as "in the evidence for another metric or entity".
+    """
+    groups: dict[str, list[tuple[str, str, str]]] = {}
+    for line in str(text or "").splitlines():
+        if not line.startswith("Deterministic calculation from "):
+            continue
+        parts = [part.strip() for part in line.split(";")]
+        fields = {}
+        free = []
+        for part in parts[1:]:
+            key, sep, value = part.partition(":")
+            if sep and key.strip().casefold() in {"label", "value", "observations", "metric", "reported horizon",
+                                                   "benchmark match", "category"}:
+                fields[key.strip().casefold()] = value.strip()
+            elif not sep:
+                free.append(part)
+        value = fields.get("value", "")
+        label = fields.get("label") or fields.get("reported horizon") or fields.get("category") or ""
+        metric = fields.get("metric") or (free[0] if free else "")
+        if fields.get("benchmark match") and fields.get("reported horizon"):
+            metric = f"{metric} ({fields['benchmark match']} benchmark)"
+        if value and label and metric:
+            groups.setdefault(metric, []).append((label, value, fields.get("observations", "")))
+    tables = []
+    for metric, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        lines = [f"TABLE — {_pipe_cell(metric)}", f"| Label | {_pipe_cell(metric)} | Observations |", "|---|---|---|"]
+        lines += [f"| {_pipe_cell(label)} | {_pipe_cell(value)} | {_pipe_cell(n)} |" for label, value, n in rows]
+        tables.append("\n".join(lines))
+    return "\n\n".join(tables)
+
+
+def evidence_tables_for_store(file_text: str) -> str:
+    """Uploaded workbook text with every recognizable sheet rewritten as a pipe table (other text unchanged)."""
+    text = str(file_text or "")
+    markers = list(_SHEET_MARKER.finditer(text))
+    if not markers:
+        return text
+    out = [text[:markers[0].start()]]
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+        body = text[marker.end():end]
+        table = _sheet_as_pipe_table(marker.group(1).strip(), body)
+        out.append(f"[Sheet: {marker.group(1).strip()}]\n{table}\n\n" if table else text[marker.start():end])
+    return "".join(out)
+
+
 def extraction_notes(file_context: str) -> list[dict[str, str]]:
     """Truncation notes the browser extractor appends to a file ("Only the first 40 of 52 sheets were extracted.").
 

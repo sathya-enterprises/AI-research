@@ -537,6 +537,9 @@ def _source_date(row: dict) -> str:
         when = _fmt_date(row.get(key))
         if when:
             return f"{word} {when}"
+    origin = str(row.get("evidence_origin") or row.get("evidenceOrigin") or "").casefold()
+    if origin in {"uploaded_workbook", "uploaded_attachment"}:
+        return ""  # the user's file was not "retrieved" today; its own as-of date is stated in the report
     when = _fmt_date(_TODAY["value"])
     return f"retrieved {when}" if when else ""
 
@@ -712,7 +715,7 @@ def _derived_caption(header: str) -> str:
     return cols[0] if cols else "Data"
 
 
-def number_tables(report: str) -> tuple[str, list[str], list[dict]]:
+def number_tables(report: str, protected_names: set[str] | None = None) -> tuple[str, list[str], list[dict]]:
     """Every table gets "**Table N: caption**" (its own sequence; a table captioned as a Figure is renamed),
     a Source line (from the citations in the table or in the paragraph before it), or is dropped when it
     has no source. Prose references "Table k" follow the new numbers; unknown ones become "the table".
@@ -804,7 +807,23 @@ def number_tables(report: str) -> tuple[str, list[str], list[dict]]:
                 continue
         cleaned.append(line)
     out = cleaned
+    # "Table N" that names data ("Table 9" is a worksheet in an uploaded workbook) is not a reference to this
+    # report's tables: renumbering it turned sheet names into "the table" in prose and inside data rows.
+    protected = {name.casefold() for name in (protected_names or set())}
+    # A "Table N" that is a cell value in one of the report's data rows is a label in the data.
+    protected |= {m.group(0).casefold() for line in out if line.lstrip().startswith("|")
+                  for m in re.finditer(r"\bTable \d+\b", line)}
+
+    def reference(m: re.Match) -> str:
+        if m.group(0).casefold() in protected:
+            return m.group(0)
+        n = int(m.group(1))
+        if n in mapping and not protected:
+            return f"Table {mapping[n]}"
+        # When the data itself names things "Table N", an unknown number is another such name, not a
+        # dangling reference to this report's tables.
+        return "the table" if n > number and not protected else m.group(0)
+
+    out = [line if line.lstrip().startswith("|") else re.sub(r"\bTable (\d+)\b(?!:)", reference, line) for line in out]
     text = "\n".join(out)
-    text = re.sub(r"\bTable (\d+)\b(?!:)", lambda m: f"Table {mapping[int(m.group(1))]}" if int(m.group(1)) in mapping
-                  else ("the table" if int(m.group(1)) > number else m.group(0)), text)
     return text, actions, inventory

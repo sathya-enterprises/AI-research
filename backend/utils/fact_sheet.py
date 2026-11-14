@@ -205,8 +205,10 @@ def _fact(pid: str, index: int, match: re.Match, unit: str, metric: str, entity:
 class FactSheet:
     def __init__(self, passages):
         self.facts: list[Fact] = []
+        self.texts: dict[str, str] = {}  # passage id -> text, for callers that cite a passage found here
         for passage in passages:
             self.facts.extend(extract_facts(passage))
+            self.texts[str(getattr(passage, "passage_id", ""))] = str(getattr(passage, "text", "") or "")
         self.by_value: dict[str, list[Fact]] = {}
         for fact in self.facts:
             self.by_value.setdefault(fact.value.lstrip("-"), []).append(fact)

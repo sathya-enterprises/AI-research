@@ -270,7 +270,7 @@ def unfence(body: str) -> str:
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
                 figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None,
                 passage_texts: dict[str, str] | None = None, own_figures: set[int] | None = None,
-                context_entity: str = "") -> SectionDraft:
+                context_entity: str = "", fallback_sheet=None) -> SectionDraft:
     text = str(raw or "").strip()
     if SUMMARY_MARKER in text:
         body, summary = text.split(SUMMARY_MARKER, 1)
@@ -303,7 +303,8 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         # Number policy: label calculations with their inputs; remove sentences whose
         # numbers are not in the evidence (logged and recorded, never hidden).
         policy = apply_number_policy(body, passage_texts=passage_texts, allowed_numbers=allowed_numbers,
-                                     section_id=draft.section_id, context_entity=context_entity)
+                                     section_id=draft.section_id, context_entity=context_entity,
+                                     fallback_sheet=fallback_sheet)
         body = policy.body
         draft.calculated_numbers += policy.calculated
         draft.removed_sentences += policy.removed
@@ -365,6 +366,19 @@ def _chunks(subsections: list, max_words: int = 2600) -> list[list]:
     return groups or [[]]
 
 
+def _store_fact_sheet(store):
+    """One fact sheet over the whole evidence store, built once and reused by every section."""
+    sheet = getattr(store, "_gg_fact_sheet", None)
+    if sheet is None and store is not None and getattr(store, "passages", None):
+        from utils.fact_sheet import FactSheet
+        sheet = FactSheet(store.passages)
+        try:
+            store._gg_fact_sheet = sheet
+        except Exception:  # a store without attribute assignment still works, rebuilt per call
+            pass
+    return sheet
+
+
 async def write_section(gateway, store, section, figures: list, *, question: str, thesis: str,
                         already_covered: list[str], other_sections: list[str], allow_extension: bool = True,
                         budget_scale: float = 1.0) -> SectionDraft:
@@ -420,7 +434,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         part = SectionDraft(section_id=draft.section_id, title=draft.title)
         postprocess(part, result.text, allowed_passages=allowed_passages, allowed_numbers=allowed_numbers,
                     figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers,
-                    passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""))
+                    passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""),
+                    fallback_sheet=_store_fact_sheet(store))
         if not part.ok:
             draft.error = (f"{draft.error}; " if draft.error else "") + f"part {gi + 1}: {part.error}"
         if part.ok:
@@ -462,7 +477,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)
             postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
                         allowed_numbers=allowed_numbers, figures=[], min_words=40, passage_numbers=passage_numbers,
-                        passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""))
+                        passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""),
+                    fallback_sheet=_store_fact_sheet(store))
             if extra.ok:
                 # The extension continues the section: a heading it repeats (the section already has
                 # it) is dropped and its text joins the section, so no heading appears twice.

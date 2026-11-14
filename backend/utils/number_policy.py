@@ -85,6 +85,24 @@ def statistic_tokens(sentence: str) -> list[str]:
     return out
 
 
+def _is_name_number(sentence: str, start: int, end: int, unit: str, passage_texts: dict, cited_ids: set) -> bool:
+    """A unitless whole number that the evidence writes right after the same word, as part of a name.
+
+    Strategy and product names carry numbers ("ALPHABOTS MIDCAP 29", "ALPHA 100", "Nifty 50"); checked as
+    statistics they were "not in the evidence" and the sentence naming the strategy was removed. The test
+    is verbatim: "<word> <number>" must occur in the evidence text itself.
+    """
+    token = sentence[start:end]
+    if unit or "." in token or "," in token or token[:1] in "+-−":
+        return False
+    previous = re.search(r"([A-Za-z][A-Za-z&'-]{1,})\s+$", sentence[:start])
+    if not previous or re.match(r"\s*%", sentence[end:]):
+        return False
+    phrase = re.compile(r"(?<![A-Za-z])" + re.escape(previous.group(1)) + r"\s+" + re.escape(token) + r"(?!\d)", re.I)
+    texts = [passage_texts[pid] for pid in (cited_ids or passage_texts) if pid in passage_texts]
+    return any(phrase.search(text or "") for text in texts)
+
+
 def _decimals(token: str) -> int:
     raw = token.replace(",", "")
     return len(raw.split(".")[1]) if "." in raw else 0
@@ -333,7 +351,7 @@ def _paragraph_names(paragraph: str, entity: str) -> bool:
 
 
 def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_numbers: set[str],
-                        section_id: str = "", context_entity: str = "") -> PolicyResult:
+                        section_id: str = "", context_entity: str = "", fallback_sheet=None) -> PolicyResult:
     """Number check = lookup in the section's fact sheet (value + unit + explicit sign + metric/entity).
 
     Per number in a sentence:
@@ -350,6 +368,7 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
     from utils.fact_sheet import FactSheet, apply_calculations, lookup
 
     sheet = FactSheet([SimpleNamespace(passage_id=pid, text=text) for pid, text in passage_texts.items()])
+    passage_texts = dict(passage_texts)  # the store fallback may add a cited passage; never mutate the caller's
     result = PolicyResult(body=body)
     result.rewritten = []
     body, calcs, failed_calcs = apply_calculations(body, sheet, None)
@@ -396,6 +415,8 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                 unit = unit_family(sentence[end:end + 16])
                 if re.match(r"[^()\d\n]{0,30}\(calculated", sentence[end:]):
                     continue  # a labelled calculation: checked below through its inputs and arithmetic
+                if _is_name_number(sentence, start, end, unit, passage_texts, cited_ids):
+                    continue  # part of a name ("ALPHABOTS MIDCAP 29", "ALPHA 100"), not a statistic
                 found = lookup(sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),
                                passage_ids=cited_ids or None, context_entity=context_entity)
                 if found.status == "ok":
@@ -412,6 +433,23 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                                                  "change": f"corrected citation to {right} (the passage holding the value)"})
                         continue
                     found = other if other.status != "absent" else found
+                if fallback_sheet is not None and found.status in {"absent", "metric_mismatch", "unit_mismatch"}:
+                    # The writer can quote a value it saw in a figure brief or another section's summary. The
+                    # whole evidence store is verified evidence: keep the sentence when the value is a fact there
+                    # with this sentence's entity and metric, and cite the passage that holds it.
+                    wide = lookup(fallback_sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),
+                                  passage_ids=None, context_entity=context_entity)
+                    if wide.status == "ok":
+                        right = wide.fact.passage_id
+                        passage_texts[right] = getattr(fallback_sheet, "texts", {}).get(right, "")
+                        if CITE_RE.search(sentence):
+                            sentence = CITE_RE.sub(lambda m: f"[{m.group(1)}, {right}]", sentence, count=1)
+                        else:
+                            sentence = re.sub(r"\s*([.!?])?\s*$", lambda m: f" [{right}]{m.group(1) or ''}", sentence, count=1)
+                        cited_ids = cited_ids | {right}
+                        result.rewritten.append({"section": section_id, "number": token,
+                                                 "change": f"cited {right}, the evidence passage holding the value"})
+                        continue
                 if found.status == "entity_missing" and _paragraph_names(line, found.fact.entity):
                     # The paragraph already names the entity ("The Nifty Metal index ... -7.34% in Q2"):
                     # supported, no "for Metal" insertion (live run H read awkwardly).

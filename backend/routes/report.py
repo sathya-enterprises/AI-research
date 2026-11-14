@@ -1134,9 +1134,24 @@ def _uploaded_evidence_rows_for_store(
             or document.get("chartEvidenceExcerpt")
             or ""
         ).strip()
-        parts = [raw_text] if raw_text else []
+        # Worksheets go in as header + rows pipe tables: the fact sheet binds a value to its row (entity)
+        # and column (metric) only in that form; from raw CSV lines it could verify no workbook number.
+        try:
+            from utils.uploaded_workbook_analytics import evidence_tables_for_store
+            store_text = evidence_tables_for_store(raw_text) if raw_text else ""
+        except Exception as exc:
+            log.warning("Upload evidence table conversion skipped: %s", type(exc).__name__)
+            store_text = raw_text
+        parts = [store_text] if store_text else []
         if calculated_excerpt and calculated_excerpt not in raw_text:
-            parts.append("Deterministic attachment calculations and row evidence:\n" + calculated_excerpt)
+            # Server calculations go in as tables (label row x metric column) in place of their prose lines.
+            try:
+                from utils.uploaded_workbook_analytics import tabulate_calculation_lines
+                calculated_for_store = tabulate_calculation_lines(calculated_excerpt)
+            except Exception as exc:
+                log.warning("Upload calculation tables skipped: %s", type(exc).__name__)
+                calculated_for_store = calculated_excerpt
+            parts.append("Deterministic attachment calculations and row evidence:\n" + calculated_for_store)
         page_content = "\n\n".join(parts).strip()[:500_000]
         if not page_content:
             continue
@@ -24522,7 +24537,14 @@ async def generate_report(request: Request):
     # writer remains the fallback if V2 fails for any reason.
     try:
         from utils.report_pipeline_v2 import enabled as _v2_enabled
-        _v2_requested = bool(_v2_enabled() and not file_only_report and not no_web_sources and evidence_store is not None)
+        # Attachment-only reports use V2 too: its section writers, number policy and evidence check work from
+        # the evidence store, which holds the uploaded rows and the server-calculated analytics. The single-call
+        # writer they used before wrote freely and the guard then deleted ~50 values per workbook report.
+        if file_only_report:
+            _v2_requested = bool(_v2_enabled() and evidence_store is not None
+                                 and os.getenv("GG_V2_ATTACHMENT_REPORTS", "1") != "0")
+        else:
+            _v2_requested = bool(_v2_enabled() and not no_web_sources and evidence_store is not None)
     except Exception:
         _v2_requested = False
     _v2_used = False
@@ -26325,7 +26347,10 @@ async def generate_report(request: Request):
         # Attachment-only reports skip the publisher-page number check, so every number the writer put in
         # the prose is checked against the attached files and the deterministic analytics instead; a
         # sentence with a number in neither is removed (the same rule the web path's number policy applies).
-        if file_only_report and os.getenv("GG_ATTACHMENT_NUMBER_CHECK", "1") != "0":
+        # With V2 the number policy already verified every number (and labelled calculations) against the
+        # passages, which hold the attached rows and the analytics; this second check would delete the
+        # verified calculations it does not know about.
+        if file_only_report and not _v2_used and os.getenv("GG_ATTACHMENT_NUMBER_CHECK", "1") != "0":
             try:
                 from utils.attachment_numbers import allowed_numbers as _attachment_allowed, check_attachment_numbers
                 _attachment_texts = [file_context or ""] + [
@@ -27556,9 +27581,12 @@ async def generate_report(request: Request):
                 report_text, workbook_analytics, workbook_source_id, workbook_source_ids_by_name,
             )
             if workbook_analytics.get("kind") == "pms_strategy_performance":
-                report_text = rewrite_pms_report_sections(
-                    report_text, workbook_analytics, workbook_source_ids_by_name,
-                )
+                # The fixed-template rewrite replaces the legacy writer's unchecked prose. V2 sections were
+                # written from the verified passages and checked number by number: keep their analysis.
+                if not _v2_used:
+                    report_text = rewrite_pms_report_sections(
+                        report_text, workbook_analytics, workbook_source_ids_by_name,
+                    )
                 _pms_title, _pms_summary = pms_report_cover(workbook_analytics)
                 if _pms_title:
                     parsed["title"] = _pms_title

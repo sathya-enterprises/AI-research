@@ -1106,7 +1106,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             log.warning("V2 chart lint skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     try:  # Stage I (FIX 8): tables have their own "Table N" sequence, a caption and a source
         from utils.chart_lint import number_tables
-        report_md, table_actions, table_inventory = number_tables(report_md)
+        # Worksheet / section names in the evidence ("[Sheet: Table 9]", "TABLE — Table 9") are data labels.
+        sheet_names = {m.group(1).strip() for p in store.passages
+                       for m in re.finditer(r"(?m)^(?:\[Sheet:\s*|TABLE\s*[—-]\s*)(Table\s+\d+)\b", p.text or "")}
+        report_md, table_actions, table_inventory = number_tables(report_md, protected_names=sheet_names)
         chart_lint_log.update(tableActions=table_actions, tableInventory=table_inventory)
     except Exception as exc:
         log.warning("V2 table numbering skipped: %s: %s", type(exc).__name__, str(exc)[:160])
