@@ -258,3 +258,4 @@ def test_unrelated_question_does_not_inherit_the_last_report(monkeypatch):
     assert captured["skip"] is False
     assert captured["rewrite"] == "What is the weather forecast in Boston?"
     assert "REPORT FOLLOW-UP REFERENCE" not in captured["prompt"]
+

@@ -357,9 +357,11 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
     except ValueError:
         max_deep = 16 if tier == "in_depth" else 3
     if question and tier == "in_depth":
-        from utils.report_outline import is_market_topic
+        from utils.report_outline import is_market_topic, is_multi_quarter_sector_rotation_request
         if not is_market_topic(question):
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
+        if is_multi_quarter_sector_rotation_request(question):
+            max_deep = min(max_deep, 4)  # the matrix covers the full sector universe; deep dives focus on standout evidence
     entities = discover_entities(store, question=question, seeds=seeds, scope=scope)
     _seed_keys = {str(x).casefold() for x in seeds or []}
     for _e in entities:  # an entity the plan named is seeded however it was discovered (table or text)

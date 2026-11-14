@@ -97,15 +97,19 @@ def _fact_supported(sheet, store, claim: str, sources: set[str], context: str = 
         return False
     # A labelled calculation ("-15.3 (calculated: 49.0 - 64.3)") is checked through its inputs and
     # arithmetic, exactly as the number policy does; its result is not a reported fact.
+    verified_calculation = False
     if "(calculated" in claim:
         if verify_calculation_labels(claim, number_pool({p.passage_id: p.text for p in store.passages if p.passage_id in pids})):
             return False
+        verified_calculation = True
         # (one level of nested parentheses: "(calculated: 13 - (-91) = 104 crore)")
         claim = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated(?:[^()]|\([^()]*\))*\)", " ", claim)
         claim = re.sub(r"\(calculated(?:[^()]|\([^()]*\))*\)", " ", claim)
     tokens = statistic_tokens(claim)
     if not tokens:
-        return False
+        # Every statistic was a labelled calculation whose inputs and arithmetic were verified above
+        # (the number policy's rule); nothing else remains to check, so the claim is supported.
+        return verified_calculation
     plain = CITE_SRC_RE.sub(" ", f"{context} {claim}")
     for token in tokens:
         at = claim.find(token)

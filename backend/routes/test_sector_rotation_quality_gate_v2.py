@@ -5,10 +5,112 @@ from routes.report import (
     _sector_rotation_topic_quality_filter,
     _build_sector_quarterly_return_chart,
     _build_sector_quarterly_return_heatmap,
+    _ensure_calculated_sector_rotation_visuals,
     _insert_sector_chart_marker,
     _ensure_sector_heatmap_chart_anchor,
+    _insert_sector_quarterly_return_matrix,
     _use_calculated_sector_return_heatmap,
 )
+
+
+def test_no_attachment_sector_rotation_uses_calculated_multi_view_charts_and_drops_snapshots():
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+
+    question = "How can you explain and analyse the sector rotation in Indian stock markets in the past 8 quarters?"
+    quarters = ["Q4 2024", "Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025", "Q1 2026", "Q2 2026", "Q3 2026"]
+    rows = [
+        {"label": "NIFTY AUTO", "quarters": quarters, "returns": [1, 2, 3, 4, 5, 6, 7, 8]},
+        {"label": "NIFTY IT", "quarters": quarters, "returns": [-1, -2, -3, -4, -5, -6, -7, -8]},
+        {"label": "NIFTY 50", "quarters": quarters, "returns": [0.5] * 8},
+    ]
+    quarter_lines = ["Sector | " + " | ".join(quarters)]
+    quarter_lines.extend(
+        row["label"] + " | " + " | ".join(f"{value:+.2f}%" for value in row["returns"])
+        for row in rows
+    )
+    source = {
+        "id": "S2", "title": "NSE sector returns by calendar quarter (calculated)",
+        "kind": "Verified data", "publisher": "Calculated from daily market data",
+        "evidence_origin": "calculated_from_daily_market_data", "page_fetch_status": "not_applicable",
+        "chartEvidenceExcerpt": "\n".join(quarter_lines),
+    }
+    stale_snapshots = [
+        {"type": "horizontal_bar", "title": "1-month return (%) by sector, as of 13 Nov 2026",
+         "series": [{"name": "Return", "data": [{"label": "NIFTY AUTO", "value": 3.0}]}], "source": ["S3"]},
+        {"type": "horizontal_bar", "title": "Sector weight (%) snapshot, as of 31 Jan 2026",
+         "series": [{"name": "Weight", "data": [{"label": "NIFTY AUTO", "value": 6.0}]}], "source": ["S4"]},
+        {"type": "horizontal_bar", "title": "Quarter Change (%) for holders, retrieved 13 Nov 2026",
+         "series": [{"name": "Change", "data": [{"label": "Holder A", "value": 2.0}]}], "source": ["S5"]},
+    ]
+    report_text = (
+        "## Market Regime: Eight-Quarter Performance and Rotation Map\n\n"
+        "The quarter-by-quarter matrix below compares observed index returns.\n\n"
+    )
+
+    report_text, charts, meta = _ensure_calculated_sector_rotation_visuals(
+        report_text, stale_snapshots, rows, [source], question,
+    )
+
+    assert {chart["type"] for chart in charts} == {"line", "horizontal_bar", "heatmap"}
+    assert len(charts) == 3
+    assert all(chart["source"] == ["S2"] for chart in charts)
+    assert any(chart["type"] == "heatmap" and len(chart["columns"]) == 8 for chart in charts)
+    assert any(chart["type"] == "line" and len(chart["series"]) == 3 for chart in charts)
+    assert any("Compounded Sector Return" in chart["title"] for chart in charts)
+    assert "Indian fiscal-quarter crosswalk" in report_text
+    assert all(f"[CHART_{index}]" in report_text for index in range(1, 4))
+    assert "1-month return" not in report_text.casefold()
+    assert len(meta["removed"]) == 3
+
+    # The calculated line/matrix points still pass the same per-value evidence gate.
+    compound = next(chart for chart in charts if "Compounded Sector Return" in chart["title"])
+    compound_rows = compound["series"][0]["data"]
+    source["chartEvidenceExcerpt"] += (
+        "\n\nSector | Compounded return Q4 2024 to Q3 2026 (%)\n"
+        + "\n".join(f"{point['label']} | {point['value']:+.2f}%" for point in compound_rows)
+    )
+    audit = audit_chart_evidence_consistency(
+        report_text, charts, [source], question=question, require_publisher_verification=True,
+    )
+    assert audit["chartEvidenceFailures"] == [], audit
+    assert audit["chartTableVerificationConflicts"] == [], audit
+
+
+def test_mixed_period_sector_table_is_removed_before_v2_evidence_checks():
+    quarters = ["Q4 2024", "Q1 2025", "Q2 2025", "Q3 2025"]
+    rows = [{"label": "NIFTY IT", "quarters": quarters, "returns": [-2.0, 3.0, 4.0, -1.0],
+             "missing_quarters": []}]
+    source = {
+        "id": "S2", "title": "NSE sector returns by calendar quarter (calculated)",
+        "kind": "Verified data", "publisher": "Calculated from daily market data",
+        "evidence_origin": "calculated_from_daily_market_data", "page_fetch_status": "not_applicable",
+        "chartEvidenceExcerpt": "NIFTY IT | -2.00% | +3.00% | +4.00% | -1.00%",
+    }
+    mixed = (
+        "## Market Regime: Eight-Quarter Performance and Rotation Map\n\n"
+        "**Table 2: Market Regime: Eight-Quarter Performance and Rotation Map: the sectors discussed, compared**\n\n"
+        "| Sector | 1M, as of 21 Apr 2025 [S49] | PE Ratio, as of 15 Oct 2026 [S81] | Quarterly return (%), Q2 FY27 [S2] |\n"
+        "| --- | --- | --- | --- |\n"
+        "| IT | -19.31 | 18.51 | +6.18% |\n\n"
+        "Source: [S49], [S81], [S2]\n\n"
+        "The evidence table mixed several retrieval dates."
+    )
+
+    cleaned_section = _insert_sector_quarterly_return_matrix(
+        mixed, rows, [source], insert_matrix=False,
+    )
+    assert "1M, as of 21 Apr 2025" not in cleaned_section
+    assert "PE Ratio, as of 15 Oct 2026" not in cleaned_section
+    assert "**Table 2:" not in cleaned_section
+    assert "Source: [S49], [S81], [S2]" not in cleaned_section
+    assert "The evidence table mixed several retrieval dates." in cleaned_section
+
+    # Publication inserts the calculated matrix exactly once, after the bad
+    # model table has been removed.
+    final = _insert_sector_quarterly_return_matrix(mixed, rows, [source])
+    assert "| Sector index | Q4 2024 | Q1 2025 | Q2 2025 | Q3 2025 |" in final
+    assert "| NIFTY IT | -2.00% | +3.00% | +4.00% | -1.00% |" in final
+    assert final.count("| Sector index |") == 1
 
 
 def test_sector_rotation_filter_removes_generic_charts_and_remaps_markers():

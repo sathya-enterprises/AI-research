@@ -65,6 +65,36 @@ def is_market_topic(question: str) -> bool:
     return bool(_MARKET_TOPIC_RE.search(str(question or ""))) if question else True
 
 
+def _sector_rotation_quarter_count(question: str) -> int:
+    text = str(question or "")
+    if not re.search(r"(?i)\b(?:sector[ -]rotation|rotation across sectors|sectoral rotation)\b", text):
+        return 0
+    match = re.search(
+        r"(?i)\b(?:(?:past|last|previous|prior|preceding)\s+)?"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+        r"(?:completed\s+)?quarters?\b",
+        text,
+    )
+    if not match:
+        return 0
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+    try:
+        return int(match.group(1)) if match.group(1).isdigit() else words[match.group(1).casefold()]
+    except (KeyError, ValueError):
+        return 0
+
+
+def is_multi_quarter_sector_rotation_request(question: str) -> bool:
+    """Detect a sector-rotation analysis explicitly bounded to several quarters."""
+    return _sector_rotation_quarter_count(question) >= 4
+
+
+def is_long_window_sector_rotation_request(question: str) -> bool:
+    """The 6+ quarter workflow gets the bounded cross-sector outline and word budget."""
+    return _sector_rotation_quarter_count(question) >= 6
+
+
 def _requested_outline_focuses(question: str) -> list[str]:
     """Select report sections from the request's actions and evidence needs."""
     text = str(question or "")
@@ -119,6 +149,20 @@ def _outline_tiers(tiers: dict | None, question: str = "") -> dict | None:
                          if (getattr(entity, "role", "") not in _NON_SUBJECT_ENTITY_ROLES
                              or getattr(entity, "seeded", False)
                              or _named_in_question(entity, question))]
+    if is_long_window_sector_rotation_request(question):
+        # The whole-universe quarter matrix covers every index. Only a few
+        # evidence-rich sectors need their own narrative sections; the rest
+        # stay in the compact comparison instead of generating one chapter each.
+        deep = list(filtered.get("deep_dive") or [])
+        compact = list(filtered.get("compact") or [])
+        compact_names = {str(getattr(entity, "name", "")).casefold() for entity in compact}
+        for entity in deep[3:]:
+            name = str(getattr(entity, "name", "")).casefold()
+            if name and name not in compact_names:
+                compact.append(entity)
+                compact_names.add(name)
+        filtered["deep_dive"] = deep[:3]
+        filtered["compact"] = compact
     return filtered
 
 
@@ -233,6 +277,38 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "   c. At least 4 cross-cutting sections (role \"cross_cutting\") chosen for THIS topic, for example: background "
             "and context, the data trends, drivers and causes, policy and regulation, comparisons, risks/scenarios and outlook. "
             "Every cross-cutting section has 2-5 subsections."
+            + tiers_block(tiers, question)
+        )
+    elif tier == "in_depth" and is_long_window_sector_rotation_request(question):
+        structure = (
+            "FOCUSED MULTI-QUARTER SECTOR ROTATION PLAN:\n"
+            "1. The verified completed-quarter matrix is the complete sector universe; do not create one long section per index.\n"
+            "2. Plan exactly six distinct core sections (the whole-universe quarter matrix and leadership changes; compounded "
+            "leaders/laggards; sector flows; earnings, valuation and macro drivers; compact sector comparison; risks, limits "
+            "and outlook), plus at most three short DEEP-DIVE sections for the evidence-ranked entities listed below. "
+            "This gives 6-9 analysis sections total. One compact comparison section must cover every COMPACT entity.\n"
+            "3. Keep each section's goal distinct. Do not repeat the same performance summary, table, or chart explanation in every sector section. "
+            "Do not add generic repeated subsections to the six core sections. For a named-sector deep dive, use at most two subsections: "
+            "its verified quarter pattern, then source-supported drivers/risks. Do not create a separate section for a partial current quarter; "
+            "label QTD separately and keep it out of completed-quarter tables. "
+            "Separate observed returns from possible explanations; do not claim causation without direct evidence.\n"
+            "4. Keep the user's time window central. The calculated dataset labels quarters by calendar year; Indian fiscal equivalents are "
+            "Q4 2024=Q3 FY25, Q1 2025=Q4 FY25, Q2 2025=Q1 FY26, Q3 2025=Q2 FY26, Q4 2025=Q3 FY26, "
+            "Q1 2026=Q4 FY26, Q2 2026=Q1 FY27, Q3 2026=Q2 FY27. Keep these equivalent labels aligned.\n"
+            + tiers_block(tiers, question)
+        )
+    elif tier == "in_depth" and is_multi_quarter_sector_rotation_request(question):
+        structure = (
+            "FOCUSED MULTI-QUARTER SECTOR ROTATION PLAN:\n"
+            "1. The verified completed-quarter matrix is the complete sector universe; do not create one long section per index.\n"
+            "2. Plan 6-9 analysis sections (at least 6): one section for the whole-universe quarter matrix and leadership changes; "
+            "one for compounded leaders/laggards; distinct sections for evidence-backed flows and valuation/earnings drivers; "
+            "one risks, limits and outlook section. Add up to four short DEEP-DIVE sections only for entities listed below; "
+            "use one compact comparison section to cover all COMPACT entities.\n"
+            "3. Keep each section's goal distinct. Do not repeat the same performance summary, table, or chart explanation in every sector section. "
+            "For a named-sector deep dive, use at most two subsections: its verified quarter pattern, then source-supported drivers/risks. "
+            "Separate observed returns from possible explanations; do not claim causation without direct evidence.\n"
+            "4. Label any current partial quarter separately; never mix it into completed-quarter tables or rankings.\n"
             + tiers_block(tiers, question)
         )
     elif tier == "in_depth":
@@ -406,8 +482,9 @@ def resolve_thin_evidence(store, sections: list[Section], decisions: list[str]) 
             decisions.append(f"Dropped section '{sec.title}': thin evidence ({reason}) and no related section to merge into.")
 
 
-def size_budgets(store, sections: list[Section], tier: str, meta: dict) -> None:
+def size_budgets(store, sections: list[Section], tier: str, meta: dict, question: str = "") -> None:
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
+    focused_rotation = tier == "in_depth" and is_multi_quarter_sector_rotation_request(question)
     leaves = [leaf for sec in sections if sec.status == "keep" for leaf in sec.leaves()]
     for leaf in leaves:
         weight, _ = _evidence_strength(store, leaf.passage_ids)
@@ -415,7 +492,7 @@ def size_budgets(store, sections: list[Section], tier: str, meta: dict) -> None:
     for sec in sections:
         if sec.status != "keep":
             continue
-        cap = DEEP_DIVE_WORDS if sec.role == "deep_dive" else (
+        cap = (900 if focused_rotation else DEEP_DIVE_WORDS) if sec.role == "deep_dive" else (
             min(1800, max(600, COMPACT_WORDS_PER_ENTITY * max(1, len(sec.entities)))) if sec.role == "compact" else None)
         if cap:
             leaves_here = sec.leaves()
@@ -427,15 +504,17 @@ def size_budgets(store, sections: list[Section], tier: str, meta: dict) -> None:
             sec.word_budget = sum(s.word_budget for s in sec.leaves()) + 120
     total = sum(s.word_budget for s in sections if s.status == "keep")
     evidence_words = total
-    if total > rules["total_cap"]:
-        factor = rules["total_cap"] / total
+    total_cap = min(rules["total_cap"], 10500) if focused_rotation else rules["total_cap"]
+    if total > total_cap:
+        factor = total_cap / total
         for leaf in leaves:
-            leaf.word_budget = max(rules["leaf_floor"], int(leaf.word_budget * factor))
+            floor = 200 if focused_rotation else rules["leaf_floor"]
+            leaf.word_budget = max(floor, int(leaf.word_budget * factor))
         for sec in sections:
             if sec.status == "keep" and sec.subsections:
                 sec.word_budget = sum(s.word_budget for s in sec.leaves()) + 120
         total = sum(s.word_budget for s in sections if s.status == "keep")
-    meta.update({"evidenceSupportedWords": evidence_words, "plannedAnalysisWords": total, "tierWordCap": rules["total_cap"]})
+    meta.update({"evidenceSupportedWords": evidence_words, "plannedAnalysisWords": total, "tierWordCap": total_cap})
 
 
 def estimate_pages(analysis_words: int, exec_words: int, charts: int, appendix_sources: int, data_tables: int) -> float:
@@ -542,9 +621,12 @@ def validate_outline(sections: list[Section], tier: str, tiers: dict | None, que
     """Structural rules the outline must meet (rejected outlines get one retry)."""
     errors = []
     tiers = _outline_tiers(tiers, question)
-    minimum = MIN_ANALYSIS_SECTIONS.get(tier, 5)
+    minimum = (6 if tier == "in_depth" and is_multi_quarter_sector_rotation_request(question)
+               else MIN_ANALYSIS_SECTIONS.get(tier, 5))
     if len(sections) < minimum:
         errors.append(f"only {len(sections)} analysis sections; at least {minimum} are required")
+    if tier == "in_depth" and is_multi_quarter_sector_rotation_request(question) and len(sections) > 9:
+        errors.append(f"{len(sections)} analysis sections; this bounded sector-rotation request allows at most 9")
     if tiers and tier == "in_depth":
         qualifying = list(tiers.get("deep_dive", []))
         for sec, covered in merged_deep_dives(sections, tiers):
@@ -605,7 +687,14 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
                       entity=entity.name, entities=[entity.name], goal=f"Full analysis of {entity.name} over the window",
                       queries=([f"{entity.name} sector", f"Nifty {entity.name} returns"] if market
                                else [entity.name, f"{entity.name} {' '.join(str(question).split()[:8])}"]))
-        for j, (sub_title, sub_goal) in enumerate(DEEP_DIVE_SUBSECTIONS if market else GENERIC_DEEP_DIVE_SUBSECTIONS, 1):
+        if market and is_multi_quarter_sector_rotation_request(question):
+            subsections = (
+                ("Quarterly return and leadership pattern", "Compare the entity's observed completed-quarter returns and benchmark-relative changes."),
+                ("Supported drivers and risks", "Include only source-supported earnings, flow, valuation, or macro drivers and state uncertainty."),
+            )
+        else:
+            subsections = DEEP_DIVE_SUBSECTIONS if market else GENERIC_DEEP_DIVE_SUBSECTIONS
+        for j, (sub_title, sub_goal) in enumerate(subsections, 1):
             sec.subsections.append(Section(section_id=f"{sec.section_id}.{j}", title=sub_title, goal=sub_goal,
                                            queries=[f"{entity.name} {sub_title.lower()}"], entities=[entity.name]))
         sections.append(sec)
@@ -621,6 +710,65 @@ def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decis
                                          "sector returns comparison" if market else "comparison data"]))
         decisions.append(f"Added compact comparison section for {len(missing)} entities the outline omitted.")
     return sections
+
+
+def _bound_multi_quarter_sector_rotation_sections(
+    sections: list[Section], tiers: dict | None, question: str, decisions: list[str] | None = None,
+) -> list[Section]:
+    """Replace sprawling model outlines with a compact, evidence-first rotation structure."""
+    if not is_long_window_sector_rotation_request(question):
+        return sections
+    tiers = _outline_tiers(tiers, question) or {}
+    deep_entities = list(tiers.get("deep_dive") or [])[:3]
+    compact_entities = list(tiers.get("compact") or [])
+    compact_names = [str(getattr(entity, "name", "")).strip() for entity in compact_entities]
+    compact_names = [name for name in compact_names if name]
+
+    core = [
+        ("Eight-Quarter Sector Returns and Leadership Changes",
+         "Show the complete verified sector-by-quarter return matrix and identify when leadership changed. Keep calendar quarters and their Indian fiscal equivalents aligned.",
+         ["calculated sector return matrix completed calendar quarters", "Nifty sector index quarterly returns leadership changes"]),
+        ("Compounded Leaders and Laggards",
+         "Compare cumulative compounded returns across the same completed-quarter window, including the strongest and weakest sectors and the benchmark where supported.",
+         ["sector compounded returns full requested quarter window", "Nifty sector index cumulative return ranking"]),
+        ("Sector Flows and Investor Positioning",
+         "Explain any rotation evidence visible in FPI, domestic-fund or ownership flows; distinguish measured flows from inferred price leadership.",
+         ["India FPI sectoral equity flows quarter", "Indian mutual fund sector allocation flows"]),
+        ("Reasons and Drivers: Earnings, Valuation and Macro Explanations",
+         "Assess source-supported earnings, valuation and macro explanations for the observed sector sequence. Separate correlation from causation and say when evidence is missing.",
+         ["Indian sector earnings growth valuation macro drivers quarter", "sector earnings valuation drivers rotation India"]),
+        ("Compact Cross-Sector and Benchmark Comparison",
+         "Compare the remaining sectors and the broad-market benchmark against the full-window pattern without repeating each sector's quarter-by-quarter story.",
+         ["sector index benchmark relative returns full window", "cross-sector return breadth rotation comparison"]),
+        ("Data Limits, Risks and What to Watch",
+         "State the data source, quarter construction, missing observations and any gap between calculated market data and official exchange data; identify evidence-backed risks and monitoring signals.",
+         ["sector index historical data methodology quarter-end closes limitations", "Indian sector market risks outlook quarter"]),
+    ]
+    bounded: list[Section] = []
+    for index, (title, goal, queries) in enumerate(core, 1):
+        is_compact = index == 5
+        bounded.append(Section(
+            section_id=f"sec-rotation-{index}", title=title, role="compact" if is_compact else "cross_cutting",
+            entities=compact_names if is_compact else [], goal=goal, queries=queries,
+        ))
+    for index, entity in enumerate(deep_entities, 1):
+        name = str(getattr(entity, "name", "")).strip()
+        if not name:
+            continue
+        bounded.append(Section(
+            section_id=f"sec-rotation-deep-{index}",
+            title=f"{name}: Evidence-Backed Rotation Deep Dive", role="deep_dive", entity=name,
+            entities=[name],
+            goal=(f"Trace {name}'s observed completed-quarter return pattern and include only source-supported flows, "
+                  "earnings, valuation or risk explanations; avoid repeating the full sector matrix."),
+            queries=[f"{name} sector index completed-quarter returns", f"{name} sector flows earnings valuation risks"],
+        ))
+    if decisions is not None and len(sections) != len(bounded):
+        decisions.append(
+            f"Bounded the model's {len(sections)} planned sector-rotation sections to six core themes and "
+            f"{len(bounded) - 6} evidence-ranked sector deep-dives; the complete matrix covers the remaining sectors."
+        )
+    return bounded
 
 
 def seed_entity_evidence(store, sections: list[Section], tiers: dict | None, question: str = "") -> None:
@@ -661,6 +809,9 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     decisions: list[str] = []
     attempts, rejection, data, result, sections = [], "", None, None, []
+    focused_rotation = tier == "in_depth" and is_multi_quarter_sector_rotation_request(question)
+    long_window_rotation = tier == "in_depth" and is_long_window_sector_rotation_request(question)
+    selected_rotation_decisions: list[str] = []
     for attempt in (1, 2):
         system, prompt = outline_prompt(question, tier, overview, today, window_note, tiers=tiers, rejection=rejection,
                                         asks_block=asks.prompt_block() if asks else "")
@@ -674,15 +825,30 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
                 raise OutlineError(f"outline call failed: {result.error or 'invalid JSON'}")
             continue
         candidate_sections = _sections_from_json(candidate, tier)
+        generated_section_count = len(candidate_sections)
+        candidate_rotation_decisions: list[str] = []
+        if long_window_rotation:
+            candidate_sections = _bound_multi_quarter_sector_rotation_sections(
+                candidate_sections, tiers, question, candidate_rotation_decisions,
+            )
         errors = validate_outline(candidate_sections, tier, tiers, question=question)
-        attempts.append({"attempt": attempt, "sections": len(candidate_sections), "errors": errors})
-        if data is None or len(candidate_sections) >= len(sections):
+        attempts.append({"attempt": attempt, "sections": generated_section_count,
+                         "normalizedSections": len(candidate_sections), "errors": errors})
+        candidate_is_bounded = len(candidate_sections) <= 9
+        current_is_bounded = len(sections) <= 9
+        if (data is None
+                or (focused_rotation and candidate_is_bounded and not current_is_bounded)
+                or (focused_rotation and candidate_is_bounded == current_is_bounded
+                    and len(candidate_sections) >= len(sections))
+                or (not focused_rotation and len(candidate_sections) >= len(sections))):
             data, sections = candidate, candidate_sections
+            selected_rotation_decisions = candidate_rotation_decisions
         if not errors:
             break
         log.warning("V2 outline attempt %d rejected: %s", attempt, "; ".join(errors)[:400])
         rejection = ("YOUR PREVIOUS OUTLINE WAS REJECTED for these reasons - fix every one:\n"
                      + "\n".join(f"- {e}" for e in errors) + "\n\n")
+    decisions.extend(selected_rotation_decisions)
     if len(sections) < 3:
         raise OutlineError(f"outline returned {len(sections)} usable sections")
     remaining = validate_outline(sections, tier, tiers, question=question)
@@ -720,7 +886,7 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     for row in coverage:
         if row["status"] != "covered":
             decisions.append(f"Entity '{row['entity']}' has insufficient evidence ({row['passages']} passages) - no dedicated coverage.")
-    if tier == "in_depth" and os.getenv("GG_V2_SUBSECTION_PLANNER", "1") != "0":
+    if tier == "in_depth" and not long_window_rotation and os.getenv("GG_V2_SUBSECTION_PLANNER", "1") != "0":
         # Deep-dives must not all share one subsection template: choose each sector's
         # subsections from the facets its own evidence covers. (Offline replays switch this
         # off: replayed writer text was written for the recorded subsections.)
@@ -748,13 +914,14 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
                              "section": own or shared, "coverage": "own deep-dive" if own else ("shared section" if shared else "none")})
         meta["sectorPlan"] = plan
         meta["mergedDeepDivesSplit"] = sum(1 for d in decisions if d.startswith("Split merged deep-dive"))
-    size_budgets(store, sections, tier, meta)
+    size_budgets(store, sections, tier, meta, question=question)
     outline = Outline(title=str(data.get("title") or "")[:160], thesis=str(data.get("thesis") or "")[:600],
                       sections=sections, entities=entities, dimensions=dimensions, entity_coverage=coverage,
                       decisions=decisions, meta=meta)
     # Fixed sections around the analysis.
+    exec_words = min(rules["exec_words"], 650) if is_multi_quarter_sector_rotation_request(question) else rules["exec_words"]
     outline.sections.insert(0, Section(section_id="exec", title="Executive Summary", kind="executive_summary",
-                                       word_budget=rules["exec_words"]))
+                                       word_budget=exec_words))
     outline.sections.append(Section(section_id="method", title="Methodology and Evidence Base", kind="methodology"))
     if tier == "in_depth":
         # Sources (with their reliability) are listed once, by the renderer, as "Appendix B — Data Sources".

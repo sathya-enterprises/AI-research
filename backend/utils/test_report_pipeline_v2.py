@@ -8,7 +8,7 @@ import pytest
 from utils.evidence_store import build_evidence_store
 from utils.llm_gateway import GatewayStats, LLMResult
 from utils.report_outline import Section, _requested_outline_focuses, outline_prompt, resolve_thin_evidence, size_budgets
-from utils.report_pipeline_v2 import PipelineV2Error, run_pipeline_v2
+from utils.report_pipeline_v2 import PipelineV2Error, _apply_section_body_transform, run_pipeline_v2
 from utils.section_charts import build_chart_candidates, charts_from_passage, verify_chart
 from utils.section_writer import SectionDraft, postprocess, unsupported_numbers
 
@@ -45,6 +45,41 @@ def _store():
                  "authority_tier": r["authorityTier"], "reliability_score": r["reliabilityScore"], "publication_date": r.get("publication_date", ""),
                  "publisher": r.get("publisher", "Calculated")} for i, r in enumerate(rows, 1)]
     return build_evidence_store(rows, manifest=manifest), manifest
+
+
+def test_postwrite_cleanup_rechecks_numbers_after_removing_a_mixed_period_table():
+    from types import SimpleNamespace
+
+    passage = SimpleNamespace(passage_id="S1.1", text="NIFTY IT completed-quarter return was +2.40%.")
+
+    class Store:
+        def get(self, passage_id):
+            return passage if passage_id == passage.passage_id else None
+
+    section = Section("sec-rotation-1", "Eight-Quarter Sector Returns", passage_ids=[passage.passage_id])
+    draft = SectionDraft(
+        section_id=section.section_id,
+        title=section.title,
+        body=("The observed NIFTY IT return was +2.40% [S1.1].\n\n"
+              "**Table 2: mixed-period sector metrics**\n\n"
+              "| Sector | 1M, as of 21 Apr 2025 | PE Ratio |\n| --- | ---: | ---: |\n"
+              "| IT | -19.31 | 18.51 |\n\nSource: [S49], [S81]"),
+        summary="NIFTY IT returned +2.40% [S1.1].",
+        ok=True,
+        unsupported_numbers=["-19.31"],
+    )
+
+    def remove_mixed_table(text, _section):
+        return str(text).split("**Table 2:", 1)[0].rstrip()
+
+    changed = _apply_section_body_transform(
+        draft, section, remove_mixed_table, store=Store(), charts=[], covered=[],
+    )
+
+    assert changed
+    assert "-19.31" not in draft.body
+    assert draft.unsupported_numbers == []
+    assert draft.cited_passages == ["S1.1"]
 
 
 # ── charts ────────────────────────────────────────────────────────────────────

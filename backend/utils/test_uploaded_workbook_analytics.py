@@ -1,5 +1,6 @@
 """Regression tests for deterministic PMS workbook analysis and file-only mode."""
 import csv
+import re
 from io import StringIO
 
 from utils.uploaded_workbook_analytics import (
@@ -47,17 +48,11 @@ def test_pms_workbook_yields_deterministic_return_charts_and_missing_values_stay
     assert any("1-Year" in title for title in titles)
     assert any("5-Year" in title for title in titles)
     one_year = next(c for c in result["charts"] if "1-Year" in c["title"])
-    one_month = next(c for c in result["charts"] if "1-Month" in c["title"])
     points = one_year["series"][0]["data"]
-    assert one_month["type"] == "dot_plot"
-    assert one_month["xLabel"] == "1 Mth return (%)" and one_month["yLabel"] == "PMS strategy"
-    assert one_year["type"] == "horizontal_bar"
     assert points[0]["value"] == 24.8
     assert points[0]["evidenceValue"] == "0.248"
     assert all(p["value"] != 0 for p in points)
     five_year = next(c for c in result["charts"] if "5-Year" in c["title"])
-    assert five_year["type"] == "lollipop"
-    assert five_year["xLabel"] == "5 Yr return (%)" and five_year["yLabel"] == "PMS strategy"
     assert len(five_year["series"][0]["data"]) == 2
     assert result["periodCoverage"]["2 Yr"] == 2
     assert result["periodCoverage"]["Since Incp."] == 2
@@ -105,7 +100,7 @@ def test_pms_attachment_tables_cover_horizons_categories_rankings_and_per_file_s
     assert result["files"][0]["sheets"][0]["missingReturnValues"] == 2
 
 
-def test_pms_snapshot_charts_use_grouped_summaries_and_pass_the_evidence_gate():
+def test_pms_snapshot_charts_use_distribution_category_aum_and_rank_views_with_evidence():
     from utils.chart_evidence_audit import audit_chart_evidence_consistency
 
     context = _pms_context().replace(
@@ -123,9 +118,14 @@ def test_pms_snapshot_charts_use_grouped_summaries_and_pass_the_evidence_gate():
         "chartEvidenceExcerpt": result["evidenceByFile"]["pms_demo.xlsx"],
     }
 
-    assert len(charts) == 5
-    assert [chart["type"] for chart in charts].count("grouped_bar") == 2
-    assert {chart["type"] for chart in charts} == {"dot_plot", "horizontal_bar", "lollipop", "grouped_bar"}
+    assert len(charts) == 6
+    assert [chart["type"] for chart in charts].count("grouped_bar") == 1
+    assert {chart["type"] for chart in charts} == {
+        "dot_plot", "horizontal_bar", "lollipop", "grouped_bar", "boxplot",
+    }
+    assert any(chart.get("chartRole") == "return_distribution" for chart in charts)
+    assert any(chart.get("chartRole") == "aum_disclosure" for chart in charts)
+    assert not any("averages by reported horizon" in chart.get("title", "") for chart in charts)
     markers = "\n".join(f"[CHART_{index}]" for index in range(1, len(charts) + 1))
     audit = audit_chart_evidence_consistency(
         markers, charts, [source], question="Analyze the attached PMS workbook.",
@@ -135,58 +135,53 @@ def test_pms_snapshot_charts_use_grouped_summaries_and_pass_the_evidence_gate():
     assert audit.get("chartTableVerificationConflicts", []) == [], audit
 
 
-def test_pms_model_chart_filter_removes_duplicate_rankings_and_misleading_horizon_trends():
+def test_model_chart_is_removed_when_its_points_duplicate_a_server_workbook_chart():
     from utils.uploaded_workbook_analytics import pms_model_chart_keep_mask
-    from routes.report import _remap_chart_placeholders
 
-    workbook_charts = [
-        {"chartRole": "strategy_ranking", "workbookMetric": "1 Yr", "title": "Top PMS Strategies by 1-Year Return"},
-        {
-            "chartRole": "snapshot_summary", "title": "PMS 1-year return averages by category (mean vs median)",
-            "series": [
-                {"name": "Mean 1-year return", "data": [
-                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.65},
-                    {"label": "LARGE CAP", "value": 6.89},
-                    {"label": "SMALL CAP", "value": -3.57},
-                    {"label": "MULTI ASSET", "value": 13.97},
-                ]},
-                {"name": "Median 1-year return", "data": [
-                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.7},
-                    {"label": "LARGE CAP", "value": 7.225},
-                    {"label": "SMALL CAP", "value": -6.91},
-                    {"label": "MULTI ASSET", "value": 11.33},
-                ]},
-            ],
-        },
-    ]
-    model_charts = [
-        {"title": "Top 10 Strategies — 1-Year Returns", "type": "lollipop", "xLabel": "Return (%)", "yLabel": "Strategy",
-         "series": [{"name": "1-Yr Return", "data": [{"label": "Alpha", "value": 24.8}]}]},
-        {"title": "Mean Return Profile Across Horizons", "type": "spline", "xLabel": "Lookback Horizon",
-         "series": [{"name": "Mean", "data": [
-             {"label": "1 Mth", "value": -2.9}, {"label": "3 Mth", "value": -4.1},
-             {"label": "1 Yr", "value": 3.6}, {"label": "5 Yr", "value": 17.2},
-         ]}]},
-        {"title": "Median Return Profile by Horizon and Category", "type": "grouped_bar", "xLabel": "Category", "yLabel": "Median Return (%)",
-         "series": [{"name": "1-Year", "data": [
-             {"label": "Multi Cap", "value": 3.7}, {"label": "Large Cap", "value": 7.22},
-             {"label": "Small Cap", "value": -6.91}, {"label": "Multi Asset", "value": 11.33},
-         ]}]},
-        {"title": "Strategy Count by Investment Category", "type": "horizontal_bar", "series": [
-            {"name": "Strategies", "data": [{"label": "Large Cap", "value": 28}]},
-        ]},
-    ]
+    baseline = {
+        "type": "grouped_bar", "title": "PMS 1-year return averages by category (mean vs median)",
+        "sourceOrigin": "uploaded_workbook", "chartRole": "snapshot_summary",
+        "series": [
+            {"name": "Mean 1-year return", "data": [
+                {"label": "Large Cap", "value": 16.2},
+                {"label": "Multi Asset", "value": 18.4},
+                {"label": "Small Cap", "value": 22.1},
+            ]},
+            {"name": "Median 1-year return", "data": [
+                {"label": "Large Cap", "value": 15.8},
+                {"label": "Multi Asset", "value": 17.9},
+                {"label": "Small Cap", "value": 20.4},
+            ]},
+        ],
+    }
+    model = {
+        "type": "horizontal_bar", "title": "1-Year Category Performance Comparison (Mean Return %)",
+        "series": [{"name": "Mean Return (%)", "data": [
+            {"label": "Large Cap", "value": 16.2},
+            {"label": "Multi-Asset", "value": 18.4},
+            {"label": "Small Cap", "value": 22.1},
+        ]}],
+    }
 
-    keep_mask, reasons = pms_model_chart_keep_mask(model_charts, workbook_charts)
+    keep, reasons = pms_model_chart_keep_mask([model], [baseline])
 
-    assert keep_mask == [False, False, False, True]
-    assert "duplicate 1 Yr strategy ranking" in reasons[0]
-    assert "not a time series" in reasons[1]
-    assert "duplicate the deterministic" in reasons[2]
-    remapped = _remap_chart_placeholders(
-        "\n".join(f"[CHART_{i}]" for i in range(1, len(model_charts) + 1)), model_charts, keep_mask,
-    )
-    assert remapped.splitlines() == ["[CHART_1]"]
+    assert keep == [False]
+    assert "duplicate" in reasons[0]
+
+
+def test_aum_chart_accepts_equivalent_unit_labels_across_workbook_sheets():
+    context = _pms_context() + "\n[Sheet: Table 3]\n" + _csv_block([
+        ["AS ON 31 JAN 2026"],
+        ["AMC", "Investment Approach", "Benchmark", "Assets Under Management (INR Crore)", "Category", "Returns"],
+        ["", "", "", "", "", "", "1 Mth", "3 Mth", "6 Mth", "1 Yr", "2 Yr", "3 Yr", "5 Yr", "10 Yr", "Since Incp."],
+        ["AMC Gamma", "Gamma Growth", "Benchmark C", "150", "Equity", "Returns", "0.03", "0.04", "0.05", "0.15", "0.20", "0.25", "0.30", "NA", "0.35"],
+    ])
+
+    result = build_attachment_analytics(context)
+
+    assert len(result["fieldMap"]["aum"]) == 2
+    chart = next(chart for chart in result["charts"] if chart.get("chartRole") == "aum_disclosure")
+    assert len(chart["series"][0]["data"]) == 3
 
 
 def test_benchmark_rows_stop_at_next_strategy_table_and_compare_matched_strategy_median():
@@ -228,13 +223,6 @@ def test_benchmark_rows_stop_at_next_strategy_table_and_compare_matched_strategy
     assert all(point["sourceObservationCount"] == 4 for point in matched["data"])
     assert all("AMC Delta" not in point["evidenceQuote"] for point in benchmark["data"])
 
-    quality_report = rewrite_pms_report_sections(
-        "## Data Quality and Integrity Audit\n\nPlaceholder.", result,
-    )
-    assert "separate benchmark-return rows in the workbook support the matched comparison" in quality_report
-    assert "1 Mth, 1 Yr, 3 Yr" in quality_report
-    assert "no separate matched period-return series was detected" not in quality_report
-
     charts = assign_workbook_source(result["charts"], "S1")
     for item in charts:
         item["_serverWorkbookEvidence"] = True
@@ -269,7 +257,8 @@ def test_missing_server_workbook_chart_markers_are_restored_before_source_list()
     registered_text, registered_charts, registry_meta = _canonicalize_chart_registry(coherent, kept)
 
     assert meta["restored"] == 1
-    assert restored.index("not a time series") < restored.index("[CHART_1]")
+    assert "Charts calculated from the attached data" in restored
+    assert "[CHART_1]" in restored
     assert restored.index("[CHART_1]") < restored.index("## Sources")
     assert len(kept) == 1, coherence_meta
     assert "[CHART_1]" in coherent
@@ -349,9 +338,48 @@ def test_verified_workbook_chart_marker_moves_out_of_an_incompatible_horizon_sec
 
     assert meta["relocated"] == 1
     assert "[CHART_1]" not in one_year and "[CHART_2]" in one_year
-    assert "Top PMS Strategies by 1-Month Return" in attachment_charts
     assert "[CHART_1]" in attachment_charts
     assert len(kept) == 2 and placement["droppedCharts"] == 0
+
+
+def test_attachment_charts_are_anchored_to_semantic_sections_and_empty_chart_group_is_removed():
+    charts = [
+        {"title": "Top PMS Strategies by 1-Year Return", "chartRole": "strategy_ranking",
+         "sourceOrigin": "uploaded_workbook", "_serverWorkbookEvidence": True},
+        {"title": "Largest reported AUM values", "chartRole": "aum_disclosure",
+         "sourceOrigin": "uploaded_workbook", "_serverWorkbookEvidence": True},
+        {"title": "PMS return distribution by horizon", "chartRole": "return_distribution",
+         "sourceOrigin": "uploaded_workbook", "_serverWorkbookEvidence": True},
+    ]
+    original = """## Executive Summary
+The workbook is summarized here.
+[CHART_1]
+[CHART_2]
+[CHART_3]
+
+## AUM Disclosure and Coverage
+Disclosed values are incomplete.
+
+## Return Distribution and Risk Limits
+The plot compares observed spreads.
+
+## Strategy Rankings by Reported Horizon
+Ranked values are shown below.
+
+## Quantitative comparisons from the uploaded files
+The charts below use verified attached rows.
+"""
+
+    repaired, meta = ensure_server_workbook_chart_markers(original, charts)
+
+    sections = re.split(r"(?m)^##\s+", repaired)
+    by_heading = {block.splitlines()[0]: block for block in sections[1:]}
+    assert meta["relocated"] == 3
+    assert "[CHART_1]" in by_heading["Strategy Rankings by Reported Horizon"]
+    assert "[CHART_2]" in by_heading["AUM Disclosure and Coverage"]
+    assert "[CHART_3]" in by_heading["Return Distribution and Risk Limits"]
+    assert "[CHART_1]" not in by_heading["Executive Summary"]
+    assert "Quantitative comparisons from the uploaded files" not in repaired
 
 
 def test_final_attachment_chart_repair_fixes_live_report_horizon_and_stale_notice():
@@ -388,7 +416,6 @@ def test_final_attachment_chart_repair_fixes_live_report_horizon_and_stale_notic
     assert note_meta["removed"] == 1
     assert "[CHART_1]" not in one_year_section and "[CHART_3]" not in one_year_section
     assert "[CHART_2]" in one_year_section
-    assert "Top PMS Strategies by 1-Month Return" in attachment_section
     assert "[CHART_1]" in attachment_section and "[CHART_3]" in attachment_section
     assert all(registered.count(f"[CHART_{i}]") == 1 for i in range(1, len(charts) + 1))
     assert len(kept) == len(charts), registry_meta
@@ -525,21 +552,60 @@ The workbook proves quarterly rotation.
     assert "[S1]" in rewritten
 
 
-def test_comparative_horizon_alias_replaces_unsupported_causal_prose():
+def test_pms_report_rewrite_removes_repeated_sections_and_preserves_data_tables():
     analytics = build_attachment_analytics(_pms_context())
-    original = (
-        "## Comparative Horizon Analysis\n\n"
-        "Short-term Volatility vs. Long-term Stability\n"
-        "The 1-month and 3-month windows show a negative mean return across almost all equity categories, "
-        "likely reflecting a market-wide drawdown."
-    )
+    original = """# PMS Report
 
-    rewritten = rewrite_pms_report_sections(original, analytics)
+## Market Snapshot: Jan 2026
+Repeated snapshot paragraph.
 
-    assert "likely reflecting a market-wide drawdown" not in rewritten
-    assert "across almost all equity categories" not in rewritten
-    assert "The recognized horizons are separate lookbacks" in rewritten
-    assert "do not by themselves establish quarter-by-quarter sector rotation or explain causes" in rewritten
+## Executive Performance Summary
+Model summary.
+
+## Category-Wise Performance Benchmarking
+Model category claim.
+
+## Top Performing Strategies by Horizon
+Model ranking claim.
+
+## AUM Distribution and Disclosure Analysis
+Model AUM claim.
+
+## Risk-Return Profile and Volatility
+Model volatility claim.
+
+## Strategic Implications and Market Outlook
+Model market prediction.
+
+## Source Coverage and Limitations
+Repeated source coverage paragraph.
+
+## Comparative Performance Analysis
+Model comparison claim.
+
+## Methodology and Derived Calculations
+Model methodology.
+
+## Data Quality and Integrity Audit
+Model quality claim.
+"""
+    report, changed = append_attachment_analytics_section(original, analytics)
+    report = rewrite_pms_report_sections(report, analytics, {"PMS_demo.xlsx": "S1"})
+    headings = re.findall(r"(?m)^##\s+(.+)$", report)
+
+    assert changed
+    assert "Market Snapshot: Jan 2026" not in report
+    assert "Source Coverage and Limitations" not in report
+    assert headings.count("Executive Summary") == 1
+    assert headings.count("Return Distribution and Risk Limits") == 1
+    assert headings.count("Interpretation and Scope") == 1
+    assert "not enough repeated return observations" in report
+    assert "within-strategy volatility" in report
+    assert "quarter-by-quarter sector returns" in report
+    assert "| Horizon | Records with values | Coverage | Mean return | Median return | Range |" in report
+    assert "| Category | Strategies with values | Mean 1-year return | Median 1-year return |" in report
+    assert headings.index("Executive Summary") < headings.index("Comparative Performance Analysis")
+    assert headings.index("Data Quality and Integrity Audit") < headings.index("Attached-data coverage")
 
 
 def test_pms_horizon_sections_are_rewritten_from_observed_rows_and_keep_charts():
@@ -742,3 +808,74 @@ Month,Region,Revenue
     assert "north.csv" not in north_row  # file name is kept in the coverage table
     assert "[S2]" not in north_row
     assert "[S1]" not in south_row
+
+
+def test_pms_model_chart_filter_removes_duplicate_rankings_and_misleading_horizon_trends():
+    from utils.uploaded_workbook_analytics import pms_model_chart_keep_mask
+    from routes.report import _remap_chart_placeholders
+
+    workbook_charts = [
+        {"chartRole": "strategy_ranking", "workbookMetric": "1 Yr", "title": "Top PMS Strategies by 1-Year Return"},
+        {
+            "chartRole": "snapshot_summary", "title": "PMS 1-year return averages by category (mean vs median)",
+            "series": [
+                {"name": "Mean 1-year return", "data": [
+                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.65},
+                    {"label": "LARGE CAP", "value": 6.89},
+                    {"label": "SMALL CAP", "value": -3.57},
+                    {"label": "MULTI ASSET", "value": 13.97},
+                ]},
+                {"name": "Median 1-year return", "data": [
+                    {"label": "MULTI CAP & FLEXI CAP", "value": 3.7},
+                    {"label": "LARGE CAP", "value": 7.225},
+                    {"label": "SMALL CAP", "value": -6.91},
+                    {"label": "MULTI ASSET", "value": 11.33},
+                ]},
+            ],
+        },
+    ]
+    model_charts = [
+        {"title": "Top 10 Strategies — 1-Year Returns", "type": "lollipop", "xLabel": "Return (%)", "yLabel": "Strategy",
+         "series": [{"name": "1-Yr Return", "data": [{"label": "Alpha", "value": 24.8}]}]},
+        {"title": "Mean Return Profile Across Horizons", "type": "spline", "xLabel": "Lookback Horizon",
+         "series": [{"name": "Mean", "data": [
+             {"label": "1 Mth", "value": -2.9}, {"label": "3 Mth", "value": -4.1},
+             {"label": "1 Yr", "value": 3.6}, {"label": "5 Yr", "value": 17.2},
+         ]}]},
+        {"title": "Median Return Profile by Horizon and Category", "type": "grouped_bar", "xLabel": "Category", "yLabel": "Median Return (%)",
+         "series": [{"name": "1-Year", "data": [
+             {"label": "Multi Cap", "value": 3.7}, {"label": "Large Cap", "value": 7.22},
+             {"label": "Small Cap", "value": -6.91}, {"label": "Multi Asset", "value": 11.33},
+         ]}]},
+        {"title": "Strategy Count by Investment Category", "type": "horizontal_bar", "series": [
+            {"name": "Strategies", "data": [{"label": "Large Cap", "value": 28}]},
+        ]},
+    ]
+
+    keep_mask, reasons = pms_model_chart_keep_mask(model_charts, workbook_charts)
+
+    assert keep_mask == [False, False, False, True]
+    assert "duplicate 1 Yr strategy ranking" in reasons[0]
+    assert "not a time series" in reasons[1]
+    assert "duplicate the deterministic" in reasons[2]
+    remapped = _remap_chart_placeholders(
+        "\n".join(f"[CHART_{i}]" for i in range(1, len(model_charts) + 1)), model_charts, keep_mask,
+    )
+    assert remapped.splitlines() == ["[CHART_1]"]
+
+
+def test_comparative_horizon_alias_replaces_unsupported_causal_prose():
+    analytics = build_attachment_analytics(_pms_context())
+    original = (
+        "## Comparative Horizon Analysis\n\n"
+        "Short-term Volatility vs. Long-term Stability\n"
+        "The 1-month and 3-month windows show a negative mean return across almost all equity categories, "
+        "likely reflecting a market-wide drawdown."
+    )
+
+    rewritten = rewrite_pms_report_sections(original, analytics)
+
+    assert "likely reflecting a market-wide drawdown" not in rewritten
+    assert "across almost all equity categories" not in rewritten
+    assert "The recognized horizons are separate lookbacks" in rewritten
+    assert "do not by themselves establish quarter-by-quarter sector rotation or explain causes" in rewritten

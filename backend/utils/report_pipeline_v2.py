@@ -53,6 +53,56 @@ class PipelineV2Error(RuntimeError):
     pass
 
 
+def _apply_section_body_transform(draft, section, transform, *, store, charts: list, covered: list[str]) -> bool:
+    """Apply a narrowly scoped post-write cleanup and refresh stale number diagnostics."""
+    if not callable(transform) or not getattr(draft, "ok", False):
+        return False
+    before_body, before_summary = draft.body, draft.summary
+    draft.body = str(transform(draft.body, section) or "")
+    draft.summary = str(transform(draft.summary, section) or "")
+    if draft.body == before_body and draft.summary == before_summary:
+        return False
+
+    from utils.section_writer import unsupported_numbers as _unsupported_numbers
+    from utils.section_charts import plain_number as _plain_number
+
+    def citation_passages(text: str) -> set[str]:
+        out = set()
+        for group in CITE_RE.findall(str(text or "")):
+            for token in re.split(r"\s*[,;]\s*", group):
+                token = token.strip().upper()
+                if "." in token:
+                    out.add(token)
+        return out
+
+    passage_ids = set(section.passage_ids)
+    for leaf in section.leaves():
+        passage_ids.update(leaf.passage_ids)
+    for chart in charts:
+        if chart.section_id == section.section_id:
+            passage_ids.update(chart.passage_ids)
+    passage_ids.update(citation_passages(draft.body))
+    passage_ids.update(citation_passages(draft.summary))
+    for line in covered:
+        passage_ids.update(citation_passages(line))
+    passage_texts = {
+        pid: passage.text for pid in passage_ids
+        if (passage := store.get(pid)) is not None
+    }
+    allowed_numbers = _number_set(passage_texts.values())
+    for chart in charts:
+        if chart.section_id != section.section_id:
+            continue
+        allowed_numbers |= _number_set(
+            f"{value:g} {_plain_number(value)}"
+            for _series, _label, value in chart.points
+        )
+    draft.cited_passages = sorted(citation_passages(draft.body))
+    draft.unsupported_numbers = _unsupported_numbers(draft.body, allowed_numbers, passage_texts)
+    draft.words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", draft.body)))
+    return True
+
+
 def enabled() -> bool:
     # Default since Stage E: V2 writes both modes. REPORT_PIPELINE_V2=0 rolls back to the single-call writer
     # (which also remains the automatic fallback when V2 fails, and the path for file-only reports).
@@ -417,7 +467,8 @@ def _chart_target(tier: str, outline, used: list) -> dict:
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
                           window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
                           chart_verifier=None, entity_search_stats: dict | None = None,
-                          evidence_auditor=None, deadline: tuple[float, float] | None = None) -> dict:
+                          evidence_auditor=None, deadline: tuple[float, float] | None = None,
+                          section_body_transform=None) -> dict:
     """``deadline``: (target, hard stop) as time.monotonic() values for the whole report job (in-depth:
     40 / 50 minutes). V2 keeps ~6 minutes for report.py's checks and the render after it."""
     started = time.perf_counter()
@@ -645,6 +696,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     import asyncio
     reserve = 6 * 60  # report.py checks, self-healing gates and the render run after V2
     wave_seconds: list[float] = []
+    section_transform_log: list[str] = []
     from utils.net_recovery import wait_budget as _wait_budget
     network_wait_left = _wait_budget()
     for start in range(0, len(analysis), wave_size):
@@ -691,6 +743,17 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                     results[i] = draft
                 log.warning("V2: rewrote %d section(s) after a network outage; %d recovered", len(lost),
                             sum(1 for d in retried if d.ok))
+        if callable(section_body_transform):
+            for section, draft in zip(wave, results):
+                try:
+                    transformed = _apply_section_body_transform(
+                        draft, section, section_body_transform, store=store, charts=planned, covered=covered,
+                    )
+                except Exception as exc:
+                    log.warning("V2 section transform skipped for '%s': %s", section.title[:100], type(exc).__name__)
+                    continue
+                if transformed:
+                    section_transform_log.append(section.title[:160])
         wave_seconds.append(time.monotonic() - wave_started)
         deadline_log["waves"].append({"sections": f"{start + 1}-{start + len(wave)}", "mode": mode,
                                       "seconds": round(wave_seconds[-1])})
@@ -1064,6 +1127,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             "numbersRewritten": [r for d in good for r in d.rewritten_numbers] + list(exec_policy.rewritten),
             "unresolvedTableValues": [t for d in good for t in d.unsupported_numbers] + exec_unsupported,
         },
+        "sectionBodyTransform": section_transform_log,
         "editorial": editorial.to_dict(),
         "evidenceCheck": {"removedClaims": [a for a in evidence_removed if a.get("action") != "rewritten"],
                           "rewrittenClaims": [a for a in evidence_removed if a.get("action") == "rewritten"],

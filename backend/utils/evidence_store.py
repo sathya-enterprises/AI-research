@@ -354,7 +354,21 @@ def build_evidence_store(rows: list[dict], *, question: str = "", manifest: list
         if not isinstance(row, dict):
             continue
         if manifest:
-            sid = id_for.get("url:" + str(row.get("url") or "").rstrip("/"), "")
+            sid = ""
+            explicit_sid = str(row.get("_canonicalEvidenceSourceId") or "").strip().upper()
+            if explicit_sid in manifest_by_id:
+                relation = manifest_by_id[explicit_sid]
+                row_origin = str(row.get("evidenceOrigin") or row.get("evidence_origin") or "").casefold()
+                manifest_origin = next((
+                    str(relation.get(key) or "").strip().casefold()
+                    for key in ("evidence_origin", "evidenceOrigin", "source_origin", "sourceOrigin")
+                    if str(relation.get(key) or "").strip().casefold()
+                    in {"uploaded_workbook", "uploaded_attachment"}
+                ), "")
+                if row_origin in {"uploaded_workbook", "uploaded_attachment"} and row_origin == manifest_origin:
+                    sid = explicit_sid
+            if not sid:
+                sid = id_for.get("url:" + str(row.get("url") or "").rstrip("/"), "")
             if not sid:
                 try:
                     from utils.source_identity import source_identity_key as _key

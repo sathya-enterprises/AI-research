@@ -74,7 +74,10 @@ from utils.chart_catalog import (
     chart_density_assessment, count_chart_points, chart_point_band,
 )
 from utils.markdown_normalizer import normalize_report_markdown, sanitize_inline_citations, strip_excluded_report_sections
-from routes.source_manifest import normalise_source_manifest, build_source_registry, ensure_cited_source_records, extract_source_citation_ids
+from routes.source_manifest import (
+    normalise_source_manifest, build_source_registry, ensure_cited_source_records, extract_source_citation_ids,
+    rebuild_source_registry_preserving_ids,
+)
 from utils.source_identity import canonical_http_url, source_identity_key
 from utils.chart_evidence_audit import (
     audit_chart_evidence_consistency, prune_unsupported_chart_points,
@@ -1039,6 +1042,114 @@ def _seed_uploaded_file_evidence(file_context: str, source_documents: list[dict]
             continue
         text = str(document.get("text") or document.get("extractedText") or "").strip()
         _record_uploaded_file_evidence(name, text, source_documents)
+
+
+def _register_attachment_analytics_evidence(analytics: dict, source_documents: list[dict]) -> int:
+    """Make the server-calculated attachment statistics verifiable evidence for their upload.
+
+    The writer is given these statistics (category means, ranges, counts, AUM totals) and the
+    attachment number check accepts them, but the evidence guard and chart gate only saw the raw
+    file rows, so they deleted correct values the server had calculated. Register the same
+    rendered analytics text with the upload: the guard reads the per-request upload registry and
+    the chart gate reads the upload's chartEvidenceExcerpt. Returns the number of files updated.
+    """
+    if not isinstance(analytics, dict):
+        return 0
+    try:
+        section = str(attachment_analytics_section(analytics) or "").strip()
+    except Exception as exc:
+        log.warning("Attachment analytics evidence skipped: %s", type(exc).__name__)
+        return 0
+    key_stats = " ".join(
+        f"{item.get('label')}: {item.get('value')}."
+        for item in (analytics.get("keyStats") or [])
+        if isinstance(item, dict) and item.get("label") and item.get("value") not in (None, "")
+    )
+    evidence = "\n\n".join(part for part in (section, key_stats) if part).strip()
+    if not evidence:
+        return 0
+    filenames = [
+        str(item.get("filename") or "").strip()
+        for item in list(analytics.get("files") or []) + list(analytics.get("additionalFiles") or [])
+        if isinstance(item, dict) and str(item.get("filename") or "").strip()
+    ]
+    evidence_texts = dict(_UPLOADED_FILE_EVIDENCE_TEXTS.get() or {})
+    updated = 0
+    for filename in dict.fromkeys(filenames):
+        key = _normalize_filename(filename)
+        if not key:
+            continue
+        prior = str(evidence_texts.get(key) or "")
+        if evidence not in prior:
+            evidence_texts[key] = f"{evidence}\n\n{prior}".strip()[:500_000]
+        document = next((
+            item for item in source_documents
+            if isinstance(item, dict)
+            and _normalize_filename(str(item.get("name") or item.get("title") or "")) == key
+        ), None)
+        if document is not None:
+            excerpt = str(document.get("chartEvidenceExcerpt") or "").strip()
+            if evidence not in excerpt:
+                combined = f"{excerpt}\n\n{evidence}".strip()
+                if len(combined) > 16_000:
+                    log.warning("Attachment analytics evidence for %s exceeds the 16,000-char chart excerpt; "
+                                "%d chars of analytics are not available to the chart gate",
+                                filename, len(combined) - 16_000)
+                document["chartEvidenceExcerpt"] = combined[:16_000]
+        updated += 1
+    _UPLOADED_FILE_EVIDENCE_TEXTS.set(evidence_texts)
+    return updated
+
+
+def _uploaded_evidence_rows_for_store(
+    source_manifest: list[dict], source_documents: list[dict],
+) -> list[dict]:
+    """Expose this request's uploaded text to passage retrieval under its canonical source ID."""
+    documents_by_name = {
+        _normalize_filename(str(item.get("name") or item.get("title") or "")): item
+        for item in source_documents if isinstance(item, dict)
+    }
+    cached_texts = _UPLOADED_FILE_EVIDENCE_TEXTS.get() or {}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for source in source_manifest:
+        if not isinstance(source, dict):
+            continue
+        origin = _explicit_uploaded_evidence_origin(source)
+        source_id = str(source.get("id") or "").strip().upper()
+        title = str(source.get("title") or source.get("name") or "").strip()
+        key = _normalize_filename(title)
+        if not origin or not source_id or not key or source_id in seen:
+            continue
+        document = documents_by_name.get(key) or {}
+        raw_text = str(
+            cached_texts.get(key)
+            or document.get("text")
+            or document.get("extractedText")
+            or ""
+        ).strip()
+        calculated_excerpt = str(
+            source.get("chartEvidenceExcerpt")
+            or document.get("chartEvidenceExcerpt")
+            or ""
+        ).strip()
+        parts = [raw_text] if raw_text else []
+        if calculated_excerpt and calculated_excerpt not in raw_text:
+            parts.append("Deterministic attachment calculations and row evidence:\n" + calculated_excerpt)
+        page_content = "\n\n".join(parts).strip()[:500_000]
+        if not page_content:
+            continue
+        rows.append({
+            "_canonicalEvidenceSourceId": source_id,
+            "title": title,
+            "pageContent": page_content,
+            "authorityTier": "unknown",
+            # The upload is direct user-provided evidence, but it has no
+            # independent publisher fetch or authority score.
+            "evidenceOrigin": origin,
+        })
+        seen.add(source_id)
+    return rows
 
 
 async def _fetch_okf_context(session_id: str, max_chars: int = 12000,
@@ -8722,18 +8833,29 @@ async def _build_strict_subject_search_queries(question: str, intent: "RequestIn
     return list(dict.fromkeys(re.sub(r"\s+", " ", query).strip() for query in queries if query.strip()))
 
 
-def _insert_sector_quarterly_return_matrix(report_text: str, rows: list, source_manifest: list) -> str:
+def _insert_sector_quarterly_return_matrix(
+    report_text: str, rows: list, source_manifest: list, *, insert_matrix: bool = True,
+) -> str:
     """Place the complete observed quarter-return matrix under its report section.
 
-    Existing model-written tables are accepted only when they cover every sector
-    present in the validated calculated dataset. A partial four-row table must
-    not suppress the complete 7/12-sector matrix merely because its header has
-    eight quarter labels.
+    Existing model-written tables are accepted only when every displayed value,
+    sector and period matches the validated calculated dataset. A partial or
+    fabricated table must not suppress the observed matrix merely because its
+    header has eight quarter labels.
     """
     if not isinstance(rows, list) or not rows:
         return report_text or ""
     quarters = next((r.get("quarters") for r in rows if isinstance(r, dict) and r.get("quarters")), [])
     if len(quarters) < 4:
+        return report_text or ""
+    source = next((
+        item for item in (source_manifest or [])
+        if isinstance(item, dict) and is_trusted_calculated_sector_source(item)
+        and re.fullmatch(r"S\d+", str(item.get("id") or ""), re.I)
+    ), None)
+    # The matrix is a public numeric claim. Do not emit it if the calculated
+    # dataset has no canonical, auditable source record.
+    if source is None:
         return report_text or ""
     text = report_text or ""
     expected_labels = [str(r.get("label") or "").strip() for r in rows if isinstance(r, dict) and r.get("label")]
@@ -8741,40 +8863,127 @@ def _insert_sector_quarterly_return_matrix(report_text: str, rows: list, source_
     def _norm_label(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
-    # Look for existing markdown sector tables. Keep them only if all rows from
-    # our actual calculated dataset are represented. Remove incomplete versions
-    # so the client doesn't see contradictory/partial matrices side by side.
+    try:
+        from utils.dataset_charts import fy_label as _sector_fy_label
+    except Exception:
+        _sector_fy_label = lambda value: value
+
+    def _header_quarter_indexes(headers: list[str]) -> list[int] | None:
+        indexes = []
+        for quarter in quarters:
+            allowed = {_norm_label(quarter), _norm_label(_sector_fy_label(str(quarter)))}
+            matches = [i for i, header in enumerate(headers) if _norm_label(header) in allowed]
+            if len(matches) != 1:
+                return None
+            indexes.append(matches[0])
+        return indexes
+
+    def _table_matches_data(block: list[str]) -> bool:
+        if len(block) < 3:
+            return False
+        cells = lambda line: [cell.strip() for cell in line.strip().strip("|").split("|")]
+        headers = cells(block[0])
+        column_indexes = _header_quarter_indexes(headers)
+        if column_indexes is None or len(headers) != len(quarters) + 1:
+            return False
+        if sorted(column_indexes) != list(range(1, len(quarters) + 1)):
+            return False
+        source_rows = {_norm_label(row.get("label")): row for row in rows
+                       if isinstance(row, dict) and row.get("label")}
+        observed_rows = {}
+        for line in block[2:]:
+            values = cells(line)
+            if values:
+                label = _norm_label(values[0])
+                if label in observed_rows:
+                    return False
+                observed_rows[label] = values
+        if not source_rows or set(source_rows) != set(observed_rows):
+            return False
+        for label, source_row in source_rows.items():
+            observed = observed_rows[label]
+            if len(observed) != len(headers):
+                return False
+            expected_values = list(source_row.get("returns") or [])
+            if len(expected_values) < len(quarters):
+                return False
+            for index, expected in zip(column_indexes, expected_values[:len(quarters)]):
+                if index >= len(observed):
+                    return False
+                cell = observed[index].strip()
+                if expected is None:
+                    if cell.casefold() not in {"", "n/a", "na", "not available", "—", "–", "-"}:
+                        return False
+                    continue
+                match = re.fullmatch(r"\s*([+\-−]?\s*\d[\d,]*(?:\.\d+)?)\s*%?\s*(?:\[[Ss]\d+\])?\s*", cell)
+                if not match:
+                    return False
+                try:
+                    actual = float(match.group(1).replace(",", "").replace("−", "-").replace(" ", ""))
+                    if abs(actual - float(expected)) > 0.011:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
+
+    # Replace model-written matrices unless their complete rows, headers and
+    # every value agree with the calculated source. Also remove mixed-window
+    # snapshot tables that appear under the rotation-map section.
     lines = text.splitlines()
     output: list[str] = []
     i = 0
     complete_existing = False
     removed_partial = False
+    current_heading = ""
+    rotation_section_re = re.compile(
+        r"(?i)\b(?:sector|market)\b.*\b(?:rotation|performance|return|matrix|leadership)\b|"
+        r"\b(?:rotation map|quarterly sector|sector return matrix)\b"
+    )
+    temporal_header_re = re.compile(
+        r"(?i)\b(?:Q[1-4]|FY\s*\d{2,4}|quarter|QTD|YTD|as of|snapshot|retrieved|updated|"
+        r"\d+\s*(?:M|W|D|mo|month|week|day|Y|yr|year))\b"
+    )
     while i < len(lines):
         line = lines[i]
+        heading = re.match(r"^\s*#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if heading:
+            current_heading = heading.group(1).strip()
         is_sector_header = bool(re.match(r"^\s*\|\s*(?:sector(?:\s+index)?|index(?:\s+name)?)\s*\|", line, re.I))
-        quarter_columns = sum(1 for q in quarters if re.search(re.escape(str(q)), line, re.I)) if is_sector_header else 0
-        if is_sector_header and quarter_columns >= min(4, len(quarters)):
+        header_cells = [cell.strip() for cell in line.strip().strip("|").split("|")] if is_sector_header else []
+        quarter_columns = _header_quarter_indexes(header_cells) if header_cells else None
+        is_rotation_section = bool(rotation_section_re.search(current_heading))
+        mixed_or_partial_period_table = bool(
+            is_sector_header and is_rotation_section and (
+                temporal_header_re.search(line)
+                or re.search(r"(?i)\b(?:return|performance)\b", line)
+            )
+        )
+        if is_sector_header and is_rotation_section and (quarter_columns is not None or mixed_or_partial_period_table):
             block = [line]
             j = i + 1
             if j < len(lines) and "|" in lines[j]:
                 block.append(lines[j]); j += 1
             while j < len(lines) and "|" in lines[j] and lines[j].strip():
                 block.append(lines[j]); j += 1
-            observed_cells = []
-            for table_line in block[2:]:
-                if not table_line.lstrip().startswith("|"):
-                    continue
-                observed_cells.append(table_line.strip().strip("|").split("|")[0].strip())
-            observed = {_norm_label(x) for x in observed_cells}
-            missing_expected = [label for label in expected_labels if _norm_label(label) not in observed]
-            if not missing_expected:
+            if _table_matches_data(block):
                 complete_existing = True
                 output.extend(block)
             else:
                 removed_partial = True
-                output.append("<!-- Incomplete model sector-return matrix removed; complete observed matrix follows. -->")
-                log.warning("Report: replaced incomplete model sector-return matrix (%d/%d expected sector rows found)",
-                            len(expected_labels) - len(missing_expected), len(expected_labels))
+                if output and not output[-1].strip():
+                    output.pop()
+                if output and re.match(r"^\s*\*\*\s*Table\b", output[-1], re.I):
+                    output.pop()
+                log.warning(
+                    "Report: removed an inaccurate or mixed-period sector table; using the calculated full-window matrix "
+                    "(%d rows, %d quarters)", len(expected_labels), len(quarters),
+                )
+                # The source line immediately after a removed generated table
+                # belongs to that table; do not leave an orphan citation row.
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines) and re.match(r"^\s*Sources?\s*:", lines[j], re.I):
+                    j += 1
             i = j
             continue
         output.append(line)
@@ -8786,12 +8995,13 @@ def _insert_sector_quarterly_return_matrix(report_text: str, rows: list, source_
     else:
         text = text
 
-    source = next((s for s in (source_manifest or []) if isinstance(s, dict) and (
-        "CALCULATED NSE SECTOR RETURNS" in str(s.get("title") or "").upper()
-        or str(s.get("evidence_origin") or s.get("evidenceOrigin") or "").casefold()
-        == "calculated_from_daily_market_data"
-    )), None)
-    sid = str(source.get("id") or "") if source else ""
+    # V2 calls this in section drafts before number and source checks. At that
+    # stage remove a mixed-window table only; the complete calculated matrix is
+    # inserted once later, after the report sections have been assembled.
+    if not insert_matrix:
+        return text
+
+    sid = str(source.get("id") or "")
     citation = f" [{sid}]" if re.fullmatch(r"S\d+", sid, re.I) else ""
     table_lines = [
         "| Sector index | " + " | ".join(str(q) for q in quarters) + " |",
@@ -8808,12 +9018,21 @@ def _insert_sector_quarterly_return_matrix(report_text: str, rows: list, source_
     missing = [f"{r.get('label')}: {', '.join(r.get('missing_quarters') or [])}" for r in rows
                if isinstance(r, dict) and r.get("missing_quarters")]
     block = "Quarterly sector-index returns (calculated from observed quarter-end closes; N/A means unavailable, not estimated)." + citation + "\n\n" + "\n".join(table_lines)
+    try:
+        from utils.dataset_charts import fy_label as _sector_fy_label
+        crosswalk = [f"{quarter} = {_sector_fy_label(str(quarter))}" for quarter in quarters]
+        block += "\n\nIndian fiscal-quarter crosswalk: " + "; ".join(crosswalk) + "."
+    except Exception:
+        # The table remains valid with its explicit calendar-quarter labels if
+        # the optional display-label helper is unavailable.
+        pass
     if missing:
         block += "\n\nMissing observations: " + "; ".join(missing) + "."
     block += "\n\n"
 
     heading = re.search(
-        r"(?im)^(#{1,6})\s+[^\n]*(?:quarterly[ -]sector[ -]?return matrix|sector performance matrix|quarterly sector return analysis|sector return matrix)[^\n]*$",
+        r"(?im)^(#{1,6})\s+[^\n]*(?:quarterly[ -]sector[ -]?return matrix|sector performance matrix|"
+        r"quarterly sector return analysis|sector return matrix|eight[ -]?quarter|rotation\s+map|sector[ -]+rotation)[^\n]*$",
         text,
     )
     if not heading:
@@ -8837,7 +9056,11 @@ def _is_sector_quarterly_return_chart(chart: object) -> bool:
     if not isinstance(chart, dict):
         return False
     title = str(chart.get("title") or chart.get("name") or "").casefold()
-    sector_return_title = ("sector" in title and "return" in title and "quarter" in title)
+    sector_return_title = (
+        re.search(r"(?i)\b(?:sector|nse|nifty)\b", title)
+        and re.search(r"(?i)\b(?:return|performance)\b", title)
+        and re.search(r"(?i)\bquarter(?:ly)?\b", title)
+    )
     if "nse sector returns by completed calendar quarter" not in title and not sector_return_title:
         return False
     series = chart.get("series") if isinstance(chart.get("series"), list) else []
@@ -8909,18 +9132,19 @@ def _build_sector_quarterly_return_chart(rows: list, source_manifest: list) -> d
 # belong to. The writer's planner names sections freely ("Quarterly Sectoral
 # Leadership Heatmap"), so match on intent words rather than exact titles.
 _SECTOR_HEATMAP_HEADING_RE = (
-    r"(?im)^#{1,6}\s+[^\n]*(?:heat[ -]?map|sector(?:al)?\s+leadership|"
+    r"(?im)^#{1,6}\s+[^\n]*(?:heat[ -]?map|eight[ -]?quarter|rotation\s+map|sector[ -]+rotation|sector(?:al)?\s+leadership|"
     r"quarterly\s+sector(?:al)?\s+(?:leadership|performance|return))[^\n]*$"
 )
 _SECTOR_QUARTERLY_HEADING_RE = (
     r"(?im)^#{1,6}\s+[^\n]*(?:eight[ -]?quarter|quarterly[ -]sector[ -]?return matrix|"
     r"sector performance matrix|quarterly sector return analysis|sector return matrix|"
-    r"quarterly\s+sector(?:al)?|sector(?:al)?\s+(?:leadership|performance|rotation\s+(?:pattern|history|timeline)))"
+    r"rotation\s+map|sector[ -]+rotation|quarterly\s+sector(?:al)?|"
+    r"sector(?:al)?\s+(?:leadership|performance|rotation\s+(?:pattern|history|timeline)))"
     r"[^\n]*$"
 )
 _SECTOR_RANKING_HEADING_RE = (
     r"(?im)^#{1,6}\s+[^\n]*(?:leaders?\s*(?:and|&)\s*laggards?|sector\s+rankings?|"
-    r"rotation\s+patterns?|leadership|cumulative|compounded)[^\n]*$"
+    r"rotation\s+(?:map|patterns?)|leadership|cumulative|compounded)[^\n]*$"
 )
 
 
@@ -9107,7 +9331,67 @@ def _is_sector_rotation_report_request(question: str) -> bool:
     ))
 
 
-def _sector_rotation_topic_quality_filter(report_text: str, charts: list) -> tuple[str, list, dict]:
+def _requested_sector_quarter_count(question: str) -> int | None:
+    """Read an explicit quarter count from a sector-rotation request."""
+    match = re.search(
+        r"(?i)\b(?:(?:past|last|previous|prior|preceding)\s+)?"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+        r"(?:completed\s+)?quarters?\b",
+        str(question or ""),
+    )
+    if not match:
+        return None
+    token = match.group(1).casefold()
+    words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+    try:
+        return int(token) if token.isdigit() else words[token]
+    except (KeyError, ValueError):
+        return None
+
+
+def _is_multi_quarter_sector_rotation_request(question: str) -> bool:
+    count = _requested_sector_quarter_count(question)
+    return _is_sector_rotation_report_request(question) and count is not None and count >= 4
+
+
+def _chart_has_historical_period_axis(chart: dict) -> bool:
+    """Recognize a real multi-period axis, including Indian fiscal-quarter labels."""
+    labels: list[str] = []
+    for key in ("columns", "labels", "categories"):
+        values = chart.get(key)
+        if isinstance(values, list):
+            labels.extend(str(value or "") for value in values)
+    for series in chart.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        points = series.get("data") if isinstance(series.get("data"), list) else series.get("values")
+        for point in points or []:
+            if isinstance(point, dict):
+                labels.append(str(point.get("label") or point.get("period") or point.get("date") or point.get("x") or ""))
+    quarter_labels = {
+        match.group(0).casefold()
+        for label in labels
+        for match in re.finditer(r"(?i)\bQ[1-4]\s+(?:FY\s*)?(?:20)?\d{2}\b", label)
+    }
+    if len(quarter_labels) >= 4:
+        return True
+    month_labels = {
+        match.group(0).casefold()
+        for label in labels
+        for match in re.finditer(
+            r"(?i)\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+            r"[\s,/-]*20\d{2}\b|\b20\d{2}[-/]\d{1,2}\b",
+            label,
+        )
+    }
+    return len(month_labels) >= 6
+
+
+def _sector_rotation_topic_quality_filter(
+    report_text: str, charts: list, question: str = "",
+) -> tuple[str, list, dict]:
     """Remove generic/non-sector charts and duplicate chart specs for sector-rotation reports.
 
     This is intentionally deterministic: chart titles and payload labels must be
@@ -9165,7 +9449,7 @@ def _sector_rotation_topic_quality_filter(report_text: str, charts: list) -> tup
         if not is_irrelevant:
             _ctype = normalize_chart_type(chart.get("type") or chart.get("chartType") or chart.get("chart_type") or "")
             _series = chart.get("series") if isinstance(chart.get("series"), list) else []
-            _quarter_re = re.compile(r"Q[1-4]\s+20\d{2}", re.I)
+            _quarter_re = re.compile(r"Q[1-4]\s+(?:FY\s*)?(?:20)?\d{2}", re.I)
             # This report's required heatmap is the requested eight-quarter
             # matrix. A lifecycle heatmap spanning 2015/COVID/2023 is not a
             # substitute for Q4 2024–Q3 2026 sector returns.
@@ -9202,6 +9486,27 @@ def _sector_rotation_topic_quality_filter(report_text: str, charts: list) -> tup
                 _flat = len(_all_numeric) >= 3 and (max(_all_numeric) - min(_all_numeric)) < 1e-9
                 if not _has_quarter_axis or _flat:
                     is_irrelevant = True
+        if not is_irrelevant and _is_multi_quarter_sector_rotation_request(question):
+            title_and_description = " ".join((
+                title, str(chart.get("description") or ""), str(chart.get("xLabel") or ""),
+                str(chart.get("yLabel") or ""),
+            ))
+            has_period_axis = _chart_has_historical_period_axis(chart)
+            is_compounded_window = bool(
+                re.search(r"(?i)\b(?:compounded|cumulative)\b", title_and_description)
+                and re.search(r"(?i)\b(?:quarters?|years?|period)\b", title_and_description)
+            )
+            is_snapshot = bool(re.search(
+                r"(?i)\b(?:as of|snapshot|retrieved|updated)\b|\b(?:QTD|quarter[- ]to[- ]date|"
+                r"daily|day return|weekly|week return|1[- ]?month|one[- ]month|"
+                r"1[- ]?year|one[- ]year|YTD|year[- ]to[- ]date)\b",
+                title_and_description,
+            ))
+            # A single-date/short-horizon ranking cannot stand in for the
+            # requested completed-quarter history. Retain genuine time series
+            # (including monthly flow series) and calculated compound returns.
+            if is_snapshot and not has_period_axis and not is_compounded_window:
+                is_irrelevant = True
         if is_irrelevant or fingerprint in seen:
             removed_titles.append(title or f"Chart {old_index}")
             continue
@@ -9311,6 +9616,85 @@ def _build_sector_quarterly_return_heatmap(rows: list, source_manifest: list) ->
         "source": [str(source["id"])],
         "evidenceBasis": "calculated",
         "basisNote": "Quarterly returns calculated from observed month-end index closes; missing values remain blank.",
+    }
+
+
+def _is_sector_compounded_return_chart(chart: object) -> bool:
+    if not isinstance(chart, dict):
+        return False
+    title = str(chart.get("title") or chart.get("name") or "").casefold()
+    if not re.search(r"\bcompounded\b", title):
+        return False
+    if re.search(r"\bsector\b", title):
+        return True
+    return any(
+        isinstance(point, dict) and re.search(r"(?i)\bNIFTY\b", str(point.get("label") or ""))
+        for series in (chart.get("series") or []) if isinstance(series, dict)
+        for point in (series.get("data") or []) if isinstance(point, dict)
+    )
+
+
+def _ensure_calculated_sector_rotation_visuals(
+    report_text: str,
+    charts: list,
+    quarterly_rows: list,
+    source_manifest: list,
+    question: str,
+) -> tuple[str, list, dict]:
+    """Anchor source-backed quarter, compound-ranking and heatmap views in a market report."""
+    if not _is_sector_rotation_report_request(question) or not isinstance(quarterly_rows, list) or not quarterly_rows:
+        return str(report_text or ""), list(charts or []), {"added": [], "replaced": []}
+
+    text = _insert_sector_quarterly_return_matrix(report_text, quarterly_rows, source_manifest)
+    result = list(charts or [])
+    added: list[str] = []
+    replaced: list[str] = []
+
+    def use_calculated_chart(calculated: dict | None, predicate, heading_pattern: str) -> None:
+        nonlocal text, result
+        if not isinstance(calculated, dict):
+            return
+        indices = [i for i, chart in enumerate(result) if predicate(chart)]
+        if indices:
+            index = indices[0]
+            previous = result[index]
+            editorial = {
+                key: previous[key]
+                for key in ("rationale", "takeaway")
+                if isinstance(previous, dict) and str(previous.get(key) or "").strip()
+            }
+            result[index] = {**previous, **calculated, **editorial}
+            for duplicate_index in indices[1:]:
+                result[duplicate_index] = None
+            replaced.append(str(calculated.get("title") or "calculated chart"))
+            chart_index = index + 1
+        else:
+            result.append(calculated)
+            chart_index = len(result)
+            added.append(str(calculated.get("title") or "calculated chart"))
+        text = _insert_sector_chart_marker(text, chart_index, heading_pattern)
+
+    quarterly_chart = _build_sector_quarterly_return_chart(quarterly_rows, source_manifest)
+    use_calculated_chart(quarterly_chart, _is_sector_quarterly_return_chart, _SECTOR_QUARTERLY_HEADING_RE)
+
+    compounded_chart = _build_sector_compounded_return_chart(quarterly_rows, source_manifest)
+    use_calculated_chart(compounded_chart, _is_sector_compounded_return_chart, _SECTOR_RANKING_HEADING_RE)
+
+    heatmap = _build_sector_quarterly_return_heatmap(quarterly_rows, source_manifest)
+    if heatmap:
+        previous_count = len(result)
+        text, result = _use_calculated_sector_return_heatmap(text, result, heatmap)
+        if len(result) > previous_count:
+            added.append(str(heatmap.get("title") or "calculated sector heatmap"))
+        else:
+            replaced.append(str(heatmap.get("title") or "calculated sector heatmap"))
+
+    text, result, topic_filter = _sector_rotation_topic_quality_filter(text, result, question=question)
+    return text, result, {
+        "added": added,
+        "replaced": replaced,
+        "removed": list(topic_filter.get("removedCharts") or []),
+        "kept": int(topic_filter.get("keptCharts") or len(result)),
     }
 
 
@@ -19437,8 +19821,7 @@ def _report_body_from_value(value: object, *, _seen: set[int] | None = None) -> 
     if _seen is None:
         _seen = set()
     if isinstance(value, str):
-        candidate = value.replace("\
-", "\n").strip()
+        candidate = value.replace("\\n", "\n").strip()
         if candidate.startswith(("{", "[")):
             try:
                 nested = json.loads(candidate, strict=False)
@@ -19544,8 +19927,7 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         try:
             value = json.loads('"' + value + '"', strict=False)
         except Exception:
-            value = value.replace("\
-", "\n").replace('\\"', '"')
+            value = value.replace("\\n", "\n").replace('\\"', '"')
         if isinstance(value, str) and len(value.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
             field_candidates.append(value.strip())
     if field_candidates:
@@ -19573,10 +19955,8 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         if fragment.endswith('"'):
             fragment = fragment[:-1]
         fragment = (
-            fragment.replace('\\r\
-', '\n')
-            .replace('\
-', '\n')
+            fragment.replace('\\r\\n', '\n')
+            .replace('\\n', '\n')
             .replace('\\t', '\t')
             .replace('\\"', '"')
             .replace('\\\\', '\\')
@@ -19598,8 +19978,7 @@ def _recover_report_body(raw: str, parsed: dict | None = None) -> str:
         try:
             decoded_reports.append(json.loads('"' + encoded + '"', strict=False))
         except Exception:
-            decoded_reports.append(encoded.replace("\
-", "\n").replace('\\"', '"'))
+            decoded_reports.append(encoded.replace("\\n", "\n").replace('\\"', '"'))
     if decoded_reports:
         best_encoded = max((x for x in decoded_reports if isinstance(x, str)), key=len, default="")
         if len(best_encoded.strip()) >= _MIN_VALID_REPORT_BODY_CHARS:
@@ -21947,6 +22326,11 @@ async def generate_report(request: Request):
                             else "Uploaded attachment"
                         ),
                     })
+            # One evidence basis for every number check: the calculated statistics the writer is
+            # given are also what the evidence guard and chart gate verify against.
+            _analytics_evidence_files = _register_attachment_analytics_evidence(workbook_analytics, source_documents)
+            if _analytics_evidence_files:
+                log.info("Attachment analytics registered as upload evidence for %d file(s)", _analytics_evidence_files)
             log.info(
                 "Attachment-first report mode enabled; kind=%s rows=%d deterministic_charts=%d files=%d",
                 workbook_analytics.get("kind"),
@@ -23674,9 +24058,18 @@ async def generate_report(request: Request):
     evidence_store = None
     try:
         from utils.evidence_store import build_evidence_store
-        evidence_store = build_evidence_store(enriched, question=question, manifest=source_manifest)
+        # Uploaded attachments are canonical sources too. Add their current
+        # request text before older/retrieved rows so the store cannot resolve
+        # the same source ID to stale session content.
+        _uploaded_store_rows = _uploaded_evidence_rows_for_store(source_manifest, source_documents)
+        evidence_store = build_evidence_store(
+            [*_uploaded_store_rows, *enriched], question=question, manifest=source_manifest,
+        )
         log.info("Report: evidence store passages=%d sources=%d mean_reliability=%.3f",
                  len(evidence_store.passages), len(evidence_store.source_ids()), evidence_store.mean_reliability())
+        if _uploaded_store_rows:
+            log.info("Report: indexed current attachment evidence for %d canonical upload source(s)",
+                     len(_uploaded_store_rows))
         record_research_stage("evidence_store", {**evidence_store.capture_summary(),
                                                  "sourceSummary": evidence_store.source_summary(),
                                                  # Keyed dict (not a list) so the capture keeps every
@@ -24422,7 +24815,7 @@ async def generate_report(request: Request):
                     )
                     if _entity_rows:
                         enriched = _dedupe_enriched_sources(enriched + _entity_rows)
-                        source_manifest = build_source_registry(enriched, source_documents)
+                        source_manifest = rebuild_source_registry_preserving_ids(source_manifest, enriched, source_documents)
                         from utils.evidence_store import build_evidence_store as _rebuild_store
                         evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
                         _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names, scope=_mp_scope)
@@ -24451,7 +24844,7 @@ async def generate_report(request: Request):
                             _agent_note["pagesKept"] = len(_fetched)
                             if _fetched:
                                 enriched = _dedupe_enriched_sources(enriched + _fetched)
-                                source_manifest = build_source_registry(enriched, source_documents)
+                                source_manifest = rebuild_source_registry_preserving_ids(source_manifest, enriched, source_documents)
                                 from utils.evidence_store import build_evidence_store as _rebuild_store
                                 evidence_store = _rebuild_store(enriched, question=question, manifest=source_manifest)
                                 _v2_tiers = _entity_tiers(evidence_store, tier=report_tier, question=question, seeds=_mp_seed_names, scope=_mp_scope)
@@ -24481,6 +24874,21 @@ async def generate_report(request: Request):
                 _past_n_quarters_anchor(question, _v2_today),
                 locals().get("_measure_plan"), has_uploaded_data=_has_uploaded_data,
             )
+            _v2_section_body_transform = None
+            _v2_sector_rows = locals().get("quarterly_rows") or []
+            if (not file_only_report and _is_sector_rotation_report_request(question)
+                    and isinstance(_v2_sector_rows, list) and _v2_sector_rows):
+                def _v2_section_body_transform(body, section):
+                    # Section writers omit the H2 heading from their body. Add
+                    # it while removing model-made mixed-period sector tables,
+                    # then strip it again; the verified matrix is inserted once
+                    # after all sections have been assembled.
+                    prefix = f"## {str(getattr(section, 'title', '') or 'Sector rotation')}\n\n"
+                    cleaned = _insert_sector_quarterly_return_matrix(
+                        prefix + str(body or ""), _v2_sector_rows, source_manifest, insert_matrix=False,
+                    )
+                    return cleaned[len(prefix):].strip() if cleaned.startswith(prefix) else cleaned
+
             _v2_result = await run_pipeline_v2(
                 runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
                 manifest=source_manifest, today=_v2_today.isoformat(),
@@ -24492,6 +24900,7 @@ async def generate_report(request: Request):
                 evidence_auditor=_v2_manifest_auditor(source_manifest, enriched),
                 # Stage H: in-depth runtime deadline from job start (target 40 min, hard stop 50 min).
                 deadline=((_job_started_at + 40 * 60, _job_started_at + 50 * 60) if report_tier == "in_depth" else None),
+                section_body_transform=_v2_section_body_transform,
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
@@ -26395,42 +26804,23 @@ async def generate_report(request: Request):
                     audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
                     record_research_stage("promoter_transaction_ledger", _promoter_ledger_meta)
 
-        # Sector-rotation report: force the actual calculated matrix and chart
-        # into the final artifact before the last validation pass.
-        if sector_rotation_request and not _v2_used:
-            report_text = _insert_sector_quarterly_return_matrix(
-                report_text, quarterly_rows, source_manifest,
+        # The calculated market-data matrix is an ordinary evidence source in
+        # web-researched reports. Apply the same final chart repair when V2 ran;
+        # workbook-only reports stay bound to their attached-file evidence.
+        if sector_rotation_request and not file_only_report:
+            report_text, charts, _sector_visuals = _ensure_calculated_sector_rotation_visuals(
+                report_text, charts, quarterly_rows, source_manifest, question,
             )
-            _quarter_chart = _build_sector_quarterly_return_chart(quarterly_rows, source_manifest)
-            if _quarter_chart and not any(_is_sector_quarterly_return_chart(c) for c in (charts or [])):
-                charts = list(charts or []) + [_quarter_chart]
-                report_text = _insert_sector_chart_marker(
-                    report_text, len(charts), _SECTOR_QUARTERLY_HEADING_RE,
+            if _sector_visuals.get("added") or _sector_visuals.get("replaced"):
+                log.info(
+                    "Sector-rotation quality gate ensured calculated visuals: added=%d replaced=%d; "
+                    "quarterly_rows=%d quarters=%d",
+                    len(_sector_visuals.get("added") or []), len(_sector_visuals.get("replaced") or []),
+                    len(quarterly_rows), len(quarterly_rows[0].get("quarters") or []) if quarterly_rows else 0,
                 )
-                log.info("Sector-rotation quality gate injected verified quarterly chart (%d sectors, %d quarters)",
-                         len(_quarter_chart.get("series") or []), len(quarterly_rows[0].get("quarters") or []))
-            _compound_chart = _build_sector_compounded_return_chart(quarterly_rows, source_manifest)
-            if _compound_chart and not any(str(c.get("title") or "").casefold().startswith("compounded sector return across")
-                                            for c in (charts or []) if isinstance(c, dict)):
-                charts = list(charts or []) + [_compound_chart]
-                _compound_marker = f"[CHART_{len(charts)}]"
-                report_text = _insert_sector_chart_marker(
-                    report_text, len(charts), _SECTOR_RANKING_HEADING_RE,
-                )
-                log.info("Sector-rotation quality gate injected evidence-linked compounded-return ranking (%d fully covered sectors)",
-                         len((_compound_chart.get("series") or [{}])[0].get("data") or []))
-            _quarter_heatmap = _build_sector_quarterly_return_heatmap(quarterly_rows, source_manifest)
-            if _quarter_heatmap:
-                report_text, charts = _use_calculated_sector_return_heatmap(
-                    report_text, list(charts or []), _quarter_heatmap,
-                )
-                log.info("Sector-rotation quality gate injected evidence-linked quarterly heatmap (%d sectors, %d quarters)",
-                         len(_quarter_heatmap.get("rows") or []), len(_quarter_heatmap.get("columns") or []))
-            report_text, charts, _topic_chart_filter = _sector_rotation_topic_quality_filter(report_text, charts)
-            if _topic_chart_filter.get("removedCharts"):
-                log.warning("Sector-rotation relevance gate removed %d off-topic/duplicate charts: %s",
-                            len(_topic_chart_filter["removedCharts"]),
-                            "; ".join(_topic_chart_filter["removedCharts"][:8]))
+            if _sector_visuals.get("removed"):
+                log.info("Sector-rotation relevance gate removed %d off-window/snapshot/off-topic chart(s): %s",
+                         len(_sector_visuals["removed"]), "; ".join(_sector_visuals["removed"][:8]))
 
         # Final publication gate runs after deterministic hygiene and before the
         # independent audit. Re-validate the exact objects that will be returned.

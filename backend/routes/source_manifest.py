@@ -557,3 +557,46 @@ def build_source_registry(
     elif isinstance(additional_sources, dict):
         combined.append(additional_sources)
     return normalise_source_manifest(combined, source_documents)
+
+
+def rebuild_source_registry_preserving_ids(
+    previous_manifest: object,
+    sources: object,
+    source_documents: object = None,
+) -> list[dict]:
+    """Rebuild the registry from the current source rows without renumbering any existing source.
+
+    A plain rebuild numbers web rows first and uploads after them, so adding web pages mid-run
+    (entity search, gap agent) moved an upload from S6 to S7 and gave its old ID to a new page,
+    while prompts, chart plans and parent links still used S6. Records are rebuilt fresh (so
+    fetch status and evidence metadata stay current); each keeps the ID its identity had before,
+    new sources get IDs after the previous maximum, and a previous source that no longer appears
+    keeps its record so earlier references still resolve.
+    """
+    previous = [item for item in (previous_manifest if isinstance(previous_manifest, list) else [])
+                if isinstance(item, dict) and _ID_RE.fullmatch(str(item.get("id") or "").upper())]
+    fresh = build_source_registry(sources, source_documents)
+    if not previous:
+        return fresh
+    previous_ids: dict[str, str] = {}
+    for item in previous:
+        identity = source_identity_key(item)
+        if identity and identity not in previous_ids:
+            previous_ids[identity] = str(item["id"]).upper()
+    next_num = _next_id(previous)
+    assigned: set[str] = set()
+    result: list[dict] = []
+    for entry in fresh:
+        source_id = previous_ids.get(source_identity_key(entry), "")
+        if not source_id or source_id in assigned:
+            source_id = f"S{next_num}"
+            next_num += 1
+        assigned.add(source_id)
+        result.append({**entry, "id": source_id})
+    for item in previous:
+        source_id = str(item["id"]).upper()
+        if source_id not in assigned:
+            assigned.add(source_id)
+            result.append(dict(item))
+    result.sort(key=lambda item: int(str(item["id"])[1:]))
+    return result

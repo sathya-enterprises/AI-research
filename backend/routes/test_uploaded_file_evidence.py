@@ -56,3 +56,34 @@ def test_upload_source_keeps_file_provenance_without_publisher_authority():
     assert merged["authority_tier"] == "unknown"
     assert merged["reliability_score"] is None
     assert "not independently publisher-verified" in merged["reliability_note"]
+
+
+def test_current_upload_rows_enter_the_passage_store_under_their_manifest_source_id():
+    from utils.evidence_store import build_evidence_store
+
+    name = "metrics.xlsx"
+    token = report._UPLOADED_FILE_EVIDENCE_TEXTS.set({
+        report._normalize_filename(name): (
+            "[Sheet: Performance]\n"
+            "| Fund | 1 Yr Return (%) |\n|---|---|\n| Alpha Growth | 24.8% |\n"
+            "| Beta Balanced | 19.0% |\n"
+        ),
+    })
+    try:
+        manifest = [{
+            "id": "S1", "title": name, "url": "",
+            "evidence_origin": "uploaded_workbook", "page_fetch_status": "not_applicable",
+            "chartEvidenceExcerpt": "Derived median return: 21.9% across 2 strategies.",
+        }]
+        documents = [{"name": name, "text": "fallback upload text"}]
+        rows = report._uploaded_evidence_rows_for_store(manifest, documents)
+        store = build_evidence_store(rows, question="1-year strategy return", manifest=manifest)
+
+        assert rows[0]["_canonicalEvidenceSourceId"] == "S1"
+        assert store.source_ids() == ["S1"]
+        assert store.passages
+        assert any("Alpha Growth" in passage.text for passage in store.passages)
+        assert any("Derived median return" in passage.text for passage in store.passages)
+        assert all(passage.kind == "calculated" for passage in store.passages)
+    finally:
+        report._UPLOADED_FILE_EVIDENCE_TEXTS.reset(token)

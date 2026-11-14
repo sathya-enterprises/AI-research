@@ -75,10 +75,81 @@ def _category_words(value: object) -> set[str]:
 
 def _close_chart_value(left: object, right: object) -> bool:
     try:
-        a, b = float(left), float(right)
+        a = float(str(left).replace(",", "").strip().rstrip("%"))
+        b = float(str(right).replace(",", "").strip().rstrip("%"))
     except (TypeError, ValueError):
         return False
     return abs(a - b) <= max(0.01, abs(b) * 0.002)
+
+
+def _quantile(values: list[float], fraction: float) -> float:
+    """Linear-interpolated quantile, stable for small as well as large samples."""
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        raise ValueError("quantile requires at least one value")
+    position = min(1.0, max(0.0, float(fraction))) * (len(ordered) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _normalized_chart_point_label(point: dict) -> str:
+    label = str(point.get("label") or point.get("name") or point.get("x") or "").strip()
+    period = _return_period_alias(label)
+    if period:
+        return f"period:{period}"
+    words = _category_words(label)
+    return "label:" + " ".join(sorted(words)) if words else ""
+
+
+def _chart_topic(chart: dict) -> str:
+    series = _chart_series(chart)
+    descriptor = " ".join([
+        str(chart.get("title") or ""), str(chart.get("xLabel") or ""),
+        str(chart.get("yLabel") or ""),
+        *(str(item.get("name") or "") for item in series),
+    ])
+    words = _chart_words(descriptor)
+    if "aum" in words or "assets under management" in words:
+        return "aum"
+    if "category" in words or "categories" in words or "categorical" in words:
+        return "category"
+    if "benchmark" in words or "benchmarks" in words:
+        return "benchmark"
+    if ("top" in words or "rank" in words) and ("strategy" in words or "strategies" in words):
+        return "strategy_ranking"
+    period_labels = sum(
+        bool(_return_period_alias(point.get("label") or point.get("name") or point.get("x")))
+        for item in series for point in _chart_points(item)
+    )
+    if "horizon" in words or "distribution" in words or period_labels >= 2:
+        return "return_horizon"
+    return ""
+
+
+def _series_observations_match(left: dict, right: dict) -> bool:
+    left_points = _chart_points(left)
+    right_points = _chart_points(right)
+    if len(left_points) < 3 or len(right_points) < 3:
+        return False
+    by_label: dict[str, list[tuple[int, object]]] = {}
+    for index, point in enumerate(right_points):
+        label = _normalized_chart_point_label(point)
+        if label:
+            by_label.setdefault(label, []).append((index, point.get("value", point.get("y"))))
+    used: set[int] = set()
+    matched = 0
+    for point in left_points:
+        label = _normalized_chart_point_label(point)
+        if not label:
+            continue
+        for index, value in by_label.get(label, []):
+            if index not in used and _close_chart_value(point.get("value", point.get("y")), value):
+                used.add(index)
+                matched += 1
+                break
+    return matched >= 3 and matched / len(left_points) >= 0.75
 
 
 def _duplicates_category_medians(chart: dict, workbook_charts: list[dict]) -> bool:
@@ -130,6 +201,34 @@ def _duplicates_category_medians(chart: dict, workbook_charts: list[dict]) -> bo
                     matched += 1
                     break
         if matched >= 3 and matched / len(model_points) >= 0.75:
+            return True
+    return False
+
+
+def _duplicates_deterministic_observations(chart: dict, workbook_charts: list[dict]) -> bool:
+    """Catch equivalent model charts even when their titles or chart types differ."""
+    topic = _chart_topic(chart)
+    if not topic:
+        return False
+    for baseline in workbook_charts:
+        if not isinstance(baseline, dict):
+            continue
+        # ``workbook_charts`` is supplied directly by build_attachment_analytics
+        # before the route adds its publication-only marker. Provenance here is
+        # the explicit upload origin on the server-built chart itself.
+        if (
+            baseline.get("_serverWorkbookEvidence") is not True
+            and str(baseline.get("sourceOrigin") or "").strip().casefold()
+            not in {"uploaded_workbook", "uploaded_attachment"}
+        ):
+            continue
+        if _chart_topic(baseline) != topic:
+            continue
+        if any(
+            _series_observations_match(model_series, baseline_series)
+            for model_series in _chart_series(chart)
+            for baseline_series in _chart_series(baseline)
+        ):
             return True
     return False
 
@@ -197,6 +296,9 @@ def pms_model_chart_keep_mask(
                 period = sorted(matching_periods)[0]
                 reason = f"duplicate {period} strategy ranking already computed from workbook rows"
 
+        if not reason and _duplicates_deterministic_observations(chart, deterministic):
+            reason = "observations duplicate a deterministic workbook chart"
+        # Same category medians under abbreviated labels or rounded values (the exact-label check above misses them).
         if not reason and _duplicates_category_medians(chart, deterministic):
             reason = "category medians duplicate the deterministic workbook mean/median comparison"
 
@@ -714,6 +816,12 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                     "headerLine": header_line, "periodLine": period_line,
                     "recognizedFields": recognized_fields,
                 }
+                if aum is not None:
+                    record["aumEvidence"] = {
+                        "filename": filename, "sheet": sheet_name, "rowNumber": row_index + 1,
+                        "tableTitle": title, "asOf": sheet_date, "rawValue": aum_raw,
+                        "rawLine": raw_line, "headerLine": header_line,
+                    }
                 if not period_values and aum is None:
                     continue
                 sheet_records.append(record)
@@ -749,6 +857,7 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
                             prior.setdefault("periodEvidence", {})[period] = record
                     if prior.get("aum") is None and aum is not None:
                         prior["aum"], prior["aumRaw"] = aum, aum_raw
+                        prior["aumEvidence"] = record.get("aumEvidence")
             sheet_metadata.append({
                 "name": sheet_name, "title": title, "asOf": sheet_date,
                 "columnNames": header_fields,
@@ -1685,7 +1794,8 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
                 "period": period, "available": len(values), "total": len(strategies),
                 "coverage": len(values) / max(1, len(strategies)),
                 "mean": mean(values), "median": median(values),
-                "min": min(values), "max": max(values),
+                "min": min(values), "q1": _quantile(values, 0.25),
+                "q3": _quantile(values, 0.75), "max": max(values),
             })
     categories: OrderedDict[str, list[float]] = OrderedDict()
     for row in strategies:
@@ -1727,8 +1837,31 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
                 })
             return points
 
-        period_mean = summary_points("period", "mean", "mean reported PMS return by horizon", periods)
-        period_median = summary_points("period", "median", "median reported PMS return by horizon", periods)
+        distribution_points = []
+        for item in periods:
+            if int(item.get("available") or 0) < MIN_CATEGORY_SIZE:
+                continue
+            label = str(item.get("period") or "").strip()
+            try:
+                values = {
+                    key: round(float(item[key]), 4)
+                    for key in ("min", "q1", "median", "q3", "max")
+                }
+                observations = int(item.get("available") or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            quote = (
+                f"Deterministic calculation from {filename}; reported return horizon: {label}; "
+                f"minimum: {values['min']:.4f}%; first quartile: {values['q1']:.4f}%; "
+                f"median: {values['median']:.4f}%; third quartile: {values['q3']:.4f}%; "
+                f"maximum: {values['max']:.4f}%; observations: {observations}; "
+                "missing values excluded; calculated from the attached workbook rows."
+            )
+            distribution_points.append({
+                "label": label, "value": values["median"], **values,
+                "evidenceSource": "", "evidenceQuote": quote,
+                "evidenceValue": f"{values['median']:.4f}%", "sourceFile": filename,
+            })
         ranked_categories = [
             item for item in pms["categorySummaries"]
             if int(item.get("available") or 0) >= MIN_CATEGORY_SIZE
@@ -1737,21 +1870,18 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
         category_median = summary_points("category", "median1Year", "median 1-year reported PMS return by category", ranked_categories)
 
         summary_charts = []
-        if period_mean and period_median:
+        if len(distribution_points) >= 3:
             summary_charts.append({
-                "type": "grouped_bar",
-                "title": "PMS return averages by reported horizon (mean vs median)",
-                "xLabel": "Reported return horizon", "yLabel": "Return as reported (%)", "unit": "%",
-                "series": [
-                    {"name": "Mean reported return", "data": period_mean},
-                    {"name": "Median reported return", "data": period_median},
-                ],
-                "sourceIds": [], "sourceOrigin": "uploaded_workbook", "chartRole": "snapshot_summary",
+                "type": "boxplot",
+                "title": "PMS return distribution by reported horizon",
+                "xLabel": "Reported return horizon", "yLabel": "Reported return (%)", "unit": "%",
+                "series": [{"name": "Reported PMS return distribution", "data": distribution_points}],
+                "sourceIds": [], "sourceOrigin": "uploaded_workbook", "chartRole": "return_distribution",
                 "sourceFiles": [filename],
-                "rationale": "Compare the mean and median across the workbook's reported lookback columns.",
+                "rationale": "Compare the observed return spread and interquartile range across separate workbook lookback columns.",
                 "takeaway": (
-                    "These are separate return horizons in one workbook snapshot, not a time series. "
-                    "Each mean and median uses only strategies with a value in that horizon."
+                    "Boxes show the middle half of observed strategy returns; whiskers show each horizon's minimum and maximum. "
+                    "These are separate lookback windows in one snapshot, not sequential quarters."
                 ),
             })
         if category_mean and category_median:
@@ -1774,6 +1904,86 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
         benchmark_chart, benchmark_evidence_lines = _matched_benchmark_chart(pms, filename)
         if benchmark_chart:
             summary_charts.append(benchmark_chart)
+
+        aum_field_labels = list(dict.fromkeys(
+            str(label).strip() for label in (pms.get("fieldMap") or {}).get("aum", [])
+            if str(label).strip()
+        ))
+        def aum_unit_key(label: str) -> str:
+            words = _chart_words(label)
+            tokens = words.split()
+            currency_aliases = {
+                "rs": "local", "rupee": "local", "rupees": "local", "inr": "local",
+                "usd": "usd", "dollar": "usd", "dollars": "usd",
+                "eur": "eur", "euro": "eur", "euros": "eur",
+                "gbp": "gbp", "pound": "gbp", "pounds": "gbp",
+            }
+            currencies = {currency_aliases[word] for word in tokens if word in currency_aliases}
+            currency = "/".join(sorted(currencies)) if currencies else "local"
+            ignored = {
+                "aum", "asset", "assets", "under", "management", "in", "of", "total", "reported",
+                *currency_aliases,
+            }
+            units = []
+            for token in tokens:
+                if token in ignored:
+                    continue
+                if token in {"cr", "crs", "crores"}:
+                    token = "crore"
+                elif token in {"lakh", "lakhs", "lacs", "lac"}:
+                    token = "lakh"
+                units.append(token)
+            return " ".join([currency, *units]).strip()
+
+        aum_unit_keys = {aum_unit_key(label) for label in aum_field_labels}
+        disclosed_aum = [
+            row for row in strategies
+            if isinstance(row, dict) and isinstance(row.get("aum"), (int, float))
+            and float(row["aum"]) >= 0 and row.get("aumEvidence")
+        ]
+        if aum_field_labels and len(aum_unit_keys) == 1 and len(disclosed_aum) >= MIN_CATEGORY_SIZE:
+            aum_label = aum_field_labels[0] if len(aum_field_labels) == 1 else "AUM (reported units)"
+            disclosed_aum.sort(key=lambda row: float(row.get("aum") or 0), reverse=True)
+            aum_points = []
+            for row in disclosed_aum[:10]:
+                evidence = row.get("aumEvidence") or {}
+                raw_value = str(evidence.get("rawValue") or row.get("aumRaw") or "").strip()
+                plotted_value = round(float(row.get("aum") or 0), 4)
+                strategy_label = " / ".join(
+                    str(row.get(key) or "").strip() for key in ("amc", "approach")
+                    if str(row.get(key) or "").strip()
+                ) or "Unlabeled strategy"
+                quote = " | ".join(part for part in (
+                    f"File: {filename}", f"Sheet: {evidence.get('sheet') or row.get('sheet')}",
+                    f"Row: {evidence.get('rowNumber') or row.get('rowNumber')}",
+                    f"As of: {evidence.get('asOf') or row.get('asOf')}" if evidence.get("asOf") or row.get("asOf") else "",
+                    f"Strategy: {strategy_label}", f"AUM field: {aum_label}",
+                    f"raw workbook cell value: {raw_value}",
+                    f"plotted reported AUM: {plotted_value:.4f}",
+                    f"Headers: {evidence.get('headerLine') or row.get('headerLine')}",
+                    f"Original row: {evidence.get('rawLine') or row.get('rawLine')}",
+                ) if part)
+                aum_points.append({
+                    "label": strategy_label, "value": plotted_value,
+                    "evidenceSource": "", "evidenceQuote": quote,
+                    "evidenceValue": raw_value, "evidenceMetric": aum_label,
+                    "sourceSheet": evidence.get("sheet") or row.get("sheet"),
+                    "sourceRow": evidence.get("rowNumber") or row.get("rowNumber"),
+                    "sourceFile": evidence.get("filename") or row.get("filename") or filename,
+                })
+            summary_charts.append({
+                "type": "horizontal_bar",
+                "title": "Largest reported AUM values among disclosing strategies",
+                "xLabel": "PMS strategy", "yLabel": f"Reported {aum_label}", "unit": "",
+                "series": [{"name": f"Reported {aum_label}", "data": aum_points}],
+                "sourceIds": [], "sourceOrigin": "uploaded_workbook", "chartRole": "aum_disclosure",
+                "sourceFiles": [filename],
+                "rationale": "Rank only the strategy rows with a usable value in the detected AUM field.",
+                "takeaway": (
+                    f"This ranks the ten largest reported values in {aum_label}. "
+                    "It describes the disclosed subset only; missing AUM values prevent a full-universe concentration estimate."
+                ),
+            })
 
         pms["charts"] = [*(pms.get("charts") or []), *summary_charts]
         if summary_charts or benchmark_evidence_lines:
@@ -2066,6 +2276,7 @@ def rewrite_pms_report_sections(
     if has_benchmark_field and benchmark_labels_only:
         benchmark_text += " Benchmark entries are labels rather than period-specific return observations in the detected strategy rows; "
         if benchmark_comparison_chart:
+            # Do not deny a comparison the report shows: separate benchmark-return rows can support it.
             comparison_periods = list(dict.fromkeys(
                 str(point.get("label") or "").strip()
                 for series in (benchmark_comparison_chart.get("series") or []) if isinstance(series, dict)
@@ -2078,22 +2289,57 @@ def rewrite_pms_report_sections(
                 "It covers only strategies that name that benchmark."
             )
         else:
-            benchmark_text += "no separate matched period-return series was detected elsewhere in the workbook."
+            benchmark_text += "the attachment does not support a benchmark-versus-strategy return comparison from this field."
     aum_text = (
         "No AUM column was recognized, so this attachment cannot support AUM disclosure or AUM-weighted comparisons."
         if not has_aum_field else (
-            f"AUM values are present for {aum_reported} of {aum_applicable} strategies represented in tables with an AUM field; "
-            f"{aum_missing} have no usable AUM value. This coverage does not support full-universe market concentration "
-            "or AUM-weighted returns."
+            "AUM is incomplete in the attached rows; any disclosed-value comparison is limited to the strategies with a usable value. "
+            "This does not support full-universe concentration or AUM-weighted returns."
         )
     )
     aum_section = (
         "No AUM column was recognized; AUM disclosure and AUM-weighted returns cannot be assessed from this attachment."
         if not has_aum_field else (
-            f"The detected {named_field('aum', 'AUM')} field contains values for {aum_reported} of {aum_applicable} "
-            f"strategies represented in tables with that field; {aum_missing} have no usable value. The disclosed subset "
-            "can be summarized, but it cannot establish full-universe market concentration or AUM-weighted returns."
+            f"The detected {named_field('aum', 'AUM')} field supports a comparison of disclosed values only. "
+            "The AUM chart and disclosure table exclude missing values; they cannot establish full-universe market concentration "
+            "or AUM-weighted returns."
         )
+    )
+    return_distribution_facts = []
+    for item in featured_periods:
+        try:
+            available = int(item.get("available") or 0)
+            if available < MIN_CATEGORY_SIZE:
+                continue
+            return_distribution_facts.append(
+                f"{item['period']}: middle 50% {float(item['q1']):.2f}% to {float(item['q3']):.2f}% "
+                f"(n={available}); full range {float(item['min']):.2f}% to {float(item['max']):.2f}%"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return_distribution_text = (
+        "Across strategies, the observed return spread is " + "; ".join(return_distribution_facts) + ". "
+        if return_distribution_facts else
+        "There are not enough repeated return observations in the detected horizons to summarize a distribution. "
+    ) + (
+        "This is cross-sectional dispersion between strategies, not within-strategy volatility, drawdown, or risk-adjusted performance."
+    )
+    ranked_periods = list(dict.fromkeys(
+        str(chart.get("workbookMetric") or "").strip()
+        for chart in (analytics.get("charts") or [])
+        if isinstance(chart, dict) and chart.get("chartRole") == "strategy_ranking"
+        and str(chart.get("workbookMetric") or "").strip()
+    ))
+    ranking_text = (
+        "Ranked charts and the supporting table show the highest reported strategies for "
+        + ", ".join(ranked_periods)
+        + ". They use the detected manager and strategy fields, exclude missing return cells, and show a ranked slice rather than the full universe."
+        if ranked_periods else
+        "No return horizon has enough labeled observations to produce a strategy ranking."
+    )
+    scope_text = (
+        "This attachment compares PMS strategies across reported lookback windows. It does not contain sequential quarter-by-quarter sector returns, "
+        "so it cannot establish sector rotation, fund flows, or the causes of performance. Those questions need dated sector and benchmark observations."
     )
     methodology_notes = [
         str(note).strip() for note in (analytics.get("methodologyNotes") or []) if str(note).strip()
@@ -2107,7 +2353,7 @@ def rewrite_pms_report_sections(
             f"{summary}{citation}\n\nThe summary statistics are calculated from the attached rows. Missing values are excluded, and strategy counts are deduplicated by the detected manager/provider and strategy/portfolio fields.",
         ),
         (
-            lambda heading: bool(re.search(r"category", heading, re.I)) and not bool(re.search(r"coverage|map", heading, re.I)),
+            lambda heading: bool(re.search(r"category", heading, re.I)) and not bool(re.search(r"coverage|map|one.year|^.*category comparison$", heading, re.I)),
             "Key Performance Findings by Category",
             f"{category_finding} Where available, the comparison uses category labels and reported 1-year returns; each strategy contributes one value, regardless of AUM.{citation}",
         ),
@@ -2120,9 +2366,26 @@ def rewrite_pms_report_sections(
         ),
         (
             lambda heading: bool(re.search(r"\baum\b|assets\s+under\s+management", heading, re.I))
-            and not bool(re.search(r"quality|integrity", heading, re.I)),
+            and not bool(re.search(r"quality|integrity|^aum disclosure$", heading, re.I)),
             "AUM Disclosure and Coverage",
             f"{aum_section}{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(r"top\s+performing\s+strateg|highest\s+reported\s+strateg|strategy\s+ranking|strategies\s+by\s+horizon", heading, re.I))
+            and not bool(re.search(r"^highest reported strategies by return horizon$", heading, re.I)),
+            "Strategy Rankings by Reported Horizon",
+            f"{ranking_text}{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(r"risk|volatility|dispersion|return\s+distribution", heading, re.I))
+            and not bool(re.search(r"coverage|methodology|quality|integrity", heading, re.I)),
+            "Return Distribution and Risk Limits",
+            f"{return_distribution_text}{citation}",
+        ),
+        (
+            lambda heading: bool(re.search(r"strategic\s+implication|market\s+outlook|investment\s+implication", heading, re.I)),
+            "Interpretation and Scope",
+            f"{scope_text}{citation}",
         ),
         (
             lambda heading: bool(re.search(r"methodology|derived\s+calculation", heading, re.I)),
@@ -2145,7 +2408,7 @@ def rewrite_pms_report_sections(
             end = next_heading.start() if next_heading else len(text)
             section_body = text[selected.end():end]
             chart_markers = list(dict.fromkeys(re.findall(r"\[CHART_\d+\]", section_body)))
-            new_section = selected.group(0).rstrip() + "\n\n" + body.strip()
+            new_section = f"## {default_heading}\n\n{body.strip()}"
             if chart_markers:
                 new_section += "\n\n" + "\n".join(chart_markers)
             text = text[:selected.start()] + new_section + "\n\n" + text[end:].lstrip("\n")
@@ -2233,7 +2496,103 @@ def rewrite_pms_report_sections(
         if chart_markers:
             new_section += "\n\n" + "\n".join(chart_markers)
         text = text[:selected.start()] + new_section + "\n\n" + text[end:].lstrip("\n")
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    section_matches = list(re.finditer(r"(?m)^##[ \t]+(?!#)([^\n]+)\s*$", text))
+    if not section_matches:
+        return text
+
+    prefix = text[:section_matches[0].start()].strip()
+    sections: list[dict[str, Any]] = []
+    for index, selected in enumerate(section_matches):
+        end = section_matches[index + 1].start() if index + 1 < len(section_matches) else len(text)
+        sections.append({
+            "heading": selected.group(1).strip(),
+            "body": text[selected.end():end].strip(),
+            "index": index,
+        })
+
+    headings = [str(item["heading"]) for item in sections]
+    has_executive = any(heading.casefold() == "executive summary" for heading in headings)
+    has_quality = any(heading.casefold() == "data quality and integrity audit" for heading in headings)
+
+    def section_key(heading: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", heading.casefold()).strip()
+        if normalized == "executive summary":
+            return "executive"
+        if normalized == "comparative performance analysis":
+            return "comparative"
+        if normalized == "key performance findings by category":
+            return "category"
+        if normalized == "strategy rankings by reported horizon":
+            return "rankings"
+        if normalized == "aum disclosure and coverage":
+            return "aum"
+        if normalized == "return distribution and risk limits":
+            return "distribution"
+        if normalized == "interpretation and scope":
+            return "scope"
+        if normalized == "methodology and derived calculations":
+            return "methodology"
+        if normalized == "data quality and integrity audit":
+            return "quality"
+        if normalized.startswith("quantitative comparisons from the uploaded") or normalized == "charts calculated from the attached data":
+            return "chart_group"
+        return ""
+
+    canonical_sections: list[dict[str, Any]] = []
+    first_by_key: dict[str, dict[str, Any]] = {}
+    for section in sections:
+        heading = str(section["heading"])
+        folded = heading.casefold()
+        if has_executive and re.search(r"\bmarket snapshot\b", folded):
+            continue
+        if has_quality and re.search(r"\bsource coverage\b", folded):
+            continue
+        key = section_key(heading)
+        if key and key in first_by_key:
+            markers = list(dict.fromkeys(re.findall(r"\[CHART_\d+\]", str(section["body"]))))
+            if markers:
+                existing = list(dict.fromkeys(re.findall(r"\[CHART_\d+\]", str(first_by_key[key]["body"]))))
+                first_by_key[key]["body"] = (
+                    str(first_by_key[key]["body"]).rstrip()
+                    + "\n\n" + "\n".join(marker for marker in markers if marker not in existing)
+                )
+            continue
+        if key:
+            first_by_key[key] = section
+        canonical_sections.append(section)
+
+    order = {
+        "executive": 0, "comparative": 10, "category": 20, "rankings": 30,
+        "aum": 40, "distribution": 50, "scope": 60, "methodology": 70,
+        "quality": 80, "chart_group": 90,
+    }
+
+    def section_order(section: dict[str, Any]) -> tuple[int, int]:
+        heading = str(section["heading"]).casefold()
+        key = section_key(str(section["heading"]))
+        if key:
+            return order[key], int(section["index"])
+        if heading == "attached-data coverage":
+            return 100, int(section["index"])
+        if heading == "return-horizon coverage and distribution":
+            return 110, int(section["index"])
+        if heading == "aum disclosure":
+            return 120, int(section["index"])
+        if heading == "one-year category comparison":
+            return 130, int(section["index"])
+        if heading == "highest reported strategies by return horizon":
+            return 140, int(section["index"])
+        if re.match(r"^(?:sources?|references?|bibliography|works cited)\b", heading):
+            return 200, int(section["index"])
+        return 85, int(section["index"])
+
+    canonical_sections.sort(key=section_order)
+    rendered = [
+        f"## {section['heading']}" + (f"\n\n{str(section['body']).strip()}" if str(section["body"]).strip() else "")
+        for section in canonical_sections
+    ]
+    return "\n\n".join(([prefix] if prefix else []) + rendered).strip()
 
 
 def _append_generic_analytics_tables(
@@ -2582,7 +2941,7 @@ def ensure_server_workbook_chart_markers(
     report_text: str,
     charts: list[dict] | None,
 ) -> tuple[str, dict[str, Any]]:
-    """Keep verified attachment charts visible and out of incompatible horizon sections."""
+    """Keep verified attachment charts visible beside the analysis they support."""
     text = str(report_text or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
     chart_rows = [
         (index, chart) for index, chart in enumerate(charts or [], start=1)
@@ -2618,6 +2977,84 @@ def ensure_server_workbook_chart_markers(
             return True
         return any(len(periods) == 1 and plotted != periods for periods in specified)
 
+    def target_heading_matches(chart: dict, heading: str) -> bool:
+        role = str(chart.get("chartRole") or "").strip().casefold()
+        words = _chart_words(heading)
+        if not words or re.search(r"\b(?:sources?|references?|bibliography|works cited)\b", words):
+            return False
+        if role == "strategy_ranking":
+            if not ("strategy" in words or "strategies" in words or "ranking" in words):
+                return False
+            if "aum" in words or "coverage" in words or "quality" in words:
+                return False
+            return not mismatched_horizon(chart, heading)
+        if role == "aum_disclosure":
+            return ("aum" in words or "assets under management" in words) and not any(
+                word in words for word in ("methodology", "quality", "integrity")
+            )
+        if role == "benchmark_comparison":
+            return (
+                ("benchmark" in words and "category" not in words)
+                or "comparative" in words or "cross horizon" in words
+            )
+        if role == "return_distribution":
+            return any(word in words for word in (
+                "distribution", "volatility", "dispersion", "risk return", "comparative", "cross horizon",
+            ))
+        if role == "snapshot_summary":
+            topic = _chart_topic(chart)
+            if topic == "category":
+                return "category" in words and "coverage" not in words
+            if topic == "return_horizon":
+                return any(word in words for word in ("comparative", "cross horizon", "distribution"))
+        return False
+
+    def target_section(chart: dict) -> tuple[int, int] | None:
+        matches = list(heading_re.finditer(text))
+        candidates: list[tuple[int, int, int, int]] = []
+        for position, heading_match in enumerate(matches):
+            title = heading_match.group(2).strip()
+            if not target_heading_matches(chart, title):
+                continue
+            level = len(heading_match.group(1))
+            end = len(text)
+            for following in matches[position + 1:]:
+                if len(following.group(1)) <= level:
+                    end = following.start()
+                    break
+            # Prefer a specific subheading (for example, a one-year ranking)
+            # over a generic parent section, then keep the first matching body
+            # section rather than placing the chart in a repeated appendix.
+            specific = 1 if explicit_horizons(title) else 0
+            candidates.append((specific, -heading_match.start(), heading_match.end(), end))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        _specific, _position, start, end = candidates[0]
+        return start, end
+
+    semantic_roles = {
+        "strategy_ranking", "aum_disclosure", "benchmark_comparison",
+        "return_distribution", "snapshot_summary",
+    }
+
+    def marker_matches_role(chart: dict, match: re.Match) -> bool:
+        chain = heading_chain(match.start())
+        if mismatched_horizon(chart, chain):
+            return False
+        role = str(chart.get("chartRole") or "").strip().casefold()
+        if role not in semantic_roles:
+            return True
+        leaf_heading = chain.split(" / ")[-1] if chain else ""
+        if target_heading_matches(chart, leaf_heading):
+            return True
+        words = _chart_words(chain)
+        return (
+            "charts calculated from the attached data" in words
+            or "quantitative comparisons from the uploaded files" in words
+            or "quantitative comparisons from the uploaded workbook" in words
+        )
+
     marker_matches: dict[int, list[re.Match]] = {}
     for match in marker_re.finditer(text):
         marker_matches.setdefault(int(match.group(1)), []).append(match)
@@ -2630,10 +3067,7 @@ def ensure_server_workbook_chart_markers(
         if not matches:
             missing.append((index, chart))
             continue
-        compatible = next(
-            (match for match in matches if not mismatched_horizon(chart, heading_chain(match.start()))),
-            None,
-        )
+        compatible = next((match for match in matches if marker_matches_role(chart, match)), None)
         if compatible is None:
             relocated.append((index, chart))
             remove_spans.extend(match.span() for match in matches)
@@ -2646,30 +3080,29 @@ def ensure_server_workbook_chart_markers(
 
     def add_chart(index: int, chart: dict) -> None:
         nonlocal text
-        title = re.sub(r"\s+", " ", str(chart.get("title") or f"Attachment chart {index}")).strip()
-        takeaway = re.sub(r"\s+", " ", str(chart.get("takeaway") or "")).strip()
-        if not takeaway:
-            takeaway = "This chart shows verified values calculated from the attached rows; missing values are excluded."
-        group = re.search(r"(?im)^##[ \t]+Charts calculated from the attached data[ \t]*$", text)
-        block = f"### {title}\n{takeaway}\n\n[CHART_{index}]"
+        marker = f"[CHART_{index}]"
+        target = target_section(chart)
+        if target:
+            _start, end = target
+            before, after = text[:end].rstrip(), text[end:].lstrip()
+            text = f"{before}\n\n{marker}" + (f"\n\n{after}" if after else "")
+            return
+
+        group = re.search(
+            r"(?im)^##[ \t]+(?:Charts calculated from the attached data|"
+            r"Quantitative comparisons from the uploaded (?:files|workbook))[ \t]*$",
+            text,
+        )
         if group:
             following = re.search(r"(?m)^##[ \t]+", text[group.end():])
             group_end = group.end() + following.start() if following else len(text)
             group_body = text[group.end():group_end]
-            title_heading = re.search(rf"(?im)^###?[ \t]+{re.escape(title)}[ \t]*$", group_body)
-            if title_heading:
-                section_start = group.end() + title_heading.start()
-                next_heading = re.search(r"(?m)^#{2,3}[ \t]+", text[group.end() + title_heading.end():group_end])
-                section_end = group.end() + title_heading.end() + next_heading.start() if next_heading else group_end
-                section = text[section_start:section_end]
-                if f"[CHART_{index}]" not in section:
-                    addition = f"\n{takeaway}\n\n[CHART_{index}]"
-                    text = text[:section_end].rstrip() + addition + "\n\n" + text[section_end:].lstrip()
+            if marker not in group_body:
+                text = text[:group_end].rstrip() + f"\n\n{marker}\n\n" + text[group_end:].lstrip()
                 return
-            text = text[:group_end].rstrip() + "\n\n" + block + "\n\n" + text[group_end:].lstrip()
             return
 
-        block = f"## Charts calculated from the attached data\n\n{block}"
+        block = "## Charts calculated from the attached data\n\nThe charts below use verified values calculated from the uploaded rows.\n\n" + marker
         source_heading = re.search(
             r"(?im)^[ \t]{0,3}#{1,3}[ \t]+(?:sources?|references?|bibliography|works cited)\b[^\r\n]*$",
             text,
@@ -2682,6 +3115,23 @@ def ensure_server_workbook_chart_markers(
 
     for index, chart in [*missing, *relocated]:
         add_chart(index, chart)
+
+    # These headings are generated solely to hold attachment-chart markers.
+    # Once every chart has a relevant section, remove the now-empty group so it
+    # cannot leave a blank-looking appendix or a second chart listing.
+    fallback_heading = re.compile(
+        r"(?im)^##[ \t]+(?:Charts calculated from the attached data|"
+        r"Quantitative comparisons from the uploaded (?:files|workbook))[ \t]*$"
+    )
+    fallback_matches = list(fallback_heading.finditer(text))
+    for position, match in reversed(list(enumerate(fallback_matches))):
+        next_heading = re.search(r"(?m)^##[ \t]+", text[match.end():])
+        end = match.end() + next_heading.start() if next_heading else len(text)
+        block = text[match.start():end]
+        if marker_re.search(block):
+            continue
+        text = text[:match.start()] + text[end:]
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text, {
         "restored": len(missing), "relocated": len(relocated),
         "titles": [str(chart.get("title") or "")[:120] for _, chart in [*missing, *relocated]],
