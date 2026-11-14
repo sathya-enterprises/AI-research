@@ -88,6 +88,10 @@ def test_pms_aum_disclosure_is_counted():
         "kind": "pms_strategy_performance", "files": [{"filename": "PMS.xlsx"}], "datasets": [], "charts": [],
         "periodSummaries": [{"period": "1 Yr", "available": 3, "coverage": 1.0, "mean": 1, "median": 1, "min": 0, "max": 2}],
         "strategies": [{"aum": 100.0}, {"aum": 300.0}, {"aum": None}, {"aum": None}],
+        # build_pms_workbook_analytics always reports which fields it recognized; the AUM section is only
+        # rendered when an AUM column was detected, under that column's own header.
+        "dataQuality": {"fieldPresence": {"aum": True}},
+        "fieldMap": {"aum": ["AUM (₹ crore)"]},
     }
     section = attachment_analytics_section(analytics, "S1", {"pms.xlsx": "S1"})
     assert "| File | Sheet / section |" in section

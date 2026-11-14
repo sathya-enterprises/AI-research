@@ -411,7 +411,7 @@ def test_official_dataset_chart_ignores_api_retrieval_date_for_data_window():
         "id": "S1", "title": row["title"], "url": row["url"], "publisher": row["publisher"],
         "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page",
         "publisherEvidenceExcerpt": row["fullContent"], "pageContent": row["fullContent"],
-        "publication_date": row["published"], "source_type": row["sourceType"],
+        "publication_date": row.get("published") or row["retrievedAt"], "source_type": row["sourceType"],
     }
     audit = audit_chart_evidence_consistency(
         "", [dict(chart.spec, evidencePassages=chart.passage_ids)], [source],

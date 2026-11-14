@@ -560,7 +560,7 @@ def test_requested_slot_years_keep_the_explicit_end_year_and_expand_in_depth_bud
     class _Client:
         params = None
 
-        async def get(self, _url, *, params):
+        async def get(self, _url, *, params, **_kwargs):
             self.params = params
             return _Response()
 

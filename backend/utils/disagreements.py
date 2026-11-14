@@ -77,6 +77,28 @@ def _entities(sentence: str) -> set[str]:
     return out
 
 
+# Clause boundaries inside a sentence: a list "84% in Brazil, 65% in India and 35% in Kenya" gives each
+# number its own subject. Thousands separators ("1,824") are not boundaries (no space after the comma).
+_CLAUSE_SPLIT_RE = re.compile(r",\s+|;\s*|\s+(?:and|while|whereas|but|versus|vs\.?|compared with|against)\s+", re.I)
+
+
+def _clause_entities(plain: str, names: set[str], start: int, end: int) -> set[str]:
+    """The sentence's named entities that appear in the clause holding the amount at [start, end).
+
+    A sentence-level entity set made every number in a multi-country list "about" every country, so
+    Brazil's 84% was compared with Kenya's 35% as the same measure. When the clause names nobody, the
+    sentence's subject applies only if the sentence names exactly one entity.
+    """
+    bounds = [0] + [m.end() for m in _CLAUSE_SPLIT_RE.finditer(plain)] + [len(plain)]
+    clause_start = max(b for b in bounds if b <= start)
+    clause_end = min((m.start() for m in _CLAUSE_SPLIT_RE.finditer(plain) if m.start() >= end), default=len(plain))
+    clause = plain[clause_start:clause_end].casefold()
+    local = {name for name in names if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", clause)}
+    if local:
+        return local
+    return set(names) if len(names) == 1 else set()
+
+
 def statements(report: str) -> list[dict]:
     out = []
     body = re.split(r"(?im)^#{1,2}\s+(?:Methodology|Appendix)\b", str(report or ""))[0]
@@ -119,7 +141,9 @@ def statements(report: str) -> list[dict]:
                 if len(words) < 2:
                     continue
                 out.append({"period": period, "family": family, "value": base, "shown": m.group(0).strip(),
-                            "words": words, "entities": names, "cites": cites, "section": section,
+                            # anchor on the number itself: the match can begin with the space before it
+                            "words": words, "entities": _clause_entities(plain, names, m.start("num"), m.end()),
+                            "cites": cites, "section": section,
                             "sentence": plain.strip()[:200]})
     return out
 
@@ -135,7 +159,7 @@ def find_disagreements(report: str, *, max_items: int = 6) -> list[dict]:
                 continue  # without a named subject, the same entity cannot be established
             if (a["value"] > 0) != (b["value"] > 0) and a["family"] != "%":
                 continue  # an inflow and an outflow are different measures
-            if a["entities"] != b["entities"]:
+            if not (a["entities"] & b["entities"]):
                 continue  # only the SAME named subjects can disagree (Realty's inflow is not the market total;
                 #           a wrong "sources disagree" note is worse than none)
             shared = a["words"] & b["words"]
@@ -146,7 +170,10 @@ def find_disagreements(report: str, *, max_items: int = 6) -> list[dict]:
             hi, lo = max(abs(a["value"]), abs(b["value"])), min(abs(a["value"]), abs(b["value"]))
             if hi == 0 or (hi - lo) / hi <= 0.15:
                 continue
-            key = (a["period"], round(lo, -3), round(hi, -3))
+            # Percentages keep their precision: rounding to thousands made every 2024 percentage pair the
+            # same key, so the first (possibly false) pair hid every real disagreement after it.
+            precision = 2 if a["family"] == "%" else -3
+            key = (a["period"], round(lo, precision), round(hi, precision))
             if key in seen:
                 continue
             seen.add(key)

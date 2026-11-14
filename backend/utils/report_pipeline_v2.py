@@ -566,78 +566,123 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             chart.status, chart.drop_reason = "dropped", reason
             chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
                                 "reason": reason, "provenance": "fetched dataset"})
-    dataset_values = [sorted(round(v, 4) for _, _, v in c.points) for c in dataset_charts if c.status != "dropped"]
+    active_dataset = [c for c in dataset_charts if c.status != "dropped"]
+    dataset_values = {c.chart_id: sorted(round(v, 4) for _, _, v in c.points) for c in active_dataset}
+    # Table charts set aside in favour of a dataset chart, with the dataset chart(s) they deferred to.
+    # They are only a duplicate view while that dataset chart survives the checks below; if it is
+    # dropped, they take its place instead of the data disappearing from the report.
+    deferred: list[tuple[object, set[str]]] = []
     deduped = []
     for chart in candidates:
         values = sorted(round(v, 4) for _, _, v in chart.points)
-        if any(values == dv for dv in dataset_values):
+        owners = {chart_id for chart_id, dv in dataset_values.items() if values == dv}
+        if owners:
             chart.status, chart.drop_reason = "dropped", "same values as a fetched-dataset chart (duplicate view)"
             chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
                                 "reason": chart.drop_reason})
+            deferred.append((chart, owners))
             continue
         deduped.append(chart)
     try:  # Stage K: an official dataset already has its data-first chart; its table is not re-charted per column
         from utils.official_data import is_official_passage
-        deduped = [c for c in deduped if not any(store.get(pid) is not None and is_official_passage(store.get(pid))
-                                                  for pid in c.passage_ids)]
+        official_ids = {c.chart_id for c in active_dataset if c.chart_id in extracted_ids}
+        kept_tables = []
+        for c in deduped:
+            if any(store.get(pid) is not None and is_official_passage(store.get(pid)) for pid in c.passage_ids):
+                owners = {d.chart_id for d in active_dataset if set(d.passage_ids) & set(c.passage_ids)} or official_ids
+                deferred.append((c, owners))
+            else:
+                kept_tables.append(c)
+        deduped = kept_tables
     except Exception as exc:
         log.warning("V2 official-table filter skipped: %s", type(exc).__name__)
-    candidates = [c for c in dataset_charts if c.status != "dropped"] + deduped
+    candidates = active_dataset + deduped
     # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
     # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).
-    try:
-        from utils.chart_lint import quality_reason
-        _kept = []
-        _earlier: list = []  # Stage L: the same data from a second publisher is not a second chart
-        _tables_seen: list = []
-        for chart in candidates:
-            _reason = quality_reason(chart.spec, chr(10).join(
-                store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400], _earlier)
-            if not _reason:  # Stage M: shape checks (place, unit) - any topic
-                from utils.series_checks import chart_data_problem
-                _reason = chart_data_problem(chart.spec, question)
-            if not _reason:
-                # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
-                from collections import Counter as _Counter
-                _nums = _Counter(f"{float(x):g}" for x in re.findall(r"\d+(?:\.\d+)?", chr(10).join(
-                    store.get(pid).text for pid in chart.passage_ids if store.get(pid)).replace(",", "")))
-                _srcs = set(chart.source_ids or [])
-                if sum(_nums.values()) >= 8 and any(
-                        not (_srcs & other_srcs)
-                        and sum((_nums & other).values()) >= 0.8 * min(sum(_nums.values()), sum(other.values()))
-                        for other_srcs, other in _tables_seen):
-                    _reason = "the same table as an earlier chart, from another source"
-                else:
-                    _tables_seen.append((_srcs, _nums))
-            if not _reason:
-                _earlier.append(sorted(round(v, 4) for s_ in chart.spec.get("series") or [] for v in
-                                       [float(p_.get("value") or 0) for p_ in s_.get("data") or []]))
-            if _reason:
-                chart.status, chart.drop_reason = "dropped", f"quality gate before writing: {_reason}"
-                chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
-                                    "reason": chart.drop_reason})
-            else:
-                _kept.append(chart)
-        candidates = _kept
-    except Exception as exc:
-        log.warning("V2 early chart quality gate skipped: %s", type(exc).__name__)
-    # Run the same chart verification the export gates use BEFORE writing, so the
-    # writer only interprets charts that will survive to the PDF.
-    if chart_verifier and candidates:
+    _earlier: list = []  # Stage L: the same data from a second publisher is not a second chart
+    _tables_seen: list = []
+    _quality_memory: dict[str, tuple] = {}  # chart id -> (its _earlier entry, its _tables_seen entry or None)
+
+    def _quality_pass(charts: list) -> list:
         try:
-            reasons = chart_verifier([dict(c.spec, evidencePassages=c.passage_ids) for c in candidates])
+            from utils.chart_lint import quality_reason
+            _kept = []
+            for chart in charts:
+                _reason = quality_reason(chart.spec, chr(10).join(
+                    store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400], _earlier)
+                if not _reason:  # Stage M: shape checks (place, unit) - any topic
+                    from utils.series_checks import chart_data_problem
+                    _reason = chart_data_problem(chart.spec, question)
+                if not _reason:
+                    # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
+                    from collections import Counter as _Counter
+                    _nums = _Counter(f"{float(x):g}" for x in re.findall(r"\d+(?:\.\d+)?", chr(10).join(
+                        store.get(pid).text for pid in chart.passage_ids if store.get(pid)).replace(",", "")))
+                    _srcs = set(chart.source_ids or [])
+                    _table_entry = None
+                    if sum(_nums.values()) >= 8 and any(
+                            not (_srcs & other_srcs)
+                            and sum((_nums & other).values()) >= 0.8 * min(sum(_nums.values()), sum(other.values()))
+                            for other_srcs, other in _tables_seen):
+                        _reason = "the same table as an earlier chart, from another source"
+                    else:
+                        _table_entry = (_srcs, _nums)
+                        _tables_seen.append(_table_entry)
+                if not _reason:
+                    _values = sorted(round(v, 4) for s_ in chart.spec.get("series") or [] for v in
+                                     [float(p_.get("value") or 0) for p_ in s_.get("data") or []])
+                    _earlier.append(_values)
+                    _quality_memory[chart.chart_id] = (_values, _table_entry)
+                if _reason:
+                    chart.status, chart.drop_reason = "dropped", f"quality gate before writing: {_reason}"
+                    chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"), "passage": ",".join(chart.passage_ids),
+                                        "reason": chart.drop_reason})
+                else:
+                    _kept.append(chart)
+            return _kept
+        except Exception as exc:
+            log.warning("V2 early chart quality gate skipped: %s", type(exc).__name__)
+            return charts
+
+    def _verify_pass(charts: list) -> list:
+        # Run the same chart verification the export gates use BEFORE writing, so the
+        # writer only interprets charts that will survive to the PDF.
+        if not (chart_verifier and charts):
+            return charts
+        try:
+            reasons = chart_verifier([dict(c.spec, evidencePassages=c.passage_ids) for c in charts])
         except Exception as exc:  # verification problems must not abort the report
             log.warning("V2 chart pre-verification failed: %s", type(exc).__name__)
-            reasons = [""] * len(candidates)
+            reasons = [""] * len(charts)
         kept = []
-        for chart, reason in zip(candidates, reasons):
+        for chart, reason in zip(charts, reasons):
             if reason:
                 chart.status, chart.drop_reason = "dropped", f"failed chart verification before writing: {reason}"
                 chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"),
                                     "passage": ",".join(chart.passage_ids), "reason": chart.drop_reason})
             else:
                 kept.append(chart)
-        candidates = kept
+        return kept
+
+    candidates = _verify_pass(_quality_pass(candidates))
+    surviving_ids = {c.chart_id for c in candidates}
+    replacements = [chart for chart, owners in deferred if owners and not (owners & surviving_ids)]
+    if replacements:
+        restored_ids = {c.chart_id for c in replacements}
+        chart_drops[:] = [d for d in chart_drops if not (d.get("chart") in restored_ids
+                                                         and "duplicate view" in str(d.get("reason") or ""))]
+        for chart in replacements:
+            chart.status, chart.drop_reason = "planned", ""
+        # The gate must compare against charts that will be published, not ones verification just dropped
+        # (their values would make the replacement look like "the same values as an earlier chart").
+        _earlier[:] = [memory[0] for chart_id, memory in _quality_memory.items() if chart_id in surviving_ids]
+        _tables_seen[:] = [memory[1] for chart_id, memory in _quality_memory.items()
+                           if chart_id in surviving_ids and memory[1] is not None]
+        restored = _verify_pass(_quality_pass(replacements))
+        if restored:
+            log.info("V2: %d table chart(s) restored because the dataset chart they duplicated was dropped",
+                     len(restored))
+        candidates = candidates + restored
     # Stage L: every verified chart carries a reading of its own data, so a chart the writer does not
     # mention is placed with that sentence instead of being dropped (charts are the report's backbone).
     try:

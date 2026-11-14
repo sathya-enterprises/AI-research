@@ -166,7 +166,9 @@ def _display_entry(entry: dict, source_id: str) -> dict:
     # export-time chart audits can re-verify the same lines.
     chart_lines = str(entry.get("chartEvidenceExcerpt") or "").strip()
     if chart_lines:
-        result["chartEvidenceExcerpt"] = chart_lines[:16000]
+        # The same limit as the upload evidence chain, so the export-time gates see what the report-time gates saw.
+        from utils.uploaded_workbook_analytics import UPLOAD_CHART_EVIDENCE_CHARS
+        result["chartEvidenceExcerpt"] = chart_lines[:UPLOAD_CHART_EVIDENCE_CHARS]
     # Keep the chart-verification evidence the report's final gate used. The
     # PDF/HTML export re-runs the same gate on this manifest; dropping these
     # fields made every chart that passed at report time fail at download

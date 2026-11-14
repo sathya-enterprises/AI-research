@@ -181,7 +181,7 @@ async def query(req: QueryReq, request: Request):
 
         if req.is_general:
             # Caller explicitly flagged as general — pull everything
-            top_k = min(30, engine.get_session_info(req.session_id).get("chunk_count", 30))
+            top_k = max(1, min(30, engine.get_session_info(req.session_id).get("chunk_count", 30) or 30))
             min_score = 0.0
 
         result = await asyncio.to_thread(

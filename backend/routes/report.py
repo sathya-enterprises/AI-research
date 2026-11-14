@@ -105,6 +105,7 @@ from utils.source_ids import (
     reconcile_chart_source_ids as _reconcile_chart_source_ids,
 )
 from utils.uploaded_workbook_analytics import (
+    UPLOAD_CHART_EVIDENCE_CHARS,
     is_file_only_workbook_report, build_attachment_analytics,
     attachment_analytics_section, append_attachment_analytics_section,
     ensure_server_workbook_chart_markers,
@@ -994,7 +995,7 @@ def _record_uploaded_file_evidence(
         merged_text = existing or extracted
     if merged_text:
         document["text"] = merged_text[:500_000]
-        document["chartEvidenceExcerpt"] = merged_text[:16_000]
+        document["chartEvidenceExcerpt"] = merged_text[:UPLOAD_CHART_EVIDENCE_CHARS]
     document["evidenceAvailable"] = bool(merged_text)
     document["evidence_available"] = bool(merged_text)
 
@@ -1091,11 +1092,11 @@ def _register_attachment_analytics_evidence(analytics: dict, source_documents: l
             excerpt = str(document.get("chartEvidenceExcerpt") or "").strip()
             if evidence not in excerpt:
                 combined = f"{excerpt}\n\n{evidence}".strip()
-                if len(combined) > 16_000:
-                    log.warning("Attachment analytics evidence for %s exceeds the 16,000-char chart excerpt; "
+                if len(combined) > UPLOAD_CHART_EVIDENCE_CHARS:
+                    log.warning("Attachment analytics evidence for %s exceeds the chart-evidence excerpt limit; "
                                 "%d chars of analytics are not available to the chart gate",
-                                filename, len(combined) - 16_000)
-                document["chartEvidenceExcerpt"] = combined[:16_000]
+                                filename, len(combined) - UPLOAD_CHART_EVIDENCE_CHARS)
+                document["chartEvidenceExcerpt"] = combined[:UPLOAD_CHART_EVIDENCE_CHARS]
         updated += 1
     _UPLOADED_FILE_EVIDENCE_TEXTS.set(evidence_texts)
     return updated
@@ -22301,7 +22302,7 @@ async def generate_report(request: Request):
             _evidence_origins_by_file = workbook_analytics.get("evidenceOriginByFile") or {}
             for filename, file_info in by_name.items():
                 original_name = str(file_info.get("filename") or filename)
-                excerpt = str(evidence_by_file.get(filename) or evidence_by_file.get(original_name) or "")[:16000]
+                excerpt = str(evidence_by_file.get(filename) or evidence_by_file.get(original_name) or "")[:UPLOAD_CHART_EVIDENCE_CHARS]
                 file_evidence_origin = str(
                     _evidence_origins_by_file.get(filename)
                     or _evidence_origins_by_file.get(original_name.casefold())
@@ -27022,7 +27023,10 @@ async def generate_report(request: Request):
             _table_handoff = {"removedTables": 0, "removed": [], "remainingCharts": 0}
         else:
             report_text, charts, _table_handoff = remove_unverified_table_chart_specs(
-                report_text, charts, enriched,
+                report_text, charts,
+                # Uploaded files are evidence too (an attachment-only report has no fetched pages at all).
+                list(enriched or []) + [doc for doc in source_documents if isinstance(doc, dict)
+                                        and _is_uploaded_evidence_source(doc)],
             )
         _chart_pipeline.record("table_handoff", charts, removed=_removed_chart_reasons(
             _charts_before_table_handoff, charts, None, "table chart rows could not be matched to a fetched publisher row"))
@@ -27962,6 +27966,13 @@ async def generate_report(request: Request):
         from utils.pipeline_fallback import label_fallback as _label_fallback
         _outcome = _label_fallback(response_payload, _outcome, v2_used=_v2_used, v2_requested=_v2_requested,
                                    fallback_reason=_v2_fallback_reason, tier=report_tier)
+        # Shape checks no claim gate makes: a body written by no model, split into characters, or
+        # nearly empty is never presented as a normal published report, whatever the gates said.
+        from utils.report_sanity import apply_integrity_outcome as _apply_integrity, report_integrity_issues as _integrity_issues
+        _integrity = _integrity_issues(response_payload.get("report", ""), report_tier, model_used)
+        if _integrity:
+            log.warning("Report integrity: %s", "; ".join(item["issue"][:120] for item in _integrity))
+            _outcome = _apply_integrity(_outcome, response_payload, _integrity)
         response_payload["publicationOutcome"] = _outcome["outcome"]
         try:
             # Stage F: one publication report per run (every gate, PASS/FAIL, the exact failing items).

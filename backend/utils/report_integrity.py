@@ -45,10 +45,22 @@ def _direct_publisher_texts(sources: list[dict] | None) -> list[str]:
     for source in sources or []:
         if not isinstance(source, dict):
             continue
+        origin = str(source.get("evidence_origin") or source.get("evidenceOrigin") or "").casefold()
+        if origin in {"uploaded_workbook", "uploaded_attachment"}:
+            # The user's own file is the primary evidence for its rows; there is no publisher page to fetch.
+            content = "\n".join(str(source.get(key) or "") for key in (
+                "text", "extractedText", "chartEvidenceExcerpt", "pageContent",
+            )).strip()
+            if len(content) >= 80:
+                texts.append(content)
+            continue
         status = str(source.get("pageFetchStatus") or source.get("page_fetch_status") or "").casefold()
         url = str(source.get("url") or source.get("publisher_page_url") or source.get("publisherPageUrl") or "").strip()
         host = (urlparse(url).hostname or "").casefold() if url else ""
-        if status != "ok" or not host or not (host.endswith("rbi.org.in") or host.endswith("icici.bank.in") or host.endswith("sbi.co.in") or host.endswith("hdfcbank.com") or host.endswith("axisbank.com") or host.endswith("bankofbaroda.in") or host.endswith("bankofindia.co.in") or host.endswith("npci.org.in") or host.endswith("sebi.gov.in") or host.endswith("bseindia.com") or host.endswith("nseindia.com")):
+        # Any directly fetched page qualifies. This used to require one of eleven Indian bank / regulator /
+        # exchange domains, so a verified table from any other publisher (World Bank, a ministry, a company
+        # filing) was always dropped as "unverified table rows".
+        if status != "ok" or not host:
             continue
         # pageContent is the extracted publisher page/table representation. fullContent
         # is accepted only with a successful HTTP page fetch and a canonical publisher.

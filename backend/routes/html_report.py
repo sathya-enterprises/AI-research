@@ -1867,6 +1867,11 @@ def _render_chart_block(
     if rationale and re.search(r"(?i)chronological series|so a (?:line|bar)\b|chart type|visual form|best fit|is the right visual",
                                str(chart.get("rationale") or "")):
         rationale = ""
+    # The server's default design notes ("Use a categorical comparison because the evidence is best read
+    # across named items.", "Use a trend view because ...") explain the chart choice, not the data.
+    if rationale and re.search(r"(?i)^\s*use an?\s+[\w\s,-]{0,60}?\b(?:view|comparison|trend|bridge)\s+because\b",
+                               str(chart.get("rationale") or "")):
+        rationale = ""
     if rationale and rationale.strip() != generic_rationale:
         bits.append(f'<div class="gg-chart-note gg-chart-note--why"><span class="gg-chart-note-label">Context</span>{_inline_md(str(chart.get("rationale") or ""), source_registry)}</div>')
     if takeaway and takeaway.strip() != generic_takeaway:

@@ -29,6 +29,10 @@ _RETURN_ALIASES = {
     "since incp.": "Since Incp.", "since inception": "Since Incp.", "inception": "Since Incp.",
 }
 MIN_CATEGORY_SIZE = 3  # categories with fewer strategies are listed but not ranked
+# Exact plotted rows, calculation quotes and the analytics tables an uploaded file's charts are verified
+# against. At 16,000 chars the excerpt was already full before the analytics were added, so correct
+# calculated chart points were rejected as unsupported. One limit for every step of the chain.
+UPLOAD_CHART_EVIDENCE_CHARS = 64_000
 _NA = {"", "na", "n/a", "nd", "n.d.", "--", "—", "-", "undisc.", "undisclosed", "not disclosed", "not available"}
 _FILE_MARKER = re.compile(r"(?m)^\[File:\s*(.*?)\]\s*$")
 _SHEET_MARKER = re.compile(r"(?m)^\[Sheet:\s*(.*?)\]\s*$")
@@ -989,7 +993,7 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
         # across many worksheets used to fill the excerpt before a single value
         # or deterministic calculation could be retained.
         deduped = list(OrderedDict((str(line), None) for line in [*lines, *header_lines]).keys())
-        evidence_by_file[filename] = "\n".join(deduped)[:16000]
+        evidence_by_file[filename] = "\n".join(deduped)[:UPLOAD_CHART_EVIDENCE_CHARS]
 
     stats = []
     one_year = [x for x in strategies if "1 Yr" in x.get("periodValues", {})]
@@ -1068,7 +1072,7 @@ def build_pms_workbook_analytics(file_context: str) -> dict[str, Any]:
     )
     if stats_note:
         for filename_key in list(evidence_by_file):
-            evidence_by_file[filename_key] = (stats_note + "\n" + evidence_by_file[filename_key])[:16000]
+            evidence_by_file[filename_key] = (stats_note + "\n" + evidence_by_file[filename_key])[:UPLOAD_CHART_EVIDENCE_CHARS]
     period_coverage = {
         period: sum(1 for strategy in strategies if period in (strategy.get("periodValues") or {}))
         for period in _RETURN_PERIODS
@@ -1147,10 +1151,11 @@ def _parse_data_number(value: object) -> tuple[float, bool] | None:
     raw = raw.strip("()").replace(",", "").replace(" ", "")
     percent = "%" in raw
     raw = raw.replace("%", "")
-    # Strip common currency symbols and unit prefixes/suffixes without
-    # interpreting dates, ratios such as 3/4, or arbitrary text as numbers.
-    raw = re.sub(r"^[^\d.+-]+", "", raw)
-    raw = re.sub(r"[^\d.eE+-]+$", "", raw)
+    # Strip only currency symbols and unit prefixes/suffixes. Stripping ANY leading text turned labels into
+    # numbers: "Fund 1" -> 1, "FY24" -> 24, "Plan B2" -> 2 and "Q3 2025" -> 32025, so name columns were
+    # profiled as numeric fields with means and medians.
+    raw = re.sub(r"(?i)^(?:₹|rs\.?|inr|usd|us\$|\$|€|eur|£|gbp)", "", raw)
+    raw = re.sub(r"(?i)(?:crores?|cr|lakhs?|lacs?|bn|billion|mn|million|k|x|times|bps|pp)$", "", raw)
     if not _DATA_NUMBER_RE.fullmatch(raw):
         return None
     try:
@@ -1691,8 +1696,37 @@ def _build_generic_attachment_analytics(
     }
 
 
+_EXTRACTION_NOTES_RE = re.compile(r"(?im)^\s*\[Extraction notes:\s*(.+?)\]\s*$")
+
+
+def extraction_notes(file_context: str) -> list[dict[str, str]]:
+    """Truncation notes the browser extractor appends to a file ("Only the first 40 of 52 sheets were extracted.").
+
+    Statistics computed from a truncated file describe only the extracted rows; without these notes the report
+    presented them as the whole file.
+    """
+    text = str(file_context or "")
+    blocks = _split_file_blocks(text) if _FILE_MARKER.search(text) else [("Attached data", text)]
+    notes = []
+    for filename, body in blocks:
+        for match in _EXTRACTION_NOTES_RE.finditer(body or ""):
+            note = re.sub(r"\s+", " ", match.group(1)).strip()
+            if note:
+                notes.append({"filename": filename, "note": note})
+    return notes
+
+
 def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> dict[str, Any]:
     """Build deterministic workbook/CSV summaries and charts from attached text."""
+    notes = extraction_notes(file_context)
+    # The note is extractor metadata, not a data row (it was counted as one row with missing values).
+    analytics = _build_attachment_analytics(_EXTRACTION_NOTES_RE.sub("", str(file_context or "")), max_charts=max_charts)
+    if notes and isinstance(analytics, dict):
+        analytics["extractionNotes"] = notes
+    return analytics
+
+
+def _build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> dict[str, Any]:
     file_context = str(file_context or "")
     if file_context.strip() and not _FILE_MARKER.search(file_context):
         file_context = f"[File: Attached data]\n{file_context}"
@@ -1999,7 +2033,7 @@ def build_attachment_analytics(file_context: str, *, max_charts: int = 12) -> di
             prior_excerpt = str((pms.get("evidenceByFile") or {}).get(evidence_key) or "")
             pms.setdefault("evidenceByFile", {})[evidence_key] = "\n".join(
                 part for part in (*evidence_lines, prior_excerpt) if part
-            )[:16000]
+            )[:UPLOAD_CHART_EVIDENCE_CHARS]
 
     # Retain notes/summary sheets, other files, and OCR'd tables alongside a
     # specialized PMS workbook instead of returning as soon as it is detected.
@@ -2084,7 +2118,7 @@ def pms_report_cover(analytics: dict[str, Any]) -> tuple[str, str]:
     if sheet_count and dated_count < sheet_count:
         missing = sheet_count - dated_count
         summary_sentences.append(
-            f"{dated_count} of {sheet_count} analyzed worksheets state an as-of date; {missing} do not."
+            f"{dated_count} of {sheet_count} analyzed worksheets state an as-of date; {missing} {'does' if missing == 1 else 'do'} not."
         )
     returns = []
     for item in _featured_pms_period_summaries(analytics):
@@ -2693,6 +2727,19 @@ def _remove_redundant_source_columns(lines: list[str]) -> list[str]:
     return output
 
 
+def _extraction_notice(analytics: dict[str, Any]) -> list[str]:
+    notes = [item for item in (analytics or {}).get("extractionNotes") or []
+             if isinstance(item, dict) and item.get("note")]
+    if not notes:
+        return []
+    detail = " ".join(f"{_md_cell(item.get('filename') or 'Attachment')}: {_md_cell(item['note'])}" for item in notes)
+    return [
+        "> **Partial attachment:** the file was larger than the extraction limit, so every count, total, average "
+        f"and ranking below describes only the extracted rows, not the whole file. {detail}",
+        "",
+    ]
+
+
 def attachment_analytics_section(
     analytics: dict[str, Any],
     source_id: str = "",
@@ -2740,6 +2787,7 @@ def attachment_analytics_section(
         "",
         f"The inventory and summary statistics below are calculated from the attached source rows; missing values remain missing.{source_note}",
         "",
+        *_extraction_notice(analytics),
         "| File | Source | Sheet / section | Data rows analyzed | Fields | Missing observations |",
         "|---|---|---|---:|---:|---:|",
     ]

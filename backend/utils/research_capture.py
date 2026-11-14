@@ -117,7 +117,13 @@ def _safe(value: Any, field_name: str = "", depth: int = 0) -> Any:
                 cap = 400_000
             clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
             return _redact_text(clipped)
-        if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt", "snippet", "report", "finalreport", "writerprompt"}:
+        if name in {"report", "finalreport"}:
+            # The finished report must be captured whole: at 15,000 chars every web report's capture
+            # ended mid-text, so its length, citations and sections could not be checked afterwards.
+            cap = 400_000
+            clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
+            return _redact_text(clipped)
+        if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt", "snippet", "writerprompt"}:
             cap = 9000 if name in {"pagecontent", "fullcontent", "full_content", "raw_content", "content", "evidence", "evidenceexcerpt"} else 15000
             clipped = value[:cap] + (f"\n[CAPTURE TRUNCATED; original chars={len(value)}]" if len(value) > cap else "")
             return _redact_text(clipped)

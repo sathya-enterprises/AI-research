@@ -61,6 +61,27 @@ def strip_calculation_labels(text: str) -> str:
     return re.sub(r"[ \t]+([,.;:)])", r"\1", "".join(out))
 
 
+# A number with four or more decimals ("58.327953%", "126.47771"): raw API precision a source republished.
+# Gates verify the exact figure; readers see it rounded. Not inside citations, URLs, versions or IDs.
+_OVERPRECISE_RE = re.compile(r"(?<![\w./:\[\]-])(-?\d[\d,]*\.\d{4,})(?![\d.]*\]|[\w/.]*\d)")
+
+
+def _round_for_reader(match: re.Match) -> str:
+    raw = match.group(1)
+    value = _num(raw)
+    if value is None:
+        return raw
+    if abs(value) >= 1:
+        text = f"{value:,.2f}" if "," in raw else f"{value:.2f}"
+    else:
+        text = f"{value:.3g}"
+    return text
+
+
+def round_overprecise_numbers(text: str) -> str:
+    return _OVERPRECISE_RE.sub(_round_for_reader, str(text or ""))
+
+
 def reader_text(markdown: str) -> str:
     """All render-time clean-ups (kept separate from the gates, which need the internal labels)."""
-    return strip_calculation_labels(markdown)
+    return round_overprecise_numbers(strip_calculation_labels(markdown))

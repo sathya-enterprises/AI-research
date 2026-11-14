@@ -248,6 +248,10 @@ def metric_name(spec: dict) -> str:
     y = str(spec.get("yLabel") or "")
     if re.fullmatch(r"(?i)\s*(?:₹|rs\.?|inr|us\$|\$)?\s*(?:crore|cr|lakh|bn|billion|mn|million|x|%)?\s*", y) and spec.get("metric"):
         y = str(spec.get("metric"))
+    # A generic axis label ("Value") never beats the measure the chart was built from: a three-country
+    # World Bank chart was retitled "Value: Brazil, India and Kenya" although its metric was known.
+    if y.strip().casefold() in {"", "value", "values"} and str(spec.get("metric") or "").strip():
+        y = str(spec.get("metric"))
     if not y or y.casefold() in {"value", "values", "return (%)"} and len(_series(spec)) == 1:
         y = str(_series(spec)[0].get("name") if _series(spec) else "") or y
     y = re.sub(r"\s*\((?:%|[^)]*(?:cr|crore|rs|₹|x|bn|billion|score)[^)]*)\)\s*$", "", y, flags=re.I)
@@ -420,10 +424,25 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         metric = "Quarterly return"
         unit = unit or ("%" if spec.get("unit") == "%" or "%" in str(spec.get("yLabel") or "") else unit)
         spec["_period"] = period_label
-    if not unit and re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings", f"{passage_text[:600]} {old_rest} {source_titles}"):
+    if not unit:
+        # A measure that states its own denominator ("Mobile cellular subscriptions (per 100 people)",
+        # "Individuals using the Internet (% of population)") carries its unit in the name.
+        named = re.search(r"\(((?:per\s+\d[\d,]*\s+[a-z][a-z ]*)|(?:%\s+of\s+[a-z][a-z ]*))\)",
+                          f"{spec.get('metric') or ''} {spec.get('yLabel') or ''} {old_rest}", re.I)
+        if named:
+            unit = named.group(1).strip()
+            if metric.casefold().endswith(f"({unit.casefold()})"):
+                metric = metric[: -len(unit) - 2].rstrip()
+    # P/E is guessed only for a chart whose metric names no measure of its own: "P/E" anywhere in a source
+    # page once turned a mobile-subscriptions chart into "P/E ratio ... (x)", which the evidence gate then
+    # rejected ("the source row does not establish the chart's stated unit").
+    metric_is_generic = metric.casefold() in {"value", "values", "return", "ratio", "multiple"} or bool(
+        re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings|valuation", metric))
+    if not unit and metric_is_generic and re.search(r"(?i)\bp/?e\b|price[- ]to[- ]earnings", f"{passage_text[:600]} {old_rest} {source_titles}"):
         vals = _values(spec)
         if vals and all(0 < v < 200 for v in vals):
-            metric, unit = (f"P/E ratio, {metric}" if metric.casefold() not in {"p/e", "pe", "p/e ratio"} else "P/E ratio"), "x"
+            metric, unit = (f"P/E ratio, {metric}" if metric.casefold() not in {
+                "p/e", "pe", "p/e ratio", "value", "values", "ratio", "multiple"} else "P/E ratio"), "x"
     if not unit:
         unit = infer_unit({"yLabel": metric, "series": []}, passage_text)
     unit_txt = f" ({unit})" if unit else ""

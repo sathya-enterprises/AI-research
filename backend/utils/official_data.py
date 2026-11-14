@@ -15,9 +15,12 @@ whatever tables web pages happened to contain. This module gives every report th
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
+
+import httpx
 import logging
 import re
 from dataclasses import dataclass, field
@@ -323,7 +326,10 @@ def _years(start_year: int, today: date, *, allow_current: bool, end_year: int |
 
 async def _fetch_wb(client, entry: CatalogEntry, entities: list[str], years: list[int]) -> dict[str, dict[int, float]]:
     url = f"https://api.worldbank.org/v2/country/{';'.join(entities)}/indicator/{entry.code}"
-    resp = await client.get(url, params={"format": "json", "date": f"{years[0]}:{years[-1]}", "per_page": 1000})
+    # The API either answers in well under a second or hangs for a minute; a short read timeout plus the
+    # caller's retries recovers far more often than waiting out one 45 s hang per attempt.
+    resp = await client.get(url, params={"format": "json", "date": f"{years[0]}:{years[-1]}", "per_page": 1000},
+                            timeout=httpx.Timeout(15.0, connect=10.0))
     resp.raise_for_status()
     payload = resp.json()
     out: dict[str, dict[int, float]] = {}
@@ -417,12 +423,22 @@ async def fetch_dataset(client, item: dict, *, start_year: int, today: date,
         return None
     fetcher = {"wb": _fetch_wb, "imf": _fetch_imf, "owid": _fetch_owid, "fred": _fetch_fred}[entry.connector]
     raw = None
-    for attempt in (1, 2):
+    # Back off between attempts: two immediate retries fell inside the same transient API error (live run:
+    # wb.internet failed twice within one second), and the report lost its headline dataset.
+    for attempt, wait_seconds in ((1, 1.5), (2, 3.0), (3, 5.0), (4, 0.0)):
         try:
             raw = await fetcher(client, entry, item["entities"], years)
             break
         except Exception as exc:
-            log.warning("Official data: %s fetch failed (%s, attempt %d)", entry.id, type(exc).__name__, attempt)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            log.warning("Official data: %s fetch failed (%s%s, attempt %d)", entry.id, type(exc).__name__,
+                        f" HTTP {status}" if status else "", attempt)
+            if not isinstance(exc, httpx.HTTPError):
+                break  # a parsing/programming error will not succeed on retry
+            if status is not None and 400 <= int(status) < 500 and int(status) not in {408, 429}:
+                break  # a client error (bad code/entity) will not succeed on retry
+            if wait_seconds:
+                await asyncio.sleep(wait_seconds)
     if raw is None:
         return None
     raw = {name: vals for name, vals in raw.items() if len(vals) >= 2}
@@ -501,7 +517,10 @@ def as_source(ds: Dataset) -> dict:
         header, *rows,
     ])
     return {
-        "title": title, "url": e.page_url, "publisher": e.publisher, "published": ds.retrieved,  # retrieval date
+        "title": title, "url": e.page_url, "publisher": e.publisher,
+        # The API retrieval date is not a publication date: shown as one, it made a 2015-2024 series look like a
+        # 2026 source and the window gates dropped its charts. Keep both facts under their own names.
+        "retrievedAt": ds.retrieved, "dataPeriod": f"{ds.years[0]}-{ds.years[-1]}",
         "snippet": f"{e.title} ({e.unit}) for {', '.join(names)}, {ds.years[0]}-{ds.years[-1]} ({e.publisher}).",
         "fullContent": text, "pageContent": text, "pageFetchStatus": "ok", "pageFetchHttpStatus": 200,
         "evidenceOrigin": "publisher_page", "sourceType": "Official dataset", "kind": "Official dataset",

@@ -206,7 +206,7 @@ def test_official_dataset_chart_rows_survive_claim_scoped_source_excerpts():
     passage = SimpleNamespace(
         passage_id=f"{sid}.1", source_id=sid, kind="table", title=source["title"],
         text=source["pageContent"], url=source["url"], publisher=source["publisher"],
-        reliability=0.95, published=source["published"],
+        reliability=0.95, published=source.get("published") or source["retrievedAt"],
     )
 
     class _Store:

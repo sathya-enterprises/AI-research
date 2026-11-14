@@ -201,6 +201,15 @@ def window_start(question: str, today: date) -> date:
 def recency(row: dict, start: date, today: date) -> tuple[float, str]:
     published = source_date(row)
     if not published:
+        # An official dataset has no publication date of its own, but its latest observation says how current it is.
+        dataset = row.get("officialDataset") if isinstance(row.get("officialDataset"), dict) else {}
+        years = [int(y) for y in dataset.get("years") or [] if str(y).isdigit()]
+        if years:
+            latest = min(date(max(years), 12, 31), today)
+            if latest >= start:
+                return 1.0, f"official data through {max(years)} (inside the requested window)"
+            years_before = (start - latest).days / 365.25
+            return round(max(0.05, 0.5 ** years_before), 3), f"official data through {max(years)}"
         return 0.5, "undated"
     if published > today:
         return 0.5, f"dated {published.isoformat()} (future date; treated as undated)"

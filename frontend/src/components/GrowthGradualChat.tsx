@@ -47,7 +47,7 @@ interface GeminiReportAudit { status?: 'PASS' | 'WARNING' | 'FAIL' | 'unavailabl
 interface ReportQualityReview { publicationAudit?: ReportPublicationAudit; chartDensity?: { profile?: { minimum?: number | null; maximum?: number | null; label?: string }; withinTarget?: number | null; measuredCharts?: number; applicableCharts?: number; exceptionsOrMisses?: { title?: string; status?: string; count?: number; minimum?: number | null; maximum?: number | null }[] }; }
 interface ReportPageBudget { minimum?: number | null; target?: number | null; maximum?: number | null; renderedPages?: number | null; measured?: boolean; minimumReached?: boolean | null; warning?: string | null; }
 interface ReportRagStatus { requested?: boolean; status?: string; retrievedChunks?: number; sourceCount?: number; sourceIds?: string[]; restoreStatus?: string; rerankerRan?: boolean; message?: string; }
-interface ReportRevision { revision: number; savedAt: number; note: string; report: string; title?: string; charts: ChartSpec[]; images?: WebImage[]; sources?: ReportSource[]; presentation?: Record<string, unknown>; keyStats?: {label:string;value:string;change?:string}[]; summary?: string; theme?: ReportTheme; qualityReview?: ReportQualityReview; publicationStatus?: string; sessionId?: string; ragStatus?: ReportRagStatus; }
+interface ReportRevision { revision: number; savedAt: number; note: string; report: string; title?: string; charts: ChartSpec[]; images?: WebImage[]; sources?: ReportSource[]; presentation?: Record<string, unknown>; keyStats?: {label:string;value:string;change?:string}[]; summary?: string; theme?: ReportTheme; qualityReview?: ReportQualityReview; publicationStatus?: string; publicationOutcome?: string; failedStage?: string | null; sessionId?: string; ragStatus?: ReportRagStatus; }
 interface ReportData { reportId?: string; revision?: number; revisionHistory?: ReportRevision[]; report: string; reportTier?: ReportTier; reportStyle?: ReportStyle; kicker?: string; pageTarget?: {min:number | null; target:number | null; max:number}; pageBudget?: ReportPageBudget; title?: string; charts: ChartSpec[]; images?: WebImage[]; presentation?: Record<string, unknown>; keyStats: {label:string;value:string;change?:string}[]; summary: string; fileImages?: {name:string;mimeType:string;data:string}[]; sourceDocuments?: {name:string;text:string;file_type?:string}[]; sources?: ReportSource[]; recommendedFormat?: 'pdf'; theme?: ReportTheme; qualityReview?: ReportQualityReview; geminiAudit?: GeminiReportAudit; publicationStatus?: 'PASS' | 'WARNING' | 'FAIL' | string; auditSummary?: {status?: string; newBlockingFindings?: number; remainingBlockingFindings?: number; publisherPagesVerified?: number}; sessionId?: string; ragStatus?: ReportRagStatus; publicationOutcome?: 'published' | 'draft' | 'structural_failure' | string; failedStage?: string | null; blockingCategories?: string[]; failureSummary?: ReportFailureItem[]; chartPipeline?: { stages?: { stage: string; count: number; removed?: { title?: string; reason?: string }[] }[]; finalCount?: number }; }
 interface ReportFailureItem { stage?: string; issue?: string; claim?: string; sources?: string[]; values?: string[]; }
 
@@ -2937,6 +2937,8 @@ export default function GrowthGradualChat() {
           theme: reportData.theme,
           qualityReview: reportData.qualityReview,
           publicationStatus: reportData.publicationStatus,
+          publicationOutcome: reportData.publicationOutcome,
+          failedStage: reportData.failedStage,
           sessionId: reportData.sessionId,
           ragStatus: reportData.ragStatus,
         };
@@ -2953,6 +2955,9 @@ export default function GrowthGradualChat() {
           presentation: finalData.presentation ?? reportData.presentation,
           qualityReview: finalData.qualityReview ?? reportData.qualityReview,
           publicationStatus: finalData.publicationStatus ?? 'WARNING',
+          // The revised text has its own outcome; never keep the previous version's draft/published flag.
+          publicationOutcome: finalData.publicationOutcome ?? (finalData.publicationStatus === 'FAIL' ? 'draft' : undefined),
+          failedStage: finalData.failedStage ?? undefined,
           auditSummary: finalData.auditSummary,
           sessionId: reportData.sessionId,
           ragStatus: finalData.ragStatus ?? reportData.ragStatus,
@@ -3014,6 +3019,8 @@ export default function GrowthGradualChat() {
       theme: current.theme,
       qualityReview: current.qualityReview,
       publicationStatus: current.publicationStatus,
+      publicationOutcome: current.publicationOutcome,
+      failedStage: current.failedStage,
       sessionId: current.sessionId,
       ragStatus: current.ragStatus,
     };

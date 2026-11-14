@@ -54,21 +54,36 @@ def test_a_number_unsupported_by_every_cited_source_still_blocks():
 
 
 def test_attachment_only_source_mode_is_separate_from_normal_claim_checks():
+    """Attachment-only mode waives publisher-page fetching, not the check that the file holds the number."""
+    import routes.report as report_module
+
+    name = "PMS uploaded workbook.xlsx"
     manifest = [{
-        "id": "S1",
-        "title": "PMS uploaded workbook",
-        "kind": "Uploaded document",
+        "id": "S1", "title": name, "kind": "Uploaded workbook",
+        "evidence_origin": "uploaded_workbook", "page_fetch_status": "not_applicable",
     }]
     report = "The workbook's 1 Mth mean return is 5.20% [S1]."
 
-    audited = _attach_audit_source_evidence(manifest, [], report)
-    ordinary_audit = _report_source_evidence_audit(audited)
-    attachment_audit = _report_source_evidence_audit(audited, attachment_only=True)
+    token = report_module._UPLOADED_FILE_EVIDENCE_TEXTS.set({})
+    try:
+        # The file does not contain the value: blocking in both modes, but no publisher-page flag for an upload.
+        audited = _attach_audit_source_evidence(manifest, [], report)
+        ordinary_audit = _report_source_evidence_audit(audited)
+        attachment_audit = _report_source_evidence_audit(audited, attachment_only=True)
+        assert ordinary_audit["blocking"] is True
+        assert attachment_audit["blocking"] is True
+        assert attachment_audit["sourceMode"] == "uploaded_attachment"
+        assert "Publisher-page fetching is not required" in attachment_audit["note"]
+        assert not any("publisher-page evidence" in str(flag) for flag in attachment_audit["flags"])
 
-    assert ordinary_audit["blocking"] is True
-    assert attachment_audit["blocking"] is False
-    assert attachment_audit["sourceMode"] == "uploaded_attachment"
-    assert "data source of truth" in attachment_audit["note"]
+        # The file holds the value with its subject: the attachment-only audit passes without any web page.
+        report_module._UPLOADED_FILE_EVIDENCE_TEXTS.set({
+            report_module._normalize_filename(name): "Horizon | Mean return\n1 Mth | 5.20%\n3 Mth | 4.10%\n",
+        })
+        audited = _attach_audit_source_evidence(manifest, [], report)
+        assert _report_source_evidence_audit(audited, attachment_only=True)["blocking"] is False
+    finally:
+        report_module._UPLOADED_FILE_EVIDENCE_TEXTS.reset(token)
 
 
 def test_risk_matrix_marker_is_removed_from_reader_text_and_raw_marker_is_blocking():
