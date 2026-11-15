@@ -895,3 +895,21 @@ def test_chart_audit_keeps_failures_for_every_chart_in_a_large_batch():
     result = audit_chart_evidence_consistency("", charts, [source])
     failing = {f.get("chartIndex") for f in result["chartEvidenceFailures"]}
     assert failing == {1, 2, 3, 4, 5, 6}
+
+
+def test_calculation_labels_with_parentheses_percent_constants_and_year_like_inputs():
+    # Benchmark: removals across healthcare / insurance / inflation / agriculture prompts.
+    from utils.number_policy import apply_number_policy, number_pool, verify_calculation_labels
+
+    pool = number_pool({"S1": "The CPI index rose from 35.0 to 41.2. Wheat MSP | 2015 | 2040 | 2275"})
+    # A label with parentheses was cut at the first ")" and never verified.
+    assert verify_calculation_labels("It rose 17.7% (calculated: (41.2 - 35.0) / 35.0 * 100).", pool) == ""
+    assert verify_calculation_labels("It rose 19.9% (calculated: (41.2 - 35.0) / 35.0 * 100).", pool)
+    # "× 100" is the percent constant, not an input to find in a passage.
+    assert verify_calculation_labels("Ratio 117.7% (calculated: 41.2 / 35.0 × 100).", pool) == ""
+    # A price that looks like a year ("MSP ₹2040") is a valid named input; an invented one is not.
+    assert verify_calculation_labels("MSP rose 11.5% (calculated: change from 2040 to 2275).", pool) == ""
+    assert verify_calculation_labels("MSP rose 9.9% (calculated: change from 2040 to 9999).", pool)
+    kept = apply_number_policy("The index rose 17.7% (calculated: (41.2 - 35.0) / 35.0 * 100) [S1].",
+                               passage_texts={"S1": "The CPI index rose from 35.0 to 41.2."}, allowed_numbers=set())
+    assert kept.removed == []

@@ -16544,7 +16544,7 @@ def _attach_audit_source_evidence(
         # A number labelled "(calculated: inputs)" was verified by the V2 number policy (each input
         # in a cited passage, the arithmetic reproduced); the label and the number it qualifies are
         # not source quotes, so they are not looked up as such.
-        text = re.sub(r"[-+−]?\s*(?:₹|INR|Rs\.?|US\$|USD|\$)?\s*\d[\d,]*(?:\.\d+)?[^\d()\n]{0,30}\(calculated[^)]*\)", " ", text, flags=re.I)
+        text = re.sub(r"[-+−]?\s*(?:₹|INR|Rs\.?|US\$|USD|\$)?\s*\d[\d,]*(?:\.\d+)?[^\d()\n]{0,30}\(calculated(?:[^()]|\([^()]*\))*\)", " ", text, flags=re.I)
         # Durations and counts of items are not statistics ("3-month window", "13 weeks", "13 out of 15").
         text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s*[- ]?\s*(?:weeks?|wks?|months?|years?|yrs?|days?|quarters?|fortnights?|sessions?)\b", " ", text)
         text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s+(?:out\s+)?of\s+(?:the\s+)?\d{1,3}\b", " ", text)

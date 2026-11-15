@@ -139,12 +139,18 @@ def to_markdown(label: str, rows: list[dict], previous: dict | None) -> str:
               f"- chart candidates verified: **{totals['candidatesVerified']} / {totals['candidatesBuilt']}**"]
     if previous:
         old = previous.get("totals") or {}
-        lines += ["", "## Change against the previous scorecard", ""]
+        # Compare like with like: only the prompts scored in both scorecards (new prompts are added over time).
+        common = [r for r in ok if r["id"] in before and not before[r["id"]].get("error")]
+        lines += ["", f"## Change against the previous scorecard ({len(common)} prompts in both)", ""]
         for key, name, better in METRICS:
-            if key in old:
-                delta = totals[key] - old[key]
-                verdict = "same" if delta == 0 else ("better" if (delta < 0) == (better == "lower") else "WORSE")
-                lines.append(f"- {name}: {old[key]} -> {totals[key]} ({verdict})")
+            now = sum(int(r.get(key) or 0) for r in common)
+            was = sum(int(before[r["id"]].get(key) or 0) for r in common)
+            delta = now - was
+            verdict = "same" if delta == 0 else ("better" if (delta < 0) == (better == "lower") else "WORSE")
+            lines.append(f"- {name}: {was} -> {now} ({verdict})")
+        new_ids = [r["id"] for r in ok if r["id"] not in before]
+        if new_ids:
+            lines.append(f"- prompts new in this scorecard (not compared): {', '.join(new_ids)}")
         worse = [r["id"] for r in ok if r["id"] in before and any(
             (int(r.get(k) or 0) > int(before[r["id"]].get(k) or 0)) if b == "lower" else
             (int(r.get(k) or 0) < int(before[r["id"]].get(k) or 0)) for k, _n, b in METRICS)]

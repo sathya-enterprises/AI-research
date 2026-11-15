@@ -106,7 +106,7 @@ def unsupported_numbers(body: str, allowed: set[str], passage_texts: dict[str, s
     count agrees with the number policy that already accepted the sentence."""
     # A labelled calculation ("₹83,816 crore (calculated: 47,955 + ...)") was verified by the
     # number policy against its inputs: neither the number nor its inputs are "unsupported".
-    text = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated:[^)]*\)", " ", body)
+    text = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n]{0,30}\(calculated:(?:[^()]|\([^()]*\))*\)", " ", body)
     sheet = None
     if passage_texts:
         from types import SimpleNamespace
@@ -185,7 +185,7 @@ def fact_block(passages, limit: int = 60) -> str:
 
 def _sentence_numbers(sentence: str) -> list[str]:
     """Factual numbers in a sentence (no citations, figure refs, periods, durations, counts, small ordinals)."""
-    return [_normalize_number(t).lstrip("-") for t in statistic_tokens(re.sub(r"\(calculated:[^)]*\)", " ", sentence))]
+    return [_normalize_number(t).lstrip("-") for t in statistic_tokens(re.sub(r"\(calculated:(?:[^()]|\([^()]*\))*\)", " ", sentence))]
 
 
 def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[str, int]:

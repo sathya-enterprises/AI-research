@@ -177,6 +177,7 @@ class PoolNumber:
     pct: bool = False
     unit: str = ""
     scale: float = 1.0  # "10 lakh" in the passage is the count 1,000,000 (scale 1e5)
+    year_like: bool = False  # 1900-2100 with no grouping: maybe a year, maybe a value ("₹2040")
 
 
 _UNIT_WORD_RE = re.compile(r"\s*(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\b|crores?|crs?\b|trillion|tn\b|billion|bn\b|million|mn\b|bps\b|x(?![A-Za-z])|times\b)", re.I)
@@ -203,15 +204,16 @@ def number_pool(passages: dict[str, str]) -> list[PoolNumber]:
         text = str(text or "")
         for match in _NUM_RE.finditer(text):
             value = _float(match.group(0))
-            if value is None or re.fullmatch(r"(?:19|20)\d{2}", match.group(0)):
+            if value is None:
                 continue
+            year_like = bool(re.fullmatch(r"(?:19|20)\d{2}", match.group(0)))
             pct = bool(re.match(r"\s*%", text[match.end():match.end() + 3]))
             scale_word = re.match(r"\s*(lakh\s+crores?|lakhs?|crores?|million|billion|thousand)\b",
                                   text[match.end():match.end() + 16], re.I)
             scale = {"lakh": 1e5, "lakhs": 1e5, "crore": 1e7, "crores": 1e7, "million": 1e6, "billion": 1e9,
                      "thousand": 1e3}.get(re.sub(r"\s+", " ", scale_word.group(1).casefold()), 1.0) if scale_word else 1.0
             pool.append(PoolNumber(value, match.group(0).lstrip("+"), pid, match.start(), text.count("\n", 0, match.start()),
-                                   pct, unit_family(text[match.end():match.end() + 16]), scale))
+                                   pct, unit_family(text[match.end():match.end() + 16]), scale, year_like))
     return pool
 
 
@@ -223,6 +225,7 @@ def _fmt(item: PoolNumber) -> str:
 
 def find_conversion(token: str, pool: list[PoolNumber], *, qualifier: str = "", unit: str = "") -> str:
     """A labelled unit conversion of one pool number; the text's unit word must be the target unit."""
+    pool = [item for item in pool if not item.year_like]  # possible years are never converted
     target = _float(token)
     if target is None or not unit:
         return ""
@@ -256,7 +259,8 @@ def find_derivation(token: str, pool: list[PoolNumber], *, qualifier: str = "", 
     target = _float(token)
     if target is None:
         return ""
-    sentence_pool = [p for p in sentence_pool if normalize(p.raw) != normalize(token)]
+    pool = [item for item in pool if not item.year_like]  # possible years never take part in a guess
+    sentence_pool = [p for p in sentence_pool if normalize(p.raw) != normalize(token) and not p.year_like]
     for a, b in itertools.permutations(sentence_pool, 2):
         if _close(a.value + b.value, token, qualifier) and a.position < b.position:
             return f"{_fmt(a)} + {_fmt(b)}"
@@ -290,7 +294,7 @@ def find_derivation(token: str, pool: list[PoolNumber], *, qualifier: str = "", 
     return ""
 
 
-_CALC_LABEL_RE = re.compile(r"\(calculated(?: from| using)?\s*:?\s*([^)]*)\)", re.I)
+_CALC_LABEL_RE = re.compile(r"\(calculated(?: from| using)?\s*:?\s*((?:[^()]|\([^()]*\))*)\)", re.I)
 
 
 def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
@@ -300,9 +304,12 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
     inputs must reproduce the number the label follows. A label whose inputs are only
     in the writer's own sentence, or whose arithmetic does not hold, fails.
     """
-    pool_values = {normalize(n.raw).lstrip("-") for n in pool}
+    pool_values = {normalize(n.raw).lstrip("-") for n in pool if not n.year_like}
     # A count written with a scale word ("10 lakh") is also the plain input (1000000).
-    pool_values |= {normalize(f"{abs(n.value) * n.scale:.4f}") for n in pool if n.scale != 1.0}
+    pool_values |= {normalize(f"{abs(n.value) * n.scale:.4f}") for n in pool if n.scale != 1.0 and not n.year_like}
+    # A value that looks like a year ("MSP of ₹2040 per quintal") may be a named input; it is never used
+    # to guess a derivation, but an explicit calculation may cite it.
+    year_like_values = {normalize(n.raw).lstrip("-") for n in pool if n.year_like}
     for match in _CALC_LABEL_RE.finditer(sentence):
         body = match.group(1)
         before = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", CITE_RE.sub(" ", sentence[:match.start()]))
@@ -314,10 +321,18 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
             if normalize(conversion.group(1)).lstrip("-") not in pool_values:
                 return f"conversion input {conversion.group(1)} is not in the cited passages"
             continue
+        # "× 100" turns a ratio into a percent: a constant, not a fact to find in a passage (removed
+        # sentences in the healthcare, insurance and inflation benchmark prompts).
+        body = re.sub(r"\s*[*×x]\s*100\s*%?\s*$", "", body.strip())
+        # "(560.4 - 268.8) / 268.8" is the percent change from 268.8 to 560.4.
+        growth = re.fullmatch(r"\(\s*([-+−]?\d[\d,]*(?:\.\d+)?)\s*[-−]\s*([-+−]?\d[\d,]*(?:\.\d+)?)\s*\)\s*[/÷]\s*"
+                              r"([-+−]?\d[\d,]*(?:\.\d+)?)", body)
+        if growth and normalize(growth.group(2)) == normalize(growth.group(3)):
+            body = f"change from {growth.group(2)} to {growth.group(1)}"
         inputs = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", body)
         if len(inputs) < 2:
             return "calculated label without its inputs"
-        missing = [x for x in inputs if normalize(x).lstrip("-") not in pool_values]
+        missing = [x for x in inputs if normalize(x).lstrip("-") not in pool_values | year_like_values]
         if missing:
             return f"calculation input(s) {', '.join(missing)} not in the cited passages"
         values = [abs(_float(x) or 0.0) for x in inputs]
@@ -408,7 +423,7 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
             if _TABLE_LINE_RE.match(line) and not re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", line):
                 # A labelled calculation in a cell is checked through its inputs and arithmetic.
                 calc_reason = verify_calculation_labels(line, number_pool(passage_texts)) if "(calculated" in line else ""
-                plain_cells = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n|]{0,30}\(calculated[^)]*\)", " ", line)
+                plain_cells = re.sub(r"[-+−]?\d[\d,]*(?:\.\d+)?[^()\d\n|]{0,30}\(calculated(?:[^()]|\([^()]*\))*\)", " ", line)
                 bad = [t for t in statistic_tokens(plain_cells) if not sheet.candidates(t.rstrip(",."))]
                 bad += [calc_reason.split(" ")[-1]] if calc_reason else []
                 if bad:
@@ -441,7 +456,7 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                 reason = "requested calculation uses numbers that are not facts in the evidence"
             cited = [t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)]
             cited_ids = {pid for pid in passage_texts if pid in cited or any(pid.split(".")[0] == c for c in cited)}
-            tokens = statistic_tokens(re.sub(r"\(calculated[^)]*\)", " ", sentence))
+            tokens = statistic_tokens(re.sub(r"\(calculated(?:[^()]|\([^()]*\))*\)", " ", sentence))
             named_entity = False
             for token in ([] if reason else tokens):
                 start = sentence.find(token)

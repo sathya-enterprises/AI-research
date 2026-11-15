@@ -116,6 +116,22 @@
       "reportId": "58e2669b3b274ab882cd70cef7a11945",
       "seconds": 424,
       "ranAt": "2026-11-16T02:01:51"
+    },
+    "ai_investment": {
+      "capture": "research_capture_20261116_020151_35cd5e65.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "dd96c1b18d7742699ae6a75dde289fb4",
+      "seconds": 741,
+      "ranAt": "2026-11-16T02:14:12"
+    },
+    "india_ipo_market": {
+      "capture": "research_capture_20261116_021412_b54d7ee0.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "9c69fbe0068449fc915f447ef5332253",
+      "seconds": 560,
+      "ranAt": "2026-11-16T02:23:32"
     }
   }
 }
