@@ -238,6 +238,8 @@ _GENERIC_MEASURE_WORDS = {
     "current", "constant", "investment", "capacity", "percent", "per", "capita", "change", "average", "data",
     "statistic", "trend", "year", "people", "population", "million", "billion", "us$", "usd", "gdp", "sector",
     "private", "public", "domestic", "national", "country", "economy", "the", "and", "for", "from", "with", "into",
+    # "semiconductor sales" vs "electric car sales": a semiconductor report fetched EV car sales as a stand-in
+    "sale", "revenue", "volume", "market", "demand", "output", "production", "use", "end", "application", "segment",
 }
 
 

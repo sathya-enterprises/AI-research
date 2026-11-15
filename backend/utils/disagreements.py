@@ -115,6 +115,10 @@ def statements(report: str) -> list[dict]:
             periods = {re.sub(r"\s+", " ", p.casefold()) for p in _PERIOD_RE.findall(plain)}
             if len(periods) != 1:
                 continue
+            if re.search(r"(?i)\b(?:19|20)\d0s\b", plain):
+                # "around 40% in the mid-1980s ... 7.4% by 2024": a decade is a second period, so the
+                # sentence's values cannot all be dated to its one year (a false "sources disagree").
+                continue
             period = next(iter(periods))
             if re.fullmatch(r"(?:19|20)\d{2}", period) and _PARTIAL_RE.search(plain):
                 continue  # "in the first four months of 2026" is not the year 2026

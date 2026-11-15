@@ -844,3 +844,17 @@ def test_healthcare_run_growth_calculations_and_rate_denominators():
     # "per 100,000 live births" is a denominator, not a statistic to look up.
     assert statistic_tokens("An MMR of 34 per 100,000 live births [S19].") == ["34"]
     assert "100,000" in statistic_tokens("The plan adds 100,000 new beds.")
+
+
+def test_semiconductor_run_disagreement_dates_and_dataset_subject():
+    from utils.disagreements import find_disagreements
+    from utils.official_data import CATALOG, fits_measure
+
+    # "40% in the mid-1980s ... 7.4% by 2024" was reported as two values for Japan's 2024 share.
+    report = ("## Regional trends\n\nJapan, once the dominant player with around 40% market share in the mid-1980s, "
+              "saw its share shrink to 7.4% by 2024 [S3].\n\n## Recovery\n\n"
+              "Japan's market share declined to just 7.4% by 2024 [S14].")
+    assert find_disagreements(report) == []
+    # "sales" says how something is measured, not what: EV car sales do not stand in for semiconductor sales.
+    assert not fits_measure(CATALOG["owid.ev_car_sales"], "semiconductor sales by end-use application (Automotive)")
+    assert fits_measure(CATALOG["owid.ev_car_sales"], "annual electric vehicle sales volume")
