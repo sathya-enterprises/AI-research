@@ -347,6 +347,39 @@ def assign_tiers(entities: list[EntityEvidence], *, max_deep_dives: int = 10) ->
     return tiers
 
 
+def merge_case_variants(entities: list[EntityEvidence]) -> list[EntityEvidence]:
+    """One entity per name regardless of case: an upper-case table row ("TAMIL NADU") and prose
+    ("Tamil Nadu") are the same state. They were two deep-dive entities, so the in-depth EV report
+    had "Tamil Nadu: Deep-Dive" and "TAMIL NADU: Deep-Dive". The evidence is pooled under the
+    mixed-case name (an all-capitals name is kept only when every variant is all capitals)."""
+    groups: dict[str, list[EntityEvidence]] = {}
+    for entity in entities:
+        groups.setdefault(re.sub(r"\s+", " ", entity.name).strip().casefold(), []).append(entity)
+    merged: list[EntityEvidence] = []
+    for entity in entities:
+        group = groups.get(re.sub(r"\s+", " ", entity.name).strip().casefold())
+        if not group:
+            continue  # already merged into an earlier entity of the group
+        groups.pop(re.sub(r"\s+", " ", entity.name).strip().casefold())
+        if len(group) == 1:
+            merged.append(entity)
+            continue
+        keep = next((e for e in group if not e.name.isupper()), group[0])
+        for other in group:
+            if other is keep:
+                continue
+            keep.aliases |= other.aliases | {other.name}
+            keep.table_passages |= other.table_passages
+            keep.table_sources |= other.table_sources
+            keep.text_passages |= other.text_passages
+            keep.good_text_sources |= other.good_text_sources
+            keep.company_rows += other.company_rows
+            keep.seeded = keep.seeded or other.seeded
+            keep.role = keep.role or other.role
+        merged.append(keep)
+    return merged
+
+
 def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
                  seeds: list[str] | None = None, scope: str = "") -> dict[str, list[EntityEvidence]]:
     # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
@@ -362,7 +395,7 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
         if is_multi_quarter_sector_rotation_request(question):
             max_deep = min(max_deep, 4)  # the matrix covers the full sector universe; deep dives focus on standout evidence
-    entities = discover_entities(store, question=question, seeds=seeds, scope=scope)
+    entities = merge_case_variants(discover_entities(store, question=question, seeds=seeds, scope=scope))
     _seed_keys = {str(x).casefold() for x in seeds or []}
     for _e in entities:  # an entity the plan named is seeded however it was discovered (table or text)
         if _e.name.casefold() in _seed_keys:
@@ -410,6 +443,50 @@ def _table_peers(store, named: list[str]) -> set[str]:
     return peers
 
 
+def _only_inside_hyphenated_names(store, name: str) -> bool:
+    """Every occurrence of ``name`` in the evidence is glued to a hyphenated name ("PM E-DRIVE")."""
+    token = re.escape(name.strip())
+    anywhere = re.compile(rf"(?<![A-Za-z0-9]){token}(?![A-Za-z0-9])")
+    seen = False
+    for passage in getattr(store, "passages", None) or []:
+        text = str(getattr(passage, "text", "") or "")
+        for match in anywhere.finditer(text):
+            seen = True
+            before, after = text[max(0, match.start() - 6):match.start()], text[match.end():match.end() + 1]
+            # "E-DRIVE", "E - DRIVE", "-E DRIVE", "DRIVE-2": glued to a hyphenated name.
+            if after == "-" or re.search(r"(?:-|(?<![A-Za-z])[A-Z])\s*-?\s*$", before):
+                continue
+            return False
+    return seen
+
+
+_ORGANISATION_WORDS = re.compile(
+    r"(?i)\b(?:ministry|department|authority|aayog|commission|council|board|bank|corporation|company|limited|ltd|"
+    r"government|agency|association|society|institute|organi[sz]ation|bureau|federation|union|university|"
+    r"motors?|industries|group|state|republic|kingdom|nations?)\b")
+
+
+def _acronym_names_a_concept(store, name: str) -> bool:
+    """The evidence spells the acronym out ("Public Charging Stations (PCS)") as a thing or measure, not an
+    organisation or place: it is a topic for the report's sections, not an entity with its own deep-dive."""
+    letters = [c for c in name if c.isalpha()]
+    if not 2 <= len(letters) <= 6:
+        return False
+    pattern = re.compile(rf"((?:[A-Za-z&][A-Za-z\-]*\s+){{1,{len(letters) + 3}}})\(\s*{re.escape(name)}s?\s*\)")
+    small = {"and", "of", "the", "for", "&", "in", "on"}
+    want = "".join(letters).casefold()
+    for passage in getattr(store, "passages", None) or []:
+        for match in pattern.finditer(str(getattr(passage, "text", "") or "")):
+            words = match.group(1).split()
+            for start in range(len(words)):
+                spelled = words[start:]
+                if spelled[0].casefold() in small:
+                    continue
+                if "".join(w[0] for w in spelled if w.casefold() not in small).casefold() == want:
+                    return not _ORGANISATION_WORDS.search(" ".join(spelled))
+    return False
+
+
 def _non_market_hygiene(entities: list[EntityEvidence], *, question: str, seeds: list[str], scope: str,
                         store=None) -> list[EntityEvidence]:
     """Stage N: table row labels are not all entities. A live health report gave deep-dives to "Female",
@@ -440,6 +517,10 @@ def _non_market_hygiene(entities: list[EntityEvidence], *, question: str, seeds:
             continue  # schema labels belong to the source metadata, not the report's research entities
         if name not in places and " " not in name.strip() and not name.isupper() and not re.search(r"\d", name):
             continue  # one ordinary capitalised word from a table row
+        if name.isupper() and store is not None and _only_inside_hyphenated_names(store, name):
+            continue  # "DRIVE" from "PM E-DRIVE": part of a scheme's name, not an entity of its own
+        if name.isupper() and store is not None and _acronym_names_a_concept(store, name):
+            continue  # "Public Charging Stations (PCS)", "Internal Combustion Engine (ICE)": a thing, not an entity
         if name not in places and _stem_words(name) <= q_stems:
             continue  # the question's own subject / measure
         if name not in places and not name.isupper() and _measure_name(name):

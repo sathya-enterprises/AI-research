@@ -62,12 +62,21 @@ def replay_source_evidence(capture: dict) -> dict:
     final = _stage(capture, "final_output")
     manifest = [row for row in final.get("sources") or [] if isinstance(row, dict)]
     enriched, exact = audit_source_rows(capture)
-    audited = _attach_audit_source_evidence(manifest, enriched, str(final.get("report") or ""))
+    report_text = str(final.get("report") or "")
+    audited = _attach_audit_source_evidence(manifest, enriched, report_text)
     audit = _source_evidence_quality_audit(audited)
+    raw_groups = len(audit.get("mismatchedCitationGroups") or [])
+    # As at the final V2 gate: a group is cleared when the evidence store's fact sheet holds every
+    # statistic of the claim in its cited sources (utils.evidence_check.reconcile_final_audit).
+    from utils.evidence_check import reconcile_final_audit
+    from utils.evidence_store import store_from_passages
+    passages = _stage(capture, "evidence_store").get("passages") or {}
+    if passages:
+        reconcile_final_audit({"sourceEvidenceAudit": audit}, report_text, store_from_passages(passages))
     captured = [finding for finding in ((final.get("audit") or {}).get("findings") or [])
                 if "lacks source evidence" in str(finding.get("issue") or "")]
     return {"captured": captured, "replayed": list(audit.get("mismatchedCitationGroups") or []), "audited": audited,
-            "exactSourceRows": exact, "sourceRows": len(enriched)}
+            "exactSourceRows": exact, "sourceRows": len(enriched), "beforeFactSheet": raw_groups}
 
 
 def audit_source_rows(capture: dict) -> tuple[list[dict], bool]:
@@ -203,6 +212,7 @@ def main() -> int:
 
     print("\n## 2. Source evidence (claims no cited source supports)")
     print(f"captured run: {len(sources['captured'])} findings | replay: {len(sources['replayed'])} citation groups "
+          f"({sources['beforeFactSheet']} before the fact-sheet check) "
           f"| source rows: {sources['sourceRows']} ({'exact' if sources['exactSourceRows'] else 'rebuilt from stages; approximate'})")
     for group in sources["replayed"][:limit]:
         print(f"  - {', '.join(group.get('sourceIds') or [])}: {', '.join(group.get('unmatchedNumericClaims') or [])} "

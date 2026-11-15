@@ -684,3 +684,31 @@ def test_an_aspnet_page_wrapped_in_a_form_keeps_its_text_but_a_search_box_is_dro
     text = _extract_html(html, 8000, True)
     assert "16.15 lakh electric vehicles were incentivised" in text
     assert "Search this site" not in text
+
+
+def test_entities_differing_only_in_case_are_one_entity():
+    # Observed in-depth run: "TAMIL NADU" (a table row) and "Tamil Nadu" (prose) were two deep-dive
+    # entities, so the outline had "Tamil Nadu: Deep-Dive" and "TAMIL NADU: Deep-Dive".
+    from utils.entity_tiers import EntityEvidence, merge_case_variants
+
+    merged = merge_case_variants([
+        EntityEvidence(name="TAMIL NADU", table_passages={"S32.1"}, table_sources={"S32"}),
+        EntityEvidence(name="Delhi", good_text_sources={"S5"}),
+        EntityEvidence(name="Tamil Nadu", text_passages={"S8.2"}, good_text_sources={"S8"}),
+    ])
+    assert [e.name for e in merged] == ["Tamil Nadu", "Delhi"]
+    tamil = merged[0]
+    assert tamil.table_passages == {"S32.1"} and tamil.good_text_sources == {"S8"} and "TAMIL NADU" in tamil.aliases
+
+
+def test_scheme_name_fragments_and_spelled_out_concepts_are_not_entities():
+    from types import SimpleNamespace
+
+    from utils.entity_tiers import _acronym_names_a_concept, _only_inside_hyphenated_names
+
+    store = SimpleNamespace(passages=[SimpleNamespace(text=(
+        "The PM E-DRIVE scheme (PM -E DRIVE) and PM E - DRIVE targets. Public Charging Stations (PCS) grew. "
+        "Goods and Services Tax (GST) was cut. NITI Aayog and the Ministry of Heavy Industries (MHI) reported."))])
+    assert _only_inside_hyphenated_names(store, "DRIVE")
+    assert _acronym_names_a_concept(store, "PCS") and _acronym_names_a_concept(store, "GST")
+    assert not _acronym_names_a_concept(store, "MHI")  # an organisation keeps its deep-dive eligibility
