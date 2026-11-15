@@ -298,3 +298,125 @@ def test_number_policy_keeps_a_value_verified_elsewhere_in_the_store_and_cites_i
     result = apply_number_policy(body, passage_texts=section, allowed_numbers=set(), fallback_sheet=store_sheet)
     assert "8402.39" in result.body and "S1.7" in result.body
     assert "9999.99" not in result.body and len(result.removed) == 1
+
+
+def test_fiscal_year_ranges_set_the_requested_window():
+    from datetime import date
+
+    from utils.data_angles import requested_year_bounds
+
+    today = date(2026, 11, 15)
+    assert requested_year_bounds("EV sales grew from FY2021 to FY2025", today) == (2020, 2025)
+    assert requested_year_bounds("FY21 to FY25 trend", today) == (2020, 2025)
+    assert requested_year_bounds("FY2020-21 to FY2024-25", today) == (2020, 2025)
+    assert requested_year_bounds("between FY 2019 and FY 2023", today) == (2018, 2023)
+    assert requested_year_bounds("from 2015 to 2024", today) == (2015, 2024)
+
+
+def test_government_domains_are_never_treated_as_brand_lookalikes():
+    from utils.source_quality import authority
+
+    assert authority("https://www.beeindia.gov.in/ev-charging")[0] == "primary_official"
+    assert authority("https://bseindla.com/notice")[0] == "denylisted"
+
+
+def test_single_country_official_dataset_chart_passes_pre_writing_verification():
+    """Live run (EV sales in India): every one-column official chart was rejected for its measure/entity,
+    in-window points were called out of window by their neighbouring rows, and the caption regex held
+    mojibake dashes, so the report had no charts."""
+    import routes.report as R
+    from routes.source_manifest import build_source_registry
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+    from utils.evidence_store import build_evidence_store
+    from utils.official_data import official_charts
+    from utils.section_charts import clip_to_question_window
+
+    table = ("OFFICIAL DATASET — Our World in Data, Our World in Data grapher: Electric car sales (cars) [electric-car-sales]\n"
+             "Retrieved from the Our World in Data public API on 2026-11-15. Latest observation: 2025.\n"
+             "TABLE 1 — Electric car sales (cars), 2020–2025\nYear | India\n2020 | 3,143\n2021 | 12,050\n"
+             "2022 | 48,023\n2023 | 82,270\n2024 | 92,095\n2025 | 170,100")
+    rows = [{"title": "Our World in Data: Electric car sales (cars), 2020-2025", "url": "https://ourworldindata.org/grapher/electric-car-sales",
+             "publisher": "Our World in Data", "fullContent": table, "pageContent": table, "pageFetchStatus": "ok",
+             "evidenceOrigin": "publisher_page", "sourceType": "Official dataset", "kind": "Official dataset",
+             "authorityTier": "primary_official", "reliabilityScore": 0.95, "retrievedAt": "2026-11-15", "dataPeriod": "2020-2025",
+             "officialDataset": {"id": "owid.ev_car_sales", "code": "electric-car-sales", "unit": "cars", "entities": ["India"],
+                                 "years": [2020, 2021, 2022, 2023, 2024, 2025], "fit": "direct",
+                                 "measure": "annual electric vehicle sales volume"}}]
+    question = "How have electric vehicle sales in India grown from FY2021 to FY2025?"
+    manifest = build_source_registry(rows, [])
+    store = build_evidence_store(rows, question=question, manifest=manifest)
+    charts = official_charts(store, question)
+    assert charts
+    assert clip_to_question_window(charts[0], question) == ""  # calendar 2020 and 2025 straddle the FY window
+    assert [d["label"] for d in charts[0].spec["series"][0]["data"]] == ["2021", "2022", "2023", "2024"]
+    specs = [dict(charts[0].spec, evidencePassages=charts[0].passage_ids)]
+    R._register_v2_chart_evidence(specs, store)
+    public = R._merge_source_evidence_statuses(manifest, R._attach_audit_source_evidence(manifest, rows, ""))
+    result = audit_chart_evidence_consistency("", specs, public, question=question, require_publisher_verification=True)
+    assert result.get("chartEvidenceFailures") == []
+
+
+def test_chart_relevance_matches_plurals_and_two_letter_acronyms():
+    from utils import chart_evidence_audit as A
+
+    question = ("How have electric vehicle sales in India grown from FY2021 to FY2025, and which state EV policies "
+                "drove the change?")
+    fys = ["2020-21", "2021-22", "2022-23", "2023-24", "2024-25"]
+
+    def chart(title, name, values):
+        return {"type": "bar", "title": title, "xLabel": "Financial Year", "sourceIds": ["S17"],
+                "series": [{"name": name, "data": [{"label": fy, "value": v} for fy, v in zip(fys, values)]}]}
+
+    ev = chart("EV as a % of total vehicles registered (%), 2020-21 to 2024-25", "EV share", [0.82, 2.49, 5.3, 6.82, 7.31])
+    wheat = chart("Wheat yield by state (tonnes), 2020-21 to 2024-25", "Wheat yield", [3.1, 3.2, 3.4, 3.5, 3.6])
+    _, kept, removed = A._dedupe_chart_specs("[CHART_1]\n[CHART_2]", [ev, wheat], question, sources=[])
+    assert [c["title"] for c in kept] == [ev["title"]] and removed == 1
+    assert {"ev", "vehicle"} <= A._chart_metric_tokens(ev)
+
+
+def test_split_fiscal_year_labels_are_read_as_fiscal_years():
+    from utils.chart_evidence_audit import _period_ranges, _periods_outside_question_window
+
+    def months(label):
+        (start, end, _), = _period_ranges(label)
+        return (start // 12, start % 12 + 1), (end // 12, end % 12 + 1)
+
+    assert months("2020-21") == ((2020, 4), (2021, 3))
+    assert months("FY 2022-23") == ((2022, 4), (2023, 3))  # was read as FY2022 (a year early)
+    question = "EV sales in India from FY2021 to FY2025"
+    assert not _periods_outside_question_window(question, ["2020-21"], [])  # FY2021 itself
+    assert _periods_outside_question_window(question, ["2019-20"], [])
+
+
+def test_trimmed_fiscal_year_chart_title_names_the_kept_span_once():
+    from utils.section_charts import _title_with_kept_periods
+
+    assert (_title_with_kept_periods("Segment: e2w, e3w and e4w, 2019-20 to 2024-25", ["2020-21", "2024-25"], {"2019-20"})
+            == "Segment: e2w, e3w and e4w, 2020-21 to 2024-25")
+
+
+def test_a_repeated_table_row_is_accepted_when_any_copy_sits_under_the_right_column():
+    from utils.chart_evidence_audit import _table_point_column_matches
+
+    glued = ("Year | Something else | Other\n"                       # another table's header glued above
+             "2021-22 | 179.86 | 4.59 | 2.49%\n\n"
+             "Financial Year | No. of ICE Vehicles registered | No. of EV Vehicles registered | EV share\n"
+             "2021-22 | 179.86 | 4.59 | 2.49%\n")
+    point = {"evidenceValue": "4.59", "evidenceColumn": "No. of EV Vehicles registered", "evidencePeriod": "2021-22"}
+    assert _table_point_column_matches(point, "EV", "2021-22", 4.59, "2021-22 | 179.86 | 4.59 | 2.49%", glued) is True
+    # every copy rejects a value that is not in the named column -> still rejected
+    wrong = {"evidenceValue": "2.49%", "evidenceColumn": "No. of EV Vehicles registered", "evidencePeriod": "2021-22"}
+    assert _table_point_column_matches(wrong, "EV", "2021-22", 2.49, "2021-22 | 179.86 | 4.59 | 2.49%", glued) is False
+
+
+def test_gate_healing_drops_charts_pruned_below_three_points():
+    from utils import gate_healing
+
+    charts = [{"type": "line", "title": "ICE vs EV", "series": [{"name": "EV", "data": [
+        {"label": y, "value": v, "evidenceSource": "S1"} for y, v in [("2021-22", 4.59), ("2022-23", 11.83), ("2023-24", 16.81)]]}]}]
+    pub = {"chartEvidenceFailures": [{"chartIndex": 1, "seriesIndex": 0, "pointIndex": 0, "label": "2021-22",
+                                      "chartTitle": "ICE vs EV", "reason": "x"}]}
+    actions = []
+    text, kept = gate_healing._remedy_publication("Intro.\n\n[CHART_1]\n", charts, pub, actions, force=False)
+    assert kept == [] and "[CHART_1]" not in text
+    assert any("fewer than 3 points" in a["detail"] for a in actions)

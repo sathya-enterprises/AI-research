@@ -597,6 +597,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except Exception as exc:
         log.warning("V2 official-table filter skipped: %s", type(exc).__name__)
     candidates = active_dataset + deduped
+    # Trim each chart to the window with the verifier's own period rule, so one out-of-window point
+    # (FY2019-20 in an FY2021-FY2025 question) no longer gets the whole chart rejected before writing.
+    from utils.section_charts import clip_to_question_window
+    _windowed = []
+    for chart in candidates:
+        _reason = clip_to_question_window(chart, question)
+        if _reason:
+            chart.status, chart.drop_reason = "dropped", _reason
+            chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"),
+                                "passage": ",".join(chart.passage_ids), "reason": _reason})
+        else:
+            _windowed.append(chart)
+    candidates = _windowed
     # Stage J: the chart quality gate also runs BEFORE writing (no text is written around a chart that
     # will be dropped: year-valued attributes, list-number labels, all-equal values, Total + components).
     _earlier: list = []  # Stage L: the same data from a second publisher is not a second chart
@@ -673,6 +686,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                                          and "duplicate view" in str(d.get("reason") or ""))]
         for chart in replacements:
             chart.status, chart.drop_reason = "planned", ""
+        replacements = [chart for chart in replacements if not clip_to_question_window(chart, question)]
         # The gate must compare against charts that will be published, not ones verification just dropped
         # (their values would make the replacement look like "the same values as an earlier chart").
         _earlier[:] = [memory[0] for chart_id, memory in _quality_memory.items() if chart_id in surviving_ids]

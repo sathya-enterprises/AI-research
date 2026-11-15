@@ -1545,7 +1545,7 @@ class _Extractor:
                 if value is not None:
                     emit("stake_percentage", "Stake sold / changed", "ratio", value, "%", "", match.group(0))
 
-            for match in re.finditer(r"\b(?:worth|for|valued\s+at|transaction\s+value\s+(?:of|to)|amounting\s+to)\s+(?P<currency>₹|â‚¹|Rs\.?|INR|US\$|USD|\$)?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>crore|cr|lakh|million|mn|billion|bn)\b", sentence, re.I):
+            for match in re.finditer(r"\b(?:worth|for|valued\s+at|transaction\s+value\s+(?:of|to)|amounting\s+to)\s+(?P<currency>₹|₹|Rs\.?|INR|US\$|USD|\$)?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>crore|cr|lakh|million|mn|billion|bn)\b", sentence, re.I):
                 value = _to_float(match.group("num"))
                 if value is not None:
                     emit("transaction_value", "Transaction value", "money", value, match.group("unit"), match.group("currency") or "₹", match.group(0))

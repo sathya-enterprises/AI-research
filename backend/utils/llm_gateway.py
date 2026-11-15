@@ -128,6 +128,9 @@ class LLMGateway:
             tried: set[tuple[str, str]] = set()
             backoff = [4, 8, 16]  # exponential; extra tries after network failures and HTTP 5xx only
             rate_backoff = [int(x) for x in os.getenv("GG_V2_RATE_LIMIT_BACKOFF", "20,40").split(",") if x.strip().isdigit()]
+            # Every model already cooling (after 429/503s from other calls): the 60 s cooldowns clear, so wait them
+            # out instead of failing at once. A live run lost two whole sections this way within one second.
+            cooldown_backoff = [int(x) for x in os.getenv("GG_V2_COOLDOWN_BACKOFF", "20,45").split(",") if x.strip().isdigit()]
             attempt = 0
             while True:
                 attempt += 1
@@ -151,6 +154,13 @@ class LLMGateway:
                     continue
                 # Stage K: every key/model rate-limited (HTTP 429) - per-minute limits clear quickly, so wait and
                 # retry twice (20 s, 40 s) before giving up; a daily-quota failure still fails (and is labelled)
+                if str(result.error or "") == "no_gemini_key_or_model_available" and cooldown_backoff:
+                    delay = cooldown_backoff.pop(0)
+                    self.stats.network_retries += 1
+                    log.warning("V2 LLM %s/%s: every model is cooling down; retrying in %ds", purpose, section_id or "-", delay)
+                    await asyncio.sleep(delay)
+                    tried.clear()
+                    continue
                 if str(result.error or "").startswith("http_429") and rate_backoff:
                     delay = rate_backoff.pop(0)
                     self.stats.network_retries += 1

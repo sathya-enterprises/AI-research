@@ -155,3 +155,21 @@ def test_capture_is_on_disk_after_each_call_even_if_the_run_never_finishes(monke
     data = json.loads(files[0].read_text(encoding="utf-8"))
     assert [c["purpose"] for c in data["llmCalls"]] == ["outline", "section"]
     assert data["status"] in {"in_progress", "failed", "error"}
+
+
+def test_waits_out_cooldowns_when_every_model_is_cooling(monkeypatch):
+    """Live run: two sections were lost within one second because every model was in its 60 s cooldown."""
+    _patch_http(monkeypatch, lambda request: _ok("section text"))
+    runtime = _runtime(groq_text="")
+    runtime.limited.update({"gemini:model:model-a", "gemini:model:model-b"})
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+        runtime.limited.clear()  # the cooldowns expire while we wait
+
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    gw = G.LLMGateway(runtime, "detailed", budget=5, capture=False)
+    res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
+    assert res.ok and res.text == "section text"
+    assert waits == [20]

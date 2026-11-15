@@ -697,7 +697,7 @@ def _same_continued_table(previous, current) -> bool:
     def key(value: str) -> str:
         value = re.sub(r"(?i)\s*\(continued\)", "", value)
         value = re.sub(r"(?i)^TABLE\s+\d+\b", "", value)
-        return re.sub(r"\s+", " ", value).strip(" -:â€”â€“").casefold()
+        return re.sub(r"\s+", " ", value).strip(" -:—–").casefold()
 
     previous_words = key(_table_title_line(previous)).split()
     current_words = key(current_title).split()
@@ -829,7 +829,10 @@ def _period_end_year(label: str) -> int | None:
 
 
 def _title_with_kept_periods(title: str, kept: list[str], outside: set[str]) -> str:
-    period_range = re.compile(r"\b(?:FY\s*)?(?:19|20)\d{2}\s*(?:to|through|[-\u2013\u2014])\s*(?:(?:19|20)\d{2}|\d{2})\b", re.I)
+    # A whole span, including split fiscal-year endpoints ("2019-20 to 2024-25"): matching only "2019-20"
+    # as the range left "... 2020-21 to 2024-25 to 2024-25" in the title.
+    endpoint = r"(?:FY\s*)?(?:19|20)\d{2}(?:\s*[-\u2013]\s*\d{2}(?!\d))?"
+    period_range = re.compile(rf"\b{endpoint}\s*(?:to|through|[-\u2013\u2014])\s*(?:{endpoint}|\d{{2}})\b", re.I)
     rewritten, replacements = period_range.subn(f"{kept[0]} to {kept[-1]}", str(title or ""), count=1)
     for label in sorted(outside, key=len, reverse=True):
         rewritten = rewritten.replace(label, "")
@@ -869,6 +872,37 @@ def clip_to_window(chart: PlannedChart, min_year: int | None, max_year: int | No
     chart.spec["basisNote"] = (str(chart.spec.get("basisNote") or "") +
                                f" Periods outside {min_year or 'start'} to {max_year or 'latest'} are left out "
                                "(outside the requested window).").strip()
+    return ""
+
+
+def clip_to_question_window(chart: PlannedChart, question: str) -> str:
+    """Drop points whose own period label the chart verifier would call outside the question's window.
+
+    clip_to_window works in calendar years ("2019-20" ends in 2020, inside 2020-2025); the verifier reads
+    Indian fiscal years (FY2019-20 is before FY2021) and rejected the whole chart for that one point. Using
+    the verifier's rule here makes the two agree. Labels that are not periods are left alone.
+    """
+    if not question:
+        return ""
+    from utils.chart_evidence_audit import _periods_outside_question_window
+    series = chart.spec.get("series") or []
+    labels = {str(d.get("label")) for s in series for d in s.get("data") or []}
+    outside = {label for label in labels if _periods_outside_question_window(question, [label], [])}
+    if not outside:
+        return ""
+    for s in series:
+        s["data"] = [d for d in s.get("data") or [] if str(d.get("label")) not in outside]
+    kept = [s for s in series if len(s.get("data") or []) >= 3]
+    if not kept:
+        return "fewer than 3 periods inside the requested window"
+    chart.spec["series"] = kept
+    chart.points = [(a, b, v) for a, b, v in chart.points if a not in outside and b not in outside]
+    title = str(chart.spec.get("title") or "")
+    if any(label in title for label in outside):
+        # "…, 2019-20 to 2024-25" would keep naming the removed period (the verifier reads the title)
+        chart.spec["title"] = _title_with_kept_periods(title, [str(d.get("label")) for d in kept[0]["data"]], outside)
+    chart.spec["basisNote"] = (str(chart.spec.get("basisNote") or "")
+                               + " Periods outside the requested window are left out.").strip()
     return ""
 
 

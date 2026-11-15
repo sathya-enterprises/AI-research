@@ -474,11 +474,11 @@ def test_structured_csv_query_context_covers_iso_coded_measure_rows():
 def test_metadata_and_latest_year_rankings_do_not_cover_a_trend_measure():
     plan = MeasurePlan(scope="India, China, Brazil, and Nigeria", measures=[
         Measure("under-five mortality rate", entities=["India", "China", "Brazil", "Nigeria"], chart="trend")])
-    metadata = ("TABLE 1 â€” Indicator metadata\nField | Value\nName | Under-five mortality rate (per 1000 live births)\n"
+    metadata = ("TABLE 1 — Indicator metadata\nField | Value\nName | Under-five mortality rate (per 1000 live births)\n"
                 "Indicator unique identifier | 2322814\nUnit of measure | probability of dying by age 5 per 1000 births\n"
                 "Geographic entities and groups | India, China, Brazil, Nigeria\n"
                 "Time intervals | 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021\n")
-    latest = ("TABLE 2 â€” Under-five mortality rate by country\nRank | Country or area | Latest year | Under-five mortality rate\n"
+    latest = ("TABLE 2 — Under-five mortality rate by country\nRank | Country or area | Latest year | Under-five mortality rate\n"
               "1 | Nigeria | 2024 | 115.6\n2 | India | 2024 | 26.6\n3 | China | 2024 | 5.7\n4 | Brazil | 2024 | 14.2")
     rows = [{"url": "https://data.who.int/indicator", "pageFetchStatus": "ok",
              "pageContent": metadata + latest}]
@@ -493,10 +493,10 @@ def test_metadata_and_latest_year_rankings_do_not_cover_a_trend_measure():
 def test_measure_slot_trends_must_have_observations_inside_the_requested_window():
     plan = MeasurePlan(scope="Brazil", measures=[Measure("under-five mortality rate", entities=["Brazil"])])
     rows = [{"url": "https://who.int/data", "pageFetchStatus": "ok",
-             "pageContent": "TABLE 1 â€” Under-five mortality rate in Brazil\nYear | Brazil\n"
+             "pageContent": "TABLE 1 — Under-five mortality rate in Brazil\nYear | Brazil\n"
                             "2000 | 90\n2001 | 85\n2002 | 80"}]
     assert slot_coverage(plan, rows, years=list(range(2010, 2025)))[0]["covered"] is False
-    rows[0]["pageContent"] = "TABLE 1 â€” Under-five mortality rate in Brazil\nYear | Brazil\n"
+    rows[0]["pageContent"] = "TABLE 1 — Under-five mortality rate in Brazil\nYear | Brazil\n"
     rows[0]["pageContent"] += "2010 | 60\n2011 | 58\n2012 | 56"
     assert slot_coverage(plan, rows, years=list(range(2010, 2025)))[0]["covered"] is True
 
@@ -505,7 +505,7 @@ def test_linked_data_uses_the_parent_measure_title_without_replacing_file_eviden
     plan = MeasurePlan(scope="India", measures=[Measure("under-five mortality rate", entities=["India"])])
     row = {"url": "https://who.int/downloads/u5mr.csv", "pageFetchStatus": "ok",
            "title": "Download data (CSV)", "publisherPageTitle": "WHO Under-five mortality rate estimates",
-           "pageContent": "TABLE 1 â€” u5mr.csv\nYear | India\n2010 | 52\n2011 | 50\n2012 | 48"}
+           "pageContent": "TABLE 1 — u5mr.csv\nYear | India\n2010 | 52\n2011 | 50\n2012 | 48"}
     slot = slot_coverage(plan, [row], years=[2010, 2024])[0]
     assert slot["covered"] is True and slot["sources"] == [row["url"]]
 

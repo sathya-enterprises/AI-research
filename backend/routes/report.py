@@ -8201,7 +8201,7 @@ def _has_promoter_share_sale_context(hay: str) -> bool:
         r"\b(?:no|not|never|without)\b.{0,80}\b(?:sold|sell|sale|dispos(?:al|ed)|"
         r"divest\w*|offload\w*|transfer(?:red)?)\b", re.I,
     )
-    cleaned = re.sub(r"\bnon[-â€â€‘â€“ ]disposal\b", " ", str(hay or ""), flags=re.I)
+    cleaned = re.sub(r"\bnon[-‐‑– ]disposal\b", " ", str(hay or ""), flags=re.I)
     fragments = re.split(r"(?<=[.!?])\s+|[;\n|]+", cleaned)
     for index, fragment in enumerate(fragments):
         context = " ".join(fragments[max(0, index - 1):min(len(fragments), index + 2)])[:900]
@@ -14550,6 +14550,7 @@ def _final_chart_evidence_gate(
             "prunedPoints": int(sanitation.get("prunedPoints") or 0),
             "residualFindings": len(deduped),
             "findings": deduped,
+            "removedDetails": list(sanitation.get("removedChartDetails") or []),
         }
     except Exception as exc:
         log.exception("Final chart evidence gate failed at stage=%s; dropping visuals", stage)
@@ -16300,11 +16301,11 @@ def _attach_audit_source_evidence(
 
         caption = ""
         for line in content.splitlines():
-            match = re.match(r"\s*TABLE\s+\d+\s*[â€”â€“-]\s*(.+?)\s*$", line, re.I)
+            match = re.match(r"\s*TABLE\s+\d+\s*[—–-]\s*(.+?)\s*$", line, re.I)
             if match:
                 caption = match.group(1)
                 break
-        caption = re.sub(r"\s*,?\s*(?:19|20)\d{2}\s*[â€”â€“-]\s*(?:19|20)?\d{2}\s*$", "", caption).strip()
+        caption = re.sub(r"\s*,?\s*(?:19|20)\d{2}\s*[—–-]\s*(?:19|20)?\d{2}\s*$", "", caption).strip()
         measure = caption or str(metadata.get("measure") or source.get("title") or "Official dataset").strip()
         unit = str(metadata.get("unit") or "").strip()
         lines: list[str] = []
@@ -27454,8 +27455,15 @@ async def generate_report(request: Request):
             parsed["keyStats"], _ = _sanitize_report_key_stats(parsed.get("keyStats", []), audit_sources)
         _final_chart_gate_findings = list(_gate_meta.get("findings") or [])
 
+        # Specific removal reasons, matched to the pre-gate charts by title (indices shift as charts go).
+        _gate_reason_by_title = {str(d.get("chartTitle") or ""): d.get("reason") for d in _gate_meta.get("removedDetails") or []}
+        _gate_title_findings = [
+            {"chartIndex": index, "reason": _gate_reason_by_title[str(chart.get("title") or "")[:180]]}
+            for index, chart in enumerate(_charts_before_final_gate, start=1)
+            if isinstance(chart, dict) and str(chart.get("title") or "")[:180] in _gate_reason_by_title
+        ]
         _chart_pipeline.record("final_chart_gate", charts, removed=_removed_chart_reasons(
-            _charts_before_final_gate, charts, _final_chart_gate_findings,
+            _charts_before_final_gate, charts, _gate_title_findings + _final_chart_gate_findings,
             "chart failed the publisher-verified export evidence gate"))
         # Keep the chart registry one-to-one with final inline placeholders. This
         # must happen before final re-audit and response serialization so a
@@ -27761,9 +27769,23 @@ async def generate_report(request: Request):
 
             def _gate_rerun(text, chs):
                 _srcs = _attach_audit_source_evidence(source_manifest, enriched, text)
+                _pub = audit_report_publication(text, chs, images, _srcs, question=question)
+                # One chart verdict: the final chart gate (strict, merged manifest) already accepted these
+                # charts; the lenient re-check over claim-scoped evidence disagreed and pruned in-window points
+                # (FY2020-21, FY2024-25) the gate had verified. Healing now prunes by the gate's own check.
+                try:
+                    _strict = audit_chart_evidence_consistency(
+                        text, chs, _merge_source_evidence_statuses(list(source_manifest or []), list(_srcs or [])),
+                        question=question, require_publisher_verification=True,
+                    )
+                    _pub = {**_pub,
+                            "chartEvidenceFailures": list(_strict.get("chartEvidenceFailures") or []),
+                            "chartTableVerificationConflicts": list(_strict.get("chartTableVerificationConflicts") or [])}
+                except Exception as _strict_exc:
+                    log.warning("Gate healing strict chart check skipped: %s", type(_strict_exc).__name__)
                 return {
                     "chartDensity": _chart_density_audit(chs, report_tier),
-                    "publicationAudit": audit_report_publication(text, chs, images, _srcs, question=question),
+                    "publicationAudit": _pub,
                     "sourceEvidenceAudit": _report_source_evidence_audit(_srcs, attachment_only=file_only_report),
                     "structure": audit_report_structure(text),
                     "scopeCoverageAudit": audit_requested_report_scope(question, text, _srcs),
@@ -27998,6 +28020,15 @@ async def generate_report(request: Request):
         # nearly empty is never presented as a normal published report, whatever the gates said.
         from utils.report_sanity import apply_integrity_outcome as _apply_integrity, report_integrity_issues as _integrity_issues
         _integrity = _integrity_issues(response_payload.get("report", ""), report_tier, model_used)
+        _missing_sections = [str(t) for t in ((_v2_meta_for_publication or {}).get("failedSections") or []) if str(t).strip()]
+        if _v2_used and _missing_sections:
+            # Planned sections the writer could not produce (provider outage) were dropped silently and the
+            # report published as complete (live run: the PLI and state-policy sections the question asked for).
+            _integrity.append({
+                "stage": "sections_missing",
+                "issue": "These planned sections could not be written and are missing from this report: "
+                         + "; ".join(_missing_sections[:6]) + ". Please run the report again.",
+            })
         if _integrity:
             log.warning("Report integrity: %s", "; ".join(item["issue"][:120] for item in _integrity))
             _outcome = _apply_integrity(_outcome, response_payload, _integrity)

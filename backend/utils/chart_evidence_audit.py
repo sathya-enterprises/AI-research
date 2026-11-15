@@ -439,6 +439,27 @@ def _heatmap_column_matches(chart: dict, column_index: int, observed: object) ->
     return bool(observed_key and observed_key in expected_keys)
 
 
+def _table_header_context(quote: str, source_text: str) -> str:
+    """The header row and caption of the pipe table that holds ``quote`` (a data row), or ""."""
+    lines = str(source_text or "").splitlines()
+    target = _norm_quote(quote)
+    for index, line in enumerate(lines):
+        if not target or _norm_quote(line) not in target or not _pipe_cells(line):
+            continue
+        header, caption = "", ""
+        cursor = index - 1
+        while cursor >= 0 and _pipe_cells(lines[cursor]):
+            if not re.fullmatch(r"\s*:?-{2,}:?\s*", lines[cursor].strip().strip("|").split("|")[0] or ""):
+                header = lines[cursor]  # keep walking: the topmost row of the block is the header
+            cursor -= 1
+        while cursor >= 0 and not lines[cursor].strip():
+            cursor -= 1
+        if cursor >= 0 and not _pipe_cells(lines[cursor]):
+            caption = lines[cursor][:300]  # "TABLE 1 — ..." or the dataset title line directly above the table
+        return f"{caption} {header}".strip()
+    return ""
+
+
 def _pipe_cells(line: str) -> list[str]:
     raw = str(line or "").strip()
     if "|" not in raw:
@@ -570,6 +591,28 @@ def _heatmap_cell_matches_source(
     return False
 
 
+def _singular(term: str) -> str:
+    if len(term) > 4 and term.endswith("ies"):
+        return term[:-3] + "y"
+    if len(term) > 4 and term.endswith(("ches", "shes", "sses", "xes")):
+        return term[:-2]
+    if len(term) > 3 and term.endswith("s") and not term.endswith(("ss", "us", "is")):
+        return term[:-1]
+    return term
+
+
+def _topic_terms(raw: str) -> set[str]:
+    """Topic words for chart/question matching: singular forms plus two-letter acronyms.
+
+    "vehicles" never matched "vehicle", and "EV" (two letters) was dropped entirely, so government charts
+    of "EV vehicles registered" were removed as irrelevant to a question about electric vehicle sales.
+    """
+    text = str(raw or "")
+    terms = {_singular(t) for t in re.findall(r"[a-z]{3,}", text.casefold()) if t not in _CHART_SCOPE_STOPWORDS}
+    terms |= {t.casefold() for t in re.findall(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])", text)}
+    return {t for t in terms if t not in _CHART_SCOPE_STOPWORDS}
+
+
 def _chart_metric_tokens(chart: dict, supporting_context: str = "") -> set[str]:
     raw = " ".join(str(chart.get(key) or "") for key in (
         "title", "xLabel", "yLabel", "unit", "metric", "measure", "caption", "heading",
@@ -580,7 +623,7 @@ def _chart_metric_tokens(chart: dict, supporting_context: str = "") -> set[str]:
         for s in chart.get("series", []) if isinstance(s, dict)
     )
     raw += " " + str(supporting_context or "")
-    return {t for t in re.findall(r"[a-z]{3,}", raw.casefold()) if t not in _CHART_SCOPE_STOPWORDS}
+    return _topic_terms(raw)
 
 
 def _source_details_for_chart(chart: dict, sources: list | dict | None) -> tuple[str, list[str]]:
@@ -658,10 +701,8 @@ def _question_chart_topic_tokens(question: str, entities: list[str] | None = Non
         if normalized:
             pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized.split()) + r"(?![a-z0-9])"
             topic_question = re.sub(pattern, " ", topic_question)
-    return {
-        term for term in re.findall(r"[a-z]{3,}", topic_question)
-        if term not in _CHART_SCOPE_STOPWORDS
-    }
+    acronyms = {t.casefold() for t in re.findall(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])", str(question or ""))}
+    return _topic_terms(topic_question) | {t for t in acronyms if t not in _CHART_SCOPE_STOPWORDS}
 
 
 def _normalized_entity_text(text: object) -> str:
@@ -827,7 +868,7 @@ def _source_metric_title(source_titles: list[str], question: str) -> str:
     entities = _requested_chart_entities(question)
     topic_terms = _question_chart_topic_tokens(question, entities)
     for source_title in source_titles:
-        candidate = re.split(r"\s*[|·â€¢]\s*", str(source_title or ""), maxsplit=1)[0].strip()
+        candidate = re.split(r"\s*[|·•]\s*", str(source_title or ""), maxsplit=1)[0].strip()
         if ":" in candidate:
             left, right = candidate.split(":", 1)
             left_terms = _chart_metric_tokens({"title": left})
@@ -1170,6 +1211,9 @@ def _calendar_quarter_months(quarter: int, year: int) -> tuple[int, int]:
     return _month_ordinal(year, start_month), _month_ordinal(year, start_month + 2)
 
 
+_SPLIT_FISCAL_YEAR_RE = re.compile(r"(?i)(?<![\d.])(?:FY\s*'?)?((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?![\d])")
+
+
 def _period_ranges(text: object) -> list[tuple[int, int, str]]:
     """Parse explicit calendar/fiscal periods into inclusive month ranges."""
     remaining = str(text or "")
@@ -1216,6 +1260,15 @@ def _period_ranges(text: object) -> list[tuple[int, int, str]]:
             ordinal = _month_ordinal(int(match.group(2)), month)
             add(ordinal, ordinal, match.group(0))
         mask(match)
+
+    # Split fiscal years ("2020-21", "FY 2022-23", "FY2024–25"): April of the first year to March of the next.
+    # Read as a plain year, "2020-21" was calendar 2020 and "FY 2022-23" was FY2022 (a year early), so
+    # in-window FY points were trimmed or rejected.
+    for match in list(_SPLIT_FISCAL_YEAR_RE.finditer(remaining)):
+        first, tail = int(match.group(1)), int(match.group(2))
+        if tail == (first + 1) % 100:
+            add(_month_ordinal(first, 4), _month_ordinal(first + 1, 3), match.group(0))
+            mask(match)
 
     for match in list(_QUESTION_YEAR_RANGE_RE.finditer(remaining)):
         first, last = int(match.group(1)), int(match.group(2))
@@ -1712,6 +1765,10 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
 
     quoted = _norm_quote(quote)
     lines = str(source_text or "").splitlines()
+    # The quoted row can occur several times (the same table inside several evidence fields, some glued to
+    # another table's header). One placement under the right column is enough; the first occurrence used to
+    # decide alone, so a correct point failed whenever an earlier copy sat under another table's header.
+    rejected = False
     for row_index, line in enumerate(lines):
         row = _pipe_cells(line)
         if len(row) < 2 or re.fullmatch(r"\s*:?-{2,}:?\s*", line.strip().strip("|")):
@@ -1772,7 +1829,8 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
             found = {index for header in previous_rows for index, cell in enumerate(header)
                      if _cell_label_matches(effective_column, cell)}
             if not found:
-                return False if explicit_column else None
+                rejected = rejected or explicit_column
+                continue  # this copy sits under another table's header; try the next occurrence
             column_matches = found if column_matches is None else column_matches & found
         period_columns = {index for header in previous_rows for index, cell in enumerate(header)
                           if period and _point_period_in_text(period, cell)}
@@ -1782,13 +1840,18 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
         if column_matches is not None:
             if any(index in matching_value_indices for index in column_matches):
                 return True
-            return False
+            rejected = True
+            continue
         if period and any(_point_period_in_text(period, cell) for cell in row):
             return True
         if period and previous_rows and any(_is_point_period(cell) for header in previous_rows for cell in header):
-            return False
+            rejected = True
+            continue
         if expected_column or column_index is not None:
-            return False
+            rejected = True
+            continue
+    if rejected:
+        return False
     return False if expected_column or column_index is not None else None
 
 
@@ -1891,6 +1954,7 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
     column_match = _table_point_column_matches(point, series, label, value, quote, source_text)
     if column_match is False:
         return "The chart value does not match the quoted source row, period, or named table column."
+    table_header_context = _table_header_context(quote, source_text) if column_match is True else ""
 
     explicit_metric = str(point.get("evidenceMetric") or point.get("evidence_metric") or "").strip()
     chart_metric = str(chart.get("metric") or chart.get("measure") or "").strip()
@@ -1914,6 +1978,11 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
     period_miss = entity_miss = metric_miss = unit_miss = False
     for own, context in windows:
         local = " ".join((own, context, quote, unit_context))
+        if column_match is True:
+            # The matched cell's meaning comes from its table header row and caption. A one-column official
+            # table ("TABLE 1 — Electric car sales (cars)" / "Year | India" / "2022 | 48,023") failed the
+            # entity and measure tests because only the bare data row was in context.
+            local = f"{local} {table_header_context}"
         if expected_period and not _relative_period_supported(
             expected_period, own, context, source_text, evidence_value or value,
         ):
@@ -2119,7 +2188,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     # observed for that entity/period. It is not an explicit
                     # claim that a chart's separately sourced observation is
                     # unverified.
-                    if cell_text in {"-", "—", "–", "â€”", "â€“"}:
+                    if cell_text in {"-", "—", "–", "—", "–"}:
                         continue
                     if not (
                         _UNVERIFIED.search(cell_text)
@@ -2361,7 +2430,11 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                             " ".join((label, series)),
                             " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
                             *[own for own, _context in quote_windows],
-                            *[context for _own, context in quote_windows],
+                            # A point labelled with its own period is dated by that label; the surrounding
+                            # context holds neighbouring rows ("2020 | 3,143" beside the 2021 row) and made
+                            # in-window points look out of window.
+                            *([] if _is_point_period(label) or _is_point_period(series)
+                              else [context for _own, context in quote_windows]),
                         ],
                         _source_period_metadata(quote_source),
                         ignore_source_metadata_dates=_is_official_dataset_source(quote_source),
@@ -2433,7 +2506,8 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         " ".join((label, series)),
                         " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
                         *[own for own, _context in windows],
-                        *[local for _own, local in windows],
+                        *([] if _is_point_period(label) or _is_point_period(series)
+                          else [local for _own, local in windows]),  # a period label dates its own point
                     ],
                     _source_period_metadata(source_by_id.get(sid)),
                     ignore_source_metadata_dates=_is_official_dataset_source(source_by_id.get(sid)),
@@ -2689,7 +2763,15 @@ def sanitize_charts_for_publication(report: str, charts: list | None, sources: l
         question=question,
     )
     critical_conflicts = list(initial_audit.get("chartTableVerificationConflicts") or [])
+    before_dedupe = list(current)
     text, current, irrelevant_or_duplicate = _dedupe_chart_specs(text, current, question, sources=sources)
+    kept_ids = {id(chart) for chart in current}
+    # Say which charts this step removed and why (the capture only said "failed the export evidence gate").
+    removed_details = [
+        {"chartIndex": index, "chartTitle": str(chart.get("title") or "")[:180],
+         "reason": "Removed as not about the question's topic or entities, or as a duplicate view of another chart."}
+        for index, chart in enumerate(before_dedupe, start=1) if id(chart) not in kept_ids
+    ]
     text, caption_recovered_indices = _attach_chart_placeholders_to_matching_captions(text, current)
     if caption_recovered_indices:
         log.info("Chart publication recovered %d caption-matched inline placeholder(s): %s", len(caption_recovered_indices), caption_recovered_indices)
@@ -2705,6 +2787,11 @@ def sanitize_charts_for_publication(report: str, charts: list | None, sources: l
             question=question,
         )
         kept, removed_idx, removed_pts = prune_unsupported_chart_points(current, audit)
+        for failure in audit.get("chartEvidenceFailures") or []:
+            index = int(failure.get("chartIndex") or 0) if str(failure.get("chartIndex", "")).isdigit() else 0
+            if index in set(removed_idx) and 0 < index <= len(current):
+                removed_details.append({"chartIndex": index, "chartTitle": str(current[index - 1].get("title") or "")[:180],
+                                        "reason": str(failure.get("reason") or "")[:200]})
         if not removed_idx and not removed_pts:
             break
         if removed_idx:
@@ -2743,4 +2830,5 @@ def sanitize_charts_for_publication(report: str, charts: list | None, sources: l
         "remainingFindings": remaining,
         "captionMatchedChartsAttached": caption_recovered_indices,
         "staleChartNarrationLinesRemoved": stale_narration_removed,
+        "removedChartDetails": removed_details,
     }

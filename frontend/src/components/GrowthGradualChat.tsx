@@ -170,6 +170,9 @@ const REPORT_STAGE_LABELS: Record<string, string> = {
   report_start: 'report start',
   report_stream: 'progress stream',
   report_status: 'status check',
+  sections_missing: 'section writing (some sections could not be written)',
+  writer_unavailable: 'report writer (no AI model was available)',
+  report_integrity: 'report integrity check',
 };
 const reportStageLabel = (stage?: string | null) => (stage ? (REPORT_STAGE_LABELS[stage] ?? stage.replace(/_/g, ' ')) : '');
 const isDraftReport = (rd?: { publicationOutcome?: string; publicationStatus?: string } | null) =>

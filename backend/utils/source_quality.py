@@ -129,7 +129,10 @@ def authority(url: str) -> tuple[str, str]:
     for listed, reason in deny.items():
         if host == listed or host.endswith("." + listed):
             return "denylisted", reason
-    brand = lookalike_brand(host)
+    from utils.primary_sources import is_primary_host
+    # Government domains cannot be registered by impersonators: beeindia.gov.in (Bureau of Energy Efficiency,
+    # the nodal agency for EV charging) was denylisted as a "bseindia" lookalike.
+    brand = None if (host.endswith(_PRIMARY_SUFFIXES) or is_primary_host(host)) else lookalike_brand(host)
     if brand:
         return "denylisted", f"host label looks like the {brand} brand but is a different domain"
     if _matches(host, _PRIMARY) or host.endswith(_PRIMARY_SUFFIXES):

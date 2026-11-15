@@ -173,8 +173,8 @@ def _remove_short_claim(text: str, claim: str, sources: list) -> tuple[str, str]
 
 def _remedy_publication(text: str, charts: list, pub: dict, actions: list[dict], *, force: bool) -> tuple[str, list]:
     def act(gate, action, detail):
-        actions.append({"gate": gate, "action": action, "detail": re.sub(r"\s+", " ", str(detail))[:240]})
-        log.info("Gate healing: %s -> %s: %s", gate, action, str(detail)[:160])
+        actions.append({"gate": gate, "action": action, "detail": re.sub(r"\s+", " ", str(detail))[:1500]})
+        log.info("Gate healing: %s -> %s: %s", gate, action, str(detail)[:1500])
 
     if pub.get("controlMarkerCount"):
         text = re.sub(r"\[\[(?:SECTION:[^\]]*|END SECTION|SECTION TO EXPAND|END_SCAN_SECTION)[^\]]*\]\]|\[\s*RISK_MATRIX\s*\]", "", text, flags=re.I)
@@ -259,7 +259,21 @@ def _remedy_publication(text: str, charts: list, pub: dict, actions: list[dict],
             text = remap_chart_placeholders(text, [i not in gone for i in range(1, len(charts) + 1)])
         if removed_idx or pruned:
             charts = kept
-            act("chartEvidenceFailures", "pruned/dropped", f"{len(removed_idx)} chart(s), {pruned} point(s)")
+            # Name what was pruned and why: "7 point(s)" alone left no way to tell why in-window points went.
+            reasons = "; ".join(sorted({
+                f"{str(f.get('chartTitle') or '')[:50]} {f.get('label') or ''}: {str(f.get('reason') or '')[:90]}"
+                for f in (pub.get("chartEvidenceFailures") or []) if isinstance(f, dict)
+            }))[:1200]
+            act("chartEvidenceFailures", "pruned/dropped",
+                f"{len(removed_idx)} chart(s), {pruned} point(s)" + (f" — {reasons}" if reasons else ""))
+            # A chart pruned down to one or two points is no longer a comparison or trend (a live report
+            # shipped "ICE vs EV registrations" with a single year): drop it rather than publish it.
+            thin = {index for index, chart in enumerate(charts, start=1)
+                    if isinstance(chart, dict) and chart.get("series")
+                    and all(len(series.get("data") or []) < 3 for series in chart["series"] if isinstance(series, dict))}
+            if thin:
+                text, charts = _drop_charts(text, charts, thin)
+                act("chart", "dropped", f"chart(s) {sorted(thin)}: fewer than 3 points left after pruning")
     return text, charts
 
 

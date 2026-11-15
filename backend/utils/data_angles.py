@@ -35,9 +35,35 @@ def subject_terms(question: str, limit: int = 6) -> list[str]:
     return list(dict.fromkeys(out))[:limit]
 
 
+# "FY2021", "FY 21", "FY2020-21", "FY20–21": group 1 = first year, group 2 = optional second (end) year
+_FY_TOKEN = r"FY\s*'?((?:19|20)?\d{2})(?:\s*[-–/]\s*((?:19|20)?\d{2}))?(?!\d)"
+
+
+def _fy_end_year(first: str | None, second: str | None) -> int | None:
+    """The calendar year a fiscal year ends in: FY2021 / FY21 / FY2020-21 -> 2021."""
+    raw = second or first
+    if not raw:
+        return None
+    year = int(raw)
+    if year < 100:
+        year += 2000
+    return year if 1900 <= year <= 2200 else None
+
+
 def requested_year_bounds(question: str, today: date) -> tuple[int, int]:
     """Inclusive calendar-year bounds, preserving explicit historical endpoints."""
     text = str(question or "")
+    # Fiscal-year ranges ("FY2021 to FY2025", "FY21-FY25", "FY2020-21 to FY2024-25"). The plain-year pattern
+    # below needs a word boundary before the year, so "FY2021" never matched and every FY question fell back to
+    # the default recent window (2024-2026): charts and official datasets for FY2021-FY2023 were dropped.
+    # An Indian FY ends in March of its year, so FY2021 starts in calendar 2020.
+    fy_range = re.search(
+        rf"(?i)\b{_FY_TOKEN}\s*(?:to|until|till|through|and|-|–|—)\s*{_FY_TOKEN}", text)
+    if fy_range:
+        first, last = _fy_end_year(fy_range.group(1), fy_range.group(2)), _fy_end_year(fy_range.group(3), fy_range.group(4))
+        if first and last:
+            first, last = sorted((first, last))
+            return first - 1, min(last, today.year)
     explicit_range = re.search(
         r"(?i)\b(?:(?:from|between)\s+)?((?:19|20)\d{2})\s*(?:to|until|till|through|and|-|–|—)\s*((?:19|20)\d{2})\b",
         text)
