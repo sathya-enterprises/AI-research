@@ -116,9 +116,18 @@ def replay_charts(capture: dict, audited: list) -> dict:
     from routes.report import _merge_source_evidence_statuses
     from utils.chart_evidence_audit import audit_chart_evidence_consistency
 
+    import routes.report as report
+    from utils.evidence_store import store_from_passages
+
     final = _stage(capture, "final_output")
     charts = [chart for chart in final.get("charts") or [] if isinstance(chart, dict)]
     manifest = [row for row in final.get("sources") or [] if isinstance(row, dict)]
+    # As in the run: each V2 chart's source rows are registered as chart evidence before the gate.
+    passages = _stage(capture, "evidence_store").get("passages") or {}
+    if passages:
+        report._register_v2_chart_evidence(charts, store_from_passages(passages))
+        audited = report._attach_audit_source_evidence(manifest, audit_source_rows(capture)[0],
+                                                       str(final.get("report") or ""))
     merged = _merge_source_evidence_statuses(manifest, audited)
     result = audit_chart_evidence_consistency(str(final.get("report") or ""), charts, merged,
                                               question=str(capture.get("question") or ""),

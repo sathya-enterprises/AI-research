@@ -220,8 +220,9 @@ def _period_header(header: str) -> str:
 def _header_units(header: str) -> set[str]:
     """Explicit units in column labels, including units absent from the cell values."""
     # "Calendar Year 2022" names a period; its "Year" is not a unit of the values.
-    text = re.sub(r"(?i)\b(?:calendar|financial|fiscal|academic)\s+years?\b|\byears?\s+(?=(?:19|20)\d{2}\b)", " ",
-                  str(header or ""))
+    # "1-Year Returns" / "3Yr Change %" name a horizon; the values are not in years.
+    text = re.sub(r"(?i)\b(?:calendar|financial|fiscal|academic)\s+years?\b|\byears?\s+(?=(?:19|20)\d{2}\b)"
+                  r"|\b\d+\s*-?\s*(?:years?|yrs?|months?|weeks?|days?)\b", " ", str(header or ""))
     return {_canonical_unit(unit) for unit in _HEADER_UNIT_RE.findall(text)}
 
 

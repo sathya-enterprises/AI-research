@@ -787,3 +787,20 @@ def test_a_retrieval_date_in_a_chart_title_is_not_the_data_period():
     assert _periods_outside_question_window(question, ["Q4: 2021-22: 14 sectors, retrieved 15 Nov 2026"], []) == []
     assert _periods_outside_question_window(question, ["Retrieved from the API on 2026-11-15"], []) == []
     assert _periods_outside_question_window(question, ["Credit growth in Q1 2026"], []) == ["Q1 2026"]
+
+
+def test_markets_run_horizon_headers_and_definition_thresholds():
+    from routes.report import _attach_audit_source_evidence
+    from utils.section_charts import _header_units
+
+    # "1-Year Returns" is a horizon, not a unit (titles read "1-Year Returns (years)").
+    assert _header_units("1-Year Returns") == set() and _header_units("3Yr Change %") == {"%"}
+    assert _header_units("Tenure (years)") == {"years"}
+    # "a Beta greater than 1" is a definition, not a statistic to find in the source.
+    url = "https://example.org/beta"
+    rows = _attach_audit_source_evidence(
+        [{"id": "S1", "title": "Beta", "url": url}],
+        [{"id": "S1", "title": "Beta", "url": url, "pageContent": "Sector betas.", "pageFetchStatus": "ok"}],
+        "Nine sectors were aggressive, possessing a Beta greater than 1 [S1].")
+    groups = rows[0].get("_citedClaimGroups") or []
+    assert all("scalar:1" not in (g.get("claimTokens") or []) for g in groups)

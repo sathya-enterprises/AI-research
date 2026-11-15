@@ -16546,6 +16546,9 @@ def _attach_audit_source_evidence(
         # Durations and counts of items are not statistics ("3-month window", "13 weeks", "13 out of 15").
         text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s*[- ]?\s*(?:weeks?|wks?|months?|years?|yrs?|days?|quarters?|fortnights?|sessions?)\b", " ", text)
         text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s+(?:out\s+)?of\s+(?:the\s+)?\d{1,3}\b", " ", text)
+        # A single-digit threshold in a definition ("a Beta greater than 1", "a ratio below 1") is not a statistic.
+        text = re.sub(r"(?i)\b(?:greater|more|less|lower|higher)\s+than\s+\d(?![\d.,%])|\b(?:above|below|under|exceeding)\s+\d(?![\d.,%\w])",
+                      " ", text)
         text = re.sub(r"(?i)(?<![\d.,])\b\d{1,3}\s+(?:[a-z]+\s+)?(?:sectors?|stocks?|companies|constituents?|indices|industries|sub-sectors?)\b",
                       " ", text)
         # A date without its year ("between September 15 and October 15, 2026") is not a statistic.
