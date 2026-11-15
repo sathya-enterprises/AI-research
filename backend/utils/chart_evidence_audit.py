@@ -1070,6 +1070,12 @@ def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
             while start > 0 and "|" in lines[start - 1]:
                 start -= 1
             header = lines[max(0, start - 2):min(start + 3, index)]
+            # The table's caption names its measure; notes between it and the header
+            # ("Retrieved from ...", "Empty cells are ...") pushed it out of reach.
+            caption = next((lines[k] for k in range(start - 1, max(-1, start - 7), -1)
+                            if re.match(r"\s*TABLE\s+\d+\b", lines[k], re.I)), "")
+            if caption and caption not in header:
+                header = [caption] + header
             for match in hits:
                 # Flattened tables put several rows on one line; keep only the
                 # row label just before the value (not every row on the line).
@@ -1633,6 +1639,14 @@ _POINT_YEAR_RANGE = re.compile(
 )
 
 
+def _column_period(point: object) -> str:
+    """The point's own source column when that column names a period ("Incentive Disbursed in FY2024-25")."""
+    if not isinstance(point, dict):
+        return ""
+    column = str(point.get("evidenceColumn") or point.get("evidence_column") or "").strip()
+    return column if column and _period_ranges(column) else ""
+
+
 def _is_point_period(value: object) -> bool:
     text = re.sub(r"\s+", " ", str(value or "").strip())
     if not text:
@@ -1782,8 +1796,14 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
         row = _pipe_cells(line)
         if len(row) < 2 or re.fullmatch(r"\s*:?-{2,}:?\s*", line.strip().strip("|")):
             continue
+        rank_dropped = False
         if quoted and _norm_quote(line) not in quoted:
-            continue
+            # Charts quote a ranked table's row without its serial cell ("UTTAR PRADESH | 6,65,247"
+            # for "1 | UTTAR PRADESH | 6,65,247"); that row, and its header without "Sl. No.", align.
+            if not (len(row) >= 3 and re.fullmatch(r"\d{1,4}\.?", row[0].strip())
+                    and _norm_quote(" | ".join(row[1:])) in quoted):
+                continue
+            row, rank_dropped = row[1:], True
         raw_value = point.get("evidenceValue", point.get("evidence_value"))
         matching_value_indices = [index for index, cell in enumerate(row)
                                   if _source_cell_matches(value, raw_value, cell)]
@@ -1808,6 +1828,11 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
                 continue
             if re.fullmatch(r"\s*:?-{2,}:?\s*", header_line.strip().strip("|")):
                 continue
+            if rank_dropped and len(header) >= 3 and (
+                    re.fullmatch(r"\d{1,4}\.?", header[0].strip())
+                    or re.fullmatch(r"(?i)#|rank(?:ing)?|s\.?\s?no\.?|sl\.?\s?no\.?|sr\.?\s?no\.?|no\.?|serial(?: no\.?)?",
+                                    header[0].strip())):
+                header = header[1:]
             previous_rows.append(header)
             if len(previous_rows) >= 100:
                 break
@@ -2446,7 +2471,10 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                             # A point labelled with its own period is dated by that label; the surrounding
                             # context holds neighbouring rows ("2020 | 3,143" beside the 2021 row) and made
                             # in-window points look out of window.
-                            *([] if _is_point_period(label) or _is_point_period(series)
+                            # A point read from a dated column ("Incentive Disbursed in FY2024-25") is dated
+                            # by that column, not by its neighbour in the header ("... in FY2025-26").
+                            *([_column_period(point)] if _column_period(point) else []),
+                            *([] if _is_point_period(label) or _is_point_period(series) or _column_period(point)
                               else [context for _own, context in quote_windows]),
                         ],
                         _source_period_metadata(quote_source),
@@ -2519,7 +2547,8 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         " ".join((label, series)),
                         " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
                         *[own for own, _context in windows],
-                        *([] if _is_point_period(label) or _is_point_period(series)
+                        *([_column_period(point)] if _column_period(point) else []),
+                        *([] if _is_point_period(label) or _is_point_period(series) or _column_period(point)
                           else [local for _own, local in windows]),  # a period label dates its own point
                     ],
                     _source_period_metadata(source_by_id.get(sid)),

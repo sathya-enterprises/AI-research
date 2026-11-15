@@ -118,6 +118,61 @@ def replay_charts(capture: dict, audited: list) -> dict:
             "conflicts": list(result.get("chartTableVerificationConflicts") or [])}
 
 
+def replay_chart_candidates(capture: dict, audited: list, enriched: list) -> dict:
+    """Rebuild the V2 table and official-dataset chart candidates from the captured
+    evidence store and run the pre-writing verification on them (``_v2_chart_preverify``).
+
+    Model-proposed dataset charts are not rebuilt (they need an LLM call).
+    """
+    from datetime import date
+
+    import routes.report as report
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+    from utils.data_angles import requested_year_bounds
+    from utils.evidence_store import store_from_passages
+    from utils.official_data import official_charts
+    from utils.report_pipeline_v2 import MAX_CHARTS
+    from utils.section_charts import build_chart_candidates
+    from utils.table_focus import focus_entities
+
+    question = str(capture.get("question") or "")
+    tier = str(capture.get("reportTier") or "detailed")
+    today = str(capture.get("startedAt") or date.today().isoformat())[:10]
+    store = store_from_passages(_stage(capture, "evidence_store").get("passages") or {})
+    try:
+        min_year, max_year = requested_year_bounds(question, date.fromisoformat(today))
+    except Exception:
+        min_year, max_year = None, None
+    candidates, drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
+                                               max_year=max_year, today=today, focus=focus_entities(question))
+    candidates = list(candidates) + list(official_charts(store, question) or [])
+    # As in the pipeline: points outside the question's window are trimmed before verification.
+    from utils.section_charts import clip_to_question_window
+    kept = []
+    for chart in candidates:
+        reason = clip_to_question_window(chart, question)
+        if reason:
+            drops.append({"title": chart.spec.get("title"), "reason": reason})
+        else:
+            kept.append(chart)
+    candidates = kept
+    specs = [dict(chart.spec, evidencePassages=chart.passage_ids) for chart in candidates]
+    manifest = [row for row in _stage(capture, "final_output").get("sources") or [] if isinstance(row, dict)]
+    report._register_v2_chart_evidence(specs, store)
+    public = report._merge_source_evidence_statuses(manifest, report._attach_audit_source_evidence(manifest, enriched, ""))
+    result = audit_chart_evidence_consistency("", specs, public, question=question, require_publisher_verification=True)
+    reasons: dict[int, str] = {}
+    for failure in list(result.get("chartEvidenceFailures") or []) + list(result.get("chartTableVerificationConflicts") or []):
+        index = int(failure.get("chartIndex") or 0) - 1
+        if 0 <= index < len(specs) and index not in reasons:
+            reasons[index] = str(failure.get("reason") or "failed chart verification")
+    rows = [{"title": str(spec.get("title") or "")[:120], "passages": list(spec.get("evidencePassages") or []),
+             "points": sum(len(s.get("data") or []) for s in spec.get("series") or []),
+             "verdict": reasons.get(index, "verified")} for index, spec in enumerate(specs)]
+    return {"candidates": rows, "droppedWhileBuilding": [
+        {"title": str(d.get("title") or "")[:120], "reason": str(d.get("reason") or "")} for d in drops]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("capture")
@@ -130,7 +185,9 @@ def main() -> int:
     capture = json.loads(Path(args.capture).read_text(encoding="utf-8"))
     numbers = replay_number_policy(capture)
     sources = replay_source_evidence(capture)
-    charts = replay_charts(capture, sources.pop("audited"))
+    audited = sources.pop("audited")
+    charts = replay_charts(capture, audited)
+    candidates = replay_chart_candidates(capture, audited, audit_source_rows(capture)[0])
 
     limit = None if args.verbose else 8
     print(f"# Replay of {Path(args.capture).name}")
@@ -157,8 +214,19 @@ def main() -> int:
         print(f"  - {str(failure.get('chartTitle'))[:60]} / {failure.get('label')} = {failure.get('value')}: "
               f"{str(failure.get('reason'))[:110]}")
 
+    print("\n## 4. Chart candidates (table + official-dataset charts, pre-writing verification)")
+    verified = [c for c in candidates["candidates"] if c["verdict"] == "verified"]
+    print(f"built: {len(candidates['candidates'])} | verified: {len(verified)} | "
+          f"dropped while building: {len(candidates['droppedWhileBuilding'])}")
+    for reason, count in Counter(c["verdict"][:100] for c in candidates["candidates"] if c["verdict"] != "verified").most_common():
+        print(f"  {count} x {reason}")
+    for item in candidates["candidates"][:limit if limit is None else limit * 2]:
+        print(f"  - {'OK ' if item['verdict'] == 'verified' else 'NO '} {item['title'][:70]} ({item['points']} pts, "
+              f"{','.join(item['passages'][:3])})")
+
     if args.json:
-        Path(args.json).write_text(json.dumps({"numberPolicy": numbers, "sourceEvidence": sources, "charts": charts},
+        Path(args.json).write_text(json.dumps({"numberPolicy": numbers, "sourceEvidence": sources, "charts": charts,
+                                               "chartCandidates": candidates},
                                               ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print(f"\nfull result: {args.json}")
     return 0

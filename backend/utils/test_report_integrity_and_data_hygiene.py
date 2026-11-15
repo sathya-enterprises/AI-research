@@ -584,3 +584,64 @@ def test_calculation_inputs_may_be_a_passage_count_written_in_lakh():
     assert verify_calculation_labels("e-2Ws reached 142.8% (calculated: 1428009 / 1000000) of target.", pool) == ""
     # An input that is in no passage, in any form, still fails.
     assert verify_calculation_labels("e-2Ws reached 71.4% (calculated: 1428009 / 2000000) of target.", pool)
+
+
+def test_a_ranked_table_row_quoted_without_its_serial_cell_matches_its_column():
+    # Observed run: every state-wise and corridor-wise chart failed because the chart quotes
+    # "UTTAR PRADESH | 6,65,247 | ..." for the source row "1 | UTTAR PRADESH | 6,65,247 | ...".
+    from utils.chart_evidence_audit import _table_point_column_matches
+
+    table = ("TABLE 1\nSl. No. | State/ UT | Total EV | Total Vehicles Sold | % Share of EV in Total Vehicles Sold\n"
+             "1 | UTTAR PRADESH | 6,65,247 | 1,53,17,699 | 4.34%\n")
+    quote = "UTTAR PRADESH | 6,65,247 | 1,53,17,699 | 4.34%"
+    point = {"evidenceValue": "6,65,247", "evidenceColumn": "Total EV", "evidenceRowLabel": "UTTAR PRADESH"}
+    assert _table_point_column_matches(point, "Total EV", "UTTAR PRADESH", 665247, quote, table) is True
+    wrong = {"evidenceValue": "1,53,17,699", "evidenceColumn": "Total EV", "evidenceRowLabel": "UTTAR PRADESH"}
+    assert _table_point_column_matches(wrong, "Total EV", "UTTAR PRADESH", 15317699, quote, table) is False
+
+
+def test_a_two_column_row_reads_its_measure_from_a_caption_above_notes():
+    from utils.chart_evidence_audit import _value_windows
+
+    text = ("TABLE 1 — Electric car sales (cars), 2020–2025\nRetrieved from the Our World in Data public API.\n"
+            "Empty cells are years with no published value.\nYear | India\n2020 | 3,143\n2021 | 12,050")
+    (_own, context), = _value_windows("12,050", text)
+    assert "Electric car sales" in context
+
+
+def test_a_point_from_a_dated_column_is_dated_by_that_column_not_its_neighbour():
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+
+    page = ("TABLE 1\n# | Name of Applicant | Category | Incentive Disbursed in FY2024-25 | Incentive Disbursed in FY2025-26\n"
+            "1 | Tata Motors Ltd. | OEM | 142.13 | 403.18\n3 | Mahindra & Mahindra Ltd. | OEM | 104.08 | 283.82\n"
+            "5 | Ola Electric Tech | OEM | 73.74 | 366.78")
+    source = {"id": "S1", "title": "PLI Auto disbursements", "url": "https://pib.gov.in/x", "pageContent": page,
+              "publisherEvidenceExcerpt": page, "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page",
+              "evidenceExcerptOrigin": "publisher_page", "pageFetchRelevanceMatched": True,
+              "chartEvidenceExcerpt": page, "publisher_table_chart_evidence_verified": True}
+    rows = [("Tata Motors Ltd.", "142.13", "Tata Motors Ltd. | OEM | 142.13 | 403.18"),
+            ("Mahindra & Mahindra Ltd.", "104.08", "Mahindra & Mahindra Ltd. | OEM | 104.08 | 283.82"),
+            ("Ola Electric Tech", "73.74", "Ola Electric Tech | OEM | 73.74 | 366.78")]
+    chart = {"type": "bar", "title": "Incentive Disbursed in FY2024-25 (INR crore)", "unit": "INR crore", "sourceIds": ["S1"],
+             "source": ["S1"], "series": [{"name": "Incentive Disbursed in FY2024-25", "data": [
+                 {"label": name, "value": float(value), "evidenceSource": "S1", "evidenceQuote": quote, "evidenceValue": value,
+                  "evidenceColumn": "Incentive Disbursed in FY2024-25", "evidenceRowLabel": name} for name, value, quote in rows]}]}
+    result = audit_chart_evidence_consistency("", [chart], [source], question="EV policy in India from FY2021 to FY2025",
+                                              require_publisher_verification=True)
+    assert not [f for f in result.get("chartEvidenceFailures") or [] if "time window" in str(f.get("reason"))]
+
+
+def test_segment_labels_keep_their_numbers_and_calendar_year_columns_are_periods():
+    from types import SimpleNamespace
+
+    from utils.section_charts import charts_from_passage
+
+    passage = SimpleNamespace(
+        passage_id="S16.1", source_id="S16", kind="table", url="", title="PIB", publisher="", published="",
+        authority_tier="primary_official", reliability=1.0, numbers=[], parent_source_id="", parent_data_context="",
+        text=("TABLE 1\nCATEGORY | Calendar Year 2022 | Calendar Year 2023 | % Growth\n2 Wheelers | 6,31,464 | 8,59,376 | 36.09%\n"
+              "3 Wheelers | 3,52,710 | 5,82,793 | 65.23%\nCommercial Vehicles | 2,649 | 5,673 | 114.16%"))
+    (chart,) = charts_from_passage(passage, 0, None)
+    assert [s["name"] for s in chart.spec["series"]] == ["2 Wheelers", "3 Wheelers", "Commercial Vehicles"]
+    assert [d["label"] for d in chart.spec["series"][0]["data"]] == ["Calendar Year 2022", "Calendar Year 2023"]
+    assert chart.spec["unit"] != "years" and "(years)" not in chart.spec["title"] and "CATEGORY" not in chart.spec["title"]

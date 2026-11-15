@@ -209,9 +209,20 @@ def _canonical_unit(unit: str) -> str:
     return aliases.get(value, value)
 
 
+_YEAR_PREFIX_RE = re.compile(r"(?i)^\s*(?:calendar|financial|fiscal)\s+year\s*[:\-]?\s*")
+
+
+def _period_header(header: str) -> str:
+    """A column named for a period: "Calendar Year 2022" / "Financial Year 2023-24" is the period itself."""
+    return _YEAR_PREFIX_RE.sub("", str(header or "")).strip()
+
+
 def _header_units(header: str) -> set[str]:
     """Explicit units in column labels, including units absent from the cell values."""
-    return {_canonical_unit(unit) for unit in _HEADER_UNIT_RE.findall(str(header or ""))}
+    # "Calendar Year 2022" names a period; its "Year" is not a unit of the values.
+    text = re.sub(r"(?i)\b(?:calendar|financial|fiscal|academic)\s+years?\b|\byears?\s+(?=(?:19|20)\d{2}\b)", " ",
+                  str(header or ""))
+    return {_canonical_unit(unit) for unit in _HEADER_UNIT_RE.findall(text)}
 
 
 def _strip_header_units(header: str) -> str:
@@ -416,7 +427,7 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         spec["sourceIds"] = ids
         return ids
 
-    period_cols = [c for c in numeric_cols if _PERIOD_RE.match(header[c])]
+    period_cols = [c for c in numeric_cols if _PERIOD_RE.match(_period_header(header[c]))]
     if len(period_cols) >= 2 and unit_of(period_cols) is None:
         period_cols = []
     cross_section_cols = []
@@ -542,7 +553,8 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     labels = [r[0] for r in rows]
     if len(period_cols) >= 2:
         metric_header = header[0] if header[0] and not re.fullmatch(
-            r"(?i)sectors?|index|indices|name|company|stock|item|particulars|industry", header[0]) else ""
+            r"(?i)sectors?|index|indices|name|company|stock|item|particulars|industry|categor(?:y|ies)|segments?|"
+            r"types?|states?(?:\s*/\s*uts?)?|description", header[0].strip()) else ""
         title = data_title(metric=metric_header or (f"Values ({unit})" if unit else "Values"),
                            labels=labels[:MAX_LINE_SERIES], periods=[header[c] for c in period_cols])
     else:
@@ -568,7 +580,8 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
 
     def point(label: str, col_label: str, value: float, raw: str, row_label: str, *,
               column_label: str = "", metric_label: str = "", entity_label: str = "") -> dict:
-        period = col_label if _PERIOD_RE.match(col_label) else (row_period_label(row_label) if _PERIOD_RE.match(row_label) else "")
+        period = (col_label if _PERIOD_RE.match(_period_header(col_label))
+                  else (row_period_label(row_label) if _PERIOD_RE.match(row_label) else ""))
         return {"label": col_label if col_label else label, "value": value, "evidenceSource": passage.source_id,
                 "evidenceQuote": evidence_rows.get(row_label, ""), "evidenceValue": raw,
                 "evidenceColumn": column_label or col_label, "evidenceRowLabel": row_label,

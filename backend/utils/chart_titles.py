@@ -20,7 +20,9 @@ from utils.entity_tiers import SYNONYMS, canonical
 # "1 Data Processing Services" is a rank; "1 Week" / "3 Months" is a period and "31 Oct 2026" a date.
 _RANK_PREFIX_RE = re.compile(
     r"^\s*(?:#?\d{1,3}[.)]?\s+)(?=[A-Za-z])(?!(?:w|wk|weeks?|m|mths?|months?|y|yrs?|years?|d|days?|quarters?|qtrs?)\b)"
-    r"(?!(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\b)", re.I)
+    r"(?!(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\b)"
+    # The number is part of the name in a vehicle segment ("2 Wheelers", "3 Wheeler").
+    r"(?!wheel(?:er)?s?\b)", re.I)
 _TICKER_RE = re.compile(r"[A-Z][A-Z0-9&\-]{1,11}")
 # Price/level columns of different instruments are not comparable in one bar chart.
 NON_COMPARABLE_METRIC_RE = re.compile(
