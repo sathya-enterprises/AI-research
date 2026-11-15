@@ -858,3 +858,25 @@ def test_semiconductor_run_disagreement_dates_and_dataset_subject():
     # "sales" says how something is measured, not what: EV car sales do not stand in for semiconductor sales.
     assert not fits_measure(CATALOG["owid.ev_car_sales"], "semiconductor sales by end-use application (Automotive)")
     assert fits_measure(CATALOG["owid.ev_car_sales"], "annual electric vehicle sales volume")
+
+
+def test_attachment_only_audit_is_reconciled_with_the_fact_sheet(monkeypatch):
+    # Workbook run: the delivered audit said "FAIL ... not publication-ready" from 30 flags that the
+    # final gate had cleared, on a report that was published. Attachment-only audits are reconciled too.
+    import asyncio
+
+    import routes.report as R
+    import utils.evidence_check as EC
+
+    calls = []
+    monkeypatch.setattr(EC, "reconcile_final_audit", lambda audits, text, store: calls.append(store) or [])
+
+    async def fake_review(**_kwargs):
+        return {"status": "PASS", "blocking": False, "findings": []}
+
+    monkeypatch.setattr(R, "_gemini_independent_report_audit", fake_review)
+    store = object()
+    asyncio.run(R._run_independent_report_audit(
+        title="PMS", question="Analyse this PMS workbook", report_text="## A\n\nText.", report_tier="detailed",
+        charts=[], images=[], sources=[], store=store, attachment_only=True))
+    assert calls == [store]

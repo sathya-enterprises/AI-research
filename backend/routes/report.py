@@ -12922,9 +12922,11 @@ def _independent_audit_source_metadata(report_text: str, charts: list, sources: 
         )
         attached_excerpt = ""
         if attachment_marked:
+            # An uploaded workbook is often the only source and the report cites dozens of its rows;
+            # at 4,200 characters the reviewer saw a fraction of them and called the rest unsupported.
             attached_excerpt = _audit_excerpt_for_claims(
                 row.get("chartEvidenceExcerpt") or row.get("chart_evidence_excerpt") or evidence,
-                source_id, claim_groups, 4200,
+                source_id, claim_groups, 16000,
             )
 
         search_excerpt = str(row.get("searchEvidenceExcerpt") or row.get("search_evidence_excerpt") or "").strip()
@@ -17545,7 +17547,10 @@ async def _run_independent_report_audit(
         "structure": audit_report_structure(report_text),
         "scopeCoverageAudit": audit_requested_report_scope(question, report_text, sources),
     }
-    if store is not None and not attachment_only:
+    # Uploaded-workbook reports too: their fact sheet holds the workbook's rows with the header units
+    # ("AUM (IN Crs)"). Skipping them left 30 flags the final gate had cleared in the delivered audit
+    # ("FAIL ... do not treat this report as publication-ready") of a report that was published.
+    if store is not None:
         try:
             from utils.evidence_check import reconcile_final_audit
             reconcile_final_audit(deterministic, report_text, store)
