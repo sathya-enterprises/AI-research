@@ -165,6 +165,7 @@ class PoolNumber:
     line: int = 0
     pct: bool = False
     unit: str = ""
+    scale: float = 1.0  # "10 lakh" in the passage is the count 1,000,000 (scale 1e5)
 
 
 _UNIT_WORD_RE = re.compile(r"\s*(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\b|crores?|crs?\b|trillion|tn\b|billion|bn\b|million|mn\b|bps\b|x(?![A-Za-z])|times\b)", re.I)
@@ -194,8 +195,12 @@ def number_pool(passages: dict[str, str]) -> list[PoolNumber]:
             if value is None or re.fullmatch(r"(?:19|20)\d{2}", match.group(0)):
                 continue
             pct = bool(re.match(r"\s*%", text[match.end():match.end() + 3]))
+            scale_word = re.match(r"\s*(lakh\s+crores?|lakhs?|crores?|million|billion|thousand)\b",
+                                  text[match.end():match.end() + 16], re.I)
+            scale = {"lakh": 1e5, "lakhs": 1e5, "crore": 1e7, "crores": 1e7, "million": 1e6, "billion": 1e9,
+                     "thousand": 1e3}.get(re.sub(r"\s+", " ", scale_word.group(1).casefold()), 1.0) if scale_word else 1.0
             pool.append(PoolNumber(value, match.group(0).lstrip("+"), pid, match.start(), text.count("\n", 0, match.start()),
-                                   pct, unit_family(text[match.end():match.end() + 16])))
+                                   pct, unit_family(text[match.end():match.end() + 16]), scale))
     return pool
 
 
@@ -285,6 +290,8 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
     in the writer's own sentence, or whose arithmetic does not hold, fails.
     """
     pool_values = {normalize(n.raw).lstrip("-") for n in pool}
+    # A count written with a scale word ("10 lakh") is also the plain input (1000000).
+    pool_values |= {normalize(f"{abs(n.value) * n.scale:.4f}") for n in pool if n.scale != 1.0}
     for match in _CALC_LABEL_RE.finditer(sentence):
         body = match.group(1)
         before = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", CITE_RE.sub(" ", sentence[:match.start()]))
@@ -411,7 +418,12 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
             sentence = piece
             # A sentence that refers back ("This metric rose from 0.82% ...") takes its subject
             # from the sentence before it; a bullet's first sentence from the list's lead-in.
-            subject_context = previous_sentence or (current_lead_in if is_bullet else "")
+            # A sentence with its own subject ("Cars sold reached 77 lakh") does not borrow one.
+            refers_back = bool(re.match(
+                r"(?i)\s*(?:[-*+]\s*)?(?:this|these|that|those|it|its|they|their|"
+                r"the\s+(?:metric|figure|share|number|ratio|rate|total|count|value|segment))\b", piece))
+            subject_context = (previous_sentence if refers_back else "") or (
+                current_lead_in if is_bullet and not previous_sentence else "")
             previous_sentence = piece
             reason = ""
             if "[[UNSUPPORTED_CALC]]" in sentence:

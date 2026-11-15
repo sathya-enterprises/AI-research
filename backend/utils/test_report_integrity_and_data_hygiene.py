@@ -544,3 +544,43 @@ def test_number_policy_reads_the_subject_from_the_previous_sentence_or_list_lead
     # The right value under the wrong subject is still removed.
     wrong = _number_policy("Passenger car sales reached 8,86,047 units [S8.1].")
     assert [r["number"] for r in wrong.removed] == ["8,86,047"]
+
+
+def test_replay_capture_reruns_the_checks_from_a_saved_capture():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "replay_capture", Path(__file__).resolve().parents[1] / "scripts" / "replay_capture.py")
+    replay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+
+    url = "https://pib.gov.in/pressreleasepage.aspx?prid=1"
+    page = "TABLE 7\nSr. No. | State | Number of Manufacturing Units\n10 | Maharashtra | 77\nTotal | 257"
+    capture = {
+        "question": "How many EV manufacturing units are there in India?",
+        "llmCalls": [{"purpose": "section", "sectionId": "sec-1", "ok": True,
+                      "llmResponse": "Nationally there are 257 manufacturing units [S1.1]. Cars sold reached 77 lakh [S1.1]."}],
+        "stages": {
+            "evidence_store": {"data": {"passages": {"S1.1": {"text": page}}}},
+            "audit_sources": {"data": {"sources": [{"title": "PIB", "url": url, "pageContent": page,
+                                                    "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page",
+                                                    "pageFetchRelevanceMatched": True}]}},
+            "final_output": {"data": {"report": "Nationally there are 257 manufacturing units [S1].", "charts": [],
+                                      "sources": [{"id": "S1", "title": "PIB", "url": url}], "audit": {}}},
+        },
+    }
+    numbers = replay.replay_number_policy(capture)
+    assert [r["number"] for r in numbers["replayed"]] == ["77"]
+    sources = replay.replay_source_evidence(capture)
+    assert sources["exactSourceRows"] is True and sources["replayed"] == []
+    assert replay.replay_charts(capture, sources["audited"])["failures"] == []
+
+
+def test_calculation_inputs_may_be_a_passage_count_written_in_lakh():
+    from utils.number_policy import number_pool, verify_calculation_labels
+
+    pool = number_pool({"S3.1": "FAME II aimed to support 10 lakh e-2Ws; 14,28,009 e-2Ws were supported."})
+    assert verify_calculation_labels("e-2Ws reached 142.8% (calculated: 1428009 / 1000000) of target.", pool) == ""
+    # An input that is in no passage, in any form, still fails.
+    assert verify_calculation_labels("e-2Ws reached 71.4% (calculated: 1428009 / 2000000) of target.", pool)

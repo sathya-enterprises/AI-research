@@ -27866,6 +27866,11 @@ async def generate_report(request: Request):
             except Exception as _heal_exc:
                 log.warning("Gate healing skipped safely: %s: %s", type(_heal_exc).__name__, str(_heal_exc)[:200])
         _capture_publication_status = _publication_status_from_audits(final_deterministic_audits)
+        if current_capture_active():
+            # The exact source rows the publication audits read (fetched pages, crawl and
+            # chart gap-fill pages, official datasets): scripts/replay_capture.py replays
+            # the source and chart checks from them offline.
+            record_research_stage("audit_sources", {"sourceCount": len(enriched or []), "sources": list(enriched or [])})
         _capture_path = finish_research_capture({
             "reportId": report_id,
             "title": clean_title,
