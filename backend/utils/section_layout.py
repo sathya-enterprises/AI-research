@@ -314,6 +314,7 @@ def timeline_from_body(body: str, *, max_events: int = 6) -> str:
             continue
         text = re.sub(r"\*\*([^*]+?):?\*\*:?", r"\1:", CITE_RE.sub("", sentence.replace("|", "/")))
         text = re.sub(r"\s+", " ", text.replace("**", "")).strip(" *-")
+        text = re.sub(r"\s+([.,;:])", r"\1", text)  # the removed citation left "crore . [S3]"
         if len(text) > 110:
             text = text[:110].rsplit(" ", 1)[0].rstrip(",;:") + "…"
         events[key] = f"{_MONTHS[month - 1].capitalize()} {key[0]} — {text} [{cites[0]}]"

@@ -183,6 +183,21 @@ def finalize_figures(report_text: str, charts: list) -> tuple[str, list, dict]:
                        "mapping": {str(k): v for k, v in mapping.items()}, "reordered": order != sorted(order)}
 
 
+_TIMELINE_SUBJECT_WORDS = {
+    "policy": r"polic|scheme|government|regulat|incentive|subsid|programme|program|mission|law|act\b",
+    "regulatory": r"regulat|polic|rule|law|act\b|circular|guideline",
+}
+
+
+def _timeline_subject_matches(subject: str, title: str) -> bool:
+    """A section is about the timeline's subject ("policy" -> policy / scheme / incentive sections)."""
+    subject = str(subject or "").casefold()
+    if not subject:
+        return True
+    words = _TIMELINE_SUBJECT_WORDS.get(subject, re.escape(subject[:5]))
+    return bool(re.search(rf"(?i)\b(?:{words})", str(title or "")))
+
+
 def _apply_section_layout(edited, *, store, outline, analysis, good, today: str, asks=None, window_start=None,
                           charted: set[str] | None = None) -> dict:
     """Evidence-built blocks per section (utils/section_layout.py); returns stats and the scorecard section."""
@@ -247,7 +262,10 @@ def _apply_section_layout(edited, *, store, outline, analysis, good, today: str,
         agreement_question = bool(asks is not None and re.search(r"(?i)\b(?:fta|agreement|cepa|treat)", asks.items or ""))
         # Agreement questions take their timeline from the agreement ledger (dated signing / entry into
         # force); a section's other dated sentences (e.g. administrative notices) are not a timeline of it.
-        if (asks is not None and (asks.per_item or asks.items) and not agreement_question
+        # "Show ... the policy timeline": sections about that subject get a timeline of their own dated events.
+        timeline_section = bool(asks is not None and getattr(asks, "timeline_requested", False)
+                                and _timeline_subject_matches(getattr(asks, "timeline_subject", ""), e.title))
+        if (asks is not None and (asks.per_item or asks.items or timeline_section) and not agreement_question
                 and not any(b.startswith("> [!STATS]") for b in top)):
             # List / why-what-how questions (agreements, deals): a timeline of the section's own dated events.
             from utils.section_layout import insert_after_first_paragraph as _after_first, timeline_from_body

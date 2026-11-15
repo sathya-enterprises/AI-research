@@ -47,6 +47,8 @@ class Asks:
     items: str = ""                 # "FTAs", "promoter exits": the things listed / analysed one by one
     per_item: list[str] = field(default_factory=list)   # ["why", "what", "how"]
     exhaustive_requested: bool = False
+    timeline_requested: bool = False
+    timeline_subject: str = ""      # "policy" in "the policy timeline"
 
     def prompt_block(self) -> str:
         if not self.asks:
@@ -66,7 +68,8 @@ class Asks:
 
     def to_dict(self) -> dict:
         return {"asks": [a.to_dict() for a in self.asks], "windowNote": self.window_note, "items": self.items,
-                "perItem": self.per_item, "exhaustiveRequested": self.exhaustive_requested}
+                "perItem": self.per_item, "exhaustiveRequested": self.exhaustive_requested,
+                "timelineRequested": self.timeline_requested, "timelineSubject": self.timeline_subject}
 
 
 def _count(word: str) -> int:
@@ -170,7 +173,18 @@ def parse_asks(question: str, today: date) -> Asks:
         add("analysis", "reasons", "the reasons / drivers, each backed by evidence", ["reason", "driver", "why", "motive", "because"])
     if re.search(r"(?i)\bsubstantial data\b|\bsupport (?:it )?with (?:data|numbers)\b", q):
         add("deliverable", "substantial data", "data tables and charts behind each main claim", ["data", "table", "figure"])
-    return Asks(asks=asks, window_note=note, items=items, per_item=per_item, exhaustive_requested=exhaustive)
+    # "Show ... the policy timeline": a dated timeline of the named subject (policies, schemes, ...).
+    timeline = re.search(r"(?i)\b(?:(\w+)\s+)?(?:timelines?|chronology|milestones)\b", q)
+    timeline_subject = ""
+    if timeline:
+        timeline_subject = (timeline.group(1) or "").casefold()
+        if timeline_subject in {"the", "a", "and", "with", "of", "show", "clear", "full", "detailed", "key"}:
+            timeline_subject = ""
+        add("deliverable", f"{timeline_subject + ' ' if timeline_subject else ''}timeline",
+            f"a dated timeline of the {timeline_subject or 'key'} events (each date from a cited source)",
+            ["timeline", "chronology", "milestone", *([timeline_subject] if timeline_subject else [])])
+    return Asks(asks=asks, window_note=note, items=items, per_item=per_item, exhaustive_requested=exhaustive,
+                timeline_requested=bool(timeline), timeline_subject=timeline_subject)
 
 
 def _section_text(section) -> str:

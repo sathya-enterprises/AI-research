@@ -645,3 +645,26 @@ def test_segment_labels_keep_their_numbers_and_calendar_year_columns_are_periods
     assert [s["name"] for s in chart.spec["series"]] == ["2 Wheelers", "3 Wheelers", "Commercial Vehicles"]
     assert [d["label"] for d in chart.spec["series"][0]["data"]] == ["Calendar Year 2022", "Calendar Year 2023"]
     assert chart.spec["unit"] != "years" and "(years)" not in chart.spec["title"] and "CATEGORY" not in chart.spec["title"]
+
+
+def test_a_requested_policy_timeline_is_built_in_the_policy_sections():
+    from datetime import date
+
+    from utils.question_asks import parse_asks
+    from utils.report_pipeline_v2 import _timeline_subject_matches
+    from utils.section_layout import timeline_from_body
+
+    asks = parse_asks("Which government policies (FAME II, PLI) drove EV adoption? Show the yearly trend and the "
+                      "policy timeline.", date(2026, 11, 15))
+    assert asks.timeline_requested and asks.timeline_subject == "policy"
+    assert any(a.text == "policy timeline" for a in asks.asks)
+    assert _timeline_subject_matches(asks.timeline_subject, "Central Government Policy Drivers: FAME II")
+    assert _timeline_subject_matches(asks.timeline_subject, "Supply-Side Incentives: PLI for Auto")
+    assert not _timeline_subject_matches(asks.timeline_subject, "Segment-Wise Annual EV Sales Trends")
+    assert not parse_asks("How did EV sales grow from FY2021 to FY2025?", date(2026, 11, 15)).timeline_requested
+
+    body = ("FAME II was notified effective from April 1, 2019 with an outlay of Rs 10,000 crore [S3]. "
+            "The PLI scheme for Auto was approved on September 15, 2021 [S5]. The ACC PLI was approved on May 12, 2021 [S5].")
+    box = timeline_from_body(body)
+    assert box.startswith("> [!TIMELINE] Apr 2019 — FAME II") and "May 2021" in box and "Sep 2021" in box
+    assert " ." not in box
