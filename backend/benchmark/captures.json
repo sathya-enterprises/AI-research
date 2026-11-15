@@ -52,6 +52,70 @@
       "reportId": "7aaa99c3d2824534a2a269681fb5abea",
       "seconds": 472,
       "ranAt": "2026-11-16T00:56:55"
+    },
+    "pharma_exports": {
+      "capture": "research_capture_20261116_005655_a4804776.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "f7d01888af814d94b81a506bb7c6af50",
+      "seconds": 546,
+      "ranAt": "2026-11-16T01:06:01"
+    },
+    "fmcg_rural": {
+      "capture": "research_capture_20261116_010601_f2bca2a2.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "af2036f5d1db4c6680e22c3810fbe836",
+      "seconds": 320,
+      "ranAt": "2026-11-16T01:11:21"
+    },
+    "real_estate_housing": {
+      "capture": "research_capture_20261116_011121_e350be7e.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "e33db07c59d34c36ada270ee119d5d58",
+      "seconds": 424,
+      "ranAt": "2026-11-16T01:18:25"
+    },
+    "agri_msp": {
+      "capture": "research_capture_20261116_011825_e6285200.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "c4fd31c815ff48d48b03f4b6177e5684",
+      "seconds": 459,
+      "ranAt": "2026-11-16T01:26:04"
+    },
+    "india_inflation": {
+      "capture": "research_capture_20261116_012604_15c8af21.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "a4ec3eaff7ca4706b397ef50812565a0",
+      "seconds": 410,
+      "ranAt": "2026-11-16T01:32:54"
+    },
+    "us_labour_market": {
+      "capture": "research_capture_20261116_013254_e327c695.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "5bf871aa901544f58773352ab22072c5",
+      "seconds": 408,
+      "ranAt": "2026-11-16T01:39:42"
+    },
+    "europe_gas": {
+      "capture": "research_capture_20261116_013942_09821453.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "0f3bdba9c4ea420faed90633dfaa9379",
+      "seconds": 514,
+      "ranAt": "2026-11-16T01:48:16"
+    },
+    "china_exports": {
+      "capture": "research_capture_20261116_015447_b6071d2d.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "58e2669b3b274ab882cd70cef7a11945",
+      "seconds": 424,
+      "ranAt": "2026-11-16T02:01:51"
     }
   }
 }

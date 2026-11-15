@@ -73,6 +73,7 @@ def replay_metrics(capture: dict) -> dict:
     logging.disable(logging.INFO)
     import replay_capture as replay
 
+    replay.reset_run_state()  # each capture starts from a clean report state, as a live run does
     numbers = replay.replay_number_policy(capture)
     sources = replay.replay_source_evidence(capture)
     audited = sources.pop("audited")

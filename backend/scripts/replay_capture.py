@@ -38,6 +38,23 @@ def _stage(capture: dict, name: str) -> dict:
     return stage.get("data", stage) if isinstance(stage, dict) else {}
 
 
+def reset_run_state() -> None:
+    """Clear the per-report state report.py keeps in context variables (registered chart evidence).
+
+    A live run starts with it empty. A process that replays several captures must clear it between
+    them: otherwise one capture's source S1 chart rows count as evidence for another capture's S1
+    (this contaminated the first benchmark scorecards)."""
+    import routes.report as report
+
+    for name in ("_CHART_EVIDENCE_LINES", "_PUBLISHER_GALLERY_CHART_EVIDENCE_LINES", "_SEARCH_GALLERY_CHART_EVIDENCE_LINES"):
+        var = getattr(report, name, None)
+        if var is not None:
+            var.set({})
+    ids = getattr(report, "_PUBLISHER_TABLE_CHART_EVIDENCE_IDS", None)
+    if ids is not None:
+        ids.set(set())
+
+
 def replay_number_policy(capture: dict) -> dict:
     from utils.number_policy import apply_number_policy
 
@@ -201,6 +218,7 @@ def main() -> int:
     logging.disable(logging.INFO)
 
     capture = json.loads(Path(args.capture).read_text(encoding="utf-8"))
+    reset_run_state()
     numbers = replay_number_policy(capture)
     sources = replay_source_evidence(capture)
     audited = sources.pop("audited")

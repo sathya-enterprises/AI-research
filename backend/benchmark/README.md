@@ -22,5 +22,10 @@ identical to the live run's per-section counts; compare scorecards with each oth
 A change is acceptable when the totals improve and the "prompts worse on any metric" line is empty,
 or every listed prompt has been looked at and explained.
 
-Scorecards in `results/`: `before-today` (code at e6248af) and `today-fixes-9` (the 9 prompts captured
-on 15 Nov, replayed after the fixes of 15-16 Nov).
+Scorecards in `results/`: `before-today` (code at e6248af) and `after-fixes` (the same captures replayed
+with the fixes of 15-16 Nov). Explained "worse" entries in `after-fixes`: ev_india_in_depth (charts the old
+code's 100-failure batch cap hid, so its earlier "verified" count was false) and internet_use_comparison (a
+dataset-documentation table, "No. Countries: Basic cross-section ...", no longer passes).
+
+Each capture is replayed from a clean report state (`replay_capture.reset_run_state`); without it, chart
+evidence registered for one capture's S1 leaked into the next capture scored by the same process.
