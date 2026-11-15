@@ -373,22 +373,26 @@ class EntityResolver:
         for name, key in zip(self.targets, self._target_keys):
             self.display[key] = name
         self._prose_patterns: list[tuple[str, re.Pattern]] = []
+        # Bank-group names appear in official publications as both full
+        # labels and acronyms. Resolve those labels to one canonical group
+        # instead of charting SCBs/PSBs/PVBs as separate entities.
+        bank_aliases = {
+            "scheduled commercial banks": {"scb", "scbs", "all scbs", "all scheduled commercial banks", "commercial banks", "commercial bank"},
+            "public sector banks": {"psb", "psbs", "public sector bank"},
+            "private sector banks": {"pvb", "pvbs", "private sector bank"},
+            "foreign banks": {"fb", "fbs", "foreign bank"},
+            "small finance banks": {"sfb", "sfbs", "small finance bank"},
+            "payments banks": {"pb", "pbs", "payment banks", "payments bank"},
+        }
+        alias_owner = {form: group for group, forms_ in bank_aliases.items() for form in forms_}
         for name, key in zip(self.targets, self._target_keys):
             forms = {key}
             acronym = _acronym(key)
             if acronym and len(acronym) >= 2:
-                forms.update({acronym, acronym + "s"})
-            # Bank-group names appear in official publications as both full
-            # labels and acronyms. Resolve those labels to one canonical group
-            # instead of charting SCBs/PSBs/PVBs as separate entities.
-            bank_aliases = {
-                "scheduled commercial banks": {"scb", "scbs", "all scbs", "all scheduled commercial banks", "commercial banks", "commercial bank"},
-                "public sector banks": {"psb", "psbs", "public sector bank"},
-                "private sector banks": {"pvb", "pvbs", "private sector bank"},
-                "foreign banks": {"fb", "fbs", "foreign bank"},
-                "small finance banks": {"sfb", "sfbs", "small finance bank"},
-                "payments banks": {"pb", "pbs", "payment banks", "payments bank"},
-            }
+                # "Private Sector Banks" spells P-S-B, but "PSB(s)" is the official short form of
+                # Public Sector Banks: a generated acronym never takes another group's alias
+                # (a live banking run charted the PSBs' 9.11% GNPA as Private Sector Banks).
+                forms.update(f for f in (acronym, acronym + "s") if alias_owner.get(f, key) == key)
             forms.update(bank_aliases.get(key, set()))
             words = key.split()
             if len(words) >= 2 and words[-1] in {"bank", "motors", "industries", "group", "company"}:
@@ -423,7 +427,7 @@ class EntityResolver:
                 return tkey, self.display[tkey], True
             if _acronym(key) and _acronym(key) == tkey:
                 return tkey, self.display[tkey], True
-            if _acronym(tkey) and _acronym(tkey) == key:
+            if _acronym(tkey) and _acronym(tkey) == key and not (canonical_alias and canonical_alias != tkey):
                 return tkey, self.display[tkey], True
             words, twords = key.split(), tkey.split()
             if len(twords) >= 2 and twords[-1] in {"bank", "motors", "industries", "group"} and key == " ".join(twords[:-1]):

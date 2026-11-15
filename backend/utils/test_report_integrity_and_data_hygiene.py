@@ -763,3 +763,27 @@ def test_an_untitled_table_and_its_continuation_are_one_chart_source():
                             url="", published="", text=f"TABLE 2 (continued)\n{header}\n31 | GOA | 9 | 100")
     merged = merge_continuations([first, rest, other])
     assert [getattr(p, "merged_ids", [p.passage_id]) for p in merged] == [["S33.1", "S33.2"], ["S33.3"]]
+
+
+def test_psbs_are_public_sector_banks_even_when_private_sector_banks_spell_psb():
+    # Live banking run: "Gross NPAs of PSBs ... 9.11%" was charted as Private Sector Banks.
+    from routes.report import build_evidence_dataset
+
+    text = ("Gross NPAs of PSBs have been declining during the last five financial years- reducing from 9.11% to "
+            "2.58% between March 2021 to March 2025. The GNPA ratio of PVBs was 1.8% in March 2025.")
+    question = "How did Indian banks' GNPA change from FY2021 to FY2025?"
+    full = build_evidence_dataset([{"id": "S5", "title": "PIB", "text": text}], question,
+                                  targets=["Scheduled Commercial Banks", "Public Sector Banks", "Private Sector Banks"])
+    assert {(o.entity, o.value) for o in full.observations} >= {("Public Sector Banks", 9.11), ("Private Sector Banks", 1.8)}
+    private_only = build_evidence_dataset([{"id": "S5", "title": "PIB", "text": text}], question,
+                                          targets=["Private Sector Banks"])
+    assert all(o.value != 9.11 for o in private_only.observations if o.entity == "Private Sector Banks")
+
+
+def test_a_retrieval_date_in_a_chart_title_is_not_the_data_period():
+    from utils.chart_evidence_audit import _periods_outside_question_window
+
+    question = "How did Indian banks' GNPA change from FY2021 to FY2025?"
+    assert _periods_outside_question_window(question, ["Q4: 2021-22: 14 sectors, retrieved 15 Nov 2026"], []) == []
+    assert _periods_outside_question_window(question, ["Retrieved from the API on 2026-11-15"], []) == []
+    assert _periods_outside_question_window(question, ["Credit growth in Q1 2026"], []) == ["Q1 2026"]

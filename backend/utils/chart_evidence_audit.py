@@ -1376,6 +1376,11 @@ def _period_evidence_text(value: object) -> str:
     return _SOURCE_METADATA_PERIOD_RE.sub(" ", str(value or ""))
 
 
+_RETRIEVAL_DATE_RE = re.compile(
+    r"(?i)\b(?:retrieved|accessed|downloaded|fetched|last\s+updated\s+on\s+the\s+api)(?:\s+(?:on|from\s+[^,;\n]{0,60}?\s+on))?\s+"
+    r"(?:\d{1,2}\s+[A-Za-z]{3,9}\.?,?\s+(?:19|20)\d{2}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+(?:19|20)\d{2}|(?:19|20)\d{2}-\d{2}-\d{2})")
+
+
 def _periods_outside_question_window(
     question: object,
     observed_texts: list[object],
@@ -1399,6 +1404,9 @@ def _periods_outside_question_window(
         seen: set[tuple[int, int, str]] = set()
         for part in parts or []:
             period_text = _period_evidence_text(part) if ignore_source_metadata_dates else part
+            # When we fetched a page is not the period its data covers: a title ending "..., retrieved
+            # 15 Nov 2026" dropped an in-window "Q4: 2021-22" banking chart as out of window.
+            period_text = _RETRIEVAL_DATE_RE.sub(" ", str(period_text or ""))
             for item in _period_ranges(period_text):
                 if item not in seen:
                     seen.add(item)
