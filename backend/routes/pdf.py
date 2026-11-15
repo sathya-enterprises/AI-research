@@ -5222,7 +5222,12 @@ def _audit_rendered_pdf_bytes(pdf_bytes: bytes, report: str, title: str,
                                        r"|NIFT\s?Y\s*\d{2,3}|SENSEX\s*\d{0,2}|S&P\s*\d{3}|\d+[- ](?:year|month|week|day|quarter)s?"
                                        # Stage K: a full date ("06 Nov 2026", "Nov 6, 2026") in a column header is a period
                                        r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}"
-                                       r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d{2})\b",
+                                       r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d{2}"
+                                       # A name with a digit in it is a label, not a value: vehicle segments
+                                       # ("E-2W", "3Ws", "2-wheelers") and hyphenated codes ("COVID-19"). The live
+                                       # in-depth EV report's heading "E-2W: The Primary Growth Engine" (TOC + body)
+                                       # was blocked as a repeated observation and the report became a draft.
+                                       r"|(?:\b[Ee]-?)?\b[234]\s*-?\s*[Ww](?:s|heelers?)?|\b[A-Za-z]{2,}-\d+[A-Za-z]*)\b",
                                        "", observation_text)):
             continue
         normalized = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S\d+)*\s*\]", "", observation_text, flags=re.I)

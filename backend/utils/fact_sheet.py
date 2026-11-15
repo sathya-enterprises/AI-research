@@ -157,9 +157,11 @@ def extract_facts(passage) -> list[Fact]:
             if (not any(re.search(r"\d", c) for c in cells[1:])
                     or re.fullmatch(r"\|?[\s|:-]*-{3,}[\s|:-]*", following)
                     or (not header and not any(_VALUE_CELL_RE.fullmatch(c) for c in cells[1:]))):
-                if header and not any(re.search(r"[A-Za-z]{3,}", c) for c in cells):
-                    # A formula / column-code row under the header ("(A) | (B) | (C)=(A)/(B)")
-                    # does not rename the columns.
+                if header and (not any(re.search(r"[A-Za-z]{3,}", c) for c in cells)
+                               or len(cells) < len(header) - 1):
+                    # A formula / column-code row under the header ("(A) | (B) | (C)=(A)/(B)") or a
+                    # partial sub-header from merged cells ("Installed | Decommissioned" under a
+                    # nine-column header) does not rename the columns.
                     continue
                 # The table's header (a row without values, or the row above the separator):
                 # column names ("4-week return (%)" has digits but is a name) and their units.
@@ -229,6 +231,9 @@ def _fact(pid: str, index: int, match: re.Match, unit: str, metric: str, entity:
                 stems=_stems(f"{metric} {entity} {context}"))
 
 
+_SCALED_COUNT_RE = re.compile(r"(?<![\w.,])(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|crores?)\b(?!\s+crores?)", re.I)
+
+
 class FactSheet:
     def __init__(self, passages):
         self.facts: list[Fact] = []
@@ -239,6 +244,21 @@ class FactSheet:
         self.by_value: dict[str, list[Fact]] = {}
         for fact in self.facts:
             self.by_value.setdefault(fact.value.lstrip("-"), []).append(fact)
+        # A count written with an Indian scale word is also the plain count: "15 lakh" in a passage
+        # supports "1,500,000" / "15,00,000" in the text ("lakh crore" amounts are not expanded).
+        by_passage_value = {(f.passage_id, f.value.lstrip("-")): f for f in self.facts}
+        for pid, text in self.texts.items():
+            for match in _SCALED_COUNT_RE.finditer(text):
+                fact = by_passage_value.get((pid, _plain(match.group(1))))
+                if fact is None:
+                    continue
+                scale = 1e5 if match.group(2).casefold().startswith("lakh") else 1e7
+                try:
+                    scaled = _plain(f"{float(match.group(1).replace(',', '')) * scale:.4f}")
+                except ValueError:
+                    continue
+                if fact not in self.by_value.setdefault(scaled, []):
+                    self.by_value[scaled].append(fact)
 
     def candidates(self, raw: str, passage_ids: set[str] | None = None) -> list[Fact]:
         facts = self.by_value.get(_plain(raw.lstrip("+-−–")), [])

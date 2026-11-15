@@ -714,6 +714,11 @@ def _same_continued_table(previous, current) -> bool:
 
     previous_words = key(_table_title_line(previous)).split()
     current_words = key(current_title).split()
+    if not previous_words and not current_words:
+        # Untitled tables ("TABLE 1" / "TABLE 1 (continued)"): the same table number is the same table.
+        number = re.compile(r"(?i)^TABLE\s+(\d+)\b")
+        before, after = number.match(_table_title_line(previous)), number.match(current_title)
+        return bool(before and after and before.group(1) == after.group(1))
     if not previous_words or not current_words:
         return False
     common = []

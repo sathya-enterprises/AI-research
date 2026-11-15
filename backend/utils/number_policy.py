@@ -61,6 +61,15 @@ def normalize(token: str) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
 
 
+_WELL_FORMED_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,2}(?:,\d{2})*,\d{3}(?:\.\d+)?|\d+(?:\.\d+)?")
+
+
+def well_formed_number(token: str) -> bool:
+    """International (1,500,000) or Indian (15,00,000) digit grouping, or no grouping at all."""
+    digits = re.sub(r"^[-+−–]\s*", "", str(token or "").strip()).rstrip(",.%")
+    return bool(_WELL_FORMED_RE.fullmatch(digits)) if re.match(r"\d", digits) else True
+
+
 def number_set(texts) -> set[str]:
     out = set()
     for text in texts:
@@ -443,6 +452,11 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                     continue  # a labelled calculation: checked below through its inputs and arithmetic
                 if _is_name_number(sentence, start, end, unit, passage_texts, cited_ids):
                     continue  # part of a name ("ALPHABOTS MIDCAP 29", "ALPHA 100"), not a statistic
+                if not well_formed_number(token):
+                    # "INR 5,00,00" (a live writer typo for 5,00,000) is neither international nor Indian
+                    # digit grouping: no reader can tell which value was meant.
+                    reason = f"{token.rstrip(',.')} is not a well-formed number"
+                    break
                 found = lookup(sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),
                                passage_ids=cited_ids or None, context_entity=context_entity)
                 if found.status == "ok":

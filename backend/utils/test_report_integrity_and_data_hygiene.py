@@ -712,3 +712,54 @@ def test_scheme_name_fragments_and_spelled_out_concepts_are_not_entities():
     assert _only_inside_hyphenated_names(store, "DRIVE")
     assert _acronym_names_a_concept(store, "PCS") and _acronym_names_a_concept(store, "GST")
     assert not _acronym_names_a_concept(store, "MHI")  # an organisation keeps its deep-dive eligibility
+
+
+def test_number_policy_partial_subheader_malformed_numbers_and_lakh_counts():
+    from utils.number_policy import apply_number_policy, well_formed_number
+
+    passages = {
+        "S100.2": ("TABLE 4\nState | FY20-21 | FY21-22 | FY22-23 | FY23-24 | FY24-25 | Total EVPCS installed | "
+                   "Total EVPCS operational\nInstalled | Decommissioned\nMaharashtra | 9 | 129 | 465 | 517 | 957 | 2243 | 1786"),
+        "S30.5": "Reimbursement of power cost with an annual cap of INR 15 lakh per enterprise for charging stations.",
+    }
+
+    def removed(body):
+        return [r["number"] for r in apply_number_policy(body, passage_texts=passages, allowed_numbers=set()).removed]
+
+    # A merged-cell sub-header ("Installed | Decommissioned") no longer erases the column names.
+    assert removed("Maharashtra has 1,786 operational EVPCS charging stations [S100.2].") == []
+    # "INR 1,500,000" is the source's "INR 15 lakh".
+    assert removed("The annual power-cost cap is INR 1,500,000 per enterprise [S30.5].") == []
+    # A malformed grouping (a live typo for 5,00,000) is removed.
+    assert removed("Retrofitting earns INR 5,00,00 per vehicle [S30.5].") == ["5,00,00"]
+    assert well_formed_number("15,00,000") and well_formed_number("1,500,000") and not well_formed_number("1,2345")
+
+
+def test_a_segment_name_heading_in_toc_and_body_is_not_a_repeated_observation():
+    import re
+
+    import routes.pdf as pdf
+
+    source = open(pdf.__file__, encoding="utf-8").read()
+    assert "E-2W" in source  # the label rule documents the live case
+    # The rule strips segment / hyphenated-code labels before deciding a line holds a number.
+    labels = re.compile(r"(?:\b[Ee]-?)?\b[234]\s*-?\s*[Ww](?:s|heelers?)?|\b[A-Za-z]{2,}-\d+[A-Za-z]*")
+    assert not re.search(r"\d", labels.sub("", "E-2W: The Primary Growth Engine"))
+    assert not re.search(r"\d", labels.sub("", "3Ws and COVID-19 recovery"))
+    assert re.search(r"\d", labels.sub("", "E-2W sales reached 11.5 lakh"))
+
+
+def test_an_untitled_table_and_its_continuation_are_one_chart_source():
+    from types import SimpleNamespace
+
+    from utils.section_charts import merge_continuations
+
+    header = "Sl. No. | State/ UT | Total EV | Total Vehicles Sold"
+    first = SimpleNamespace(passage_id="S33.1", source_id="S33", kind="table", reliability=1.0, publisher="", title="",
+                            url="", published="", text=f"TABLE 1\n{header}\n1 | UTTAR PRADESH | 6,65,247 | 1,53,17,699")
+    rest = SimpleNamespace(passage_id="S33.2", source_id="S33", kind="table", reliability=1.0, publisher="", title="",
+                           url="", published="", text=f"TABLE 1 (continued)\n{header}\n30 | LADAKH | 191 | 35,896")
+    other = SimpleNamespace(passage_id="S33.3", source_id="S33", kind="table", reliability=1.0, publisher="", title="",
+                            url="", published="", text=f"TABLE 2 (continued)\n{header}\n31 | GOA | 9 | 100")
+    merged = merge_continuations([first, rest, other])
+    assert [getattr(p, "merged_ids", [p.passage_id]) for p in merged] == [["S33.1", "S33.2"], ["S33.3"]]
