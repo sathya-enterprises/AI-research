@@ -16589,6 +16589,7 @@ def _attach_audit_source_evidence(
         table_header_text = ""
         row_context: dict[str, str] = {}
         header_line = ""
+        last_caption = ""
         row_header: dict[str, str] = {}
         recent_text_lines: list[str] = []
         # "(CR)" / "(Rs cr)" column headers carry crore to their cells, like "(crore)".
@@ -16622,6 +16623,8 @@ def _attach_audit_source_evidence(
                 table_header_text = ""
                 header_line = ""
                 last_prose_line = line[:200]
+                if re.match(r"(?i)\s*TABLE\s+\d+\b", line):
+                    last_caption = line.strip()[:240]
             if "|" in line:
                 flush_paragraph()
                 cells = [cell.strip() for cell in line.strip("|").split("|")]
@@ -16663,6 +16666,11 @@ def _attach_audit_source_evidence(
                         match = unit_re.search(cell)
                         column_units.append(match.group(1).upper() if match else None)
                     header_line = " | ".join(cells)
+                    # The table's caption names its measure ("TABLE 1 — Share of electricity from
+                    # solar (%)"): a claim-aligned excerpt that kept only "Year | India" and the
+                    # matched rows could no longer establish an official chart's measure.
+                    if last_caption:
+                        header_line = f"{last_caption}\n{header_line}"
                     blocks.append(header_line)
                     continue
 
@@ -19250,6 +19258,13 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
             if passage is None:
                 continue
             rows = [ln.strip() for ln in passage.text.splitlines() if " | " in ln]
+            # The table's caption names the measure ("TABLE 1 — Share of electricity from solar
+            # (%)"); without it, once the report's own claims had narrowed the source excerpt, an
+            # official dataset chart could no longer establish its measure and was dropped.
+            caption = next((ln.strip() for ln in passage.text.splitlines()
+                            if re.match(r"(?i)\s*TABLE\s+\d+\b", ln) and " | " not in ln), "")
+            if caption and rows:
+                rows = [caption] + rows
             # Stage J: an extracted-dataset chart quotes lines of a page-derived passage (prose or a
             # chart's data printed as text); those exact quotes are registered too. Snippet passages never.
             if isinstance(chart, dict) and chart.get("provenance") == "extracted dataset" and passage.kind in {"table", "narrative"}:

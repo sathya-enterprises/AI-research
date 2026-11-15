@@ -804,3 +804,23 @@ def test_markets_run_horizon_headers_and_definition_thresholds():
         "Nine sectors were aggressive, possessing a Beta greater than 1 [S1].")
     groups = rows[0].get("_citedClaimGroups") or []
     assert all("scalar:1" not in (g.get("claimTokens") or []) for g in groups)
+
+
+def test_registered_chart_rows_keep_the_tables_caption():
+    # Renewables run: three OWID charts passed before writing and were dropped after assembly ("does
+    # not establish the chart's stated measure") because only "Year | India" rows were registered.
+    from types import SimpleNamespace
+
+    import routes.report as report
+
+    passage = SimpleNamespace(passage_id="S1.1", source_id="S1", kind="table", text=(
+        "OFFICIAL DATASET — Our World in Data\nTABLE 1 — Share of electricity from solar (%), 2019–2025\n"
+        "Retrieved from the Our World in Data public API on 2026-11-15.\nYear | India\n2020 | 3.38\n2021 | 3.91"))
+    store = SimpleNamespace(get=lambda pid: passage if pid == "S1.1" else None)
+    report._CHART_EVIDENCE_LINES.set({})
+    try:
+        report._register_v2_chart_evidence([{"evidencePassages": ["S1.1"]}], store)
+        lines = report._CHART_EVIDENCE_LINES.get()["S1"]
+    finally:
+        report._CHART_EVIDENCE_LINES.set({})
+    assert lines[0].startswith("TABLE 1 — Share of electricity from solar") and "2020 | 3.38" in lines
