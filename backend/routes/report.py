@@ -11317,6 +11317,10 @@ _SUBJECT_STOP_WORDS = frozenset({
     "lower", "high", "strong", "robust", "stable", "improved", "improvement", "moderated",
     "period", "periods", "ended", "ending", "half", "yearly", "annual", "quarter", "quarterly",
     "search", "extract", "publisher", "page", "verified", "directional", "basis", "points",
+    # Units and scales say how a value is measured, not what it measures: a
+    # "Rs crore" table header must not make any rupee claim look on-subject.
+    "crore", "crores", "lakh", "lakhs", "million", "millions", "billion", "billions",
+    "trillion", "trillions", "thousand", "thousands", "rupee", "rupees", "dollar", "dollars",
 })
 
 _SUBJECT_ALIASES = {
@@ -12723,6 +12727,15 @@ def _audit_excerpt_for_claims(text: object, source_id: str, claim_groups: list, 
                 matching_indexes.add(index)
     if matching_indexes:
         selected_indexes = set(matching_indexes)
+        # A matched table row keeps its own header row so the reviewer can see
+        # which column the value sits in ("Segment | ... | Incentive Disbursed").
+        for index in sorted(matching_indexes):
+            cursor = index - 1
+            while cursor >= 0 and "|" in lines[index] and "|" in lines[cursor]:
+                if not _source_numeric_values(lines[cursor]):
+                    selected_indexes.add(cursor)
+                    break
+                cursor -= 1
         for index in range(min(3, len(lines))):
             if (not _source_numeric_values(lines[index])
                     and re.search(r"\b(?:year|country|metric|measure|value|capacity|generation|share|rate|period)\b|^#\s*\|", lines[index], re.I)):
@@ -16548,6 +16561,9 @@ def _attach_audit_source_evidence(
     # Caption/header text for each table-row sentence, local to this audit call
     # (used for claim-subject checks; never added to evidence excerpts).
     _TABLE_ROW_CONTEXT: dict[str, str] = {}
+    # The exact header row above each table-row sentence, so an excerpt shows a
+    # row under its own column names ("Year | India" above "2021 | 12,050").
+    _TABLE_ROW_HEADER: dict[str, str] = {}
 
     def split_sentences(value: str, *, allow_short_table_rows: bool = False) -> list[str]:
         """Split prose/table rows while preserving headers and inheriting column units.
@@ -16569,6 +16585,9 @@ def _attach_audit_source_evidence(
         last_prose_line = ""
         table_header_text = ""
         row_context: dict[str, str] = {}
+        header_line = ""
+        row_header: dict[str, str] = {}
+        recent_text_lines: list[str] = []
         # "(CR)" / "(Rs cr)" column headers carry crore to their cells, like "(crore)".
         unit_re = re.compile(r"(\b(?:GW|MW|KW|TW|TWh|GWh|MWh|kWh|BU|billion units|crore|cr|lakh|million|billion|trillion|per\s?cent)\b|%)", re.I)
         def flush_paragraph() -> None:
@@ -16598,6 +16617,7 @@ def _attach_audit_source_evidence(
             if "|" not in line:
                 table_pct_context = ""
                 table_header_text = ""
+                header_line = ""
                 last_prose_line = line[:200]
             if "|" in line:
                 flush_paragraph()
@@ -16639,7 +16659,8 @@ def _attach_audit_source_evidence(
                     for cell in cells:
                         match = unit_re.search(cell)
                         column_units.append(match.group(1).upper() if match else None)
-                    blocks.append(" | ".join(cells))
+                    header_line = " | ".join(cells)
+                    blocks.append(header_line)
                     continue
 
                 expanded_cells = []
@@ -16671,10 +16692,23 @@ def _attach_audit_source_evidence(
                     row_text += f" [table columns: {table_pct_context}]"
                 blocks.append(row_text)
                 row_context[row_text] = (re.sub(r"\d", " ", last_prose_line) + " " + table_header_text).strip()
+                if header_line:
+                    row_header[row_text] = header_line
                 if context_rows_remaining > 0:
                     context_rows_remaining -= 1
                 continue
 
+            # PDF text extraction drops table borders: "e-4 Wheelers 22,644" is a
+            # row of the table captioned on the lines above it. Keep such short
+            # label-value lines as rows (the caption is their subject context)
+            # instead of discarding them as too short to be a sentence.
+            if (allow_short_table_rows and len(line) < 35 and recent_text_lines
+                    and re.fullmatch(r"[A-Za-z][^|]{1,40}?\s+[-+]?\d[\d,]*(?:\.\d+)?%?(?:\s*\([^)]*\))?", line)):
+                flush_paragraph()
+                blocks.append(line)
+                row_context[line] = " ".join(re.sub(r"\d", " ", text) for text in recent_text_lines[-2:]).strip()
+                continue
+            recent_text_lines.append(line[:200])
             # A new prose paragraph after a table heading should not be merged
             # with the previous row, but keep the lightweight unit context alive
             # for extracted data rows that follow the heading on the next line.
@@ -16700,6 +16734,8 @@ def _attach_audit_source_evidence(
                 if len(row) >= 35 or short_numeric_row:
                     parts.append(row)
                     _TABLE_ROW_CONTEXT[row] = row_context[block]
+                    if block in row_header:
+                        _TABLE_ROW_HEADER[row] = row_header[block]
                 continue
             sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9₹$])|(?<=;)\s+", block)
             block_parts = [sentence.strip() for sentence in sentences if len(sentence.strip()) >= 35]
@@ -16938,6 +16974,9 @@ def _attach_audit_source_evidence(
             # merge all rows into one pseudo-sentence and attach unrelated values
             # to the same citation.
             cleaned = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in candidate.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+            # Publisher HTML sometimes splits a decimal across inline tags
+            # ("4911 .81" for 4911.81); rejoin it so the value is one number.
+            cleaned = re.sub(r"(?<=\d) \.(?=\d)", ".", cleaned)
             cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
             dedupe_key = re.sub(r"\s+", " ", cleaned).strip()
             candidate_key = f"{origin}:{dedupe_key}" if origin == "publisher_chart_table" else dedupe_key
@@ -16945,12 +16984,22 @@ def _attach_audit_source_evidence(
             if len(dedupe_key) >= minimum_candidate_chars and candidate_key not in seen_candidate_text:
                 seen_candidate_text.add(candidate_key)
                 content_candidates.append((cleaned, origin))
+        # Short publisher-page table rows count only on a page that was fetched and
+        # passed the relevance check; a rejected page's rows verify nothing.
+        publisher_rows_eligible = (
+            _fetch_status == "ok" and _fetch_relevance is not False and not _fetch_reject_reason
+        )
         all_sentences: list[tuple[str, str]] = []
         for candidate, origin in content_candidates:
             all_sentences.extend(
                 (sentence, origin)
                 for sentence in split_sentences(
-                    candidate, allow_short_table_rows=(origin in {"publisher_chart_table", "uploaded_file"}),
+                    # Short rows under a table header ("e-3W | 1,64,718 | 1109.86") are complete
+                    # evidence on a directly fetched page too; the claim-subject check still applies.
+                    candidate, allow_short_table_rows=(
+                        origin in {"publisher_chart_table", "uploaded_file"}
+                        or (origin == "publisher_page" and publisher_rows_eligible)
+                    ),
                 )
             )
         # Deduplicate same sentences but prefer directly fetched publisher text.
@@ -17115,7 +17164,20 @@ def _attach_audit_source_evidence(
             # the internal report/chart audit only.
             if len(" ".join(publisher_parts)) >= 5200 or len(publisher_parts) >= 16:
                 break
-        item["publisherEvidenceExcerpt"] = " ".join(publisher_parts)[:5200]
+        # One line per sentence/table row, and each table row under its own header
+        # row: a row joined to its neighbours reads as one line holding every year
+        # of the table, a bare "2021 | 12,050" names no entity, and the auditor's
+        # excerpt selection works line by line.
+        publisher_blocks: dict[str, list[str]] = {}
+        for sentence in publisher_parts:
+            header = _TABLE_ROW_HEADER.get(sentence, "")
+            publisher_blocks.setdefault(header or f"\0{sentence}", []).append(sentence)
+        publisher_lines: list[str] = []
+        for header, block_rows in publisher_blocks.items():
+            if not header.startswith("\0"):
+                publisher_lines.append(header)
+            publisher_lines.extend(block_rows)
+        item["publisherEvidenceExcerpt"] = "\n".join(publisher_lines)[:5200]
         item["evidenceExcerpt"] = excerpt
         item["evidenceAvailable"] = bool(excerpt)
         if uploaded_origin:

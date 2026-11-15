@@ -31,6 +31,10 @@ import httpx
 
 log = logging.getLogger("llm_gateway")
 
+# Calls that write the report's prose. They wait for a full model rather than use a "lite" one, which wrote
+# sections at roughly half the requested length; the lite model is used only after the cooldown waits.
+LITE_AVOIDING_PURPOSES = {"section", "section_extend", "executive_summary"}
+
 DEFAULT_BUDGETS = {"detailed": 30, "in_depth": 90}
 
 
@@ -131,10 +135,14 @@ class LLMGateway:
             # Every model already cooling (after 429/503s from other calls): the 60 s cooldowns clear, so wait them
             # out instead of failing at once. A live run lost two whole sections this way within one second.
             cooldown_backoff = [int(x) for x in os.getenv("GG_V2_COOLDOWN_BACKOFF", "20,45").split(",") if x.strip().isdigit()]
+            # Report prose is written by the full models: under rate limits half the sections went to the lite
+            # model and the report came out at about half its planned length. Lite stays a last resort.
+            allow_lite = purpose not in LITE_AVOIDING_PURPOSES
             attempt = 0
             while True:
                 attempt += 1
-                result = await self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout, tried)
+                result = await self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout, tried,
+                                                 allow_lite)
                 result.attempts = attempt
                 if result.ok:
                     break
@@ -154,6 +162,11 @@ class LLMGateway:
                     continue
                 # Stage K: every key/model rate-limited (HTTP 429) - per-minute limits clear quickly, so wait and
                 # retry twice (20 s, 40 s) before giving up; a daily-quota failure still fails (and is labelled)
+                if str(result.error or "") == "no_gemini_key_or_model_available" and not cooldown_backoff and not allow_lite:
+                    allow_lite = True  # every full model still cooling after the waits: the lite model before Groq
+                    log.warning("V2 LLM %s/%s: full models still unavailable; using the lite model", purpose, section_id or "-")
+                    tried.clear()
+                    continue
                 if str(result.error or "") == "no_gemini_key_or_model_available" and cooldown_backoff:
                     delay = cooldown_backoff.pop(0)
                     self.stats.network_retries += 1
@@ -196,7 +209,7 @@ class LLMGateway:
             return result
 
     # ── providers ─────────────────────────────────────────────────────────────
-    def _attempt_plan(self, tried: set) -> list[tuple[str, str]]:
+    def _attempt_plan(self, tried: set, allow_lite: bool = True) -> list[tuple[str, str]]:
         rt = self.runtime
         keys = [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k)]
         if not keys:
@@ -204,7 +217,7 @@ class LLMGateway:
         ring = rt.round_robin(keys)
         plan = []
         for model in rt.GEMINI_MODELS:
-            if rt._gemini_model_cooling(model):
+            if rt._gemini_model_cooling(model) or (not allow_lite and "lite" in str(model).casefold()):
                 continue
             healthy = [k for k in rt._gemini_candidate_keys(ring, model, len(ring))
                        if not rt.is_rate_limited(k) and (model, k) not in tried]
@@ -213,9 +226,10 @@ class LLMGateway:
         self._key_cursor += 1
         return plan
 
-    async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried) -> LLMResult:
+    async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried,
+                           allow_lite: bool = True) -> LLMResult:
         rt = self.runtime
-        plan = self._attempt_plan(tried)
+        plan = self._attempt_plan(tried, allow_lite)
         if not plan:
             return LLMResult(ok=False, error="no_gemini_key_or_model_available")
         last_error = "no_response"

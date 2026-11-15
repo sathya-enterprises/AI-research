@@ -420,3 +420,84 @@ def test_gate_healing_drops_charts_pruned_below_three_points():
     text, kept = gate_healing._remedy_publication("Intro.\n\n[CHART_1]\n", charts, pub, actions, force=False)
     assert kept == [] and "[CHART_1]" not in text
     assert any("fewer than 3 points" in a["detail"] for a in actions)
+
+
+def test_ev_column_does_not_fuzzily_match_the_ice_column():
+    from utils.chart_evidence_audit import _table_point_column_matches
+
+    table = ("Financial Year | No. of ICE Vehicles registered | No. of EV Vehicles registered | EV share\n"
+             "2021-22 | 179.86 | 4.59 | 2.49%\n")
+    ice_value = {"evidenceValue": "179.86", "evidenceColumn": "No. of EV Vehicles registered", "evidencePeriod": "2021-22"}
+    assert _table_point_column_matches(ice_value, "EV", "2021-22", 179.86, "2021-22 | 179.86 | 4.59 | 2.49%", table) is False
+    ev_value = {"evidenceValue": "4.59", "evidenceColumn": "No. of EV Vehicles registered", "evidencePeriod": "2021-22"}
+    assert _table_point_column_matches(ev_value, "EV", "2021-22", 4.59, "2021-22 | 179.86 | 4.59 | 2.49%", table) is True
+
+
+_PIB_FAME_TABLE = (
+    "TABLE 1\nSegment | No. of Vehicles incentivized | Incentive Disbursed (Rs. crore)\n"
+    "e-2W | 14,28,882 | 4911 .81\ne-3W | 1,64,718 | 1109.86\ne-4W | 22,615 | 536.52\n"
+    "Total | 16,16,215 | 6,558.19\n"
+)
+
+
+def _fame_audit(report: str):
+    from routes.report import _attach_audit_source_evidence, _source_evidence_quality_audit
+
+    url = "https://pib.gov.in/pressreleasepage.aspx?prid=2222608"
+    manifest = [{"id": "S8", "title": "Press Release Page | Press Information Bureau", "url": url}]
+    enriched = [{**manifest[0], "pageContent": _PIB_FAME_TABLE, "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page"}]
+    rows = _attach_audit_source_evidence(manifest, enriched, report)
+    return rows[0], _source_evidence_quality_audit(rows)
+
+
+def test_short_rows_of_a_fetched_publisher_table_verify_the_claims_that_cite_them():
+    # Observed run: the PIB FAME II table rows are shorter than a prose sentence, and the page
+    # renders 4911.81 as "4911 .81"; every figure was reported as missing from S8 and removed.
+    row, audit = _fame_audit(
+        "Under FAME II, e-2Ws received Rs 4,911.81 crore in incentives supporting 14,28,882 vehicles [S8]. "
+        "e-3Ws accounted for Rs 1,109.86 crore supporting 1,64,718 vehicles [S8].")
+    assert row["claimEvidenceMatched"] is True and row["unmatchedNumericClaims"] == []
+    assert not audit.get("mismatchedCitationGroups")
+    # The auditor's publisher excerpt now carries the rows it is asked to check.
+    assert "1109.86" in row["publisherEvidenceExcerpt"] and "4911.81" in row["publisherEvidenceExcerpt"]
+
+
+def test_a_shared_unit_word_is_not_a_shared_subject():
+    _row, audit = _fame_audit("India's software exports reached Rs 1,109.86 crore [S8].")
+    assert audit.get("mismatchedCitationGroups")
+    _row, audit = _fame_audit("Under FAME II, e-2Ws received Rs 4,811.81 crore in incentives [S8].")
+    assert audit.get("mismatchedCitationGroups")
+
+
+def test_auditor_excerpt_keeps_each_matched_row_under_its_header():
+    from routes.report import _audit_excerpt_for_claims
+
+    text = ("Intro sentence about the scheme.\nOther | Table\nA | 1 | 2\nTABLE 1\n"
+            "Segment | No. of Vehicles incentivized | Incentive Disbursed (Rs. crore)\n"
+            "e-2W | 14,28,882 | 4911.81\ne-3W | 1,64,718 | 1109.86")
+    excerpt = _audit_excerpt_for_claims(text, "S8", [{"sourceIds": ["S8"], "claimTokens": ["inr_crore:1109.86"]}], 2400)
+    assert excerpt.splitlines() == [
+        "Segment | No. of Vehicles incentivized | Incentive Disbursed (Rs. crore)", "e-3W | 1,64,718 | 1109.86"]
+
+
+def test_rows_of_a_borderless_pdf_table_verify_the_claims_that_cite_them():
+    # Observed run: a PIB PDF extracted as "e-4 Wheelers 22,644" lines (no pipes); every
+    # line was shorter than a sentence and dropped, so the FAME II counts were flagged.
+    from routes.report import _attach_audit_source_evidence, _source_evidence_quality_audit
+
+    page = ("The scheme focuses on increasing EV adoption and strengthening the charging infrastructure.\n\n"
+            "EVs Supported under FAME-II as of June 2025\nCategory Number of EVs Supported\n"
+            "e-2 Wheelers 14,35,065\ne-3 Wheelers 1,65,029\ne-4 Wheelers 22,644\ne-Buses 5,165 (6,862 sanctioned)\n")
+    manifest = [{"id": "S4", "title": "Final Green Mobility", "url": "https://static.pib.gov.in/doc.pdf"}]
+    enriched = [{**manifest[0], "pageContent": page, "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page",
+                 "pageFetchRelevanceMatched": True}]
+
+    def audit(report):
+        return _source_evidence_quality_audit(_attach_audit_source_evidence(manifest, enriched, report))
+
+    assert not audit("Under FAME II, 22,644 e-4Ws and 1,65,029 e-3Ws were supported as of June 2025 [S4].").get(
+        "mismatchedCitationGroups")
+    assert audit("Under FAME II, 23,644 e-4Ws were supported as of June 2025 [S4].").get("mismatchedCitationGroups")
+    # A page rejected by the relevance check still verifies nothing.
+    enriched[0]["pageFetchRelevanceMatched"] = False
+    assert audit("Under FAME II, 22,644 e-4Ws were supported as of June 2025 [S4].").get("mismatchedCitationGroups")

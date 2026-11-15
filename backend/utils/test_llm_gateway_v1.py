@@ -173,3 +173,54 @@ def test_waits_out_cooldowns_when_every_model_is_cooling(monkeypatch):
     res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
     assert res.ok and res.text == "section text"
     assert waits == [20]
+
+
+def test_section_prose_waits_for_a_full_model_and_uses_lite_only_as_last_resort(monkeypatch):
+    seen_models = []
+
+    def handler(request):
+        seen_models.append(request.url.path.split("/models/")[1].split(":")[0])
+        return _ok("section text")
+
+    _patch_http(monkeypatch, handler)
+    runtime = _runtime(groq_text="")
+    runtime.GEMINI_MODELS = ["model-a", "model-a-lite"]
+    runtime.limited.add("gemini:model:model-a")  # the full model is cooling
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            runtime.limited.clear()  # the cooldown ends during the first wait
+
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    gw = G.LLMGateway(runtime, "detailed", budget=5, capture=False)
+    res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
+    assert res.ok and seen_models == ["model-a"] and waits == [20]
+
+    # a planning call may use the lite model straight away
+    seen_models.clear(); waits.clear()
+    runtime.limited.add("gemini:model:model-a")
+    res = asyncio.run(G.LLMGateway(runtime, "detailed", budget=5, capture=False).generate(purpose="outline", prompt="p"))
+    assert res.ok and seen_models == ["model-a-lite"] and waits == []
+
+
+def test_section_prose_falls_back_to_lite_after_the_cooldown_waits(monkeypatch):
+    seen_models = []
+
+    def handler(request):
+        seen_models.append(request.url.path.split("/models/")[1].split(":")[0])
+        return _ok("section text")
+
+    _patch_http(monkeypatch, handler)
+    runtime = _runtime(groq_text="")
+    runtime.GEMINI_MODELS = ["model-a", "model-a-lite"]
+    runtime.limited.add("gemini:model:model-a")  # stays cooling throughout
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    res = asyncio.run(G.LLMGateway(runtime, "detailed", budget=5, capture=False).generate(purpose="section", prompt="p"))
+    assert res.ok and seen_models == ["model-a-lite"] and waits == [20, 45]

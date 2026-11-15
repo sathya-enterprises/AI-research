@@ -1061,7 +1061,11 @@ def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
                 hits.append(match)
         if not hits:
             continue
-        if "|" in line and line.count("|") >= 2:
+        # A two-column row ("2021 | 12,050") has one pipe; it is still a table
+        # row when it sits in a block of pipe rows, and its measure is in the
+        # caption above the header, not in the line before it.
+        if "|" in line and (line.count("|") >= 2 or any(
+                0 <= neighbour < len(lines) and "|" in lines[neighbour] for neighbour in (index - 1, index + 1))):
             start = index
             while start > 0 and "|" in lines[start - 1]:
                 start -= 1
@@ -1722,6 +1726,11 @@ def _cell_label_matches(expected: str, observed: str) -> bool:
                                       "crore", "crores", "lakh", "lakhs", "million", "billion", "thousand"}]
     if not expected_terms:
         return _label_terms_present(expected, observed)
+    # Two-letter acronyms ("EV", "UK") distinguish columns: dropped as too short, "No. of EV Vehicles
+    # registered" also matched "No. of ICE Vehicles registered", so the ICE value passed as the EV value.
+    acronyms = re.findall(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])", expected)
+    if any(not re.search(rf"(?<![A-Za-z]){acronym}(?![A-Za-z])", observed) for acronym in acronyms):
+        return False
     hits = sum(bool(re.search(rf"\b{re.escape(term)}\b", observed, re.I)) for term in expected_terms)
     required = len(expected_terms) if len(expected_terms) <= 3 else max(2, (3 * len(expected_terms) + 3) // 4)
     return hits >= required
@@ -1828,6 +1837,10 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
         if effective_column:
             found = {index for header in previous_rows for index, cell in enumerate(header)
                      if _cell_label_matches(effective_column, cell)}
+            exact = {index for header in previous_rows for index, cell in enumerate(header)
+                     if _norm_quote(cell) == _norm_quote(effective_column)}
+            if exact and len(found) > 1:
+                found = exact  # several headers share most words: the one named exactly is the column
             if not found:
                 rejected = rejected or explicit_column
                 continue  # this copy sits under another table's header; try the next occurrence
