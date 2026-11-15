@@ -374,7 +374,16 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
     body, calcs, failed_calcs = apply_calculations(body, sheet, None)
     result.calculated += [{"section": section_id, "number": c["value"], "inputs": c["inputs"]} for c in calcs]
     out_lines = []
+    # The line that introduces a bullet list ("Goods Vehicles registrations show:") names
+    # the subject of bullets such as "- 2018: 8,86,047 total (658 EVs)".
+    lead_in = ""
     for line in body.split("\n"):
+        is_bullet = bool(re.match(r"\s*(?:[-*+]|\d+\.)\s", line))
+        if line.strip() and not is_bullet and not _TABLE_LINE_RE.match(line) and not _FIG_RE.fullmatch(line.strip()):
+            current_lead_in = lead_in
+            lead_in = line
+        else:
+            current_lead_in = lead_in
         if not line.strip() or _TABLE_LINE_RE.match(line) or _HEADING_RE.match(line) or _FIG_RE.fullmatch(line.strip()):
             # A table cell can only be a reported value: a row with a value the evidence does
             # not contain is removed (logged and recorded), like an unsupported sentence.
@@ -394,11 +403,16 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
             out_lines.append(line)
             continue
         kept: list[str] = []
+        previous_sentence = ""
         for piece in _sentences(line):
             if not piece.strip():
                 kept.append(piece)
                 continue
             sentence = piece
+            # A sentence that refers back ("This metric rose from 0.82% ...") takes its subject
+            # from the sentence before it; a bullet's first sentence from the list's lead-in.
+            subject_context = previous_sentence or (current_lead_in if is_bullet else "")
+            previous_sentence = piece
             reason = ""
             if "[[UNSUPPORTED_CALC]]" in sentence:
                 reason = "requested calculation uses numbers that are not facts in the evidence"
@@ -421,6 +435,12 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                                passage_ids=cited_ids or None, context_entity=context_entity)
                 if found.status == "ok":
                     continue
+                if found.status == "metric_mismatch" and subject_context:
+                    nearby = lookup(sheet, token, sign=explicit, unit=unit,
+                                    sentence=CITE_RE.sub(" ", f"{subject_context} {sentence}"),
+                                    passage_ids=cited_ids or None, context_entity=context_entity)
+                    if nearby.status == "ok":
+                        continue
                 if cited_ids and found.status in {"absent", "metric_mismatch"}:
                     # The fact is in another passage of this section's evidence: correct the citation.
                     other = lookup(sheet, token, sign=explicit, unit=unit, sentence=CITE_RE.sub(" ", sentence),

@@ -501,3 +501,46 @@ def test_rows_of_a_borderless_pdf_table_verify_the_claims_that_cite_them():
     # A page rejected by the relevance check still verifies nothing.
     enriched[0]["pageFetchRelevanceMatched"] = False
     assert audit("Under FAME II, 22,644 e-4Ws were supported as of June 2025 [S4].").get("mismatchedCitationGroups")
+
+
+_EV_PASSAGES = {
+    "S20.1": ("TABLE 1\nCalendar Year | Total EV registered on Vahan | Total Vehicles registered on Vahan | % Share of EVs\n"
+              "(A) | (B) | (C)=(A)/(B)\n2024 | 19,50,490 | 2,62,07,453 | 7.44%"),
+    "S20.2": ("TABLE 1\nFinancial Year | No. of ICE Vehicles registered | No. of EV Vehicles registered | "
+              "EV as a % of total vehicles registered\n2020-21 | 173.79 | 1.43 | 0.82%\n2021-22 | 179.86 | 4.59 | 2.49%"),
+    "S43.2": ("TABLE 7\nSr. No. | State | Number of Manufacturing Units\n1 | Andhra Pradesh | 4\n"
+              "10 | Maharashtra | 77\nTotal | 257"),
+    "S12.1": ("TABLE 1\nSl. No. | Segment | No. of EVs for which incentive paid\n1 | e-2 wheelers | 14,28,009\n"
+              "2 | e-3 wheelers | 1,64,523\nTotal | 16,15,080"),
+    "S8.1": ("TABLE 2\nSr. No. | Category | 2018 Total | 2018 EV | 2018 % | 2019 Total | 2019 EV | 2019 %\n"
+             "4 | Goods Vehicles | 8,86,047 | 658 | 0.07 | 7,99,661 | 54 | 0.01"),
+}
+
+
+def _number_policy(body: str):
+    from utils.number_policy import apply_number_policy
+
+    return apply_number_policy(body, passage_texts=_EV_PASSAGES, allowed_numbers=set(), section_id="t")
+
+
+def test_number_policy_keeps_values_from_official_tables_it_used_to_misread():
+    # Observed run: 19 of 20 removed sentences quoted these tables correctly. A column-code row
+    # "(A) | (B)" replaced the header, a year-first row was labelled by its first value, a
+    # "Total | 257" row was not read as a table row, and "EVs" / "e-2Ws" matched nothing.
+    body = ("By 2024, Vahan recorded 19,50,490 EV registrations, a 7.44% share of EVs [S20.1]. "
+            "The share of EVs rose to 2.49% in FY2022 [S20.2]. "
+            "Nationally there are 257 manufacturing units [S43.2]. "
+            "FAME II supported 14,28,009 e-2Ws and 16,15,080 vehicles in all [S12.1].")
+    result = _number_policy(body)
+    assert result.removed == [], result.removed
+
+
+def test_number_policy_reads_the_subject_from_the_previous_sentence_or_list_lead_in():
+    body = ("EV penetration is EV registrations as a share of total vehicles registered [S20.2]. "
+            "This metric rose from a marginal 0.82% in FY2021 [S20.2].\n\n"
+            "Goods Vehicles registrations recorded in central registries show:\n"
+            "- 2018: 8,86,047 total (658 EVs; 0.07% share) [S8.1]\n- 2019: 7,99,661 total (54 EVs; 0.01% share) [S8.1]")
+    assert _number_policy(body).removed == []
+    # The right value under the wrong subject is still removed.
+    wrong = _number_policy("Passenger car sales reached 8,86,047 units [S8.1].")
+    assert [r["number"] for r in wrong.removed] == ["8,86,047"]

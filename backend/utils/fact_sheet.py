@@ -55,17 +55,30 @@ def _plain(raw: str) -> str:
         return raw
 
 
+_ACRONYM_WORDS = {"ev": {"elect", "vehic"}, "evs": {"elect", "vehic"}, "pcs": {"publi", "charg", "stati"}}
+_WHEELER_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(?:e-?)?([234])\s*-?\s*w(?:s|heelers?)?(?![A-Za-z])")
+
+
 def _stems(text: str) -> set[str]:
-    words = re.findall(r"[A-Za-z][A-Za-z&]+", text or "")
     out = set()
+    # Vehicle segments are written "e-2W", "E3W", "3Ws", "2-wheelers" or "two wheelers".
+    if _WHEELER_RE.search(text or "") or re.search(r"(?i)\b(?:two|three|four)[\s-]*wheelers?\b", text or ""):
+        out.add("wheel")
+    words = re.findall(r"[A-Za-z][A-Za-z&]+", text or "")
     for raw in words:
         word = raw.casefold()
         if raw.isupper() and 2 <= len(raw) <= 5:
             out.add(word)
+        elif raw.endswith("s") and raw[:-1].isupper() and 2 <= len(raw) - 1 <= 5:
+            out.add(word[:-1])  # a plural acronym ("EVs", "NPAs") is the acronym
         elif len(word) >= 4 and word not in _STOP:
             if word.endswith("s") and len(word) > 4 and not word.endswith("ss"):
                 word = word[:-1]
             out.add(word[:5])
+    # An acronym is also the words it stands for ("EVs" in a table header, "vehicles" in the claim).
+    for acronym, expansion in _ACRONYM_WORDS.items():
+        if acronym in out:
+            out.update(expansion)
     # Acronyms of multi-word names: "Oil & Natural Gas Corporation Ltd." is cited as "ONGC".
     for run in re.findall(r"(?:[A-Z][a-z]+(?:\s+(?:&|and|of)\s+|\s+)){1,5}[A-Z][a-z]+", text or ""):
         initials = "".join(w[0] for w in re.findall(r"[A-Z][a-z]+", run) if w not in {"Ltd", "Limited", "The", "Inc"})
@@ -135,24 +148,38 @@ def extract_facts(passage) -> list[Fact]:
             header, space_header = [], []
             continue
         cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if " | " in stripped and (stripped.startswith("|") or len(cells) >= 3) and max(len(c) for c in cells) <= 160:
+        # A two-cell row ("Total | 257") under an active header is a row of that table.
+        if (" | " in stripped and (stripped.startswith("|") or len(cells) >= 3 or (header and len(cells) == 2))
+                and max(len(c) for c in cells) <= 160):
             if re.fullmatch(r"[\s|:-]+", stripped):
                 continue  # Markdown separator row
             following = lines[index + 1].strip() if index + 1 < len(lines) else ""
             if (not any(re.search(r"\d", c) for c in cells[1:])
                     or re.fullmatch(r"\|?[\s|:-]*-{3,}[\s|:-]*", following)
                     or (not header and not any(_VALUE_CELL_RE.fullmatch(c) for c in cells[1:]))):
+                if header and not any(re.search(r"[A-Za-z]{3,}", c) for c in cells):
+                    # A formula / column-code row under the header ("(A) | (B) | (C)=(A)/(B)")
+                    # does not rename the columns.
+                    continue
                 # The table's header (a row without values, or the row above the separator):
                 # column names ("4-week return (%)" has digits but is a name) and their units.
                 header = cells
                 header_units = [unit_family(re.sub(r"^.*?\(", "", c)) if "(" in c else ("%" if "%" in c else "") for c in cells]
                 continue
             # A rank / serial-number first column is not the row's entity: the next text cell is.
-            label = next((c for c in cells if c and not re.fullmatch(r"[#\d.\s]+", c)), cells[0])
+            # A row with no text cell ("2024 | 19,50,490 | ...") is labelled by its first cell,
+            # not by the first value that has a comma in it.
+            label = next((c for c in cells if c and re.search(r"[A-Za-z]", c)), cells[0])
+            # A total row often spans the serial-number column ("Total | 257" under
+            # "Sr. No. | State | Number of Units"): its cells align from the right.
+            offset = (len(header) - len(cells)
+                      if header and len(cells) < len(header)
+                      and re.match(r"(?i)\s*(?:sr\b|sr\.|s\.?\s*no\b|sl\b|sl\.|#|serial)", header[0] or "") else 0)
             for col, cell in enumerate(cells[1:], 1):
                 for match in _NUM_RE.finditer(cell):
-                    unit = unit_family(cell[match.end():]) or (header_units[col] if col < len(header_units) else "")
-                    metric = header[col] if col < len(header) else ""
+                    hcol = col + offset
+                    unit = unit_family(cell[match.end():]) or (header_units[hcol] if hcol < len(header_units) else "")
+                    metric = header[hcol] if hcol < len(header) else ""
                     facts.append(_fact(pid, len(facts), match, unit, metric, _entity_in(label) or label,
                                        _period(metric) or _period(label), f"{label} {metric} {heading}"))
                     facts[-1].kind, facts[-1].label = "table", label.strip()[:60]
