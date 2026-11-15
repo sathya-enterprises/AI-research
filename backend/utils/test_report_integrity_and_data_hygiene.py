@@ -824,3 +824,23 @@ def test_registered_chart_rows_keep_the_tables_caption():
     finally:
         report._CHART_EVIDENCE_LINES.set({})
     assert lines[0].startswith("TABLE 1 — Share of electricity from solar") and "2020 | 3.38" in lines
+
+
+def test_healthcare_run_growth_calculations_and_rate_denominators():
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import FactSheet, apply_calculations, compute
+    from utils.number_policy import statistic_tokens
+
+    table = ("TABLE 1 — Healthcare expenditure per capita (international $), 2015–2023\n"
+             "Year | Indonesia | Philippines | Thailand | Vietnam\n2015 | 293.2 | 268.8 | 608.3 | 361.4\n"
+             "2023 | 416.6 | 560.4 | 1,066.8 | 689.6")
+    sheet = FactSheet([SimpleNamespace(passage_id="S2.1", text=table)])
+    # The writer's usual growth request was refused as "[[UNSUPPORTED_CALC]]" (6 sentences removed).
+    assert compute("(560.4 - 268.8) / 268.8", sheet, None) == ("108.5%", "change from 268.8 to 560.4")
+    assert compute("(1,066.8 - 608.3) / 608.3 * 100", sheet, None)[0] == "75.4%"
+    assert compute("(560.4 - 268.8) / 293.2", sheet, None) is None  # not a change from its own base
+    assert "UNSUPPORTED" not in apply_calculations("growth of [[calc: (560.4 - 268.8) / 268.8]].", sheet, None)[0]
+    # "per 100,000 live births" is a denominator, not a statistic to look up.
+    assert statistic_tokens("An MMR of 34 per 100,000 live births [S19].") == ["34"]
+    assert "100,000" in statistic_tokens("The plan adds 100,000 new beds.")

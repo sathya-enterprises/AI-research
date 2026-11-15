@@ -301,6 +301,11 @@ CALC_RE = re.compile(r"\[\[\s*calc\s*:\s*([^\]]+)\]\]", re.I)
 def compute(expression: str, sheet: FactSheet, passage_ids: set[str] | None) -> tuple[str, str] | None:
     """'47,955 + 21,745 + 14,116' -> ('83,816', '47,955 + 21,745 + 14,116') when every operand is a fact."""
     expr = expression.strip()
+    # "(560.4 - 268.8) / 268.8" (optionally "* 100") is the percent change from 268.8 to 560.4:
+    # the writer's usual way of asking for growth, which used to be refused as unsupported.
+    growth = re.fullmatch(r"\(\s*(\S+)\s*[-−]\s*(\S+)\s*\)\s*[/÷]\s*(\S+?)(?:\s*[*×]\s*100)?", expr)
+    if growth and _plain(growth.group(2).lstrip("+")) == _plain(growth.group(3).lstrip("+")):
+        expr = f"change from {growth.group(2)} to {growth.group(1)}"
     change = re.fullmatch(r"(?i)change\s+from\s+(\S+)\s+to\s+(\S+)", expr)
     if change:
         a, b = change.group(1), change.group(2)

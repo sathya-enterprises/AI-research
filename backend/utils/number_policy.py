@@ -34,6 +34,8 @@ _PERIOD_RE = re.compile(
 _NON_STAT_RE = re.compile(
     # (?<![\d,.]) keeps "10,915 of 13,112" or "1,036 m" from being read as a count/duration.
     r"(?i)(?<![\d,.])\b\d{1,3}\s*[- ]?\s*(?:w|wk|wks|weeks?|months?|mths?|m|years?|yrs?|y|days?|d|quarters?|qtrs?|sessions?|fortnights?)\b(?![%])"
+    # A rate's denominator ("34 per 100,000 live births", "per 1,000 population") is not a statistic.
+    r"|\bper\s+(?:1|10|100|1,000|1000|10,000|10000|100,000|100000|1,00,000)\b(?![\d,.])"
     r"|(?<![\d,.])\b\d{1,3}(?:st|nd|rd|th)\b"
     r"|(?<![\d,.])\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\b"
     r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b(?![,.]\d)"
