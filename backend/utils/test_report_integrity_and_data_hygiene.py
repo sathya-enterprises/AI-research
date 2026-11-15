@@ -668,3 +668,19 @@ def test_a_requested_policy_timeline_is_built_in_the_policy_sections():
     box = timeline_from_body(body)
     assert box.startswith("> [!TIMELINE] Apr 2019 — FAME II") and "May 2021" in box and "Sep 2021" in box
     assert " ." not in box
+
+
+def test_an_aspnet_page_wrapped_in_a_form_keeps_its_text_but_a_search_box_is_dropped():
+    # Observed run: pib.gov.in wraps every release in <form id="form1">; removing all forms removed
+    # the release text, so PIB pages came back as "empty_extraction" or as their tables only.
+    from utils.source_extractor import _extract_html
+
+    paragraphs = "".join(f"<p>FAME II paragraph {i}: 16.15 lakh electric vehicles were incentivised under the scheme.</p>"
+                         for i in range(4))
+    html = ("<html><head><title>Press Release Page | Press Information Bureau</title></head><body>"
+            "<form id='form1'><div class='innner-page-main-about-us-content-right-part'>"
+            f"<h2>16.15 LAKH ELECTRIC VEHICLES INCENTIVISED UNDER FAME-II SCHEME</h2>{paragraphs}</div></form>"
+            "<form class='search'><input name='q'><p>Search this site</p></form></body></html>")
+    text = _extract_html(html, 8000, True)
+    assert "16.15 lakh electric vehicles were incentivised" in text
+    assert "Search this site" not in text

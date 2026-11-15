@@ -202,8 +202,16 @@ def _extract_html(raw_html: str, max_chars: int, include_script_data: bool) -> s
 
         # Build narrative text separately so the structured values can be given
         # first claim on the final page-extraction budget.
-        for node in soup.find_all(["script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "form", "button", "iframe", "canvas"]):
+        for node in soup.find_all(["script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "button", "iframe", "canvas"]):
             node.decompose()
+        # A form is usually a search / login box, but ASP.NET WebForms pages (pib.gov.in and many
+        # other government sites) wrap the whole page in <form id="form1">: removing every form
+        # removed the release text, and those pages came back as "empty_extraction".
+        for node in soup.find_all("form"):
+            if getattr(node, "attrs", None) is None or getattr(node, "decomposed", False):
+                continue
+            if len(node.find_all("p")) < 3 and len(node.get_text(" ", strip=True)) < 600:
+                node.decompose()
         for node in soup.find_all(True):
             # A node inside an already-decomposed ancestor has attrs=None;
             # touching it raised AttributeError and the whole page was
