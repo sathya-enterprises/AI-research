@@ -880,3 +880,18 @@ def test_attachment_only_audit_is_reconciled_with_the_fact_sheet(monkeypatch):
         title="PMS", question="Analyse this PMS workbook", report_text="## A\n\nText.", report_tier="detailed",
         charts=[], images=[], sources=[], store=store, attachment_only=True))
     assert calls == [store]
+
+
+def test_chart_audit_keeps_failures_for_every_chart_in_a_large_batch():
+    # The audit returned the first 100 failures of the whole batch: in a 47-chart pre-writing batch the
+    # first charts used every slot and each later failing chart looked verified (found by the benchmark).
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+
+    source = {"id": "S1", "title": "t", "url": "https://example.org/a", "pageContent": "Nothing relevant here.",
+              "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page"}
+    charts = [{"type": "bar", "title": f"Chart {i}", "sourceIds": ["S1"], "source": ["S1"], "series": [{"name": "x", "data": [
+        {"label": f"P{j}", "value": float(j + 1), "evidenceSource": "S1", "evidenceQuote": f"P{j} | {j + 1}"}
+        for j in range(30)]}]} for i in range(6)]
+    result = audit_chart_evidence_consistency("", charts, [source])
+    failing = {f.get("chartIndex") for f in result["chartEvidenceFailures"]}
+    assert failing == {1, 2, 3, 4, 5, 6}

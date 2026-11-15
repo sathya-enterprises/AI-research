@@ -2585,8 +2585,23 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                 "sourceIds": ids, "sourceFetchStatus": status, "reason": reason,
                 **({"sourcePeriod": ", ".join(stale_periods)} if stale_periods else {}),
             })
-    return {"chartTableVerificationConflicts": conflicts[:50], "chartEvidenceFailures": failures[:100],
+    # Cap per chart, never across the batch: with one cap of 100, the first charts of a 47-chart
+    # pre-writing batch used every slot and each later failing chart looked verified (it was then
+    # written about and dropped at the final gate). Every chart keeps its own failures.
+    return {"chartTableVerificationConflicts": _cap_per_chart(conflicts, 25),
+            "chartEvidenceFailures": _cap_per_chart(failures, 40),
             "blocking": bool(conflicts or failures)}
+
+
+def _cap_per_chart(items: list[dict], per_chart: int) -> list[dict]:
+    kept: list[dict] = []
+    seen: dict[object, int] = {}
+    for item in items:
+        key = item.get("chartIndex") if isinstance(item, dict) else None
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] <= per_chart:
+            kept.append(item)
+    return kept
 
 
 _CHART_PLACEHOLDER = re.compile(r"\[CHART_(\d+)\]")

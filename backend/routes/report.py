@@ -19266,9 +19266,13 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
             # The table's caption names the measure ("TABLE 1 — Share of electricity from solar
             # (%)"); without it, once the report's own claims had narrowed the source excerpt, an
             # official dataset chart could no longer establish its measure and was dropped.
+            # Only a table's first caption: a "TABLE n (continued)" line between the pieces of a split
+            # table, whose repeated header is de-duplicated below, left the later rows without a header
+            # (benchmark: the markets run's ranked-industry chart regressed from 0 to 7 failures).
             caption = next((ln.strip() for ln in passage.text.splitlines()
-                            if re.match(r"(?i)\s*TABLE\s+\d+\b", ln) and " | " not in ln), "")
-            if caption and rows:
+                            if re.match(r"(?i)\s*TABLE\s+\d+\b", ln) and " | " not in ln
+                            and not re.search(r"(?i)\(continued\)", ln)), "")
+            if caption and rows and caption not in lines.get(passage.source_id, []):
                 rows = [caption] + rows
             # Stage J: an extracted-dataset chart quotes lines of a page-derived passage (prose or a
             # chart's data printed as text); those exact quotes are registered too. Snippet passages never.

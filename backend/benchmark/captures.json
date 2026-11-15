@@ -1,0 +1,57 @@
+{
+  "about": "prompt id -> capture file in backend/diagnostics/ (local, not committed)",
+  "captures": {
+    "ev_india_detailed": {
+      "capture": "research_capture_20261115_103310_fc269465.json",
+      "questionMatches": true
+    },
+    "ev_india_in_depth": {
+      "capture": "research_capture_20261115_221336_d5ced555.json",
+      "questionMatches": true
+    },
+    "banking_asset_quality": {
+      "capture": "research_capture_20261115_234432_7de39bff.json",
+      "questionMatches": true
+    },
+    "markets_sector_rotation": {
+      "capture": "research_capture_20261115_235312_ac012033.json",
+      "questionMatches": true
+    },
+    "renewables_capacity": {
+      "capture": "research_capture_20261116_000556_6ecf809e.json",
+      "questionMatches": true
+    },
+    "healthcare_sea": {
+      "capture": "research_capture_20261116_001302_752f3fbe.json",
+      "questionMatches": true
+    },
+    "semiconductors_global": {
+      "capture": "research_capture_20261116_001907_bf9edc04.json",
+      "questionMatches": true
+    },
+    "internet_use_comparison": {
+      "capture": "research_capture_20261115_005940_71819b1f.json",
+      "questionMatches": false
+    },
+    "pms_workbook": {
+      "capture": "research_capture_20261116_002543_e73f51ee.json",
+      "questionMatches": true
+    },
+    "insurance_penetration": {
+      "capture": "research_capture_20261116_004258_f2060c11.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "9c5d96d82ea744de8e4d95e14e291185",
+      "seconds": 365,
+      "ranAt": "2026-11-16T00:49:02"
+    },
+    "telecom_5g": {
+      "capture": "research_capture_20261116_004903_638cce30.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "7aaa99c3d2824534a2a269681fb5abea",
+      "seconds": 472,
+      "ranAt": "2026-11-16T00:56:55"
+    }
+  }
+}
