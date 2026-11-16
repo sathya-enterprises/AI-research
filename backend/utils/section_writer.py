@@ -184,9 +184,12 @@ def numbered_facts(passages, limit: int = 60) -> list:
 def fact_value_text(fact) -> str:
     """A fact as it is written in the report: the cell's own text plus its unit ("₹1,750", "7.44%", "300 crore")."""
     raw = fact.raw
-    if not fact.unit or fact.unit in raw:
-        return raw
-    return f"{raw}%" if fact.unit == "%" else f"{raw} {fact.unit}"
+    if fact.unit and fact.unit not in raw:
+        return f"{raw}%" if fact.unit == "%" else f"{raw} {fact.unit}"
+    unit_text = getattr(fact, "unit_text", "")
+    if not fact.unit and unit_text and unit_text.casefold() not in raw.casefold():
+        return f"{raw} {unit_text}"  # the column's unit as written: "109.14 MnT"
+    return raw
 
 
 def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
@@ -202,8 +205,9 @@ def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
     if not lines:
         return ""
     return ("\nFACT SHEET (id | value | what it measures | whose | period | passage). To state one of these numbers, "
-            "write its id in double brackets, e.g. [[F3]], instead of typing the number: the system inserts the exact "
-            "value, unit and citation. Name the metric and entity shown here in the same sentence. Ids work in "
+            "write its id in double brackets, e.g. [[F3]], instead of typing the number: the system inserts the value "
+            "exactly as shown here, and its citation. If the value shown has no unit, write the unit after the id "
+            "([[F3]] per quintal). Name the metric and entity shown here in the same sentence. Ids work in "
             "calculations too: [[calc: F3 - F1]].\n"
             + "\n".join(lines) + "\n")
 

@@ -1063,3 +1063,20 @@ def test_two_column_tables_are_tables():
     assert (india.kind, india.label, india.metric) == ("table", "2021", "India")
     jio = sheet.candidates("908.34")[0]
     assert (jio.kind, jio.label) == ("table", "Reliance Jio")
+
+
+def test_fact_ids_insert_the_column_unit_when_the_cell_has_none():
+    # Live run (steel): "India produced [[F1]] of crude steel" became "produced 109.14 of crude steel":
+    # the unit was in the header ("Quantity (in MnT)"), not in the cell.
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import _header_unit_text
+    from utils.section_writer import fact_value_text, numbered_facts
+
+    assert _header_unit_text("Quantity (in MnT)") == "MnT"
+    assert _header_unit_text("MSP (Rs per quintal)") == "Rs per quintal"
+    assert _header_unit_text("TABLE 1 (continued)") == "" and _header_unit_text("Revenue (2019)") == ""
+    passages = [SimpleNamespace(passage_id="S24.1", text="TABLE 1\nYear | Quantity (in MnT)\n2019-20 | 109.14\n2020-21 | 103.54"),
+                SimpleNamespace(passage_id="S6.1", text="Procurement\nYear | Total MSP Value (In Lakh Crore) | Growth (%)\n2024-25 | 3.47 | 4.1")]
+    values = [fact_value_text(f) for f in numbered_facts(passages)]
+    assert values == ["109.14 MnT", "103.54 MnT", "3.47 lakh crore", "4.1%"]

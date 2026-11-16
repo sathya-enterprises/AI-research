@@ -113,6 +113,7 @@ class Fact:
     stems: set[str] = field(default_factory=set)
     kind: str = "prose"     # table | prose
     label: str = ""         # a table row's own label ("Nifty PSU Bank")
+    unit_text: str = ""     # the column's unit as written ("MnT", "Rs per quintal") when it is not a scale unit
 
     def to_dict(self) -> dict:
         return {"id": self.fid, "value": self.raw, "unit": self.unit, "metric": self.metric[:60], "entity": self.entity[:40],
@@ -140,6 +141,7 @@ def extract_facts(passage) -> list[Fact]:
     lines = text.splitlines()
     header: list[str] = []
     header_units: list[str] = []
+    header_unit_texts: list[str] = []
     space_header: list[str] = []
     heading = next((ln.strip() for ln in lines if ln.strip() and " | " not in ln), "")
     for index, line in enumerate(lines):
@@ -175,7 +177,9 @@ def extract_facts(passage) -> list[Fact]:
                 # The table's header (a row without values, or the row above the separator):
                 # column names ("4-week return (%)" has digits but is a name) and their units.
                 header = cells
-                header_units = [unit_family(re.sub(r"^.*?\(", "", c)) if "(" in c else ("%" if "%" in c else "") for c in cells]
+                header_units = [(unit_family(_header_unit_text(c)) or unit_family(re.sub(r"^.*?\(", "", c))) if "(" in c
+                                else ("%" if "%" in c else "") for c in cells]
+                header_unit_texts = [_header_unit_text(c) for c in cells]
                 continue
             # A rank / serial-number first column is not the row's entity: the next text cell is.
             # A row with no text cell ("2024 | 19,50,490 | ...") is labelled by its first cell,
@@ -194,6 +198,8 @@ def extract_facts(passage) -> list[Fact]:
                     facts.append(_fact(pid, len(facts), match, unit, metric, _entity_in(label) or label,
                                        _period(metric) or _period(label), f"{label} {metric} {heading}"))
                     facts[-1].kind, facts[-1].label = "table", label.strip()[:60]
+                    if not unit and hcol < len(header_unit_texts):
+                        facts[-1].unit_text = header_unit_texts[hcol]
             continue
         tokens = stripped.split()
         numeric = [t for t in tokens if re.fullmatch(r"[+\-−–]?\d[\d,]*(?:\.\d+)?%?x?", t)]
@@ -221,6 +227,23 @@ def extract_facts(passage) -> list[Fact]:
                 facts.append(_fact(pid, len(facts), match, unit, " ".join(before.split()[-6:]), _entity_in(before),
                                    _period(sentence), sentence))
     return facts
+
+
+_UNIT_TEXT_RE = re.compile(r"(?i)^(?:in\s+)?([₹$€£]?[A-Za-z₹$€£][A-Za-z₹$€£ ./-]{0,23})$")
+_NOT_A_UNIT_RE = re.compile(r"(?i)\b(?:continued|cont|approx|provisional|estimated?|notes?|source|[per])\.?$")
+
+
+def _header_unit_text(cell: str) -> str:
+    """The unit in a column header's trailing parentheses: "Quantity (in MnT)" -> "MnT",
+    "MSP (Rs per quintal)" -> "Rs per quintal". Not units: years, "continued", notes, long phrases."""
+    m = re.search(r"\(([^()]{1,30})\)\s*$", cell or "")
+    if not m:
+        return ""
+    inner = m.group(1).strip()
+    unit = _UNIT_TEXT_RE.match(inner)
+    if not unit or _NOT_A_UNIT_RE.search(inner):
+        return ""
+    return unit.group(1).strip()
 
 
 def _two_cell_neighbour(lines: list[str], index: int) -> bool:
