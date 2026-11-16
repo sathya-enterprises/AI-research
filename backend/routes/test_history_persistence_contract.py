@@ -3,8 +3,8 @@ from pathlib import Path
 
 
 def main() -> None:
-    p = Path(__file__).resolve().parents[2] / "frontend/src/components/GrowthGradualChat.tsx"
-    src = p.resolve().read_text(encoding="utf-8")
+    from routes._chat_source import read_chat_source
+    src = read_chat_source(Path(__file__).resolve().parents[2])
     required = [
         "messagesRef",
         "activeIdRef",

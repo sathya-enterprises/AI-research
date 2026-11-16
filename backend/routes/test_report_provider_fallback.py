@@ -71,7 +71,8 @@ def test_provider_key_pools_parse_and_deduplicate_multiple_configured_keys(monke
 
 
 def test_frontend_report_error_keeps_the_existing_message_object():
-    component = (Path(__file__).resolve().parents[2] / "frontend/src/components/GrowthGradualChat.tsx").read_text(encoding="utf-8")
+    from routes._chat_source import read_chat_source
+    component = read_chat_source()
 
     assert "reportError: message" in component
     assert "reportLoading: false, reportError: message, reportPreview: undefined" in component

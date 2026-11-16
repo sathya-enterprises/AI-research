@@ -986,3 +986,80 @@ def test_chart_points_are_dated_by_their_own_period_labels():
     assert _label_period("31.03.2021") and not _periods_outside_question_window(question, [_label_period("31.03.2021")])
     assert _label_period("FY 24-25") and _label_period("Mar 2024") and not _label_period("Uttar Pradesh")
     assert _periods_outside_question_window(question, [_label_period("31.03.2020")])
+
+
+# ── Fact ids: the writer references fact-sheet cells, the code inserts the exact values ──────────
+_MSP_PASSAGES = {
+    "S2.1": ("MSP of Kharif crops (Rs per quintal)\nYear | Paddy common | Maize\n2018-19 | 1750 | 1700\n2019-20 | 1815 | 1760"),
+    "S3.1": "Share of EVs\nYear | EV share (%)\n2023 | 6.39\n2024 | 7.44",
+}
+
+
+def _fact_postprocess(raw: str):
+    from types import SimpleNamespace
+
+    from utils.section_writer import SectionDraft, numbered_facts, postprocess
+
+    passages = [SimpleNamespace(passage_id=k, text=v) for k, v in _MSP_PASSAGES.items()]
+    facts = numbered_facts(passages)
+    draft = SectionDraft(section_id="t", title="t")
+    postprocess(draft, raw, allowed_passages=set(_MSP_PASSAGES), allowed_numbers=set(), figures=[], min_words=1,
+                passage_texts=_MSP_PASSAGES, fact_refs=facts)
+    return draft, facts
+
+
+def test_fact_sheet_lists_numbered_ids_and_tells_the_writer_to_use_them():
+    from types import SimpleNamespace
+
+    from utils.section_writer import fact_block, numbered_facts
+
+    passages = [SimpleNamespace(passage_id=k, text=v) for k, v in _MSP_PASSAGES.items()]
+    block = fact_block(passages, facts=numbered_facts(passages))
+    assert "- F1 | 1750 | Paddy common | 2018-19 | 2018 | [S2.1]" in block
+    assert "- F6 | 7.44% | EV share (%) | 2024 | 2024 | [S3.1]" in block  # two-column tables too
+    assert "[[F3]]" in block and "[[calc: F3 - F1]]" in block
+
+
+def test_fact_ids_become_the_exact_cell_with_its_citation_and_are_not_second_guessed():
+    # The sentence names neither "MSP" nor the crop: typed, 1815 could be any cell; by id it is exactly one.
+    draft, facts = _fact_postprocess("It then rose to [[F3]] per quintal.\n\n<<<SUMMARY>>>\nRose to [[F3]].")
+    f3 = facts[2]
+    assert (f3.label, f3.metric, f3.raw) == ("2019-20", "Paddy common", "1815")
+    assert "rose to 1815 per quintal [S2.1]." in draft.body
+    assert draft.removed_sentences == []
+    assert "\u2060" not in draft.body + draft.summary and "1815" in draft.summary
+    assert draft.fact_refs_used[0] == {"id": "F3", "value": "1815", "passage": "S2.1"}
+
+
+def test_fact_ids_carry_units_without_doubling_them_and_work_in_calculations():
+    draft, facts = _fact_postprocess(
+        "EV share reached [[F6]] in 2024 [S3.1]. Measured as a share it was [[F6]]% of registrations [S3.1]. "
+        "Paddy MSP rose by [[calc: F3 - F1]] per quintal [S2.1].")
+    assert "reached 7.44% in 2024" in draft.body
+    assert "7.44% of registrations" in draft.body and "7.44%%" not in draft.body
+    assert "65 (calculated: 1815 - 1750)" in draft.body.replace("1,815", "1815").replace("1,750", "1750")
+
+
+def test_unknown_fact_ids_remove_their_sentence_with_a_reason():
+    draft, _ = _fact_postprocess("Paddy MSP was [[F1]] [S2.1]. Wheat MSP was [[F99]] [S2.1].")
+    assert "Paddy MSP was 1750 [S2.1]." in draft.body
+    assert "Wheat" not in draft.body
+    assert [r["reason"] for r in draft.removed_sentences] == ["refers to a fact id that is not on the section's fact sheet"]
+
+
+def test_two_column_tables_are_tables():
+    # 3,494 two-column rows in the benchmark evidence. A two-column table that starts with its header
+    # ("Year | India") was read as prose, so its values had no metric or row; and a label/value row
+    # with no header ("Reliance Jio | 908.34 million subscribers") must stay data, not become a header.
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import FactSheet
+
+    sheet = FactSheet([
+        SimpleNamespace(passage_id="S1.1", text="Domestic credit to private sector (% of GDP)\nYear | India\n2020 | 40.79\n2021 | 36.89"),
+        SimpleNamespace(passage_id="S2.1", text="Subscribers, October 2025\nReliance Jio | 908.34 million subscribers\nBharti Airtel | 485.02 million subscribers"),
+    ])
+    india = sheet.candidates("36.89")[0]
+    assert (india.kind, india.label, india.metric) == ("table", "2021", "India")
+    jio = sheet.candidates("908.34")[0]
+    assert (jio.kind, jio.label) == ("table", "Reliance Jio")

@@ -44,6 +44,8 @@ NON-NEGOTIABLE RULES
    write [[calc: A + B]], [[calc: A - B]], [[calc: A / B]] (share, %) or [[calc: change from A to B]] with A, B copied
    exactly from the passages; the system computes the value and shows its inputs. If a number you would need is
    not in the evidence, say the evidence does not show it. Sentences with numbers the evidence does not contain are removed.
+   When a FACT SHEET is given, write a number that is on it by its id ([[F3]]) instead of typing it, and only use ids
+   listed there; the system inserts the exact value, unit and citation.
 4. Figures: for each figure listed, put its marker [[FIGURE N]] on its own line where it belongs, and in the adjacent
    paragraph refer to it by number ("Figure N") in a sentence that states what the data shows - the key pattern with
    the figure's own values - and why it matters for the section's goal. Never restate the figure's title or describe
@@ -73,6 +75,7 @@ class SectionDraft:
     repaired_citations: int = 0
     unsupported_numbers: list[str] = field(default_factory=list)
     calculated_numbers: list[dict] = field(default_factory=list)
+    fact_refs_used: list[dict] = field(default_factory=list)
     removed_sentences: list[dict] = field(default_factory=list)
     rewritten_numbers: list[dict] = field(default_factory=list)
     figures_referenced: list[int] = field(default_factory=list)
@@ -123,7 +126,8 @@ def unsupported_numbers(body: str, allowed: set[str], passage_texts: dict[str, s
 
 
 def build_section_prompt(*, question: str, thesis: str, title: str, goal: str, subsections: list[dict], word_budget: int,
-                         passages: list, figures: list, already_covered: list[str], other_sections: list[str]) -> str:
+                         passages: list, figures: list, already_covered: list[str], other_sections: list[str],
+                         facts: list | None = None) -> str:
     sub_text = "\n".join(f"  ### {s['title']} — goal: {s.get('goal') or 'as titled'} (~{s['words']} words)" for s in subsections) or "  (none: write it as one argument with 1-3 H3 subheadings of your choice)"
     covered = "\n".join(f"- {c}" for c in already_covered) or "- (nothing yet: this is among the first sections)"
     others = "\n".join(f"- {o}" for o in other_sections) or "- (none)"
@@ -150,37 +154,117 @@ OTHER SECTIONS in this report (leave their goals to them):
 
 FIGURES FOR THIS SECTION:
 {figs}
-{fact_block(passages)}
+{fact_block(passages, facts=facts)}
 EVIDENCE PASSAGES (cite by id):
 {ev}"""
 
 
-def fact_block(passages, limit: int = 60) -> str:
-    """The section's fact sheet, compact: the numbers the writer may quote, each with its unit, what it
-    measures, whose it is and its passage (Stage G: most removed numbers were a right value attached to
-    the wrong metric/entity, or a calculation on inexact inputs)."""
+def numbered_facts(passages, limit: int = 60) -> list:
+    """The section's table facts in fact-sheet order; fact Fn is element n-1.
+
+    Built once per prompt and handed to postprocess, so an id means the same cell in both."""
     try:
         from utils.fact_sheet import FactSheet
         facts = [f for f in FactSheet(passages).facts if f.kind == "table" and f.metric and f.entity
                  and not re.fullmatch(r"(?:19|20)\d{2}", f.value)]
     except Exception:  # the block is an aid; the section still has its passages
-        return ""
-    seen, lines = set(), []
+        return []
+    seen, out = set(), []
     for f in facts:
         key = (f.value, f.unit, f.entity.casefold(), f.metric.casefold()[:30])
         if key in seen:
             continue
         seen.add(key)
-        metric = re.sub(r"\s+", " ", f.metric)[:50]
-        lines.append(f"- {f.raw}{(' ' + f.unit) if f.unit and f.unit not in f.raw else ''} | {metric or '-'} | "
-                     f"{(f.label or f.entity)[:40] or '-'} | {f.period or '-'} | [{f.passage_id}]")
-        if len(lines) >= limit:
+        out.append(f)
+        if len(out) >= limit:
             break
+    return out
+
+
+def fact_value_text(fact) -> str:
+    """A fact as it is written in the report: the cell's own text plus its unit ("₹1,750", "7.44%", "300 crore")."""
+    raw = fact.raw
+    if not fact.unit or fact.unit in raw:
+        return raw
+    return f"{raw}%" if fact.unit == "%" else f"{raw} {fact.unit}"
+
+
+def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
+    """The section's fact sheet, compact: the numbers the writer may quote, each with an id, its unit, what
+    it measures, whose it is and its passage (Stage G: most removed numbers were a right value attached to
+    the wrong metric/entity, or a calculation on inexact inputs)."""
+    facts = numbered_facts(passages, limit) if facts is None else facts
+    lines = []
+    for i, f in enumerate(facts, 1):
+        metric = re.sub(r"\s+", " ", f.metric)[:50]
+        lines.append(f"- F{i} | {fact_value_text(f)} | {metric or '-'} | "
+                     f"{(f.label or f.entity)[:40] or '-'} | {f.period or '-'} | [{f.passage_id}]")
     if not lines:
         return ""
-    return ("\nFACT SHEET (numbers you may quote, as value | what it measures | whose | period | passage). Quote a number "
-            "only with the metric and entity shown here; use these exact values as [[calc: ...]] inputs:\n"
+    return ("\nFACT SHEET (id | value | what it measures | whose | period | passage). To state one of these numbers, "
+            "write its id in double brackets, e.g. [[F3]], instead of typing the number: the system inserts the exact "
+            "value, unit and citation. Name the metric and entity shown here in the same sentence. Ids work in "
+            "calculations too: [[calc: F3 - F1]].\n"
             + "\n".join(lines) + "\n")
+
+
+FACT_REF_RE = re.compile(r"\[\[\s*(?:fact\s*:\s*)?F(\d+)\s*\]\]", re.I)
+FACT_ID_IN_CALC_RE = re.compile(r"(?<![\w.])F(\d+)(?![\w])")
+VERIFIED_MARK = "⁠"  # word joiner, invisible: the number before it was inserted from a fact id
+UNKNOWN_FACT = "[[UNKNOWN_FACT]]"
+
+
+def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
+    """Replace the writer's fact ids with the facts' exact text.
+
+    "[[F3]]" becomes the cell's value and unit, marked verified (the number policy does not second-guess
+    a value the code inserted) and the sentence gains the fact's citation if it lacks it. Ids inside
+    [[calc: ...]] become the values the calculation then checks. An id that is not in the list becomes
+    UNKNOWN_FACT, and the number policy removes that sentence."""
+    facts = facts or []
+    used: list[dict] = []
+
+    def fact_for(n: str):
+        i = int(n)
+        return facts[i - 1] if 1 <= i <= len(facts) else None
+
+    def calc_sub(m: re.Match) -> str:
+        inner = FACT_ID_IN_CALC_RE.sub(
+            lambda f: fact_value_text(fact_for(f.group(1))) if fact_for(f.group(1)) else f.group(0), m.group(1))
+        return f"[[calc: {inner}]]"
+
+    text = re.sub(r"\[\[\s*calc\s*:\s*([^\]]+)\]\]", calc_sub, text, flags=re.I)
+
+    pieces = re.split(r"(?<=[.!?])(\s+)", text)
+    for i, sentence in enumerate(pieces):
+        if not FACT_REF_RE.search(sentence):
+            continue
+        needed: list[str] = []
+
+        def sub(m: re.Match) -> str:
+            fact = fact_for(m.group(1))
+            if fact is None:
+                return UNKNOWN_FACT
+            value = fact_value_text(fact)
+            after = sentence[m.end():m.end() + 16].lstrip().casefold()
+            if fact.unit and fact.unit != "%" and after.startswith(fact.unit.casefold()) and value.endswith(fact.unit):
+                value = value[: -len(fact.unit)].rstrip()  # the writer wrote the unit after the id itself
+            if fact.unit == "%" and after.startswith(("%", "per cent", "percent")) and value.endswith("%"):
+                value = value[:-1]
+            needed.append(fact.passage_id)
+            used.append({"id": f"F{m.group(1)}", "value": value, "passage": fact.passage_id})
+            digits = re.search(r"\d[\d,]*(?:\.\d+)?", value)
+            return value[:digits.end()] + VERIFIED_MARK + value[digits.end():] if digits else value
+
+        sentence = FACT_REF_RE.sub(sub, sentence)
+        cited = {t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)}
+        missing = [pid for pid in dict.fromkeys(needed) if pid not in cited and pid.split(".")[0] not in cited]
+        if missing:
+            stripped = sentence.rstrip()
+            end = len(stripped) - 1 if stripped and stripped[-1] in ".!?" else len(stripped)
+            sentence = stripped[:end] + f" [{', '.join(missing)}]" + stripped[end:] + sentence[len(stripped):]
+        pieces[i] = sentence
+    return "".join(pieces), used
 
 
 def _sentence_numbers(sentence: str) -> list[str]:
@@ -270,12 +354,16 @@ def unfence(body: str) -> str:
 def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], allowed_numbers: set[str],
                 figures: list, min_words: int = 60, passage_numbers: dict[str, set[str]] | None = None,
                 passage_texts: dict[str, str] | None = None, own_figures: set[int] | None = None,
-                context_entity: str = "", fallback_sheet=None) -> SectionDraft:
+                context_entity: str = "", fallback_sheet=None, fact_refs: list | None = None) -> SectionDraft:
     text = str(raw or "").strip()
     if SUMMARY_MARKER in text:
         body, summary = text.split(SUMMARY_MARKER, 1)
     else:
         body, summary = text, ""
+    # Fact ids ([[F3]]) become the exact cell text before anything else reads the numbers.
+    body, used = resolve_fact_refs(body, fact_refs)
+    summary, used_in_summary = resolve_fact_refs(summary, fact_refs)
+    draft.fact_refs_used += used + used_in_summary
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
     # The writer sometimes copies the prompt's subsection spec into the heading:
@@ -309,6 +397,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         draft.calculated_numbers += policy.calculated
         draft.removed_sentences += policy.removed
         draft.rewritten_numbers += policy.rewritten
+    # The verified marks have done their job (the number policy skipped those numbers): remove them.
+    body = body.replace(VERIFIED_MARK, "")
+    summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}
@@ -417,11 +508,12 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         group_figures = [f for f in figures if not group or set(f.passage_ids) & group_passage_ids or gi == 0]
         budget = sum(s.word_budget for s in group) if group else section.word_budget
         budget = max(150, int(budget * budget_scale))
+        group_facts = numbered_facts(group_passages)
         prompt = build_section_prompt(
             question=question, thesis=thesis, title=section.title, goal=section.goal,
             subsections=[{"title": s.title, "goal": s.goal, "words": s.word_budget} for s in group],
             word_budget=budget, passages=group_passages, figures=group_figures,
-            already_covered=already_covered + summaries, other_sections=other_sections,
+            already_covered=already_covered + summaries, other_sections=other_sections, facts=group_facts,
         )
         max_tokens = min(16384, max(3072, int(budget * 2.2) + 800))
         result = await gateway.generate(purpose="section", section_id=f"{section.section_id}#{gi + 1}", system=SYSTEM,
@@ -435,7 +527,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         postprocess(part, result.text, allowed_passages=allowed_passages, allowed_numbers=allowed_numbers,
                     figures=[f for f in group_figures if f.status != "referenced"], passage_numbers=passage_numbers,
                     passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""),
-                    fallback_sheet=_store_fact_sheet(store))
+                    fallback_sheet=_store_fact_sheet(store), fact_refs=group_facts)
         if not part.ok:
             draft.error = (f"{draft.error}; " if draft.error else "") + f"part {gi + 1}: {part.error}"
         if part.ok:
@@ -445,6 +537,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
             draft.repaired_citations += part.repaired_citations
             draft.unsupported_numbers += part.unsupported_numbers
             draft.calculated_numbers += part.calculated_numbers
+            draft.fact_refs_used += part.fact_refs_used
             draft.removed_sentences += part.removed_sentences
             draft.rewritten_numbers += part.rewritten_numbers
             draft.figures_referenced += part.figures_referenced

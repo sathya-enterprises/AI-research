@@ -80,7 +80,8 @@ def test_legacy_character_floor_helper_does_not_pad_reports(monkeypatch):
 def test_active_report_card_exposes_the_supported_pdf_export():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    active = (root / "frontend" / "src" / "components" / "GrowthGradualChat.tsx").read_text(encoding="utf-8")
+    from routes._chat_source import read_chat_source
+    active = read_chat_source(root)
     assert 'onClick={downloadPdf}' in active
     assert "fetch('/api/chat/report/pdf'" in active
 

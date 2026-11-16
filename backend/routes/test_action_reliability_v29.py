@@ -1,3 +1,4 @@
+import re
 """Regression tests for Action visual alternatives and reliable chart/table completion."""
 import asyncio
 import json
@@ -127,14 +128,16 @@ def test_table_or_chart_alternative_can_pass_validation_without_table_if_evidenc
 
 
 def test_active_frontends_keep_icon_image_aspect_ratio_without_auto_dimension_warning():
-    root = Path(__file__).parents[2]
-    for path in (
-        root / "frontend" / "src" / "components" / "GrowthGradualChat.tsx",
-    ):
-        src = path.read_text(encoding="utf-8")
-        assert "width={32} height={32} style={{ objectFit:'cover', objectPosition:'3% 50%', width:32, height:32 }}" in src
-        assert "width={30} height={30} style={{ objectFit:'cover', objectPosition:'3% 50%', width:30, height:30 }}" in src
-        assert src.count("width={28} height={28} style={{ objectFit:'cover', objectPosition:'3% 50%', width:28, height:28 }}") == 2
+    # The redesign shows the brand once (site header): the chat sidebar (32px) and top-bar (30px) logos
+    # were removed on purpose. Every logo image left must still set matching width/height props and
+    # style so Next.js keeps its aspect ratio without the auto-dimension warning.
+    from routes._chat_source import read_chat_source
+    src = read_chat_source()
+    logos = re.findall(r'<Image src="/growth-gradual-logo\.jpg"[^>]*/>', src)
+    assert logos, "the chat still shows the logo on assistant messages"
+    for tag in logos:
+        m = re.search(r"width=\{(\d+)\} height=\{(\d+)\} style=\{\{ objectFit:'cover', objectPosition:'3% 50%', width:(\d+), height:(\d+) \}\}", tag)
+        assert m and len(set(m.groups())) == 1, tag
 
 
 def test_two_section_action_with_table_or_chart_alternative_commits_atomically_without_chart_provider(monkeypatch):

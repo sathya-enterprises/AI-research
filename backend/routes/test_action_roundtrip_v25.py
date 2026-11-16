@@ -60,8 +60,8 @@ def test_action_accepts_new_citation_when_fresh_dossier_provides_it():
 
 
 def test_frontend_roundtrip_includes_and_merges_images_sources_and_presentation():
-    source = Path(__file__).parents[2] / 'frontend' / 'src' / 'components' / 'GrowthGradualChat.tsx'
-    text = source.read_text(encoding='utf-8')
+    from routes._chat_source import read_chat_source
+    text = read_chat_source()
     assert 'images: reportData.images || []' in text
     assert 'sources: reportData.sources || []' in text
     assert 'images: updatedImages || reportData.images' in text

@@ -151,7 +151,8 @@ def test_action_provider_pool_does_not_busy_spin_when_all_keys_are_rate_limited(
 
 def test_frontend_uses_background_action_jobs_and_status_polling():
     root = Path(__file__).parents[2] / "frontend"
-    component = (root / "src/components/GrowthGradualChat.tsx").read_text(encoding="utf-8")
+    from routes._chat_source import read_chat_source
+    component = read_chat_source(root.parent)
     start_route = root / "src/app/api/chat/report/edit/start/route.ts"
     status_route = root / "src/app/api/chat/report/edit/status/[job_id]/route.ts"
     assert "'/api/chat/report/edit/start'" in component

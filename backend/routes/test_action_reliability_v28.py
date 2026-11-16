@@ -108,7 +108,8 @@ def test_action_research_persistence_sanitizes_nuls_in_query_and_source_content(
 
 def test_top_level_runtime_frontend_uses_async_action_routes_not_sync_edit_endpoint():
     project_root = Path(__file__).parents[2]
-    component = (project_root / "frontend" / "src" / "components" / "GrowthGradualChat.tsx").read_text(encoding="utf-8")
+    from routes._chat_source import read_chat_source
+    component = read_chat_source(project_root)
     assert "'/api/chat/report/edit/start'" in component
     assert "`/api/chat/report/edit/status/" in component
     assert "fetch('/api/chat/report/edit'," not in component

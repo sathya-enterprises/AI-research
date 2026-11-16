@@ -8,6 +8,7 @@ from routes.report import _TIER_EXPANSION_PASSES, _insert_section_addition
 
 ROOT = Path(__file__).resolve().parents[2]
 TSX = ROOT / "frontend" / "src" / "components" / "GrowthGradualChat.tsx"
+from routes._chat_source import read_chat_source  # noqa: E402  (chat + components/chat/)
 HTML_REPORT = ROOT / "backend" / "routes" / "html_report.py"
 
 
@@ -31,7 +32,7 @@ def test_section_addition_stays_inside_existing_heading():
 
 
 def test_frontend_has_persistent_pre_send_tier_selector():
-    text = TSX.read_text(encoding="utf-8")
+    text = read_chat_source(ROOT)
     assert "selectedReportTier" in text
     assert "composer-report-tier" in text
     assert "selectedReportTier === option.value" in text
@@ -40,7 +41,7 @@ def test_frontend_has_persistent_pre_send_tier_selector():
 
 
 def test_frontend_explicit_report_uses_selected_tier():
-    text = TSX.read_text(encoding="utf-8")
+    text = read_chat_source(ROOT)
     block_start = text.index("if (reportModeEnabled)")
     block_end = text.index("return;", block_start)
     block = text[block_start:block_end]
@@ -101,7 +102,7 @@ def test_pdf_css_avoids_known_weasyprint_incompatible_features():
 
 
 def test_picker_tier_is_authoritative_over_prompt_wording():
-    text = TSX.read_text(encoding="utf-8")
+    text = read_chat_source(ROOT)
     assert 'The report-depth picker is authoritative.' in text
     assert 'must never silently change the user\'s selected tier' in text
 
@@ -146,7 +147,7 @@ def test_longer_tiers_use_distinct_research_breadth_without_expansion_quotas():
 
 
 def test_frontend_longer_tiers_use_background_jobs_without_changing_picker():
-    text = TSX.read_text(encoding="utf-8")
+    text = read_chat_source(ROOT)
     assert "label: 'Brief'" not in text and "label: 'In-Detail'" in text and "label: 'Deep Research'" in text
     assert "/api/chat/report/start" in text
     assert "/api/chat/report/status/" in text

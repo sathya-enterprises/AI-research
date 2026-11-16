@@ -479,6 +479,8 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
             reason = ""
             if "[[UNSUPPORTED_CALC]]" in sentence:
                 reason = "requested calculation uses numbers that are not facts in the evidence"
+            if "[[UNKNOWN_FACT]]" in sentence:
+                reason = "refers to a fact id that is not on the section's fact sheet"
             cited = [t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)]
             cited_ids = {pid for pid in passage_texts if pid in cited or any(pid.split(".")[0] == c for c in cited)}
             tokens = statistic_tokens(re.sub(r"\(calculated(?:[^()]|\([^()]*\))*\)", " ", sentence))
@@ -488,6 +490,8 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                 if start < 0:
                     continue
                 end = start + len(token)
+                if sentence[end:end + 1] == "⁠":
+                    continue  # inserted by the code from a fact id ([[F3]]): the exact cell, already verified
                 explicit = "-" if token[:1] in "-−" else ("+" if token[:1] == "+" else "")
                 unit = unit_family(sentence[end:end + 16])
                 if re.match(r"[^()\d\n]{0,30}\(calculated", sentence[end:]):

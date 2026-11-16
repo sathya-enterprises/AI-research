@@ -148,15 +148,24 @@ def extract_facts(passage) -> list[Fact]:
             header, space_header = [], []
             continue
         cells = [c.strip() for c in stripped.strip("|").split("|")]
-        # A two-cell row ("Total | 257") under an active header is a row of that table.
-        if (" | " in stripped and (stripped.startswith("|") or len(cells) >= 3 or (header and len(cells) == 2))
+        # A two-cell row ("Total | 257") under an active header is a row of that table, and so is a
+        # two-cell row next to another one: a two-column table ("Year | India" then "2019 | 29.52")
+        # starts with its header, which was read as prose, so none of its values had a metric or row.
+        if (" | " in stripped and (stripped.startswith("|") or len(cells) >= 3 or (header and len(cells) == 2)
+                                   or (len(cells) == 2 and _two_cell_neighbour(lines, index)))
                 and max(len(c) for c in cells) <= 160):
             if re.fullmatch(r"[\s|:-]+", stripped):
                 continue  # Markdown separator row
             following = lines[index + 1].strip() if index + 1 < len(lines) else ""
-            if (not any(re.search(r"\d", c) for c in cells[1:])
-                    or re.fullmatch(r"\|?[\s|:-]*-{3,}[\s|:-]*", following)
-                    or (not header and not any(_VALUE_CELL_RE.fullmatch(c) for c in cells[1:]))):
+            above_separator = bool(re.fullmatch(r"\|?[\s|:-]*-{3,}[\s|:-]*", following))
+            is_header = (not any(re.search(r"\d", c) for c in cells[1:]) or above_separator
+                         or (not header and not any(_VALUE_CELL_RE.fullmatch(c) for c in cells[1:])))
+            if (is_header and len(cells) == 2 and not header and not above_separator
+                    and any(re.search(r"\d", c) for c in cells[1:])):
+                # A two-column label/value row ("Reliance Jio | 908.34 million subscribers") is data,
+                # not a header: read as a header, its value vanished from the evidence.
+                is_header = False
+            if is_header:
                 if header and (not any(re.search(r"[A-Za-z]{3,}", c) for c in cells)
                                or len(cells) < len(header) - 1):
                     # A formula / column-code row under the header ("(A) | (B) | (C)=(A)/(B)") or a
@@ -212,6 +221,16 @@ def extract_facts(passage) -> list[Fact]:
                 facts.append(_fact(pid, len(facts), match, unit, " ".join(before.split()[-6:]), _entity_in(before),
                                    _period(sentence), sentence))
     return facts
+
+
+def _two_cell_neighbour(lines: list[str], index: int) -> bool:
+    """The line before or after is also a two-cell " | " row (the rows of a two-column table)."""
+    for j in (index - 1, index + 1):
+        if 0 <= j < len(lines):
+            other = lines[j].strip()
+            if " | " in other and len(other.strip("|").split("|")) == 2:
+                return True
+    return False
 
 
 def facts_in_row(cells: list[str]) -> bool:
@@ -328,11 +347,16 @@ def lookup(sheet: FactSheet, raw: str, *, sign: str, unit: str, sentence: str, p
             continue  # another year's value
         if _names_sibling(sheet, fact, claim):
             continue
-        if claim and not claim & sheet.passage_stems(fact.passage_id):
-            continue  # the sentence's subject appears nowhere in the source ("passenger car sales" for a goods-vehicle row)
+        source_words = sheet.passage_stems(fact.passage_id)
+        if claim and len(source_words) >= 6 and not claim & source_words:
+            # The sentence's subject appears nowhere in the source ("passenger car sales" for a goods-vehicle
+            # row). A source that is a bare grid of numbers has no words to compare, so it cannot judge.
+            continue
         owner = _owner_stems(fact)
-        if claim and owner and not claim & owner:
-            continue  # the value belongs to a named row ("2 Uttar Pradesh 2,78,178") the sentence does not name
+        if claim and owner and not claim & owner and _competing_columns(sheet, fact):
+            # The value belongs to a named row/column ("2 Uttar Pradesh 2,78,178") the sentence does not
+            # name. A single-column table ("Year | India") has nothing to confuse it with.
+            continue
         same_period = bool(claim_period and claim_period in fact_periods and (cited or digits >= 3))
         specific = not _year_like(raw) and (digits >= 4 + (0 if cited else 1) or (decimal and digits >= 3 + (0 if cited else 1)))
         if same_period or specific:
@@ -397,6 +421,17 @@ def _significant_digits(raw: str) -> int:
 def _year_like(raw: str) -> bool:
     plain = raw.replace(",", "").lstrip("+-−–")
     return bool(re.fullmatch(r"(?:19|20)\d{2}", plain))
+
+
+def _competing_columns(sheet: "FactSheet", fact: Fact) -> bool:
+    """Whether the fact's source has other values it could be confused with: prose (always), or a table
+    with more than one value column or more than one row label that is not a period."""
+    if fact.kind != "table":
+        return True
+    columns = {f.metric for f in sheet.facts if f.passage_id == fact.passage_id and f.kind == "table" and f.metric}
+    rows = {f.label for f in sheet.facts if f.passage_id == fact.passage_id and f.kind == "table"
+            and f.label and not _period_keys(f.label)}
+    return len(columns) > 1 or len(rows) > 1
 
 
 _TOTAL_STEMS = {"total", "all", "overa", "grand", "world", "tt", "wt", "wtwt", "aat"}
