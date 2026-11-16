@@ -159,18 +159,75 @@ EVIDENCE PASSAGES (cite by id):
 {ev}"""
 
 
-def numbered_facts(passages, limit: int = 60) -> list:
-    """The section's table facts in fact-sheet order; fact Fn is element n-1.
+_MONTH_RE = re.compile(r"(?i)^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?$")
+_NUMBERING_RE = re.compile(r"(?i)^(?:table|figure|fig|chart|section|annex|annexure|chapter|para|paragraph|appendix|box|"
+                           r"exhibit|note|schedule|clause|rule|item|no|sl|s\.no)\.?$")
+# A unit written as a word after a prose number, kept with the value: "INR 1.8 lakh", "19.240 MT".
+_PROSE_UNIT_RE = re.compile(r"^(lakhs?|thousand|MT|MnT|mt|tonnes?|tons?|GW|MW|GWh|TWh|kWh|km|kg|units|bps|"
+                            r"million\s+tonnes|lakh\s+tonnes|crore\s+tonnes)\b")
 
-    Built once per prompt and handed to postprocess, so an id means the same cell in both."""
+
+def _prose_unit_text(fact) -> str:
+    context = fact.context or ""
+    at = context.find(fact.raw)
+    if at < 0 or fact.unit:
+        return ""
+    m = _PROSE_UNIT_RE.match(context[at + len(fact.raw):].lstrip())
+    return m.group(1) if m else ""
+
+
+def _prose_statistic(fact) -> bool:
+    """A number in passage prose worth an id: it has a unit or scale, or enough digits to be a statistic.
+    Not years, dates, small counts or list numbers."""
+    plain = fact.value.lstrip("-")
+    if re.fullmatch(r"(?:19|20)\d{2}(?:\.\d+)?", plain):
+        return False  # a year, or a year with a footnote stuck to it ("by 2047.57")
+    context = fact.context or ""
+    at = context.find(fact.raw)
+    if at >= 0:
+        before = context[:at].split()[-1:] or [""]
+        after = context[at + len(fact.raw):].split()[:1] or [""]
+        if _MONTH_RE.match(before[0].strip(",.")) or _MONTH_RE.match(after[0].strip(",.")):
+            return False  # "15 November", "November 15"
+        if _NUMBERING_RE.match(before[0].strip(",.:")):
+            return False  # "Table 1.6", "Section 3.2"
+        if not fact.unit and not context[:at].strip() and re.match(r"\s*:?\s*[A-Z][a-z]", context[at + len(fact.raw):]):
+            return False  # a heading number ("1.3 Highlights of ...")
+        # A flattened table ("Total MF AUM (lakh crore) 53.4 172 461 1,152 2,791"): a run of bare numbers
+        # has lost its rows and columns, so which number belongs to which year cannot be told.
+        window = context[:at].split()[-3:] + context[at + len(fact.raw):].split()[:3]
+        if sum(1 for w in window if re.fullmatch(r"[-+−]?[\d,]+(?:\.\d+)?%?", w.strip("(),"))) >= 2:
+            return False
+    digits = len(re.sub(r"\D", "", plain).strip("0"))
+    has_scale = bool(fact.unit) or bool(re.match(r"[₹$€£]|Rs|INR|USD", fact.raw))
+    return has_scale or digits >= 3 or "." in plain
+
+
+def prose_snippet(fact, before_words: int = 9, after_words: int = 7) -> str:
+    """The words around a prose number, so the writer sees what it measures."""
+    context = re.sub(r"\s+", " ", fact.context or "").strip()
+    at = context.find(fact.raw)
+    if at < 0:
+        return context[:110]
+    before = context[:at].split()[-before_words:]
+    after = context[at + len(fact.raw):].split()[:after_words]
+    return ("…" if len(context[:at].split()) > before_words else "") + " ".join(before + [fact.raw] + after) + "…"
+
+
+def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
+    """The section's facts in fact-sheet order (table cells, then statistics from passage prose); fact Fn is
+    element n-1.
+
+    Built once per prompt and handed to postprocess, so an id means the same value in both."""
     try:
         from utils.fact_sheet import FactSheet
-        facts = [f for f in FactSheet(passages).facts if f.kind == "table" and f.metric and f.entity
-                 and not re.fullmatch(r"(?:19|20)\d{2}", f.value)]
+        all_facts = FactSheet(passages).facts
     except Exception:  # the block is an aid; the section still has its passages
         return []
+    table = [f for f in all_facts if f.kind == "table" and f.metric and f.entity
+             and not re.fullmatch(r"(?:19|20)\d{2}", f.value)]
     seen, out = set(), []
-    for f in facts:
+    for f in table:
         key = (f.value, f.unit, f.entity.casefold(), f.metric.casefold()[:30])
         if key in seen:
             continue
@@ -178,14 +235,29 @@ def numbered_facts(passages, limit: int = 60) -> list:
         out.append(f)
         if len(out) >= limit:
             break
-    return out
+    # Statistics written in the passages' sentences ("exports reached $27.85 billion in FY24"): most of the
+    # numbers the writer still typed came from prose, where only word matching could check them.
+    prose_seen, prose = set(), []
+    for f in all_facts:
+        if f.kind != "prose" or not _prose_statistic(f):
+            continue
+        key = (f.value, f.unit, f.passage_id)
+        if key in prose_seen:
+            continue
+        prose_seen.add(key)
+        if not f.unit_text:
+            f.unit_text = _prose_unit_text(f)
+        prose.append(f)
+        if len(prose) >= prose_limit:
+            break
+    return out + prose
 
 
 def fact_value_text(fact) -> str:
     """A fact as it is written in the report: the cell's own text plus its unit ("₹1,750", "7.44%", "300 crore")."""
     raw = fact.raw
     if fact.unit and fact.unit not in raw:
-        return f"{raw}%" if fact.unit == "%" else f"{raw} {fact.unit}"
+        return f"{raw}{fact.unit}" if fact.unit in {"%", "x"} else f"{raw} {fact.unit}"
     unit_text = getattr(fact, "unit_text", "")
     if not fact.unit and unit_text and unit_text.casefold() not in raw.casefold():
         return f"{raw} {unit_text}"  # the column's unit as written: "109.14 MnT"
@@ -197,13 +269,19 @@ def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
     it measures, whose it is and its passage (Stage G: most removed numbers were a right value attached to
     the wrong metric/entity, or a calculation on inexact inputs)."""
     facts = numbered_facts(passages, limit) if facts is None else facts
-    lines = []
+    lines, prose_lines = [], []
     for i, f in enumerate(facts, 1):
+        if f.kind == "prose":
+            prose_lines.append(f"- F{i} | {fact_value_text(f)} | {prose_snippet(f)} | [{f.passage_id}]")
+            continue
         metric = re.sub(r"\s+", " ", f.metric)[:50]
         lines.append(f"- F{i} | {fact_value_text(f)} | {metric or '-'} | "
                      f"{(f.label or f.entity)[:40] or '-'} | {f.period or '-'} | [{f.passage_id}]")
-    if not lines:
+    if not lines and not prose_lines:
         return ""
+    if prose_lines:
+        lines += ["NUMBERS IN THE PASSAGES' TEXT (id | value | the sentence around it | passage); state each with "
+                  "what its sentence says it measures:"] + prose_lines
     return ("\nFACT SHEET (id | value | what it measures | whose | period | passage). To state one of these numbers, "
             "write its id in double brackets, e.g. [[F3]], instead of typing the number: the system inserts the value "
             "exactly as shown here, and its citation. If the value shown has no unit, write the unit after the id "

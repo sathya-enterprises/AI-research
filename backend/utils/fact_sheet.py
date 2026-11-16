@@ -114,6 +114,7 @@ class Fact:
     kind: str = "prose"     # table | prose
     label: str = ""         # a table row's own label ("Nifty PSU Bank")
     unit_text: str = ""     # the column's unit as written ("MnT", "Rs per quintal") when it is not a scale unit
+    context: str = ""       # the sentence (prose) or row text the value was read from
 
     def to_dict(self) -> dict:
         return {"id": self.fid, "value": self.raw, "unit": self.unit, "metric": self.metric[:60], "entity": self.entity[:40],
@@ -218,7 +219,7 @@ def extract_facts(passage) -> list[Fact]:
                                        _entity_in(label) or label, "", f"{label} {names[i] if i < len(names) else ''} {heading}"))
                     facts[-1].kind, facts[-1].label = "table", label.strip()[:60]
             continue
-        for sentence in re.split(r"(?<=[.!?;])\s+", stripped):
+        for sentence in _sentences(stripped):
             for match in _NUM_RE.finditer(sentence):
                 if re.fullmatch(r"(?:19|20)\d{2}", match.group(2)) and not match.group(1):
                     continue
@@ -256,6 +257,23 @@ def _two_cell_neighbour(lines: list[str], index: int) -> bool:
     return False
 
 
+_ABBREVIATION_END_RE = re.compile(r"(?i)(?:^|[\s(])(?:rs|re|no|nos|mr|mrs|ms|dr|st|vs|approx|est|inc|ltd|co|corp|fig|figs|"
+                                  r"e\.g|i\.e|etc|u\.s|u\.k|sr|jr|bn|mn|cr|lakh|govt|dept|vol|op|cit)\.$")
+
+
+def _sentences(text: str) -> list[str]:
+    """Split prose into sentences, but not after abbreviations: "Sales Turnover of Rs. 104545 crore" was cut
+    at "Rs.", so the value lost its currency and its subject."""
+    parts = re.split(r"(?<=[.!?;])\s+", text)
+    out: list[str] = []
+    for part in parts:
+        if out and _ABBREVIATION_END_RE.search(out[-1]):
+            out[-1] = f"{out[-1]} {part}"
+        else:
+            out.append(part)
+    return out
+
+
 def facts_in_row(cells: list[str]) -> bool:
     return any(_NUM_RE.search(c) for c in cells[1:])
 
@@ -270,7 +288,7 @@ def _fact(pid: str, index: int, match: re.Match, unit: str, metric: str, entity:
     value = _plain(match.group(2))
     return Fact(fid=f"{pid}#{index + 1}", raw=match.group(0).strip(), value=("-" if sign == "-" else "") + value, sign=sign,
                 unit=unit, metric=metric.strip(), entity=entity.strip(), period=period, passage_id=pid,
-                stems=_stems(f"{metric} {entity} {context}"))
+                stems=_stems(f"{metric} {entity} {context}"), context=context)
 
 
 _SCALED_COUNT_RE = re.compile(r"(?<![\w.,])(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|crores?)\b(?!\s+crores?)", re.I)

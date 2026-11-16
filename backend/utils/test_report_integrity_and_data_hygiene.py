@@ -1080,3 +1080,22 @@ def test_fact_ids_insert_the_column_unit_when_the_cell_has_none():
                 SimpleNamespace(passage_id="S6.1", text="Procurement\nYear | Total MSP Value (In Lakh Crore) | Growth (%)\n2024-25 | 3.47 | 4.1")]
     values = [fact_value_text(f) for f in numbered_facts(passages)]
     assert values == ["109.14 MnT", "103.54 MnT", "3.47 lakh crore", "4.1%"]
+
+
+def test_prose_statistics_get_fact_ids_with_their_units_and_noise_is_left_out():
+    # Most numbers the writer still typed after table ids came from passage prose.
+    from types import SimpleNamespace
+
+    from utils.section_writer import fact_block, fact_value_text, numbered_facts
+
+    text = ("Sales Turnover of Rs. 104545 crore during FY'24 has been achieved. Crude Steel Production of 19.240 MT "
+            "was achieved. Per capita income may rise from INR 1.8 lakh to INR 16.5 lakh by 2047. See Table 1.6 for "
+            "details. Total MF AUM (lakh crore) 53.4 172 461 1,152 2,791. The meeting was held on 15 November.")
+    passages = [SimpleNamespace(passage_id="S3.1", text=text)]
+    values = [fact_value_text(f) for f in numbered_facts(passages)]
+    # "Rs." no longer ends a sentence, the unit word after a number is kept, and table numbers,
+    # flattened number runs and dates get no id.
+    assert values == ["Rs. 104545 crore", "19.240 MT", "INR 1.8 lakh", "INR 16.5 lakh"]
+    block = fact_block(passages)
+    assert "NUMBERS IN THE PASSAGES' TEXT" in block
+    assert "- F1 | Rs. 104545 crore | Sales Turnover of Rs. 104545 crore during FY'24 has been achieved.… | [S3.1]" in block
