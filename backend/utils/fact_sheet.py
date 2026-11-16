@@ -241,6 +241,12 @@ class FactSheet:
         for passage in passages:
             self.facts.extend(extract_facts(passage))
             self.texts[str(getattr(passage, "passage_id", ""))] = str(getattr(passage, "text", "") or "")
+        # Row labels and column headers of each passage's tables: a claim that names one of them is about it.
+        self.table_names: dict[str, set[str]] = {}
+        for fact in self.facts:
+            if fact.kind == "table":
+                names = self.table_names.setdefault(fact.passage_id, set())
+                names.update(n for n in (fact.label, fact.metric) if n)
         self.by_value: dict[str, list[Fact]] = {}
         for fact in self.facts:
             self.by_value.setdefault(fact.value.lstrip("-"), []).append(fact)
@@ -259,6 +265,12 @@ class FactSheet:
                     continue
                 if fact not in self.by_value.setdefault(scaled, []):
                     self.by_value[scaled].append(fact)
+
+    def passage_stems(self, passage_id: str) -> set[str]:
+        cache = self.__dict__.setdefault("_passage_stems", {})
+        if passage_id not in cache:
+            cache[passage_id] = _stems(self.texts.get(passage_id, ""))
+        return cache[passage_id]
 
     def candidates(self, raw: str, passage_ids: set[str] | None = None) -> list[Fact]:
         facts = self.by_value.get(_plain(raw.lstrip("+-−–")), [])
@@ -285,13 +297,137 @@ def lookup(sheet: FactSheet, raw: str, *, sign: str, unit: str, sentence: str, p
         return Lookup("sign_mismatch", unit_ok[0])
     claim = _stems(sentence)
     context = _stems(context_entity)
+    position = _number_position(sentence, raw)
+    claim_period = _nearest_period(sentence, position)
+
+    def other_period(fact: Fact) -> bool:
+        """A table row's value quoted with another period next to it ("29.52% in 2020" for the 2019 row)."""
+        periods = _period_keys(f"{fact.label} | {fact.metric}") if fact.kind == "table" else set()
+        return bool(claim_period and periods and claim_period not in periods)
+
     for fact in sign_ok:
+        # Matching words are accepted without a period check: over the 30-prompt benchmark a "nearest
+        # period" check here removed 140+ correct sentences that quote several years in one sentence.
         if not fact.stems or claim & fact.stems:
             return Lookup("ok", fact)
     for fact in sign_ok:
         if context & fact.stems and fact.entity:
             return Lookup("entity_missing", fact)  # right value; the sentence does not name its entity
+    # Words are not the only evidence that a number is this fact. The writer's own data rows
+    # ("2018-19 1750 1700 1840", "FY 2017-18: 7,926.62 crore") have no words, and writers paraphrase
+    # ("penetration" for "Individuals using the Internet"). Accept the value when the evidence itself
+    # pins it down - the period next to it is the table row's period, or the value is too specific to
+    # recur by chance in the cited passage - unless the sentence names another row/column of the same
+    # table or another period (the right value attached to the wrong entity or year).
+    digits = _significant_digits(raw)
+    decimal = "." in raw
+    cited = passage_ids is not None
+    for fact in sign_ok:
+        fact_periods = _period_keys(f"{fact.label} | {fact.metric}") if fact.kind == "table" else set()
+        if other_period(fact):
+            continue  # another year's value
+        if _names_sibling(sheet, fact, claim):
+            continue
+        if claim and not claim & sheet.passage_stems(fact.passage_id):
+            continue  # the sentence's subject appears nowhere in the source ("passenger car sales" for a goods-vehicle row)
+        owner = _owner_stems(fact)
+        if claim and owner and not claim & owner:
+            continue  # the value belongs to a named row ("2 Uttar Pradesh 2,78,178") the sentence does not name
+        same_period = bool(claim_period and claim_period in fact_periods and (cited or digits >= 3))
+        specific = not _year_like(raw) and (digits >= 4 + (0 if cited else 1) or (decimal and digits >= 3 + (0 if cited else 1)))
+        if same_period or specific:
+            return Lookup("ok", fact)
     return Lookup("metric_mismatch", sign_ok[0])
+
+
+_PERIOD_KEY_RE = re.compile(
+    r"(?i)\b(?:(?P<q>[QH][1-4])\s*(?:FY|CY)?\s*'?(?P<qy>(?:19|20)?\d{2}))\b"
+    r"|\b(?:FY\s*'?)?(?P<a>(?:19|20)?\d{2})\s*[-/–]\s*(?P<b>\d{2,4})\b"
+    r"|\bFY\s*'?(?P<fy>(?:19|20)?\d{2})\b"
+    r"|\b(?P<y>(?:19|20)\d{2})\b")
+
+
+def _period_matches(text: str):
+    for match in _PERIOD_KEY_RE.finditer(text or ""):
+        if match.group("q"):
+            year = match.group("qy")
+            key = f"{match.group('q').upper()} {('20' + year) if len(year) == 2 else year}"
+        elif match.group("a"):
+            start, end = match.group("a"), match.group("b")
+            if len(start) == 2 and not re.match(r"(?i)\s*FY", match.group(0)):
+                continue  # "12-15" is not a period without an FY prefix
+            start = ("20" + start) if len(start) == 2 else start
+            end = end[-2:]
+            if int(end) != (int(start[-2:]) + 1) % 100:
+                continue  # "2018-2024" is a range, "10-12" a count; a fiscal year runs into the next
+            key = f"{start}-{end}"
+        elif match.group("fy"):
+            year = match.group("fy")
+            key = f"FY{('20' + year) if len(year) == 2 else year}"
+        else:
+            key = match.group("y")
+        yield match.start(), key
+
+
+def _period_keys(text: str) -> set[str]:
+    return {key for _pos, key in _period_matches(text)}
+
+
+def _nearest_period(sentence: str, position: int) -> str:
+    if position < 0:
+        return ""
+    best, distance = "", 10 ** 9
+    for pos, key in _period_matches(sentence):
+        gap = abs(pos - position)
+        if gap < distance:
+            best, distance = key, gap
+    return best
+
+
+def _number_position(sentence: str, raw: str) -> int:
+    match = re.search(r"(?<![\d.,])" + re.escape(raw.lstrip("+-−–")) + r"(?![\d])", sentence or "")
+    return match.start() if match else -1
+
+
+def _significant_digits(raw: str) -> int:
+    digits = re.sub(r"\D", "", raw.split(".")[0]) + (raw.split(".")[1] if "." in raw else "")
+    return len(digits.strip("0"))
+
+
+def _year_like(raw: str) -> bool:
+    plain = raw.replace(",", "").lstrip("+-−–")
+    return bool(re.fullmatch(r"(?:19|20)\d{2}", plain))
+
+
+_TOTAL_STEMS = {"total", "all", "overa", "grand", "world", "tt", "wt", "wtwt", "aat"}
+
+
+def _owner_stems(fact: Fact) -> set[str]:
+    """Whose value this is: a table row's label (or, in a year-first table, its column), or in flattened
+    text the name written just before the number ("... 2 Uttar Pradesh 2,78,178"). Totals have no owner."""
+    if fact.kind == "table":
+        name = fact.label if re.search(r"[A-Za-z]{3,}", fact.label or "") and not _period_keys(fact.label) else fact.metric
+    else:
+        tail = re.split(r"\d", fact.metric or "")[-1]
+        run = re.findall(r"(?:[A-Z][a-z]{2,}(?:\s+|$))+", tail + " ")
+        name = run[-1] if run else ""
+    stems = _stems(name) - {"conti", "table"}
+    return set() if not stems or stems <= _TOTAL_STEMS else stems
+
+
+def _names_sibling(sheet: "FactSheet", fact: Fact, claim: set[str]) -> bool:
+    """The claim names another row or column of the fact's table, and not the fact's own row/column."""
+    if fact.kind != "table":
+        return False
+    own = _stems(f"{fact.label} {fact.metric}")
+    if claim & own:
+        return False
+    for name in sheet.table_names.get(fact.passage_id, ()):
+        if name in {fact.label, fact.metric} or _period_keys(name) and len(_stems(name)) <= 1:
+            continue
+        if claim & (_stems(name) - own):
+            return True
+    return False
 
 
 # ── calculations in code ─────────────────────────────────────────────────────

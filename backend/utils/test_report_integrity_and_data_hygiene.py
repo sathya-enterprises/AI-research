@@ -546,6 +546,38 @@ def test_number_policy_reads_the_subject_from_the_previous_sentence_or_list_lead
     assert [r["number"] for r in wrong.removed] == ["8,86,047"]
 
 
+_VALUE_PASSAGES = {
+    "S1.1": ("Individuals using the Internet (% of population)\nYear | India | Kenya\n2019 | 29.52 | 22.67\n2020 | 43.41 | 24.72"),
+    "S2.1": ("MSP of Kharif crops (Rs per quintal)\nYear | Paddy common | Maize\n2018-19 | 1750 | 1700\n2019-20 | 1815 | 1760"),
+    "S3.1": "State-wise vehicles supported\n1 Maharashtra 4,28,253 2 Uttar Pradesh 2,78,178 3 Karnataka 2,67,127",
+}
+
+
+def _value_policy(body: str):
+    from utils.number_policy import apply_number_policy
+
+    return apply_number_policy(body, passage_texts=_VALUE_PASSAGES, allowed_numbers=set(), section_id="t")
+
+
+def test_number_policy_accepts_values_the_evidence_pins_down_without_shared_words():
+    # Benchmark (30 prompts): half the "another metric or entity" removals were the writer's own data
+    # rows ("2018-19 1750 1700") or paraphrases ("penetration" for "Individuals using the Internet")
+    # of values whose row period or specificity identifies the fact.
+    body = ("India's penetration jumped to 29.52% in 2019 and 43.41% in 2020 [S1.1].\n\n"
+            "2018-19 1750 1700 [S2.1]\n\n2019-20 1815 1760 [S2.1]")
+    assert _value_policy(body).removed == []
+
+
+def test_number_policy_still_removes_pinned_values_under_the_wrong_row_or_year():
+    # Kenya's value attributed to India (a sibling column of the same table).
+    assert _value_policy("India's penetration reached 22.67% in 2019 [S1.1].").removed
+    # A data row whose period is another row's period.
+    assert _value_policy("2019-20 1750 [S2.1]").removed
+    # A state's value presented as the national total (flattened table: the name before it owns it).
+    assert _value_policy("Nationally, 2,78,178 vehicles were supported under the scheme [S3.1].").removed
+    assert not _value_policy("Uttar Pradesh had 2,78,178 vehicles supported [S3.1].").removed
+
+
 def test_replay_capture_reruns_the_checks_from_a_saved_capture():
     import importlib.util
     from pathlib import Path
