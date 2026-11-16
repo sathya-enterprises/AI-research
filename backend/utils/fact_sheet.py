@@ -298,8 +298,125 @@ def lookup(sheet: FactSheet, raw: str, *, sign: str, unit: str, sentence: str, p
 CALC_RE = re.compile(r"\[\[\s*calc\s*:\s*([^\]]+)\]\]", re.I)
 
 
+_QTY_RE = re.compile(
+    r"\s*\(?\s*(?P<sign>[-+−])?\s*(?P<cur>₹|Rs\.?|INR|USD|US\$|\$|€|£)?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<pct>%|per\s?cent)?\s*(?P<word>[A-Za-z]{1,12})?\s*\)?\s*", re.I)
+_SCALE_WORDS = {"trillion": 1e12, "tn": 1e12, "t": 1e12, "billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6,
+                "m": 1e6, "crore": 1e7, "crores": 1e7, "cr": 1e7, "lakh": 1e5, "lakhs": 1e5, "thousand": 1e3, "k": 1e3}
+
+
+def _quantity(text: str) -> dict | None:
+    """'USD 100 billion' -> number '100', value 1e11, currency 'usd', unit ''; '160.9%' -> pct. None if not one quantity."""
+    match = _QTY_RE.fullmatch(text or "")
+    if not match:
+        return None
+    word = (match.group("word") or "").casefold()
+    scale = _SCALE_WORDS.get(word, 1.0)
+    unit = "" if word in _SCALE_WORDS else word
+    currency = (match.group("cur") or "").casefold().replace("us$", "$").replace("usd", "$").rstrip(".")
+    currency = {"rs": "₹", "inr": "₹"}.get(currency, currency)
+    try:
+        number = float(match.group("num").replace(",", ""))
+    except ValueError:
+        return None
+    sign = -1.0 if match.group("sign") in {"-", "−"} else 1.0
+    return {"raw": match.group("num"), "value": sign * number * scale, "scale": scale, "scale_word": word if scale != 1.0 else "",
+            "currency": currency, "unit": unit, "pct": bool(match.group("pct")),
+            "decimals": len(match.group("num").split(".")[1]) if "." in match.group("num") else 0}
+
+
+def _with_units(value: float, like: dict) -> str:
+    """Write ``value`` (base units) in the currency / scale / unit of the operand ``like``."""
+    shown = value / (like["scale"] or 1.0)
+    number = f"{shown:,.{like['decimals']}f}"
+    scale_word = {"b": "billion", "bn": "billion", "t": "trillion", "tn": "trillion", "m": "million", "mn": "million",
+                  "k": "thousand", "cr": "crore"}.get(like["scale_word"], like["scale_word"])
+    currency = {"$": "$", "₹": "₹", "€": "€", "£": "£"}.get(like["currency"], "")
+    tail = " ".join(x for x in (scale_word, like["unit"].upper() if like["unit"] in {"gw", "mw", "mmt", "gwh", "twh"} else like["unit"]) if x)
+    return f"{currency}{number}{(' ' + tail) if tail else ''}{'%' if like['pct'] else ''}"
+
+
+def _compute_with_units(expression: str, sheet: FactSheet, passage_ids: set[str] | None) -> tuple[str, str] | None:
+    """The unit-aware path of :func:`compute`; None hands the expression to the plain-number path."""
+    expr = re.sub(r"\s*[*×]\s*100\s*$", "", expression.strip())
+    expr = re.sub(r"\(\s*([-−]\s*[\d.,]+\s*%?)\s*\)", r"\1", expr)  # "29.90 - (-0.73)"
+    if not re.search(r"%|per\s?cent|[₹$€£]|\b(?:USD|INR|Rs\.?|US)\b|\d\s*[A-Za-z]|[-−]\s*\d[\d,.]*\s*$|[-−]\s*[-−]", expr, re.I):
+        if re.fullmatch(r"\s*\d[\d,]*(?:\.\d+)?\s*", expr) and sheet.candidates(expr.strip(), passage_ids):
+            return expr.strip(), ""  # "[[calc: 7.3]]": the reported value itself
+        return None
+
+    def fact(q: dict) -> bool:
+        return bool(sheet.candidates(q["raw"], passage_ids))
+
+    def change(a_text: str, b_text: str) -> tuple[str, str] | None:
+        a, b = _quantity(a_text), _quantity(b_text)
+        if not (a and b and fact(a) and fact(b)) or not a["value"]:
+            return None
+        if a["currency"] != b["currency"] or a["unit"] != b["unit"]:
+            return None
+        return f"{100 * (b['value'] - a['value']) / abs(a['value']):.1f}%", f"change from {a_text.strip()} to {b_text.strip()}"
+
+    growth = re.fullmatch(r"\(\s*(.+?)\s+[-−]\s+(.+?)\s*\)\s*[/÷]\s*(.+)", expr)
+    if growth and _quantity(growth.group(2)) and _quantity(growth.group(3)) and \
+            abs(_quantity(growth.group(2))["value"] - _quantity(growth.group(3))["value"]) < 1e-9:
+        return change(growth.group(2), growth.group(1))
+    moved = re.fullmatch(r"(?i)change\s+from\s+(.+?)\s+to\s+(.+)", expr)
+    if moved:
+        return change(moved.group(1), moved.group(2))
+
+    parts = re.split(r"\s+([+\-−÷/×*])\s+", expr)
+    operands, ops = parts[0::2], parts[1::2]
+    quantities = [_quantity(o) for o in operands]
+    if any(q is None for q in quantities):
+        return None
+    if len(quantities) == 1:
+        return (operands[0].strip(), "") if fact(quantities[0]) else None
+    if not all(fact(q) for q in quantities):
+        return None
+    label = expression.strip()
+    first = quantities[0]
+    if all(op in {"+", "-", "−"} for op in ops):
+        if len({(q["currency"], q["unit"], q["pct"]) for q in quantities}) != 1:
+            return None
+        total = quantities[0]["value"]
+        for op, q in zip(ops, quantities[1:]):
+            total = total + q["value"] if op == "+" else total - q["value"]
+        if first["pct"]:
+            decimals = max(q["decimals"] for q in quantities)
+            return f"{total:.{decimals}f} percentage points", label
+        return _with_units(total, {**first, "decimals": max(q["decimals"] for q in quantities)}), label
+    if len(quantities) == 2 and ops[0] in {"/", "÷"}:
+        a, b = quantities
+        if not b["value"]:
+            return None
+        if a["currency"] == b["currency"] and a["unit"] == b["unit"] and a["pct"] == b["pct"]:
+            return f"{100 * a['value'] / b['value']:.1f}%", label  # a share of a like quantity
+        if a["currency"] and not b["currency"] and not b["pct"]:
+            per = a["value"] / b["value"]
+            return f"{a['currency']}{per:,.0f}" if abs(per) >= 100 else f"{a['currency']}{per:,.2f}", label
+        return None
+    if len(quantities) == 2 and ops[0] in {"*", "×"}:
+        a, b = quantities
+        plain = [q for q in (a, b) if not (q["currency"] or q["unit"] or q["pct"] or q["scale"] != 1.0)]
+        if len(plain) != 1:
+            return None
+        other = b if plain[0] is a else a
+        return _with_units(a["value"] * b["value"] / (1.0 if other is b else 1.0), other), label
+    return None
+
+
 def compute(expression: str, sheet: FactSheet, passage_ids: set[str] | None) -> tuple[str, str] | None:
-    """'47,955 + 21,745 + 14,116' -> ('83,816', '47,955 + 21,745 + 14,116') when every operand is a fact."""
+    """'47,955 + 21,745 + 14,116' -> ('83,816', '47,955 + 21,745 + 14,116') when every operand is a fact.
+
+    Operands may carry their units: "160.9% - 124.4%" (percentage points), "USD 100 billion - USD 12 billion",
+    "change from $140B to $217B", "$217B / $1.20T" (a share), "₹12.12 trillion / 7.31 billion" (per unit),
+    "29.90 - (-0.73)". Every operand's number must still be a fact; only the unit reading is new (the
+    benchmark found 92 of 106 refused requests had facts for operands and failed only on their units).
+    A single number ("[[calc: 7.3]]") that is a fact is returned as written, with an empty label.
+    """
+    result = _compute_with_units(expression, sheet, passage_ids)
+    if result is not None:
+        return result
     expr = expression.strip()
     # "(560.4 - 268.8) / 268.8" (optionally "* 100") is the percent change from 268.8 to 560.4:
     # the writer's usual way of asking for growth, which used to be refused as unsupported.
@@ -343,11 +460,21 @@ def apply_calculations(body: str, sheet: FactSheet, passage_ids: set[str] | None
 
     def repl(match: re.Match) -> str:
         result = compute(match.group(1), sheet, passage_ids)
+        tail = match.group("tail") or ""
         if result is None:
             failed.append(match.group(1))
-            return "[[UNSUPPORTED_CALC]]"
+            return "[[UNSUPPORTED_CALC]]" + tail
         value, inputs = result
+        # The writer often adds the unit itself: "[[calc: ...]]%" or "[[calc: a% - b%]] percentage points".
+        # Keep one copy of it, before the label.
+        if tail.strip() and re.match(r"(?i)\s*(?:%|per\s?cent\b)", tail) and value.endswith("%"):
+            value = value[:-1]
+        if re.match(r"(?i)\s*(?:percentage\s+points?|pp\b)", tail) and value.endswith(" percentage points"):
+            value = value[: -len(" percentage points")]
+        if not inputs:
+            return f"{value}{tail}"  # a reported value the writer wrapped in [[calc]]: no calculation label
         done.append({"value": value, "inputs": inputs})
-        return f"{value} (calculated: {inputs})"
+        return f"{value}{tail} (calculated: {inputs})"
 
-    return CALC_RE.sub(repl, body), done, failed
+    pattern = re.compile(CALC_RE.pattern + r"(?P<tail>\s?(?:%|per\s?cent\b|percentage\s+points?\b|pp\b))?", CALC_RE.flags)
+    return pattern.sub(repl, body), done, failed

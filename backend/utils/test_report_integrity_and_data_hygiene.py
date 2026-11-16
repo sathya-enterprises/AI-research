@@ -913,3 +913,31 @@ def test_calculation_labels_with_parentheses_percent_constants_and_year_like_inp
     kept = apply_number_policy("The index rose 17.7% (calculated: (41.2 - 35.0) / 35.0 * 100) [S1].",
                                passage_texts={"S1": "The CPI index rose from 35.0 to 41.2."}, allowed_numbers=set())
     assert kept.removed == []
+
+
+def test_calculations_read_units_percent_points_scales_and_signed_operands():
+    # Benchmark: 92 of 106 refused [[calc]] requests had facts for operands and failed only on units.
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import FactSheet, apply_calculations, compute
+    from utils.number_policy import number_pool, verify_calculation_labels
+
+    text = ("Asia grew 160.9% while the Americas grew 124.4%. Jio share 40.60% vs 35.43%. Capex $140 billion rose "
+            "to $217B; all filers $1.20T. UPI value ₹12.12 trillion over 7.31 billion transactions. Global average 7.3. "
+            "Nifty Metal -0.73 then 29.90. Investment USD 100 billion and USD 12 billion.")
+    sheet = FactSheet([SimpleNamespace(passage_id="S1", text=text)])
+    assert compute("160.9% - 124.4%", sheet, None)[0] == "36.5 percentage points"
+    assert compute("change from $140B to $217B", sheet, None)[0] == "55.0%"
+    assert compute("$217B / $1.20T", sheet, None)[0] == "18.1%"
+    assert compute("₹12.12 trillion / 7.31 billion", sheet, None)[0] == "₹1,658"
+    assert compute("USD 100 billion - USD 12 billion", sheet, None)[0] == "$88 billion"
+    assert compute("29.90 - (-0.73)", sheet, None)[0] == "30.63"
+    assert compute("7.3", sheet, None) == ("7.3", "")
+    assert compute("99.9% - 35.43%", sheet, None) is None  # an operand that is not a fact is still refused
+    body, _done, _failed = apply_calculations("Jio gained [[calc: 40.60% - 35.43%]] percentage points; average "
+                                              "[[calc: 7.3]].", sheet, None)
+    assert body == "Jio gained 5.17 percentage points (calculated: 40.60% - 35.43%); average 7.3."
+    # The label checker agrees with the engine on signed operands.
+    pool = number_pool({"S1": "Nifty Metal | -0.73 | 29.90"})
+    assert verify_calculation_labels("| Metal | -0.73 | 29.90 | 30.63 (calculated: 29.90 - (-0.73)) |", pool) == ""
+    assert verify_calculation_labels("| Metal | -0.73 | 29.90 | 29.17 (calculated: 29.90 - (-0.73)) |", pool)

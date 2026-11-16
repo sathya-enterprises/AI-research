@@ -297,6 +297,23 @@ def find_derivation(token: str, pool: list[PoolNumber], *, qualifier: str = "", 
 _CALC_LABEL_RE = re.compile(r"\(calculated(?: from| using)?\s*:?\s*((?:[^()]|\([^()]*\))*)\)", re.I)
 
 
+def _signed_sum(body: str) -> float | None:
+    """'29.90 - (-0.73)' -> 30.63; None unless the label is only additions / subtractions of numbers."""
+    text = re.sub(r"\(\s*([-−+]?\s*\d[\d,]*(?:\.\d+)?)\s*\)", r"\1", body.strip())
+    text = re.sub(r"(?<=\d)\s*%", "", text)
+    parts = re.split(r"\s+([+\-−])\s+", text)
+    if len(parts) < 3:
+        return None
+    try:
+        values = [float(p.replace(",", "").replace("−", "-").replace(" ", "")) for p in parts[0::2]]
+    except ValueError:
+        return None
+    total = values[0]
+    for op, value in zip(parts[1::2], values[1:]):
+        total = total + value if op == "+" else total - value
+    return total
+
+
 def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
     """'' when every "(calculated: ...)" label in the sentence is verified, else the reason.
 
@@ -336,6 +353,14 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
         if missing:
             return f"calculation input(s) {', '.join(missing)} not in the cited passages"
         values = [abs(_float(x) or 0.0) for x in inputs]
+        signed_sum = _signed_sum(body)
+        if signed_sum is not None:
+            # "29.90 - (-0.73)" is 30.63: sums and differences keep their signs (the calculation engine
+            # computes them that way; this check used absolute values and rejected its correct result).
+            qualifier = qualifier_before(sentence[:sentence.find(target)]) if target in sentence else ""
+            if not _close(signed_sum, target, qualifier):
+                return f"calculation does not reproduce {target}"
+            continue
         if "÷" in body or "/" in body:
             derived = 100 * values[0] / values[1] if values[1] else float("nan")
         elif "change from" in body.casefold():

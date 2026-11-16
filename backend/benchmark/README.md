@@ -29,3 +29,17 @@ dataset-documentation table, "No. Countries: Basic cross-section ...", no longer
 
 Each capture is replayed from a clean report state (`replay_capture.reset_run_state`); without it, chart
 evidence registered for one capture's S1 leaked into the next capture scored by the same process.
+
+## Baseline (30 prompts, 16 Nov) and what it showed
+
+`results/baseline-30.md` scores all 30 prompts; `results/reasons-baseline-30.md` ranks the causes across them
+(`python scripts/benchmark_reasons.py`). The largest general causes:
+
+- numbers removed (325): "in the evidence for another metric or entity" 130 (25 prompts); "requested
+  calculation uses numbers that are not facts" 92 (23 prompts); "not in the evidence" 52 (16 prompts);
+- chart candidates rejected (133): "period outside the requested window" 79 (19 prompts; many are correct
+  rejections of out-of-window or undated tables); "quoted line not present" 21 (13 prompts).
+
+First fix chosen from the ranking (`results/unit-calcs.md`): 92 of 106 refused calculation requests had
+facts for every operand and failed only on units ("160.9% - 124.4%", "USD 100 billion - USD 12 billion",
+"29.90 - (-0.73)"). Numbers removed 325 -> 273 across the 30 prompts, no prompt worse.

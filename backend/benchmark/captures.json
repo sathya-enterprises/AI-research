@@ -113,6 +113,62 @@
       "capture": "research_capture_20261116_023122_1ffd0de8.json",
       "questionMatches": true,
       "reportId": "ccb2179151544fe0b87955f462701d32"
+    },
+    "oil_prices_india": {
+      "capture": "research_capture_20261116_111136_bf404887.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "36be4de4c7f6435cb0658804aabcd458",
+      "seconds": 470,
+      "ranAt": "2026-11-16T11:19:25"
+    },
+    "defence_exports": {
+      "capture": "research_capture_20261116_111925_80c283ed.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "b1bc9bff24bb443bb6d76f982a4b5f6a",
+      "seconds": 454,
+      "ranAt": "2026-11-16T11:26:59"
+    },
+    "tourism_recovery": {
+      "capture": "research_capture_20261116_112659_538496b8.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "ed7c9486387547e6867065e87c1c87ea",
+      "seconds": 592,
+      "ranAt": "2026-11-16T11:36:51"
+    },
+    "education_outcomes": {
+      "capture": "research_capture_20261116_113651_87650b46.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "6724823eb98247b7a0072ec3ef3b364f",
+      "seconds": 428,
+      "ranAt": "2026-11-16T11:43:59"
+    },
+    "upi_payments": {
+      "capture": "research_capture_20261116_114400_dfa2d100.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "0c5edea5740c410dac06395264d2588b",
+      "seconds": 999,
+      "ranAt": "2026-11-16T12:00:38"
+    },
+    "auto_sales_ice": {
+      "capture": "research_capture_20261116_120039_7abac6f4.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "90115821dc124aef8fbc9290aa925c10",
+      "seconds": 815,
+      "ranAt": "2026-11-16T12:14:13"
+    },
+    "climate_emissions": {
+      "capture": "research_capture_20261116_121413_1a87b1de.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "f2512f9f74ce4a8587694370d417d7ab",
+      "seconds": 996,
+      "ranAt": "2026-11-16T12:30:49"
     }
   }
 }
