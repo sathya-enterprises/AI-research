@@ -1082,6 +1082,24 @@ def test_fact_ids_insert_the_column_unit_when_the_cell_has_none():
     assert values == ["109.14 MnT", "103.54 MnT", "3.47 lakh crore", "4.1%"]
 
 
+def test_currency_column_units_go_before_the_value():
+    # Live run (IPO): a "(₹ Cr)" column gave "raising 11,455 ₹ Cr".
+    from types import SimpleNamespace
+
+    from utils.section_writer import fact_value_text, numbered_facts
+
+    passages = [SimpleNamespace(passage_id="S25.1", text="SME IPOs\nYear | Issues | Amount (₹ Cr)\nFY2025 | 267 | 11,455")]
+    values = [fact_value_text(f) for f in numbered_facts(passages)]
+    assert "₹11,455 Cr" in values and not any("₹ Cr" in v for v in values)
+
+
+def test_rs_with_a_full_stop_is_not_left_as_a_sentence_end():
+    # Live run (IPO): "a net worth exceeding Rs. 25 crore [S4]." reached the report as
+    # "exceeding Rs [S4]. 25 crore [S4]." - later steps split sentences at ". " before a digit.
+    draft, _ = _fact_postprocess("The MSP rose to Rs. 1815 per quintal in 2023 [S2.1]. It was raised again in 2024 [S2.1].")
+    assert "Rs. 1815" not in draft.body and "Rs 1815" in draft.body
+
+
 def test_prose_statistics_get_fact_ids_with_their_units_and_noise_is_left_out():
     # Most numbers the writer still typed after table ids came from passage prose.
     from types import SimpleNamespace

@@ -253,6 +253,10 @@ def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
     return out + prose
 
 
+_RS_DOT_RE = re.compile(r"\bRs\.\s*(?=\d)")
+_CURRENCY_UNIT_RE = re.compile(r"^(₹|US\$|\$|€|£|Rs\.?|INR|USD)\s*(.*)$")
+
+
 def fact_value_text(fact) -> str:
     """A fact as it is written in the report: the cell's own text plus its unit ("₹1,750", "7.44%", "300 crore")."""
     raw = fact.raw
@@ -260,6 +264,11 @@ def fact_value_text(fact) -> str:
         return f"{raw}{fact.unit}" if fact.unit in {"%", "x"} else f"{raw} {fact.unit}"
     unit_text = getattr(fact, "unit_text", "")
     if not fact.unit and unit_text and unit_text.casefold() not in raw.casefold():
+        currency = _CURRENCY_UNIT_RE.match(unit_text)
+        if currency and not re.match(r"\s*[-+−]?\s*(?:₹|US\$|\$|€|£|Rs|INR|USD)", raw):
+            symbol, rest = currency.group(1).rstrip("."), currency.group(2).strip()
+            value = f"{symbol}{raw}" if symbol in {"₹", "$", "US$", "€", "£"} else f"{symbol} {raw}"
+            return f"{value} {rest}" if rest else value  # "(₹ Cr)" column: "₹11,455 Cr", not "11,455 ₹ Cr"
         return f"{raw} {unit_text}"  # the column's unit as written: "109.14 MnT"
     return raw
 
@@ -446,6 +455,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     body, used = resolve_fact_refs(body, fact_refs)
     summary, used_in_summary = resolve_fact_refs(summary, fact_refs)
     draft.fact_refs_used += used + used_in_summary
+    # "Rs. 25 crore" -> "Rs 25 crore": later steps split sentences at ". " before a digit, which cut
+    # "a net worth exceeding Rs. 25 crore" into "exceeding Rs [S4]. 25 crore [S4]."
+    body, summary = (_RS_DOT_RE.sub("Rs ", part) for part in (body, summary))
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
     # The writer sometimes copies the prompt's subsection spec into the heading:

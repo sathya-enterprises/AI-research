@@ -1,0 +1,174 @@
+{
+  "about": "prompt id -> capture file in backend/diagnostics/ (local, not committed)",
+  "captures": {
+    "ev_india_detailed": {
+      "capture": "research_capture_20261115_103310_fc269465.json",
+      "questionMatches": true
+    },
+    "ev_india_in_depth": {
+      "capture": "research_capture_20261115_221336_d5ced555.json",
+      "questionMatches": true
+    },
+    "banking_asset_quality": {
+      "capture": "research_capture_20261115_234432_7de39bff.json",
+      "questionMatches": true,
+      "reportId": "45432be72b614a1f9624c998868ed8ba"
+    },
+    "markets_sector_rotation": {
+      "capture": "research_capture_20261115_235312_ac012033.json",
+      "questionMatches": true,
+      "reportId": "1134f7852a2f490a907329e819c6b0e7"
+    },
+    "renewables_capacity": {
+      "capture": "research_capture_20261116_000556_6ecf809e.json",
+      "questionMatches": true,
+      "reportId": "8d886918faeb4490adbdac0aea668f77"
+    },
+    "healthcare_sea": {
+      "capture": "research_capture_20261116_001302_752f3fbe.json",
+      "questionMatches": true,
+      "reportId": "6fc9479c1b8941bf9fb2129b8612d74f"
+    },
+    "semiconductors_global": {
+      "capture": "research_capture_20261116_001907_bf9edc04.json",
+      "questionMatches": true,
+      "reportId": "802087a3bdb54d2ca3df5f65507a8c38"
+    },
+    "internet_use_comparison": {
+      "capture": "research_capture_20261115_005940_71819b1f.json",
+      "questionMatches": true,
+      "reportId": "51ea9f72a697428b9eb26e0e3ff02e43"
+    },
+    "pms_workbook": {
+      "capture": "research_capture_20261116_002543_e73f51ee.json",
+      "questionMatches": true,
+      "reportId": "c90faafc93fd482592b8d988f7483daa"
+    },
+    "insurance_penetration": {
+      "capture": "research_capture_20261116_004258_f2060c11.json",
+      "questionMatches": true,
+      "reportId": "9c5d96d82ea744de8e4d95e14e291185"
+    },
+    "telecom_5g": {
+      "capture": "research_capture_20261116_232546_ab944668.json",
+      "questionMatches": true,
+      "reportId": "7aaa99c3d2824534a2a269681fb5abea"
+    },
+    "pharma_exports": {
+      "capture": "research_capture_20261116_005655_a4804776.json",
+      "questionMatches": true,
+      "reportId": "f7d01888af814d94b81a506bb7c6af50"
+    },
+    "fmcg_rural": {
+      "capture": "research_capture_20261116_010601_f2bca2a2.json",
+      "questionMatches": true,
+      "reportId": "af2036f5d1db4c6680e22c3810fbe836"
+    },
+    "real_estate_housing": {
+      "capture": "research_capture_20261116_011121_e350be7e.json",
+      "questionMatches": true,
+      "reportId": "e33db07c59d34c36ada270ee119d5d58"
+    },
+    "agri_msp": {
+      "capture": "research_capture_20261116_234238_201c40e8.json",
+      "questionMatches": true,
+      "reportId": "c4fd31c815ff48d48b03f4b6177e5684"
+    },
+    "india_inflation": {
+      "capture": "research_capture_20261116_012604_15c8af21.json",
+      "questionMatches": true,
+      "reportId": "a4ec3eaff7ca4706b397ef50812565a0"
+    },
+    "us_labour_market": {
+      "capture": "research_capture_20261116_013254_e327c695.json",
+      "questionMatches": true,
+      "reportId": "5bf871aa901544f58773352ab22072c5"
+    },
+    "europe_gas": {
+      "capture": "research_capture_20261116_013942_09821453.json",
+      "questionMatches": true,
+      "reportId": "0f3bdba9c4ea420faed90633dfaa9379"
+    },
+    "china_exports": {
+      "capture": "research_capture_20261116_015447_b6071d2d.json",
+      "questionMatches": true,
+      "reportId": "58e2669b3b274ab882cd70cef7a11945"
+    },
+    "ai_investment": {
+      "capture": "research_capture_20261116_020151_35cd5e65.json",
+      "questionMatches": true,
+      "reportId": "dd96c1b18d7742699ae6a75dde289fb4"
+    },
+    "india_ipo_market": {
+      "capture": "research_capture_20261116_235343_98562777.json",
+      "questionMatches": true,
+      "reportId": "9c69fbe0068449fc915f447ef5332253"
+    },
+    "mutual_fund_sip": {
+      "capture": "research_capture_20261117_000248_e9dfd94f.json",
+      "questionMatches": true,
+      "reportId": "68d22a9a4f1b4c3f9de008931154b285"
+    },
+    "steel_production": {
+      "capture": "research_capture_20261117_001224_90ae0b73.json",
+      "questionMatches": true,
+      "reportId": "ccb2179151544fe0b87955f462701d32"
+    },
+    "oil_prices_india": {
+      "capture": "research_capture_20261116_111136_bf404887.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "36be4de4c7f6435cb0658804aabcd458",
+      "seconds": 470,
+      "ranAt": "2026-11-16T11:19:25"
+    },
+    "defence_exports": {
+      "capture": "research_capture_20261116_111925_80c283ed.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "b1bc9bff24bb443bb6d76f982a4b5f6a",
+      "seconds": 454,
+      "ranAt": "2026-11-16T11:26:59"
+    },
+    "tourism_recovery": {
+      "capture": "research_capture_20261116_112659_538496b8.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "ed7c9486387547e6867065e87c1c87ea",
+      "seconds": 592,
+      "ranAt": "2026-11-16T11:36:51"
+    },
+    "education_outcomes": {
+      "capture": "research_capture_20261116_113651_87650b46.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "6724823eb98247b7a0072ec3ef3b364f",
+      "seconds": 428,
+      "ranAt": "2026-11-16T11:43:59"
+    },
+    "upi_payments": {
+      "capture": "research_capture_20261116_114400_dfa2d100.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "0c5edea5740c410dac06395264d2588b",
+      "seconds": 999,
+      "ranAt": "2026-11-16T12:00:38"
+    },
+    "auto_sales_ice": {
+      "capture": "research_capture_20261116_120039_7abac6f4.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "90115821dc124aef8fbc9290aa925c10",
+      "seconds": 815,
+      "ranAt": "2026-11-16T12:14:13"
+    },
+    "climate_emissions": {
+      "capture": "research_capture_20261116_121413_1a87b1de.json",
+      "questionMatches": true,
+      "exitCode": 0,
+      "reportId": "f2512f9f74ce4a8587694370d417d7ab",
+      "seconds": 996,
+      "ranAt": "2026-11-16T12:30:49"
+    }
+  }
+}
