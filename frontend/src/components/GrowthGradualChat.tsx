@@ -2122,16 +2122,35 @@ async function authHeader(): Promise<Record<string, string>> {
 }
 
 // ─── Suggestions ──────────────────────────────────────────────────────────────
-const SUGGESTIONS = [
-  { icon:'📈', label:'Nifty outlook today' },
-  { icon:'🏦', label:'Top banking stocks' },
-  { icon:'💰', label:'Best SIPs right now' },
-  { icon:'🔍', label:'Analyse HDFC Bank' },
-  { icon:'📰', label:'Latest market news' },
-  { icon:'🌐', label:'RBI rate cut impact' },
-  { icon:'🚀', label:'Upcoming IPOs' },
-  { icon:'📊', label:'Sector performance' },
+type SuggestionIcon = 'trend' | 'bank' | 'fund' | 'search' | 'news' | 'rate' | 'ipo' | 'bars';
+const SUGGESTIONS: { icon: SuggestionIcon; label: string }[] = [
+  { icon:'trend',  label:'Nifty outlook today' },
+  { icon:'bank',   label:'Top banking stocks' },
+  { icon:'fund',   label:'Best SIPs right now' },
+  { icon:'search', label:'Analyse HDFC Bank' },
+  { icon:'news',   label:'Latest market news' },
+  { icon:'rate',   label:'RBI rate cut impact' },
+  { icon:'ipo',    label:'Upcoming IPOs' },
+  { icon:'bars',   label:'Sector performance' },
 ];
+
+/** Line icons for the suggestion chips (design system: one icon style, no emoji). */
+function SugIcon({ name }: { name: SuggestionIcon }) {
+  const paths: Record<SuggestionIcon, React.ReactNode> = {
+    trend:  <><polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/></>,
+    bank:   <><path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M9 21v-6h6v6"/></>,
+    fund:   <><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 4"/></>,
+    search: <><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></>,
+    news:   <><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="12" y2="17"/></>,
+    rate:   <><line x1="19" y1="5" x2="5" y2="19"/><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/></>,
+    ipo:    <><path d="M12 19V5"/><polyline points="6 11 12 5 18 11"/><line x1="5" y1="21" x2="19" y2="21"/></>,
+    bars:   <><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="6"/><line x1="18" y1="20" x2="18" y2="14"/></>,
+  };
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--gg-forest)" strokeWidth="2"
+         strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
+  );
+}
 
 // ─── Attach-complete notification ─────────────────────────────────────────────
 // Fires a native browser notification only when the tab is backgrounded, so
@@ -5259,12 +5278,9 @@ export default function GrowthGradualChat() {
         <aside className={`sidebar${sidebarOpen ? '' : ' sidebar--closed'}${isMobile ? ' sidebar--mobile' : ''}`}>
           {/* Sidebar header */}
           <div className="sidebar-hdr">
-            <div className="sidebar-logo">
-              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={32} height={32} style={{ objectFit:'cover', objectPosition:'3% 50%', width:32, height:32 }}/>
-            </div>
-            <div className="sidebar-brand">
-              Growth Gradual
-              <span>Research Intelligence</span>
+            {/* The brand is in the site header; the sidebar is the user's research list. */}
+            <div style={{ fontFamily:'var(--gg-font-ui)', fontSize:14, fontWeight:600, color:'var(--gg-ink)' }}>
+              Your research
             </div>
             {/* Mobile close button */}
             {isMobile && (
@@ -5294,8 +5310,8 @@ export default function GrowthGradualChat() {
           {/* Conversation list */}
           <div className="conv-list">
             {conversations.length === 0 ? (
-              <div style={{ padding:'16px 14px', fontSize:11, color:'#b0b8d4', fontFamily:'DM Sans,sans-serif', textAlign:'center', lineHeight:1.6 }}>
-                No conversations yet.<br/>Start chatting below.
+              <div style={{ padding:'12px 14px', fontSize:13, color:'var(--gg-muted)', fontFamily:'var(--gg-font-ui)', lineHeight:1.55 }}>
+                Your questions and reports will be kept here.
               </div>
             ) : (
               Object.entries(grouped).map(([date, convs]) => (
@@ -5335,14 +5351,9 @@ export default function GrowthGradualChat() {
             <button className="topbar-toggle" onClick={() => setSidebarOpen(o => !o)} aria-label="Toggle sidebar">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
             </button>
-            <div className="topbar-logo">
-              <Image src="/growth-gradual-logo.jpg" alt="Growth Gradual" width={30} height={30} style={{ objectFit:'cover', objectPosition:'3% 50%', width:30, height:30 }}/>
-            </div>
-            <div className="topbar-info">
-              <div className="topbar-name">Growth Gradual</div>
-              <div className="topbar-sub">
-                <span className="topbar-dot"/>
-                Research Intelligence · Indian Markets
+            <div className="topbar-info" style={{ minWidth:0 }}>
+              <div className="topbar-name" style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                {conversations.find(c => c.id === activeId)?.title || 'New research'}
               </div>
             </div>
           </div>
@@ -5354,26 +5365,16 @@ export default function GrowthGradualChat() {
           }}>
             {isEmpty ? (
               <div className="chat-welcome">
-                <div className="welcome-kicker">
-                  <span className="welcome-kicker-dot" aria-hidden="true" />
-                  RESEARCH INTELLIGENCE <span className="welcome-kicker-sep">/</span> INDIAN MARKETS
-                </div>
                 {/* Headline */}
                 <div className="welcome-intro">
-                  <p className="welcome-title">Where should we begin?</p>
-                  <p className="welcome-sub">A sharper view of Indian markets, built from live research, source-linked evidence and thoughtful analysis.</p>
+                  <h1 className="welcome-title">What do you want to research?</h1>
+                  <p className="welcome-sub">Answers from live market data and sources you can check — every number linked to where it came from.</p>
                 </div>
-                <div className="welcome-capabilities" aria-label="Research capabilities">
-                  <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--mint">↗</span> Live research</span>
-                  <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--violet"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg></span> Evidence-linked insights</span>
-                  <span className="welcome-capability"><span className="welcome-capability-icon welcome-capability-icon--gold">▥</span> Visual reports</span>
-                </div>
-
                 {/* Quick suggestion chips */}
                 <div className="sugs">
                   {SUGGESTIONS.map(s => (
-                    <button key={s.label} className="sug" onClick={() => send(s.label)}>
-                      <span className="sug-icon">{s.icon}</span>
+                    <button key={s.label} type="button" className="sug" onClick={() => send(s.label)}>
+                      <span className="sug-icon"><SugIcon name={s.icon} /></span>
                       <span>{s.label}</span>
                     </button>
                   ))}

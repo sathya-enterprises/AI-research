@@ -6,8 +6,13 @@ import { useEffect, useState } from 'react';
 import { CATEGORIES } from '@/data';
 import { useAuth } from '@/contexts/AuthContext';
 
+const SHOW_OPS = process.env.NEXT_PUBLIC_SHOW_OPS === '1';
+const NEWS_PATHS = new Set(['/feed', ...CATEGORIES.filter(c => c.id !== 'all').map(c => `/${c.id}`), '/article']);
+
 export default function Navbar() {
   const pathname = usePathname();
+  const isResearch = pathname === '/';
+  const isNews = NEWS_PATHS.has(pathname);
   const [time, setTime] = useState('');
   const { user, loading, signOut } = useAuth();
   const [showAccountMenu, setShowAccountMenu] = useState(false);
@@ -23,32 +28,34 @@ export default function Navbar() {
     <>
       <style>{`
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+        /* App sections (Research, News) in the top row */
+        .nav-section {
+          display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border-radius:8px;
+          font-family:var(--gg-font-ui);font-size:14px;font-weight:500;text-decoration:none;
+          color:var(--gg-ink-2);white-space:nowrap;
+          transition:background var(--gg-dur-press) var(--gg-ease), color var(--gg-dur-press) var(--gg-ease);
+        }
+        .nav-section:hover { background:var(--gg-paper-2); color:var(--gg-ink); }
+        .nav-section.active { background:var(--gg-forest-tint); color:var(--gg-forest); font-weight:600; }
+        /* News categories (second row on news pages) */
         .nav-link-item {
-          display:flex;align-items:center;gap:6px;
-          padding:6px 12px;border-radius:6px;
-          font-size:11px;font-weight:600;
-          font-family:'DM Sans',sans-serif;letter-spacing:0.4px;
-          text-transform:uppercase;text-decoration:none;
-          color:#475569;
-          border:1px solid transparent;
-          transition:all .15s ease;
+          display:flex;align-items:center;min-height:34px;padding:0 14px;border-radius:999px;
+          font-family:var(--gg-font-ui);font-size:13px;font-weight:500;text-decoration:none;
+          color:var(--gg-ink-2);border:1px solid var(--gg-line);background:var(--gg-surface);
           white-space:nowrap;
+          transition:background var(--gg-dur-press) var(--gg-ease), color var(--gg-dur-press) var(--gg-ease), border-color var(--gg-dur-press) var(--gg-ease);
         }
-        .nav-link-item:hover { color:#0e1f3d; background:#f1f5f9; border-color:#e2e8f0; }
-        .nav-link-item.active {
-          color:#0e1f3d;font-weight:700;
-          border-color:#cbd5e1;
-          background:#f8fafc;
-          box-shadow:inset 0 -2px 0 #c49a4a;
-        }
+        .nav-link-item:hover { border-color:#BFD5C9; color:var(--gg-ink); }
+        .nav-link-item.active { background:var(--gg-forest); border-color:var(--gg-forest); color:#fff; font-weight:600; }
         .mob-nav-item {
-          display:flex;flex-direction:column;align-items:center;gap:3px;
-          padding:4px 8px;text-decoration:none;flex:1;
-          color:#94a3b8;transition:color .15s;
+          display:flex;flex-direction:column;align-items:center;gap:4px;min-height:44px;
+          padding:6px 8px;text-decoration:none;flex:1;border-radius:8px;
+          color:var(--gg-muted);font-family:var(--gg-font-ui);font-size:12px;
+          transition:color var(--gg-dur-press) var(--gg-ease), transform var(--gg-dur-press) var(--gg-ease);
         }
-        .mob-nav-item.active { color:#0d5c45; }
-        .mob-nav-item { border-radius:8px; }
-        .mob-nav-item:active { background:rgba(13,92,69,0.08); transform:scale(.96); }
+        .mob-nav-item.active { color:var(--gg-forest); font-weight:600; }
+        @media (max-width:680px) { .nav-sections { display:none !important; } }
+        .mob-nav-item:active { background:var(--gg-forest-tint); transform:scale(.96); }
       `}</style>
 
       <nav style={{
@@ -60,48 +67,34 @@ export default function Navbar() {
         boxShadow: '0 1px 3px rgba(15,23,42,0.05)',
         backdropFilter: 'blur(12px)',
       }}>
-        {/* Thin gold accent line at very top */}
-        <div style={{
-          height: '2px',
-          background: 'linear-gradient(90deg, #0e1f3d 0%, #c49a4a 50%, #0e1f3d 100%)',
-          opacity: 1,
-        }} />
-
         {/* Top row */}
         <div className="nav-top">
-          {/* Logo + tagline */}
-          <div style={{ display:'flex', alignItems:'center', gap:'14px' }}>
-            <Image
-              src="/growth-gradual-logo.jpg"
-              alt="Growth Gradual"
-              width={200}
-              height={56}
-              style={{ objectFit:'contain', height:'40px', width:'auto' }}
-              priority
-            />
-            <div style={{ width:'1px', height:'18px', background:'rgba(15,23,42,0.12)' }} />
-            <span className="nav-tagline" style={{
-              fontSize:'9.5px', color:'rgba(15,23,42,0.38)',
-              fontFamily:"'DM Sans',sans-serif", letterSpacing:'1.2px', textTransform:'uppercase',
-            }}>
-              Institutional Market Intelligence
-            </span>
+          {/* Logo + app sections */}
+          <div style={{ display:'flex', alignItems:'center', gap:'20px', minWidth:0 }}>
+            <Link href="/" aria-label="Growth Gradual home" style={{ display:'flex', alignItems:'center' }}>
+              <Image
+                src="/growth-gradual-logo.jpg"
+                alt="Growth Gradual"
+                width={200}
+                height={56}
+                style={{ objectFit:'contain', height:'40px', width:'auto' }}
+                priority
+              />
+            </Link>
+            <div className="nav-sections" style={{ display:'flex', alignItems:'center', gap:'4px' }}>
+              <Link href="/" className={`nav-section${isResearch ? ' active' : ''}`} aria-current={isResearch ? 'page' : undefined}>Research</Link>
+              <Link href="/feed" className={`nav-section${isNews ? ' active' : ''}`} aria-current={isNews ? 'page' : undefined}>News</Link>
+            </div>
           </div>
 
           {/* Right cluster */}
           <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
-            <span className="nav-tagline" style={{
-              fontSize:'9px', color:'rgba(15,23,42,0.22)',
-              fontFamily:'JetBrains Mono,monospace', letterSpacing:'0.5px',
-            }}>NSE · BSE · MCX</span>
-            <Link href="/microservices" aria-label="Microservices monitor" title="Microservices monitor" style={{
-              display:'inline-flex', alignItems:'center', gap:'6px', padding:'7px 10px',
-              borderRadius:'8px', border:'1px solid #dbe5e0', background: pathname === '/microservices' ? '#e8f3ee' : '#fff',
-              color:'#145b43', textDecoration:'none', fontSize:'11px', fontWeight:700,
-              fontFamily:"'DM Sans',sans-serif", whiteSpace:'nowrap',
-            }}>
-              <span aria-hidden="true">⌁</span><span className="nav-tagline">Services</span>
-            </Link>
+            {/* The service monitor is an operations page: shown only when explicitly enabled. */}
+            {SHOW_OPS && (
+              <Link href="/microservices" className={`nav-section${pathname === '/microservices' ? ' active' : ''}`}>
+                Services
+              </Link>
+            )}
 
             {/* Auth control — logged-out visitors see the full-page AuthGate
                 instead, so this only needs to render once authenticated */}
@@ -110,26 +103,30 @@ export default function Navbar() {
               {!loading && user && (
                 <>
                   <button
+                    type="button"
                     onClick={() => setShowAccountMenu(v => !v)}
+                    aria-haspopup="menu"
+                    aria-expanded={showAccountMenu}
                     style={{
-                      display: 'flex', alignItems: 'center', gap: '6px',
-                      background: 'rgba(15,23,42,0.05)',
-                      border: '1px solid rgba(15,23,42,0.12)',
-                      borderRadius: '20px',
-                      padding: '4px 12px',
-                      fontSize: '10.5px',
-                      fontWeight: 600,
-                      fontFamily: "'DM Sans',sans-serif",
-                      color: '#0f172a',
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      background: 'var(--gg-surface)',
+                      border: '1px solid var(--gg-line)',
+                      borderRadius: '999px',
+                      padding: '4px 12px 4px 4px',
+                      minHeight: '40px',
+                      fontSize: '13px',
+                      fontWeight: 500,
+                      fontFamily: 'var(--gg-font-ui)',
+                      color: 'var(--gg-ink)',
                       cursor: 'pointer',
-                      maxWidth: '160px',
+                      maxWidth: '200px',
                     }}
                   >
                     <span style={{
-                      width: '16px', height: '16px', borderRadius: '50%',
-                      background: '#c8922a', color: '#fff',
+                      width: '30px', height: '30px', borderRadius: '50%',
+                      background: 'var(--gg-gold)', color: '#fff',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '9px', fontWeight: 700, flexShrink: 0,
+                      fontSize: '13px', fontWeight: 600, flexShrink: 0,
                     }}>
                       {(user.email ?? '?').charAt(0).toUpperCase()}
                     </span>
@@ -169,46 +166,41 @@ export default function Navbar() {
 
 
 
-        {/* Nav links row — hidden on chat page */}
-        <div className="nav-links" style={{
-          display: pathname === '/' ? 'none' : 'flex',
-          borderTop: '1px solid #e2e8f0',
+        {/* News categories — only on news pages */}
+        <nav aria-label="News categories" className="nav-links" style={{
+          display: isNews && pathname !== '/article' ? 'flex' : 'none',
+          borderTop: '1px solid var(--gg-line)',
+          gap: '8px',
         }}>
           {CATEGORIES.map(cat => {
             const href = cat.id === 'all' ? '/feed' : `/${cat.id}`;
-            const active = pathname === href || (cat.id === 'all' && (pathname === '/feed'));
+            const active = pathname === href;
             return (
-              <Link key={cat.id} href={href} className={`nav-link-item${active ? ' active' : ''}`}>
-                <span style={{ fontSize:'10px' }}>{cat.icon}</span>
+              <Link key={cat.id} href={href} className={`nav-link-item${active ? ' active' : ''}`} aria-current={active ? 'page' : undefined}>
                 {cat.label}
               </Link>
             );
           })}
           <div style={{ flex:1 }} />
           <span suppressHydrationWarning className="nav-tagline" style={{
-            fontSize:'9px', color:'rgba(15,23,42,0.28)',
-            fontFamily:'JetBrains Mono,monospace',
+            fontSize:'12px', color:'var(--gg-muted)', fontFamily:'var(--gg-font-mono)',
           }}>
             {time} IST
           </span>
-        </div>
+        </nav>
       </nav>
 
-      {/* Mobile bottom nav */}
-      <div className="mobile-bottom-nav">
-        {CATEGORIES.map(cat => {
-          const href = cat.id === 'all' ? '/feed' : `/${cat.id}`;
-          const active = pathname === href;
-          return (
-            <Link key={cat.id} href={href} className={`mob-nav-item${active ? ' active' : ''}`}>
-              <span style={{ fontSize:'18px' }}>{cat.icon}</span>
-              <span style={{ fontSize:'8px', fontFamily:"'DM Sans',sans-serif", fontWeight: active ? 700 : 400, letterSpacing:'0.5px', textTransform:'uppercase' }}>
-                {cat.label}
-              </span>
-            </Link>
-          );
-        })}
-      </div>
+      {/* Mobile bottom nav: the app's sections (categories are the chips at the top) */}
+      <nav aria-label="App sections" className="mobile-bottom-nav">
+        <Link href="/" className={`mob-nav-item${isResearch ? ' active' : ''}`} aria-current={isResearch ? 'page' : undefined}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Research
+        </Link>
+        <Link href="/feed" className={`mob-nav-item${isNews ? ' active' : ''}`} aria-current={isNews ? 'page' : undefined}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="17" y2="9"/><line x1="7" y1="13" x2="17" y2="13"/><line x1="7" y1="17" x2="12" y2="17"/></svg>
+          News
+        </Link>
+      </nav>
     </>
   );
 }

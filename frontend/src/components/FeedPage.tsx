@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabaseClient';
 function SkeletonCard({ h = 110 }: { h?: number }) {
   return (
     <div style={{
-      background: '#ffffff', border: '1px solid #e6e2d8',
+      background: 'var(--gg-surface)', border: '1px solid var(--gg-line)',
       borderRadius: '10px', height: `${h}px`, overflow: 'hidden', padding: '16px',
       boxShadow: '0 1px 4px rgba(15,23,42,0.04)',
     }}>
@@ -31,6 +31,22 @@ interface FeedMeta {
   knowledgeBase?: { status?: string; storedSources?: number; storedVersions?: number; storedChunks?: number; reason?: string };
 }
 
+// Cards rendered at a time. The feed can hold 2,000+ articles; rendering them all made the page
+// tens of thousands of pixels tall and slow to scroll.
+const PAGE_SIZE = 20;
+
+/** "Updated 4 min ago" from an ISO time: plain words instead of cache/knowledge-base internals. */
+function updatedAgo(iso: string, now: number): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const minutes = Math.max(0, Math.round((now - t) / 60000));
+  if (minutes < 1) return 'Updated just now';
+  if (minutes < 60) return `Updated ${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `Updated ${hours} h ago`;
+  return `Updated ${new Date(t).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+}
+
 async function fetchScrape(method: 'GET' | 'POST' = 'GET'): Promise<Response> {
   let headers: HeadersInit | undefined;
   try {
@@ -48,6 +64,20 @@ export default function FeedPage({ category }: { category: Category }) {
   const [error, setError] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [isScraping, setIsScraping] = useState(false);
+  const [visible, setVisible] = useState(PAGE_SIZE);
+  const [now, setNow] = useState(() => Date.now());
+  const [shownCategory, setShownCategory] = useState(category);
+
+  // Each category starts from the top of its list (adjusted during render, not in an effect).
+  if (shownCategory !== category) {
+    setShownCategory(category);
+    setVisible(PAGE_SIZE);
+  }
+  // Keep "Updated N min ago" current.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Strip HTML from titles and filter out articles with empty/URL-only titles
   const stripTitle = (t: string) => {
@@ -203,8 +233,9 @@ export default function FeedPage({ category }: { category: Category }) {
     const pattern = CATEGORY_KEYWORDS[cat];
     if (!pattern) return true;
     const text = `${article.title} ${article.summary || ''} ${article.tag || ''}`;
-    // Accept if: category matches OR title/summary matches keyword pattern
-    return article.category === cat || article.category === 'all' || pattern.test(text);
+    // Accept if the article is filed under this category or its text is about it. Articles filed
+    // under the general 'all' category used to pass every tab, so Stocks showed unrelated news.
+    return article.category === cat || pattern.test(text);
   };
 
   const cat = CATEGORIES.find(c => c.id === category);
@@ -212,11 +243,10 @@ export default function FeedPage({ category }: { category: Category }) {
 
   const featured = filtered[0];
   const grid     = filtered.slice(1, 5);
-  const list     = filtered.slice(5);
+  const list     = filtered.slice(5, 5 + visible);
+  const remaining = Math.max(0, filtered.length - 5 - list.length);
 
-  const fetchedLabel = meta?.fetchedAt
-    ? new Date(meta.fetchedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
-    : '';
+  const updatedLabel = meta?.fetchedAt ? updatedAgo(meta.fetchedAt, now) : '';
 
   return (
     <>
@@ -231,63 +261,27 @@ export default function FeedPage({ category }: { category: Category }) {
         {/* Section header */}
         <div className="section-header" style={{ marginBottom:'14px' }}>
           <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
-            <div style={{ width:'3px', height:'20px', background:'linear-gradient(180deg,#0d5c45,#c8922a)', borderRadius:'2px' }}/>
             <div>
               <h2 style={{
-                fontFamily:"'Playfair Display',serif",
-                fontSize:'18px', fontWeight:800, color:'#0f172a', letterSpacing:'-0.4px', lineHeight:1.1,
+                fontFamily:'var(--gg-font-display)',
+                fontSize:'24px', fontWeight:500, color:'var(--gg-ink)', letterSpacing:'-0.01em', lineHeight:1.2,
               }}>{cat?.label || 'All Markets'}</h2>
-              <span style={{ fontSize:'9px', color:'#94a3b8', fontFamily:"'DM Sans',sans-serif", textTransform:'uppercase', letterSpacing:'1.5px' }}>Latest News</span>
+              <span style={{ fontSize:'13px', color:'var(--gg-muted)', fontFamily:'var(--gg-font-ui)' }}>
+                {updatedLabel || 'Latest news'}
+                {filtered.length > 0 && ` · ${filtered.length.toLocaleString('en-IN')} articles`}
+              </span>
             </div>
           </div>
 
           <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
-            {meta && (
-              <div style={{
-                display:'flex', alignItems:'center', gap:'5px',
-                background: meta.fromCache ? 'rgba(200,146,42,0.08)' : 'rgba(13,92,69,0.07)',
-                border:`1px solid ${meta.fromCache ? 'rgba(200,146,42,0.3)' : 'rgba(13,92,69,0.25)'}`,
-                borderRadius:'20px', padding:'3px 10px',
-              }}>
-                <span style={{
-                  width:'5px', height:'5px', borderRadius:'50%',
-                  background: meta.fromCache ? '#c8922a' : '#0d5c45',
-                  display:'inline-block',
-                }}/>
-                <span style={{ fontSize:'9px', color: meta.fromCache ? '#92400e' : '#0d5c45', fontFamily:'JetBrains Mono,monospace', fontWeight:600 }}>
-                  {meta.fromCache ? 'CACHED' : 'LIVE'} · {meta.total}
-                </span>
-                {fetchedLabel && (
-                  <span className="fetched-time" style={{ fontSize:'9px', color:'#94a3b8', fontFamily:'JetBrains Mono,monospace' }}>
-                    · {fetchedLabel} IST
-                  </span>
-                )}
-                {meta.knowledgeBase?.status && meta.knowledgeBase.status !== 'not_synced_yet' && (
-                  <span
-                    title={meta.knowledgeBase.reason || `Supabase article KB: ${meta.knowledgeBase.storedSources ?? 0} source records, ${meta.knowledgeBase.storedVersions ?? 0} content versions, ${meta.knowledgeBase.storedChunks ?? 0} retrieval chunks`}
-                    style={{ fontSize:'9px', color: meta.knowledgeBase.status === 'stored' ? '#0d5c45' : '#92400e', fontFamily:'JetBrains Mono,monospace', fontWeight:700 }}
-                  >
-                    · KB {meta.knowledgeBase.status === 'stored' ? `SAVED ${meta.knowledgeBase.storedSources ?? 0}` : meta.knowledgeBase.status.toUpperCase()}
-                  </span>
-                )}
-              </div>
-            )}
             <button
               onClick={() => loadArticles(true)}
               disabled={refreshing}
-              style={{
-                background: refreshing ? 'rgba(13,92,69,0.05)' : '#fff',
-                border:'1px solid #e6e2d8', borderRadius:'20px',
-                padding:'4px 12px', fontSize:'9px',
-                color: refreshing ? '#94a3b8' : '#0d5c45',
-                cursor: refreshing ? 'not-allowed' : 'pointer',
-                fontFamily:"'DM Sans',sans-serif", letterSpacing:'0.8px', textTransform:'uppercase',
-                fontWeight:600, transition:'all .15s',
-              }}
-              onMouseEnter={e => { if (!refreshing) { e.currentTarget.style.borderColor='#0d5c45'; e.currentTarget.style.background='rgba(13,92,69,0.05)'; }}}
-              onMouseLeave={e => { e.currentTarget.style.borderColor='#e6e2d8'; e.currentTarget.style.background='#fff'; }}
+              type="button"
+              className="gg-btn-ghost"
+              aria-busy={refreshing}
             >
-              {refreshing ? '↻ Fetching…' : '↻ Refresh'}
+              {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
           </div>
         </div>
@@ -298,17 +292,16 @@ export default function FeedPage({ category }: { category: Category }) {
         {/* Error banner */}
         {error && (
           <div style={{
-            background:'#fef2f2', border:'1px solid rgba(239,68,68,0.25)',
-            borderRadius:'8px', padding:'12px 16px', marginBottom:'12px',
-            fontSize:'12px', color:'#991b1b', fontFamily:"'DM Sans',sans-serif",
-          }}>
-            ⚠ {error}
+            background:'var(--gg-down-tint)', border:'1px solid rgba(180,35,24,0.25)',
+            borderRadius:'10px', padding:'12px 16px', marginBottom:'12px',
+            fontSize:'14px', color:'var(--gg-down)', fontFamily:'var(--gg-font-ui)',
+          }} role="alert">
+            {error}
             <button
               onClick={() => loadArticles(false)}
-              style={{ marginLeft:'12px', background:'none', border:'none', color:'#0d5c45', cursor:'pointer', fontSize:'11px', fontFamily:"'DM Sans',sans-serif", textDecoration:'underline', transition:'color .15s ease' }}
-              onMouseEnter={e => { e.currentTarget.style.color='#0a4a37'; }}
-              onMouseLeave={e => { e.currentTarget.style.color='#0d5c45'; }}
-            >Retry</button>
+              type="button"
+              style={{ marginLeft:'12px', background:'none', border:'none', color:'var(--gg-forest)', cursor:'pointer', fontSize:'14px', fontWeight:600, fontFamily:'var(--gg-font-ui)', textDecoration:'underline', minHeight:'44px' }}
+            >Try again</button>
           </div>
         )}
 
@@ -319,26 +312,26 @@ export default function FeedPage({ category }: { category: Category }) {
           <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
             {isScraping && (
               <div style={{
-                background:'linear-gradient(135deg,rgba(13,92,69,0.06),rgba(26,31,78,0.04))',
+                background:'var(--gg-forest-tint)',
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'10px', padding:'16px 18px', marginBottom:'4px',
               }}>
                 <div style={{ display:'flex', alignItems:'center', gap:'10px', marginBottom:'8px' }}>
-                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'#0d5c45', animation:'pulse 1.2s infinite' }}/>
-                  <span style={{ fontSize:'12px', fontFamily:"'DM Sans',sans-serif", color:'#0d5c45', fontWeight:700 }}>
+                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'var(--gg-forest)', animation:'pulse 1.2s infinite' }}/>
+                  <span style={{ fontSize:'14px', fontFamily:'var(--gg-font-ui)', color:'var(--gg-forest)', fontWeight:600 }}>
                     Fetching from 54 sources…
                   </span>
-                  <span style={{ fontSize:'11px', fontFamily:'JetBrains Mono,monospace', color:'#94a3b8', marginLeft:'auto' }}>
+                  <span style={{ fontSize:'11px', fontFamily:'JetBrains Mono,monospace', color:'var(--gg-muted)', marginLeft:'auto' }}>
                     {elapsed}s
                   </span>
                 </div>
                 <div style={{ height:'3px', background:'rgba(13,92,69,0.12)', borderRadius:'3px', overflow:'hidden' }}>
                   <div style={{
                     height:'100%', borderRadius:'3px',
-                    background:'linear-gradient(90deg,#0d5c45,#c8922a)',
+                    background:'var(--gg-forest)',
                     width:`${Math.min((elapsed/90)*100,95)}%`, transition:'width 1s linear',
                   }}/>
                 </div>
-                <p style={{ fontSize:'10px', color:'#94a3b8', fontFamily:"'DM Sans',sans-serif", marginTop:'6px' }}>
+                <p style={{ fontSize:'13px', color:'var(--gg-muted)', fontFamily:'var(--gg-font-ui)', marginTop:'8px' }}>
                   Articles appear as sources load — takes ~60–90s on first run.
                 </p>
               </div>
@@ -352,12 +345,12 @@ export default function FeedPage({ category }: { category: Category }) {
             {(isScraping || refreshing) && articles.length > 0 && (
               <div style={{
                 display:'flex', alignItems:'center', gap:'8px',
-                background:'linear-gradient(135deg,rgba(13,92,69,0.06),rgba(26,31,78,0.04))',
+                background:'var(--gg-forest-tint)',
                 border:'1px solid rgba(13,92,69,0.2)', borderRadius:'8px',
                 padding:'8px 14px', marginBottom:'10px',
               }}>
-                <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:'#0d5c45', animation:'pulse 1.2s infinite' }}/>
-                <span style={{ fontSize:'11px', fontFamily:"'DM Sans',sans-serif", color:'#0d5c45', fontWeight:600 }}>
+                <div style={{ width:'6px', height:'6px', borderRadius:'50%', background:'var(--gg-forest)', animation:'pulse 1.2s infinite' }}/>
+                <span style={{ fontSize:'14px', fontFamily:'var(--gg-font-ui)', color:'var(--gg-forest)', fontWeight:500 }}>
                   Updating feed… showing latest available while new articles load.
                 </span>
               </div>
@@ -378,12 +371,12 @@ export default function FeedPage({ category }: { category: Category }) {
             )}
             {list.length > 0 && (
               <div style={{
-                background:'#fff', borderRadius:'10px', border:'1px solid #e6e2d8',
+                background:'var(--gg-surface)', borderRadius:'12px', border:'1px solid var(--gg-line)',
                 boxShadow:'0 1px 6px rgba(15,23,42,0.04)',
                 padding:'4px 0', marginTop:'4px',
               }}>
-                <div style={{ padding:'10px 14px 6px', borderBottom:'1px solid #f0f2f7' }}>
-                  <span style={{ fontSize:'9px', fontFamily:"'DM Sans',sans-serif", fontWeight:700, color:'#94a3b8', letterSpacing:'1.2px', textTransform:'uppercase' }}>More Stories</span>
+                <div style={{ padding:'12px 14px 8px', borderBottom:'1px solid var(--gg-line)' }}>
+                  <span style={{ fontSize:'13px', fontFamily:'var(--gg-font-ui)', fontWeight:600, color:'var(--gg-ink-2)' }}>More stories</span>
                 </div>
                 {list.map(a=>(
                   <div key={a.id} className="fade-up">
@@ -392,11 +385,23 @@ export default function FeedPage({ category }: { category: Category }) {
                 ))}
               </div>
             )}
+            {remaining > 0 && (
+              <button
+                type="button"
+                className="gg-btn-ghost"
+                style={{ width:'100%', marginTop:'12px' }}
+                onClick={() => setVisible(v => v + PAGE_SIZE)}
+              >
+                Show {Math.min(PAGE_SIZE, remaining)} more · {remaining.toLocaleString('en-IN')} left
+              </button>
+            )}
             {filtered.length === 0 && (
-              <div style={{ textAlign:'center', padding:'64px 20px', color:'#94a3b8', fontFamily:"'Playfair Display',serif", fontSize:'15px', fontStyle:'italic' }}>
-                No articles in this category yet.
-                <br/>
-                <span style={{ fontSize:'11px', fontFamily:"'DM Sans',sans-serif", color:'#cbd5e1' }}>Feeds refresh every 5 minutes.</span>
+              <div style={{ textAlign:'center', padding:'56px 20px', display:'flex', flexDirection:'column', alignItems:'center', gap:'10px' }}>
+                <p style={{ fontFamily:'var(--gg-font-display)', fontSize:'20px', color:'var(--gg-ink)' }}>No {(cat?.label || 'category').toLowerCase()} news right now</p>
+                <p style={{ fontSize:'14px', color:'var(--gg-muted)', maxWidth:'420px', lineHeight:1.6 }}>
+                  New articles are checked every few hours. Meanwhile, the full market feed has {articles.length.toLocaleString('en-IN')} recent stories.
+                </p>
+                {articles.length > 0 && <a href="/feed" className="gg-btn-ghost" style={{ textDecoration:'none' }}>See all market news</a>}
               </div>
             )}
           </>

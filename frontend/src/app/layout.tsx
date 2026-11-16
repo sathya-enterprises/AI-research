@@ -2,7 +2,6 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
 import TickerTape from '@/components/TickerTape';
-import NewsFAB from '@/components/NewsFAB';
 import { STOCKS } from '@/data';
 import { AuthProvider } from '@/contexts/AuthContext';
 import AuthGate from '@/components/AuthGate';
@@ -22,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <head />
-      <body style={{ background: '#F8FAFC', minHeight: '100dvh', color: '#0F172A' }}>
+      <body style={{ background: 'var(--gg-paper)', minHeight: '100dvh', color: 'var(--gg-ink)' }}>
         <AuthProvider>
           <Navbar />
           <TickerTape stocks={STOCKS} />
@@ -31,8 +30,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               {children}
             </AuthGate>
           </main>
-          {/* News feed as floating round button */}
-          <NewsFAB />
         </AuthProvider>
       </body>
     </html>

@@ -79,11 +79,8 @@ function ArticleReader() {
 
   const handleBackToFeed = () => {
     if (from === '/') {
-      // Article was opened from the slide-in news panel on the chat page —
-      // tell NewsFAB to reopen that panel once we land back on '/' instead
-      // of leaving the user staring at the bare chatbot.
-      try { sessionStorage.setItem('gg:reopen-news', '1'); } catch { /* ignore */ }
-      router.push('/');
+      // News lives on its own page now (the floating news button and its slide-in panel are gone).
+      router.push('/feed');
     } else if (from) {
       router.push(from);
     } else {

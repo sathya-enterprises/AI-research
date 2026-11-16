@@ -82,6 +82,22 @@ body {
 }
 ::selection { background: rgba(13,92,69,.16); color: var(--gg-ink); }
 
+/* ── Buttons (design system v1): 44px touch target, press feedback ───────── */
+.gg-btn, .gg-btn-ghost {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; padding: 0 18px; border-radius: 10px;
+  font-family: var(--gg-font-ui); font-size: 14px; font-weight: 600; line-height: 1;
+  cursor: pointer;
+  transition: background var(--gg-dur-press) var(--gg-ease), border-color var(--gg-dur-press) var(--gg-ease),
+              color var(--gg-dur-press) var(--gg-ease), transform var(--gg-dur-press) var(--gg-ease);
+}
+.gg-btn { background: var(--gg-forest); color: #fff; border: 1px solid var(--gg-forest); }
+.gg-btn:hover { background: var(--gg-forest-deep); border-color: var(--gg-forest-deep); }
+.gg-btn-ghost { background: var(--gg-surface); color: var(--gg-forest); border: 1px solid #CFE0D7; }
+.gg-btn-ghost:hover { background: var(--gg-forest-tint); border-color: var(--gg-forest); }
+.gg-btn:active, .gg-btn-ghost:active { transform: scale(.97); }
+.gg-btn:disabled, .gg-btn-ghost:disabled, .gg-btn-ghost[aria-busy="true"] { cursor: progress; opacity: .7; transform: none; }
+
 /* ── Accessible focus ring — gold accent, only shown for keyboard nav ──── */
 :focus-visible {
   outline: 2px solid var(--gold);
