@@ -119,7 +119,7 @@ export default function MobileMarketBar() {
                   {gainers.slice(0, 3).map(s => (
                     <div key={s.symbol} className="mmb-gl-item">
                       <span className="mmb-gl-sym">{s.symbol}</span>
-                      <span className="mmb-gl-chg" style={{ color: '#15803d' }}>{s.change}</span>
+                      <span className="mmb-gl-chg" style={{ color: 'var(--gg-up)' }}>{s.change}</span>
                     </div>
                   ))}
                 </div>
@@ -130,7 +130,7 @@ export default function MobileMarketBar() {
                   {losers.slice(0, 3).map(s => (
                     <div key={s.symbol} className="mmb-gl-item">
                       <span className="mmb-gl-sym">{s.symbol}</span>
-                      <span className="mmb-gl-chg" style={{ color: '#dc2626' }}>{s.change}</span>
+                      <span className="mmb-gl-chg" style={{ color: 'var(--gg-down)' }}>{s.change}</span>
                     </div>
                   ))}
                 </div>

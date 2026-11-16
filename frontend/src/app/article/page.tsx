@@ -12,7 +12,7 @@ function SkeletonLine({ w = '100%', h = 14 }: { w?: string; h?: number }) {
   return (
     <div className="skeleton" style={{
       width: w, height: `${h}px`,
-      background: '#e2e8f0', borderRadius: '3px', marginBottom: '10px',
+      background: 'var(--gg-forest-tint)', borderRadius: '3px', marginBottom: '10px',
     }} />
   );
 }
@@ -106,7 +106,7 @@ function ArticleReader() {
           style={{
             display: 'flex', alignItems: 'center', gap: '6px',
             background: 'none', border: 'none',
-            color: '#64748b', cursor: 'pointer',
+            color: 'var(--gg-muted)', cursor: 'pointer',
             fontSize: '11px', fontFamily: 'DM Sans, sans-serif',
             letterSpacing: '0.5px', marginBottom: '20px',
             padding: 0, transition: 'color 0.15s',
@@ -119,7 +119,7 @@ function ArticleReader() {
 
         <article style={{
           background: '#ffffff',
-          border: '1px solid #1a1e28',
+          border: '1px solid var(--gg-line)',
           borderRadius: '4px',
           overflow: 'hidden',
         }}>
@@ -129,25 +129,25 @@ function ArticleReader() {
               {tag && (
                 <span style={{
                   fontSize: '9px', fontWeight: 700,
-                  color: '#e0c870', background: '#1e3a5f',
+                  color: '#e0c870', background: 'var(--gg-ink)',
                   padding: '3px 8px', borderRadius: '2px',
                   fontFamily: 'DM Sans, sans-serif',
                   letterSpacing: '1px', textTransform: 'uppercase',
                 }}>{tag}</span>
               )}
-              <span style={{ fontSize: '10px', color: '#64748b', fontFamily: 'DM Sans, sans-serif' }}>
+              <span style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>
                 {displaySource}
               </span>
               {time && (
                 <>
-                  <span style={{ color: '#cbd5e1', fontSize: '9px' }}>·</span>
-                  <span style={{ fontSize: '10px', color: '#2a4050', fontFamily: 'JetBrains Mono, monospace' }}>{time}</span>
+                  <span style={{ color: 'var(--gg-muted)', fontSize: '9px' }}>·</span>
+                  <span style={{ fontSize: '10px', color: 'var(--gg-ink-2)', fontFamily: 'JetBrains Mono, monospace' }}>{time}</span>
                 </>
               )}
               {readingTime && (
                 <>
-                  <span style={{ color: '#cbd5e1', fontSize: '9px' }}>·</span>
-                  <span style={{ fontSize: '10px', color: '#2a4050', fontFamily: 'DM Sans, sans-serif' }}>{readingTime} min read</span>
+                  <span style={{ color: 'var(--gg-muted)', fontSize: '9px' }}>·</span>
+                  <span style={{ fontSize: '10px', color: 'var(--gg-ink-2)', fontFamily: 'DM Sans, sans-serif' }}>{readingTime} min read</span>
                 </>
               )}
             </div>
@@ -162,7 +162,7 @@ function ArticleReader() {
               <h1 style={{
                 fontFamily: "'Playfair Display', serif",
                 fontSize: '26px', fontWeight: 700,
-                color: '#0f172a', lineHeight: 1.3,
+                color: 'var(--gg-ink)', lineHeight: 1.3,
                 letterSpacing: '-0.3px', marginBottom: '16px',
               }}>{displayTitle}</h1>
             )}
@@ -172,27 +172,27 @@ function ArticleReader() {
               <div style={{
                 display: 'flex', alignItems: 'center', gap: '10px',
                 marginBottom: '22px', paddingBottom: '22px',
-                borderBottom: '1px solid #1a1e28',
+                borderBottom: '1px solid var(--gg-line)',
               }}>
                 {displayAuthor && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
                     <div style={{
                       width: '26px', height: '26px', borderRadius: '50%',
                       background: 'linear-gradient(135deg, #1e40af, #3b82f6)',
-                      border: '1px solid #2a3a5a',
+                      border: '1px solid var(--gg-ink-2)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '10px', color: '#3b82f6', fontWeight: 700,
+                      fontSize: '10px', color: 'var(--gg-forest)', fontWeight: 700,
                       fontFamily: 'JetBrains Mono, monospace',
                     }}>
                       {displayAuthor.slice(0, 1).toUpperCase()}
                     </div>
-                    <span style={{ fontSize: '12px', color: '#5a7090', fontFamily: 'DM Sans, sans-serif', fontWeight: 500 }}>
+                    <span style={{ fontSize: '12px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', fontWeight: 500 }}>
                       {displayAuthor}
                     </span>
                   </div>
                 )}
                 {displayDate && (
-                  <span style={{ fontSize: '11px', color: '#2a4050', fontFamily: 'DM Sans, sans-serif' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--gg-ink-2)', fontFamily: 'DM Sans, sans-serif' }}>
                     {displayDate}
                   </span>
                 )}
@@ -211,13 +211,13 @@ function ArticleReader() {
               </div>
             ) : error ? (
               <div style={{
-                background: '#f8fafc', border: '1px solid #e2e8f0',
+                background: 'var(--gg-surface)', border: '1px solid var(--gg-line)',
                 borderRadius: '4px', padding: '32px', textAlign: 'center',
               }}>
-                <p style={{ fontSize: '13px', color: '#475569', fontFamily: "'Playfair Display', serif", marginBottom: '8px', fontStyle: 'italic' }}>
+                <p style={{ fontSize: '13px', color: 'var(--gg-ink-2)', fontFamily: "'Playfair Display', serif", marginBottom: '8px', fontStyle: 'italic' }}>
                   Unable to load article content
                 </p>
-                <p style={{ fontSize: '11px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', marginBottom: '20px' }}>
+                <p style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', marginBottom: '20px' }}>
                   {error}
                 </p>
                 <a
@@ -227,8 +227,8 @@ function ArticleReader() {
                   style={{
                     display: 'inline-block',
                     padding: '9px 20px',
-                    background: '#0f172a', border: '1px solid #334155',
-                    borderRadius: '3px', color: '#93c5fd',
+                    background: 'var(--gg-ink)', border: '1px solid var(--gg-ink-2)',
+                    borderRadius: '3px', color: 'var(--gg-muted)',
                     fontSize: '11px', fontFamily: 'DM Sans, sans-serif',
                     textDecoration: 'none', letterSpacing: '1px',
                     textTransform: 'uppercase',
@@ -260,26 +260,26 @@ function ArticleReader() {
                       <>
                         <div style={{
                           width: '48px', height: '48px', borderRadius: '50%',
-                          background: '#eff6ff', border: '1px solid #bfdbfe',
+                          background: 'var(--gg-surface)', border: '1px solid var(--gg-line-strong)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
                           margin: '0 auto 16px', fontSize: '20px',
                         }}>🗞</div>
-                        <p style={{ fontSize: '14px', fontFamily: "'Playfair Display', serif", color: '#1e293b', marginBottom: '8px', fontWeight: 600 }}>
+                        <p style={{ fontSize: '14px', fontFamily: "'Playfair Display', serif", color: 'var(--gg-ink)', marginBottom: '8px', fontWeight: 600 }}>
                           {title || 'Article from ' + publisherName}
                         </p>
-                        <p style={{ fontSize: '11px', color: '#64748b', fontFamily: 'DM Sans, sans-serif', marginBottom: '6px' }}>
+                        <p style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', marginBottom: '6px' }}>
                           This article is hosted on <strong>{publisherName}</strong>.
                         </p>
-                        <p style={{ fontSize: '11px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', marginBottom: '24px' }}>
+                        <p style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', marginBottom: '24px' }}>
                           Click below to open the original article on {publisherName}.
                         </p>
                       </>
                     ) : (
                       <>
-                        <p style={{ fontSize: '14px', color: '#94a3b8', fontFamily: "'Playfair Display', serif", fontStyle: 'italic', marginBottom: '8px' }}>
+                        <p style={{ fontSize: '14px', color: 'var(--gg-muted)', fontFamily: "'Playfair Display', serif", fontStyle: 'italic', marginBottom: '8px' }}>
                           Content could not be extracted from this source.
                         </p>
-                        <p style={{ fontSize: '11px', color: '#cbd5e1', fontFamily: 'DM Sans, sans-serif', marginBottom: '20px' }}>
+                        <p style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', marginBottom: '20px' }}>
                           This publisher may require JavaScript or a subscription.
                         </p>
                       </>
@@ -291,8 +291,8 @@ function ArticleReader() {
                       style={{
                         display: 'inline-block',
                         padding: '10px 22px',
-                        background: '#0f172a', border: '1px solid #334155',
-                        borderRadius: '3px', color: '#93c5fd',
+                        background: 'var(--gg-ink)', border: '1px solid var(--gg-ink-2)',
+                        borderRadius: '3px', color: 'var(--gg-muted)',
                         fontSize: '11px', fontFamily: 'DM Sans, sans-serif',
                         textDecoration: 'none', letterSpacing: '1px',
                         textTransform: 'uppercase',
@@ -300,8 +300,8 @@ function ArticleReader() {
                     >
                       Open on {publisherName} →
                     </a>
-                    <div style={{ marginTop: '16px', fontSize: '10px', color: '#cbd5e1', fontFamily: 'DM Sans, sans-serif' }}>
-                      Content sourced from <strong style={{ color: '#94a3b8' }}>{isGoogleNews ? sourceDomain : content?.source || source}</strong>
+                    <div style={{ marginTop: '16px', fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>
+                      Content sourced from <strong style={{ color: 'var(--gg-muted)' }}>{isGoogleNews ? sourceDomain : content?.source || source}</strong>
                     </div>
                   </div>
                 );
@@ -336,7 +336,7 @@ function ArticleReader() {
 
                 {/* Lead image at TOP: shown before body when it appears before text in the original article */}
                 {content?.heroImagePosition === 'top' && (content?.images[0] || cardImage) && !imgErrors.has(-1) && (
-                  <div style={{ margin: '0 0 24px', borderRadius: '4px', overflow: 'hidden', border: '1px solid #1a1e28' }}>
+                  <div style={{ margin: '0 0 24px', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--gg-line)' }}>
                     <img
                       src={content?.images[0] || cardImage}
                       alt={displayTitle}
@@ -367,7 +367,7 @@ function ArticleReader() {
                         <h3 style={{
                           fontFamily: "'Playfair Display', serif",
                           fontSize: '16px', fontWeight: 600,
-                          color: '#1e293b', lineHeight: 1.4,
+                          color: 'var(--gg-ink)', lineHeight: 1.4,
                           margin: '24px 0 10px',
                           paddingLeft: '12px',
                           borderLeft: '2px solid #3b82f644',
@@ -385,7 +385,7 @@ function ArticleReader() {
                       )}
                       {/* Lead image: shown after lede paragraph (i===0), mirrors original article layout */}
                       {showLeadImage && (
-                        <div style={{ margin: '0 0 24px', borderRadius: '4px', overflow: 'hidden', border: '1px solid #1a1e28' }}>
+                        <div style={{ margin: '0 0 24px', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--gg-line)' }}>
                           <img
                             src={images[0] || cardImage}
                             alt={displayTitle}
@@ -395,7 +395,7 @@ function ArticleReader() {
                         </div>
                       )}
                       {showImg && (
-                        <div style={{ margin: '24px 0', borderRadius: '4px', overflow: 'hidden', border: '1px solid #1a1e28' }}>
+                        <div style={{ margin: '24px 0', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--gg-line)' }}>
                           <img
                             src={inlineImg}
                             alt=""
@@ -414,7 +414,7 @@ function ArticleReader() {
             {!loading && !error && (
               <div style={{
                 marginTop: '32px', paddingTop: '20px',
-                borderTop: '1px solid #1a1e28',
+                borderTop: '1px solid var(--gg-line)',
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -423,8 +423,8 @@ function ArticleReader() {
                       style={{ borderRadius: '2px' }}
                       onError={e => (e.currentTarget.style.display = 'none')} />
                   )}
-                  <span style={{ fontSize: '11px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif' }}>
-                    Content sourced from <strong style={{ color: '#2563eb' }}>{displaySource}</strong>
+                  <span style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>
+                    Content sourced from <strong style={{ color: 'var(--gg-forest)' }}>{displaySource}</strong>
                   </span>
                 </div>
                 <a
@@ -432,7 +432,7 @@ function ArticleReader() {
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{
-                    fontSize: '10px', color: '#3b82f6',
+                    fontSize: '10px', color: 'var(--gg-forest)',
                     fontFamily: 'DM Sans, sans-serif',
                     textDecoration: 'none', letterSpacing: '0.8px',
                     textTransform: 'uppercase', opacity: 0.7,
@@ -452,11 +452,11 @@ function ArticleReader() {
       {/* RIGHT: Related / TOC panel */}
       <div className="sidebar-right" style={{ position: 'sticky', top: '90px' }}>
         <div style={{
-          background: '#ffffff', border: '1px solid #1a1e28',
+          background: '#ffffff', border: '1px solid var(--gg-line)',
           borderRadius: '4px', padding: '16px',
         }}>
           <p style={{
-            fontSize: '9px', fontWeight: 600, color: '#64748b',
+            fontSize: '9px', fontWeight: 600, color: 'var(--gg-muted)',
             textTransform: 'uppercase', letterSpacing: '2px',
             marginBottom: '12px', fontFamily: 'DM Sans, sans-serif',
             borderBottom: '1px solid #3b82f622', paddingBottom: '8px',
@@ -464,25 +464,25 @@ function ArticleReader() {
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <div>
-              <p style={{ fontSize: '9px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Source</p>
-              <p style={{ fontSize: '12px', color: '#3b82f6', fontFamily: 'DM Sans, sans-serif' }}>{displaySource || '—'}</p>
+              <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Source</p>
+              <p style={{ fontSize: '12px', color: 'var(--gg-forest)', fontFamily: 'DM Sans, sans-serif' }}>{displaySource || '—'}</p>
             </div>
             {displayDate && (
               <div>
-                <p style={{ fontSize: '9px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Published</p>
-                <p style={{ fontSize: '11px', color: '#64748b', fontFamily: 'DM Sans, sans-serif' }}>{displayDate}</p>
+                <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Published</p>
+                <p style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>{displayDate}</p>
               </div>
             )}
             {displayAuthor && (
               <div>
-                <p style={{ fontSize: '9px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Author</p>
-                <p style={{ fontSize: '12px', color: '#3b82f6', fontFamily: 'DM Sans, sans-serif' }}>{displayAuthor}</p>
+                <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Author</p>
+                <p style={{ fontSize: '12px', color: 'var(--gg-forest)', fontFamily: 'DM Sans, sans-serif' }}>{displayAuthor}</p>
               </div>
             )}
             {readingTime && (
               <div>
-                <p style={{ fontSize: '9px', color: '#94a3b8', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Reading Time</p>
-                <p style={{ fontSize: '12px', color: '#3b82f6', fontFamily: 'DM Sans, sans-serif' }}>{readingTime} minutes</p>
+                <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '3px' }}>Reading Time</p>
+                <p style={{ fontSize: '12px', color: 'var(--gg-forest)', fontFamily: 'DM Sans, sans-serif' }}>{readingTime} minutes</p>
               </div>
             )}
           </div>
@@ -491,7 +491,7 @@ function ArticleReader() {
           {!loading && content && content.images.length > 1 && (
             <div style={{ marginTop: '18px' }}>
               <p style={{
-                fontSize: '9px', fontWeight: 600, color: '#64748b',
+                fontSize: '9px', fontWeight: 600, color: 'var(--gg-muted)',
                 textTransform: 'uppercase', letterSpacing: '2px',
                 marginBottom: '10px', fontFamily: 'DM Sans, sans-serif',
                 borderBottom: '1px solid #3b82f622', paddingBottom: '8px',
@@ -506,7 +506,7 @@ function ArticleReader() {
                       onError={() => setImgErrors(s => new Set([...s, i + 10]))}
                       style={{
                         width: '100%', height: '60px', objectFit: 'cover',
-                        borderRadius: '3px', border: '1px solid #1a1e28',
+                        borderRadius: '3px', border: '1px solid var(--gg-line)',
                         display: 'block',
                       }}
                     />
@@ -525,7 +525,7 @@ function ArticleReader() {
 export default function ArticlePage() {
   return (
     <Suspense fallback={
-      <div style={{ color: '#64748b', padding: '40px', textAlign: 'center', fontFamily: 'DM Sans, sans-serif' }}>
+      <div style={{ color: 'var(--gg-muted)', padding: '40px', textAlign: 'center', fontFamily: 'DM Sans, sans-serif' }}>
         Loading article…
       </div>
     }>

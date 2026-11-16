@@ -110,8 +110,8 @@ export default function DataSearchPage() {
 
       {error && !loading && (
         <div style={{
-          padding: '16px 18px', background: '#fef2f2', border: '1px solid #fecaca',
-          borderRadius: 'var(--radius-md)', color: '#991b1b', fontSize: '13px',
+          padding: '16px 18px', background: 'var(--gg-down-tint)', border: '1px solid var(--gg-line-strong)',
+          borderRadius: 'var(--radius-md)', color: 'var(--gg-down)', fontSize: '13px',
           fontFamily: "'DM Sans',sans-serif", marginBottom: '20px',
         }}>{error}</div>
       )}

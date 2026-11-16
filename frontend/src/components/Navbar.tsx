@@ -45,7 +45,7 @@ export default function Navbar() {
           white-space:nowrap;
           transition:background var(--gg-dur-press) var(--gg-ease), color var(--gg-dur-press) var(--gg-ease), border-color var(--gg-dur-press) var(--gg-ease);
         }
-        .nav-link-item:hover { border-color:#BFD5C9; color:var(--gg-ink); }
+        .nav-link-item:hover { border-color:var(--gg-line-strong); color:var(--gg-ink); }
         .nav-link-item.active { background:var(--gg-forest); border-color:var(--gg-forest); color:#fff; font-weight:600; }
         .mob-nav-item {
           display:flex;flex-direction:column;align-items:center;gap:4px;min-height:44px;
@@ -63,7 +63,7 @@ export default function Navbar() {
         position: 'sticky',
         top: 0,
         zIndex: 100,
-        borderBottom: '1px solid #e2e8f0',
+        borderBottom: '1px solid var(--gg-line)',
         boxShadow: '0 1px 3px rgba(15,23,42,0.05)',
         backdropFilter: 'blur(12px)',
       }}>
@@ -150,7 +150,7 @@ export default function Navbar() {
                         style={{
                           display: 'block', width: '100%', textAlign: 'left',
                           padding: '10px 14px', background: 'transparent', border: 'none',
-                          fontSize: '12px', color: '#0f172a', cursor: 'pointer',
+                          fontSize: '12px', color: 'var(--gg-ink)', cursor: 'pointer',
                           fontFamily: "'DM Sans',sans-serif",
                         }}
                       >

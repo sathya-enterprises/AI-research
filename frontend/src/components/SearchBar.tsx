@@ -32,7 +32,7 @@ export default function SearchBar() {
         <div style={{ position: 'relative', flex: 1 }}>
           <span style={{
             position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)',
-            fontSize: '11px', color: '#94a3b8',
+            fontSize: '11px', color: 'var(--gg-muted)',
           }}>⌕</span>
           <input
             value={q}
@@ -44,9 +44,9 @@ export default function SearchBar() {
               padding: '10px 14px 10px 28px',
               fontSize: '12px',
               background: '#ffffff',
-              border: '1px solid #e2e8f0',
+              border: '1px solid var(--gg-line)',
               borderRadius: '6px',
-              color: '#0f172a',
+              color: 'var(--gg-ink)',
               fontFamily: 'DM Sans, sans-serif',
               outline: 'none',
               transition: 'border-color 0.2s, box-shadow 0.2s',
@@ -90,8 +90,8 @@ export default function SearchBar() {
       {(loading || answer) && (
         <div style={{
           marginTop: '10px',
-          background: '#f0f9ff',
-          border: '1px solid #bae6fd',
+          background: 'var(--gg-surface)',
+          border: '1px solid var(--gg-line)',
           borderRadius: '6px',
           padding: '16px',
           borderLeft: '3px solid #3b82f6',
@@ -122,14 +122,14 @@ export default function SearchBar() {
                 }} />
               ))}
               <style>{`@keyframes dotPulse{0%,100%{opacity:0.2;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}`}</style>
-              <span style={{ fontSize: '11px', color: '#64748b', fontFamily: 'DM Sans, sans-serif', marginLeft: '4px' }}>
+              <span style={{ fontSize: '11px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', marginLeft: '4px' }}>
                 Querying financial knowledge base…
               </span>
             </div>
           ) : (
             <p style={{
               fontSize: '12px',
-              color: '#334155',
+              color: 'var(--gg-ink-2)',
               lineHeight: 1.7,
               whiteSpace: 'pre-wrap',
               fontFamily: 'DM Sans, sans-serif',

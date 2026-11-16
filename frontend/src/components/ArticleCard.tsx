@@ -74,7 +74,7 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
       onClick={navigate}
       style={{
         padding:'11px 14px 11px 12px',
-        borderBottom:'1px solid #eef0f5',
+        borderBottom:'1px solid var(--gg-line)',
         borderLeft:'2px solid transparent',
         cursor:'pointer',
         borderRadius:'6px',
@@ -94,13 +94,13 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
         <TagPill />
         <p style={{
           fontSize:'12.5px', fontFamily:"'Playfair Display',serif",
-          fontWeight:600, color:'#1a2035', lineHeight:1.42, marginBottom:'6px',
+          fontWeight:600, color:'var(--gg-ink)', lineHeight:1.42, marginBottom:'6px',
         }}>{stripHtml(article.title)}</p>
         <div style={{ display:'flex', gap:'6px', alignItems:'center' }}>
-          <span style={{ fontSize:'9px', color:'#64748b', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{article.source}</span>
-          <span style={{ color:'#d1d9e6', fontSize:'8px' }}>·</span>
-          <span style={{ fontSize:'9px', color:'#94a3b8', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
-          <span style={{ marginLeft:'auto', fontSize:'9px', color:'#0d5c45', fontFamily:"'DM Sans',sans-serif", fontWeight:600, letterSpacing:'0.3px' }}>Read →</span>
+          <span style={{ fontSize:'9px', color:'var(--gg-muted)', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{article.source}</span>
+          <span style={{ color:'var(--gg-muted)', fontSize:'8px' }}>·</span>
+          <span style={{ fontSize:'9px', color:'var(--gg-muted)', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
+          <span style={{ marginLeft:'auto', fontSize:'9px', color:'var(--gg-forest)', fontFamily:"'DM Sans',sans-serif", fontWeight:600, letterSpacing:'0.3px' }}>Read →</span>
         </div>
       </div>
     </div>
@@ -112,7 +112,7 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
       onClick={navigate}
       style={{
         background:'#fff', borderRadius:'12px', overflow:'hidden',
-        cursor:'pointer', border:'1px solid #e4e8ef',
+        cursor:'pointer', border:'1px solid var(--gg-line)',
         boxShadow:'0 2px 12px rgba(15,23,42,0.06)',
         transition:'box-shadow .22s cubic-bezier(.4,0,.2,1), transform .22s cubic-bezier(.4,0,.2,1)',
       }}
@@ -133,7 +133,7 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
       )}
       <div style={{
         background:'linear-gradient(135deg,rgba(13,92,69,0.04) 0%,rgba(26,31,78,0.03) 100%)',
-        borderBottom:'1px solid #eef0f5',
+        borderBottom:'1px solid var(--gg-line)',
         padding:'22px 22px 16px',
       }}>
         {/* Teal accent bar */}
@@ -142,12 +142,12 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
         <h2 style={{
           fontFamily:"'Playfair Display',serif",
           fontSize:'clamp(16px,2.5vw,20px)', fontWeight:800,
-          color:'#0f172a', lineHeight:1.28, marginBottom: article.summary ? '10px' : 0,
+          color:'var(--gg-ink)', lineHeight:1.28, marginBottom: article.summary ? '10px' : 0,
           letterSpacing:'-0.3px',
         }}>{stripHtml(article.title)}</h2>
         {article.summary && stripHtml(article.summary) && (
           <p style={{
-            fontSize:'12.5px', color:'#64748b', lineHeight:1.65,
+            fontSize:'12.5px', color:'var(--gg-muted)', lineHeight:1.65,
             fontFamily:"'DM Sans',sans-serif",
             display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
           } as React.CSSProperties}>{stripHtml(article.summary)}</p>
@@ -162,11 +162,11 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
         }}>
           {article.source.slice(0,2).toUpperCase()}
         </div>
-        <span style={{ fontSize:'11.5px', color:'#334155', fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>{article.source}</span>
-        <span style={{ color:'#d1d9e6', fontSize:'8px' }}>·</span>
-        <span style={{ fontSize:'9.5px', color:'#94a3b8', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
+        <span style={{ fontSize:'11.5px', color:'var(--gg-ink-2)', fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>{article.source}</span>
+        <span style={{ color:'var(--gg-muted)', fontSize:'8px' }}>·</span>
+        <span style={{ fontSize:'9.5px', color:'var(--gg-muted)', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
         <div style={{ flex:1 }}/>
-        <span style={{ fontSize:'9px', color:'#0d5c45', fontFamily:"'DM Sans',sans-serif", fontWeight:700, letterSpacing:'0.5px', textTransform:'uppercase' }}>Read →</span>
+        <span style={{ fontSize:'9px', color:'var(--gg-forest)', fontFamily:"'DM Sans',sans-serif", fontWeight:700, letterSpacing:'0.5px', textTransform:'uppercase' }}>Read →</span>
       </div>
     </div>
   );
@@ -178,7 +178,7 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
       style={{
         background:'#fff', borderRadius:'10px', overflow:'hidden',
         cursor:'pointer', height:'100%',
-        border:'1px solid #e4e8ef',
+        border:'1px solid var(--gg-line)',
         boxShadow:'0 1px 6px rgba(15,23,42,0.05)',
         display:'flex', flexDirection:'column',
         transition:'box-shadow .2s cubic-bezier(.4,0,.2,1), transform .2s cubic-bezier(.4,0,.2,1), border-color .2s cubic-bezier(.4,0,.2,1)',
@@ -207,13 +207,13 @@ export default function ArticleCard({ article, featured=false, compact=false }: 
         <TagPill />
         <p style={{
           fontSize:'12.5px', fontFamily:"'Playfair Display',serif",
-          fontWeight:700, color:'#1a2035', lineHeight:1.42, marginBottom:'10px',
+          fontWeight:700, color:'var(--gg-ink)', lineHeight:1.42, marginBottom:'10px',
           display:'-webkit-box', WebkitLineClamp:3, WebkitBoxOrient:'vertical', overflow:'hidden',
         } as React.CSSProperties}>{stripHtml(article.title)}</p>
         <div style={{ display:'flex', alignItems:'center', gap:'6px', marginTop:'auto' }}>
-          <span style={{ fontSize:'10px', color:'#64748b', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{article.source}</span>
-          <span style={{ color:'#d1d9e6', fontSize:'8px' }}>·</span>
-          <span style={{ fontSize:'9px', color:'#94a3b8', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
+          <span style={{ fontSize:'10px', color:'var(--gg-muted)', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{article.source}</span>
+          <span style={{ color:'var(--gg-muted)', fontSize:'8px' }}>·</span>
+          <span style={{ fontSize:'9px', color:'var(--gg-muted)', fontFamily:'JetBrains Mono,monospace' }}>{article.time}</span>
         </div>
       </div>
     </div>

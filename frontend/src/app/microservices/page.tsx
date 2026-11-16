@@ -26,11 +26,11 @@ type Overview = {
 };
 
 const panel: CSSProperties = {
-  background: '#fff', border: '1px solid #e3eae6', borderRadius: 14,
+  background: '#fff', border: '1px solid var(--gg-line)', borderRadius: 14,
   boxShadow: '0 2px 10px rgba(20,55,40,0.035)',
 };
 const labelStyle: CSSProperties = {
-  color: '#718078', fontSize: 10, letterSpacing: 1.1, fontWeight: 800,
+  color: 'var(--gg-muted)', fontSize: 10, letterSpacing: 1.1, fontWeight: 800,
   textTransform: 'uppercase', fontFamily: 'Arial, sans-serif',
 };
 
@@ -98,34 +98,34 @@ export default function MicroservicesPage() {
   }, [data, traceFilter]);
 
   return (
-    <main style={{ minHeight: 'calc(100vh - 70px)', background: '#f5f8f6', padding: '30px 22px 72px', color: '#18362a' }}>
+    <main style={{ minHeight: 'calc(100vh - 70px)', background: 'var(--gg-paper)', padding: '30px 22px 72px', color: 'var(--gg-forest)' }}>
       <div style={{ maxWidth: 1440, margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', marginBottom: 24 }}>
           <div>
-            <div style={{ ...labelStyle, color: '#237455', marginBottom: 8 }}>Growth Gradual · Operations</div>
-            <h1 style={{ fontSize: 29, lineHeight: 1.15, margin: 0, color: '#123d2c', fontWeight: 750 }}>Microservices Monitor</h1>
-            <p style={{ color: '#718078', fontSize: 13, margin: '9px 0 0', maxWidth: 700, lineHeight: 1.55 }}>
+            <div style={{ ...labelStyle, color: 'var(--gg-up)', marginBottom: 8 }}>Growth Gradual · Operations</div>
+            <h1 style={{ fontSize: 29, lineHeight: 1.15, margin: 0, color: 'var(--gg-forest)', fontWeight: 750 }}>Microservices Monitor</h1>
+            <p style={{ color: 'var(--gg-muted)', fontSize: 13, margin: '9px 0 0', maxWidth: 700, lineHeight: 1.55 }}>
               Follow the journey of an uploaded file or chat question through browser extraction, FastAPI orchestration, RAG retrieval, vector storage and streamed AI output.
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 7, color: '#64756c', fontSize: 11, fontWeight: 600 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 7, color: 'var(--gg-muted)', fontSize: 11, fontWeight: 600 }}>
               <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} /> Auto-refresh · 15s
             </label>
-            <button onClick={() => void refresh()} disabled={refreshing} style={{ border: '1px solid #cbdcd2', background: '#fff', color: '#145b43', borderRadius: 9, padding: '9px 13px', fontWeight: 700, cursor: refreshing ? 'wait' : 'pointer' }}>
+            <button onClick={() => void refresh()} disabled={refreshing} style={{ border: '1px solid var(--gg-line)', background: '#fff', color: 'var(--gg-forest)', borderRadius: 9, padding: '9px 13px', fontWeight: 700, cursor: refreshing ? 'wait' : 'pointer' }}>
               {refreshing ? 'Checking…' : '↻ Refresh status'}
             </button>
           </div>
         </div>
 
-        {error && <div role="alert" style={{ ...panel, padding: 14, marginBottom: 18, borderColor: '#edc7c1', background: '#fff7f5', color: '#9e342d', fontSize: 13 }}>
+        {error && <div role="alert" style={{ ...panel, padding: 14, marginBottom: 18, borderColor: 'var(--gg-line-strong)', background: 'var(--gg-paper)', color: 'var(--gg-down)', fontSize: 13 }}>
           <strong>Diagnostics unavailable.</strong> {error} Check that Next.js can reach the FastAPI backend and that the backend has been restarted with the observability update.
         </div>}
 
         <section style={{ ...panel, padding: 18, marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 15, flexWrap: 'wrap' }}>
-            <div><div style={labelStyle}>Live dependency map</div><h2 style={{ fontSize: 17, margin: '5px 0 0', color: '#214b37' }}>What happens to each input?</h2></div>
-            <div style={{ fontSize: 10, color: '#8b9991' }}>Last checked: {lastChecked ? formatTime(lastChecked) : '—'}</div>
+            <div><div style={labelStyle}>Live dependency map</div><h2 style={{ fontSize: 17, margin: '5px 0 0', color: 'var(--gg-forest)' }}>What happens to each input?</h2></div>
+            <div style={{ fontSize: 10, color: 'var(--gg-muted)' }}>Last checked: {lastChecked ? formatTime(lastChecked) : '—'}</div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(205px, 1fr))', gap: 9 }}>
             {[
@@ -136,15 +136,15 @@ export default function MicroservicesPage() {
               ['05 · Supabase', 'Postgres pgvector + Storage', 'Vector chunks are searched in rag_chunks; original extracted text/OKF bundle is archived in Storage.'],
               ['06 · LLM → UI', 'Groq → Gemini fallback → SSE', 'Retrieved context is added to the generation prompt and the answer is streamed back to the chat UI.'],
             ].map(([step, title, description], index) => (
-              <div key={step} style={{ background: '#f8fbf9', border: '1px solid #e6eee9', borderRadius: 10, padding: 12, position: 'relative' }}>
-                <div style={{ ...labelStyle, color: '#398061', fontSize: 9 }}>{step}</div>
-                <div style={{ color: '#214b37', fontWeight: 750, fontSize: 12, marginTop: 7 }}>{title}</div>
-                <div style={{ color: '#738178', fontSize: 11, lineHeight: 1.5, marginTop: 6 }}>{description}</div>
-                {index < 5 && <div aria-hidden="true" style={{ position: 'absolute', right: -8, top: '45%', zIndex: 1, background: '#e4efe8', color: '#4d8a6a', width: 16, height: 16, borderRadius: 20, textAlign: 'center', lineHeight: '16px', fontSize: 11 }}>›</div>}
+              <div key={step} style={{ background: 'var(--gg-surface)', border: '1px solid var(--gg-line)', borderRadius: 10, padding: 12, position: 'relative' }}>
+                <div style={{ ...labelStyle, color: 'var(--gg-up)', fontSize: 9 }}>{step}</div>
+                <div style={{ color: 'var(--gg-forest)', fontWeight: 750, fontSize: 12, marginTop: 7 }}>{title}</div>
+                <div style={{ color: 'var(--gg-muted)', fontSize: 11, lineHeight: 1.5, marginTop: 6 }}>{description}</div>
+                {index < 5 && <div aria-hidden="true" style={{ position: 'absolute', right: -8, top: '45%', zIndex: 1, background: 'var(--gg-forest-tint)', color: 'var(--gg-up)', width: 16, height: 16, borderRadius: 20, textAlign: 'center', lineHeight: '16px', fontSize: 11 }}>›</div>}
               </div>
             ))}
           </div>
-          <div style={{ marginTop: 12, color: '#8a9890', fontSize: 10, lineHeight: 1.5 }}>
+          <div style={{ marginTop: 12, color: 'var(--gg-muted)', fontSize: 10, lineHeight: 1.5 }}>
             Chat retrieval is initiated by the FastAPI orchestrator's <code>document_search</code> tool; it is not a separate direct RAG branch in the chat route.
           </div>
         </section>
@@ -156,11 +156,11 @@ export default function MicroservicesPage() {
               const color = statusColor(service.status);
               return <article key={service.id} style={{ ...panel, padding: 15 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                  <div style={{ color: '#244b38', fontWeight: 750, fontSize: 13 }}>{service.name}</div>
+                  <div style={{ color: 'var(--gg-forest)', fontWeight: 750, fontSize: 13 }}>{service.name}</div>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: color.text, background: color.bg, borderRadius: 20, padding: '4px 8px', fontSize: 9, fontWeight: 800, textTransform: 'uppercase' }}><span style={{ width: 6, height: 6, borderRadius: 10, background: color.dot }} />{service.status.replaceAll('_', ' ')}</span>
                 </div>
-                <div style={{ color: '#78877e', fontSize: 11, lineHeight: 1.45, minHeight: 32, marginTop: 8 }}>{service.role}</div>
-                <div style={{ borderTop: '1px solid #edf1ee', marginTop: 10, paddingTop: 9, color: '#617268', fontSize: 10, lineHeight: 1.7 }}>
+                <div style={{ color: 'var(--gg-muted)', fontSize: 11, lineHeight: 1.45, minHeight: 32, marginTop: 8 }}>{service.role}</div>
+                <div style={{ borderTop: '1px solid var(--gg-line)', marginTop: 10, paddingTop: 9, color: 'var(--gg-muted)', fontSize: 10, lineHeight: 1.7 }}>
                   {service.id === 'rag_service' && <>{service.model || 'Embedding model'} · {service.embeddingDimension ?? '—'} dimensions<br />Reranker: {service.rerankerEnabled ? 'enabled' : 'not loaded'} · Probe: {service.probeMs ?? '—'} ms<br />Loaded sessions: {data?.rag?.sessionCountInProcess ?? '—'} · cached chunks: {data?.rag?.chunkCountInProcess ?? '—'}</>}
                   {service.id === 'supabase_pgvector' && <>Table: {service.table || 'rag_chunks'}<br />Configured: {pretty(service.configured)}</>}
                   {service.id === 'supabase_storage' && <>Read: {pretty(service.readAvailable)} · Write: {pretty(service.writeAvailable)}<br />Mode: {service.storageMode || '—'}</>}
@@ -171,35 +171,35 @@ export default function MicroservicesPage() {
                 </div>
               </article>;
             })}
-            {loading && !data && <div style={{ ...panel, padding: 18, color: '#7b8a81', fontSize: 12 }}>Checking service status…</div>}
+            {loading && !data && <div style={{ ...panel, padding: 18, color: 'var(--gg-muted)', fontSize: 12 }}>Checking service status…</div>}
           </div>
         </section>
 
         <section style={{ ...panel, padding: 18, marginBottom: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-            <div><div style={labelStyle}>Request timeline</div><h2 style={{ fontSize: 17, margin: '5px 0 0', color: '#214b37' }}>What actually ran</h2></div>
-            <input value={traceFilter} onChange={e => setTraceFilter(e.target.value)} placeholder="Filter by request / trace ID" style={{ border: '1px solid #dce7e0', borderRadius: 8, padding: '8px 10px', minWidth: 220, fontSize: 11, outlineColor: '#26805a' }} />
+            <div><div style={labelStyle}>Request timeline</div><h2 style={{ fontSize: 17, margin: '5px 0 0', color: 'var(--gg-forest)' }}>What actually ran</h2></div>
+            <input value={traceFilter} onChange={e => setTraceFilter(e.target.value)} placeholder="Filter by request / trace ID" style={{ border: '1px solid var(--gg-line)', borderRadius: 8, padding: '8px 10px', minWidth: 220, fontSize: 11, outlineColor: 'var(--gg-up)' }} />
           </div>
-          <div style={{ color: '#87948c', fontSize: 10, marginBottom: 10 }}>Backend event buffer: latest 160 · RAG service: latest 100 · newest first. A shared trace ID connects hops for the same request.</div>
+          <div style={{ color: 'var(--gg-muted)', fontSize: 10, marginBottom: 10 }}>Backend event buffer: latest 160 · RAG service: latest 100 · newest first. A shared trace ID connects hops for the same request.</div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 780, fontSize: 11 }}>
-              <thead><tr style={{ color: '#829087', textAlign: 'left', borderBottom: '1px solid #e8eee9' }}>
+              <thead><tr style={{ color: 'var(--gg-muted)', textAlign: 'left', borderBottom: '1px solid var(--gg-line)' }}>
                 {['Time', 'Trace ID', 'Service', 'Stage', 'Status', 'Duration', 'Safe diagnostics'].map(v => <th key={v} style={{ padding: '9px 8px', fontSize: 9, letterSpacing: .7, textTransform: 'uppercase' }}>{v}</th>)}
               </tr></thead>
               <tbody>
                 {events.map((event, index) => {
                   const c = statusColor(event.status);
-                  return <tr key={`${event.timestamp}-${event.service}-${event.stage}-${index}`} style={{ borderBottom: '1px solid #f0f3f1', verticalAlign: 'top' }}>
-                    <td style={{ padding: '10px 8px', color: '#65766c', whiteSpace: 'nowrap' }}>{formatTime(event.timestamp)}</td>
-                    <td style={{ padding: '10px 8px', color: '#387455', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{event.traceId ? `${event.traceId.slice(0, 12)}…` : '—'}</td>
-                    <td style={{ padding: '10px 8px', color: '#365b47', whiteSpace: 'nowrap' }}>{event.service}</td>
-                    <td style={{ padding: '10px 8px', color: '#365b47' }}>{event.stage}</td>
+                  return <tr key={`${event.timestamp}-${event.service}-${event.stage}-${index}`} style={{ borderBottom: '1px solid var(--gg-line)', verticalAlign: 'top' }}>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-muted)', whiteSpace: 'nowrap' }}>{formatTime(event.timestamp)}</td>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-up)', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{event.traceId ? `${event.traceId.slice(0, 12)}…` : '—'}</td>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-forest)', whiteSpace: 'nowrap' }}>{event.service}</td>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-forest)' }}>{event.stage}</td>
                     <td style={{ padding: '10px 8px' }}><span style={{ background: c.bg, color: c.text, borderRadius: 20, padding: '3px 7px', fontSize: 9, fontWeight: 800 }}>{event.status}</span></td>
-                    <td style={{ padding: '10px 8px', color: '#65766c', whiteSpace: 'nowrap' }}>{event.durationMs == null ? '—' : `${Math.round(event.durationMs)} ms`}</td>
-                    <td style={{ padding: '10px 8px', color: '#7b8981', maxWidth: 360, lineHeight: 1.4, wordBreak: 'break-word' }}>{event.details && Object.keys(event.details).length ? JSON.stringify(event.details) : '—'}</td>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-muted)', whiteSpace: 'nowrap' }}>{event.durationMs == null ? '—' : `${Math.round(event.durationMs)} ms`}</td>
+                    <td style={{ padding: '10px 8px', color: 'var(--gg-muted)', maxWidth: 360, lineHeight: 1.4, wordBreak: 'break-word' }}>{event.details && Object.keys(event.details).length ? JSON.stringify(event.details) : '—'}</td>
                   </tr>;
                 })}
-                {!events.length && <tr><td colSpan={7} style={{ padding: 18, color: '#839087', textAlign: 'center' }}>{loading ? 'Waiting for events…' : 'No events yet. Upload a file or send a chat question, then refresh this view.'}</td></tr>}
+                {!events.length && <tr><td colSpan={7} style={{ padding: 18, color: 'var(--gg-muted)', textAlign: 'center' }}>{loading ? 'Waiting for events…' : 'No events yet. Upload a file or send a chat question, then refresh this view.'}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -207,17 +207,17 @@ export default function MicroservicesPage() {
 
         <section style={{ ...panel, padding: 18, marginBottom: 20 }}>
           <div style={labelStyle}>Legacy / inactive services</div>
-          <h2 style={{ fontSize: 17, margin: '5px 0 12px', color: '#214b37' }}>Not on the current Growth Gradual chat path</h2>
+          <h2 style={{ fontSize: 17, margin: '5px 0 12px', color: 'var(--gg-forest)' }}>Not on the current Growth Gradual chat path</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 9 }}>
-            {(data?.legacyServices ?? []).map(service => <div key={service.id} style={{ border: '1px solid #edf0ee', background: '#fafbfa', borderRadius: 9, padding: 11 }}>
-              <div style={{ fontWeight: 750, color: '#53665a', fontSize: 11 }}>{service.name}</div>
-              <div style={{ color: '#98a39c', fontSize: 10, lineHeight: 1.5, marginTop: 5 }}>{service.reason}</div>
+            {(data?.legacyServices ?? []).map(service => <div key={service.id} style={{ border: '1px solid var(--gg-line)', background: 'var(--gg-surface)', borderRadius: 9, padding: 11 }}>
+              <div style={{ fontWeight: 750, color: 'var(--gg-muted)', fontSize: 11 }}>{service.name}</div>
+              <div style={{ color: 'var(--gg-muted)', fontSize: 10, lineHeight: 1.5, marginTop: 5 }}>{service.reason}</div>
             </div>)}
           </div>
         </section>
 
-        <section style={{ ...panel, padding: 15, color: '#75837a', fontSize: 10, lineHeight: 1.6 }}>
-          <strong style={{ color: '#4b6455' }}>Diagnostic limitations</strong>
+        <section style={{ ...panel, padding: 15, color: 'var(--gg-muted)', fontSize: 10, lineHeight: 1.6 }}>
+          <strong style={{ color: 'var(--gg-forest)' }}>Diagnostic limitations</strong>
           <ul style={{ paddingLeft: 17, margin: '6px 0 0' }}>
             {(data?.notes ?? [
               'Only operational metadata is recorded. Prompts, document contents, credentials and provider URLs are not stored.',

@@ -220,22 +220,25 @@ export default function FeedPage({ category }: { category: Category }) {
     return () => { cancelled = true; clearInterval(timer); };
   }, [meta?.knowledgeBase?.status]);
 
-  // ── Strict category keyword filters ───────────────────────────────────────
+  // ── Category keyword filters ───────────────────────────────────────────────
+  // Most feeds file everything under the general category, so these patterns decide most tabs.
+  // They match the HEADLINE only (TITLE_ONLY): summaries mention "trade deficit" or "repo on hold"
+  // in stories that are not about stocks. Words that are ambiguous on their own (trade, hold,
+  // share, gain, correction, portfolio, scheme, returns, inflow) are left out; measured on 2,235
+  // cached articles, they put rupee, gold-import and budget stories under Stocks.
   const CATEGORY_KEYWORDS: Record<string, RegExp> = {
-    stocks: /\b(stock|share|equity|nifty|sensex|bse|nse|ipo|listing|gmp|allotment|sebi|fii|dii|rally|correction|bull|bear|trade|trading|nifty\s*50|smallcap|midcap|largecap|bluechip|dividend|buyback|rights\s*issue|bonus\s*share|circuit|upper\s*circuit|lower\s*circuit|52.week|pe\s*ratio|eps|screener|ticker|portfolio|gain|gainer|loser|analyst|target\s*price|buy\s*call|sell\s*call|hold|outperform|underperform)\b/i,
-    banks: /\b(bank|banking|lender|credit|loan|npa|nim|rbi|repo\s*rate|monetary\s*policy|hdfc\s*bank|icici\s*bank|sbi|axis\s*bank|kotak|yes\s*bank|idfc|federal\s*bank|deposit|savings|current\s*account|nbfc|microfinance|mfi|priority\s*sector|capital\s*adequacy|tier\s*1|tier\s*2|basel|liquidity|clrb|slr|crr|cd\s*ratio|net\s*interest|interest\s*income|advances|disbursement|asset\s*quality|provision)\b/i,
-    mutual_funds: /\b(mutual\s*fund|sip|nav|amc|amfi|nfo|fund\s*house|scheme|folio|elss|liquid\s*fund|debt\s*fund|hybrid\s*fund|equity\s*fund|index\s*fund|etf|exchange\s*traded|large\s*cap\s*fund|mid\s*cap\s*fund|small\s*cap\s*fund|flexi\s*cap|multi\s*cap|sectoral\s*fund|thematic\s*fund|stp|swp|lump\s*sum|returns|cagr|xirr|sharpe|alpha|beta|aum|inflow|outflow|redemption|icici\s*prudential|hdfc\s*mutual|nippon|axis\s*mutual|sbi\s*mutual|kotak\s*mutual|dsp|uti\s*mutual|mirae|motilal\s*oswal\s*mutual|aditya\s*birla|groww|etmoney|kuvera|paytm\s*money)\b/i,
-    finance: /\b(economy|gdp|inflation|cpi|wpi|fiscal|budget|tax|gst|rbi|monetary|interest\s*rate|repo|reverse\s*repo|forex|currency|rupee|dollar|exchange\s*rate|trade\s*deficit|current\s*account|balance\s*of\s*payment|fdi|fpi|capital\s*market|bond|yield|g-sec|treasury|debt|sovereign|imf|world\s*bank|oecd|sebi|irdai|irda|insurance|gold|crude|oil|commodity|real\s*estate|housing|msme|startup|unicorn|fintech|payment|upi|regulatory|policy|reform|subsidy|disinvestment|privatisation|public\s*sector)\b/i,
+    stocks: /\b(stocks?|shares|share\s*price|share\s*market|stock\s*market|equit(?:y|ies)\s*markets?|nifty\s*50|nifty50|nifty|sensex|bse|nse|ipos?|listing|gmp|allotment|sebi|fiis?|diis?|small[\s-]?caps?|mid[\s-]?caps?|large[\s-]?caps?|blue[\s-]?chips?|dividends?|buyback|rights\s*issue|bonus\s*issue|upper\s*circuit|lower\s*circuit|52[\s-]week|target\s*price|target\s*of\s*(?:rs\.?|₹)|brokerages?|buy\s*rating|sell\s*rating|outperform|underperform|rally|market\s*cap|closing\s*bell|opening\s*bell|bull\s*market|bear\s*market)\b/i,
+    banks: /\b(banks?|banking|banker|lenders?|loans?|npas?|nim|rbi|repo\s*rate|monetary\s*policy|hdfc\s*bank|icici\s*bank|sbi|axis\s*bank|kotak|yes\s*bank|idfc|federal\s*bank|deposits?|nbfcs?|microfinance|mfis?|priority\s*sector|capital\s*adequacy|basel|crr|slr|cd\s*ratio|net\s*interest|interest\s*income|asset\s*quality|credit\s*growth|bad\s*loans?)\b/i,
+    mutual_funds: /\b(mutual\s*funds?|mfs?|sips?|nav|amcs?|amfi|nfos?|fund\s*house|folios?|elss|liquid\s*funds?|debt\s*funds?|hybrid\s*funds?|equity\s*funds?|index\s*funds?|etfs?|exchange\s*traded|large[\s-]?cap\s*funds?|mid[\s-]?cap\s*funds?|small[\s-]?cap\s*funds?|flexi[\s-]?cap|multi[\s-]?cap|sectoral\s*funds?|thematic\s*funds?|stp|swp|lump\s*sum|cagr|xirr|aum|redemptions?|icici\s*prudential|nippon|mirae|aditya\s*birla|groww|kuvera|paytm\s*money)\b/i,
+    finance: /\b(economy|economic|gdp|inflation|cpi|wpi|fiscal|budget|tax|taxes|gst|rbi|monetary|interest\s*rates?|repo|forex|currency|rupee|dollar|exchange\s*rate|trade\s*deficit|current\s*account|balance\s*of\s*payments?|fdi|fpi|bonds?|yields?|g-?secs?|treasury|sovereign|imf|world\s*bank|oecd|sebi|irdai|insurance|gold|crude|oil\s*(?:prices?|surplus|supply|demand|imports?|output|market)|commodit(?:y|ies)|real\s*estate|housing|msmes?|startups?|unicorns?|fintech|payments?|upi|regulat(?:or|ory|ion)|reforms?|subsid(?:y|ies)|disinvestment|privati[sz]ation|exports?|imports?)\b/i,
   };
 
   const isRelevant = (article: Article, cat: Category): boolean => {
     if (cat === 'all') return true;
     const pattern = CATEGORY_KEYWORDS[cat];
     if (!pattern) return true;
-    const text = `${article.title} ${article.summary || ''} ${article.tag || ''}`;
-    // Accept if the article is filed under this category or its text is about it. Articles filed
-    // under the general 'all' category used to pass every tab, so Stocks showed unrelated news.
-    return article.category === cat || pattern.test(text);
+    // Filed under this category by its feed, or the headline is about it (TITLE_ONLY).
+    return article.category === cat || pattern.test(`${article.title} ${article.tag || ''}`);
   };
 
   const cat = CATEGORIES.find(c => c.id === category);

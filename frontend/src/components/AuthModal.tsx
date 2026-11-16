@@ -72,7 +72,7 @@ export default function AuthModal({ onClose }: AuthModalProps) {
       >
         <div style={{
           fontFamily: "'DM Sans',sans-serif", fontSize: '18px', fontWeight: 700,
-          color: '#0f172a', marginBottom: '4px',
+          color: 'var(--gg-ink)', marginBottom: '4px',
         }}>
           {mode === 'login' ? 'Log in' : 'Create account'}
         </div>
@@ -104,10 +104,10 @@ export default function AuthModal({ onClose }: AuthModalProps) {
           />
 
           {error && (
-            <div style={{ fontSize: '12px', color: '#dc2626', lineHeight: 1.4 }}>{error}</div>
+            <div style={{ fontSize: '12px', color: 'var(--gg-down)', lineHeight: 1.4 }}>{error}</div>
           )}
           {info && (
-            <div style={{ fontSize: '12px', color: '#16a34a', lineHeight: 1.4 }}>{info}</div>
+            <div style={{ fontSize: '12px', color: 'var(--gg-up)', lineHeight: 1.4 }}>{info}</div>
           )}
 
           <button
@@ -174,13 +174,13 @@ const inputStyle: React.CSSProperties = {
   fontFamily: "'DM Sans',sans-serif",
   outline: 'none',
   background: '#fff',
-  color: '#0f172a',
+  color: 'var(--gg-ink)',
 };
 
 const linkStyle: React.CSSProperties = {
   background: 'transparent',
   border: 'none',
-  color: '#c8922a',
+  color: 'var(--gg-gold-text)',
   fontWeight: 700,
   cursor: 'pointer',
   padding: 0,

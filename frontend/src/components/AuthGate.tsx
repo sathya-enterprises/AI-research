@@ -18,10 +18,10 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
   if (initializationError) {
     return (
-      <div role="alert" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', padding: '64px 20px', color: '#334155', fontFamily: "'DM Sans',sans-serif", textAlign: 'center' }}>
-        <div style={{ fontSize: '16px', fontWeight: 700, color: '#0f172a' }}>Could not verify the saved session</div>
+      <div role="alert" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', padding: '64px 20px', color: 'var(--gg-ink-2)', fontFamily: "'DM Sans',sans-serif", textAlign: 'center' }}>
+        <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--gg-ink)' }}>Could not verify the saved session</div>
         <div style={{ maxWidth: '420px', fontSize: '13px', lineHeight: 1.6 }}>{initializationError}</div>
-        <button type="button" onClick={retryInitialization} style={{ background: '#c8922a', color: '#fff', border: 'none', borderRadius: '8px', padding: '10px 16px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}>
+        <button type="button" onClick={retryInitialization} style={{ background: 'var(--gg-gold)', color: '#fff', border: 'none', borderRadius: '8px', padding: '10px 16px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}>
           Retry session check
         </button>
       </div>
@@ -97,7 +97,7 @@ function AuthScreen() {
       }}>
         <div style={{
           fontFamily: "'DM Sans',sans-serif", fontSize: '20px', fontWeight: 700,
-          color: '#0f172a', marginBottom: '4px', textAlign: 'center',
+          color: 'var(--gg-ink)', marginBottom: '4px', textAlign: 'center',
         }}>
           {mode === 'login' ? 'Log in' : 'Create account'}
         </div>
@@ -141,10 +141,10 @@ function AuthScreen() {
           )}
 
           {error && (
-            <div style={{ fontSize: '12px', color: '#dc2626', lineHeight: 1.4 }}>{error}</div>
+            <div style={{ fontSize: '12px', color: 'var(--gg-down)', lineHeight: 1.4 }}>{error}</div>
           )}
           {info && (
-            <div style={{ fontSize: '12px', color: '#16a34a', lineHeight: 1.4 }}>{info}</div>
+            <div style={{ fontSize: '12px', color: 'var(--gg-up)', lineHeight: 1.4 }}>{info}</div>
           )}
 
           <button
@@ -198,13 +198,13 @@ const inputStyle: React.CSSProperties = {
   fontFamily: "'DM Sans',sans-serif",
   outline: 'none',
   background: '#fff',
-  color: '#0f172a',
+  color: 'var(--gg-ink)',
 };
 
 const linkStyle: React.CSSProperties = {
   background: 'transparent',
   border: 'none',
-  color: '#c8922a',
+  color: 'var(--gg-gold-text)',
   fontWeight: 700,
   cursor: 'pointer',
   padding: 0,

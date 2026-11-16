@@ -56,7 +56,7 @@ const FALLBACK: MarketData = {
 const Panel = ({ children, style = {} }: { children: React.ReactNode; style?: React.CSSProperties }) => (
   <div style={{
     background: '#ffffff',
-    border: '1px solid #e6e2d8',
+    border: '1px solid var(--gg-line)',
     borderRadius: '10px',
     padding: '16px',
     boxShadow: '0 2px 10px rgba(15,23,42,0.06)',
@@ -65,10 +65,10 @@ const Panel = ({ children, style = {} }: { children: React.ReactNode; style?: Re
 );
 
 const SectionLabel = ({ children }: { children: React.ReactNode }) => (
-  <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'12px', paddingBottom:'8px', borderBottom:'1px solid #f0f2f7' }}>
+  <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'12px', paddingBottom:'8px', borderBottom:'1px solid var(--gg-line)' }}>
     <div style={{ width:'2px', height:'12px', background:'linear-gradient(180deg,#0d5c45,#c8922a)', borderRadius:'2px' }}/>
     <p style={{
-      fontSize:'9px', fontWeight:700, color:'#8892a4',
+      fontSize:'9px', fontWeight:700, color:'var(--gg-muted)',
       textTransform:'uppercase', letterSpacing:'2px',
       fontFamily:"'DM Sans',sans-serif", margin:0,
     }}>{children}</p>
@@ -85,7 +85,7 @@ function Pulse({ color = '#22c55e' }: { color?: string }) {
 }
 
 const SkeletonRow = () => (
-  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid #f8fafc' }}>
+  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--gg-line)' }}>
     <div className="skeleton-shine" style={{ width: '58px', height: '10px', borderRadius: '3px' }} />
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '5px' }}>
       <div className="skeleton-shine" style={{ width: '46px', height: '11px', borderRadius: '3px' }} />
@@ -183,7 +183,7 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
               fontFamily: 'JetBrains Mono, monospace',
             }}>
               {loading ? (
-                <span style={{ fontSize: '8px', color: '#cbd5e1' }}>loading…</span>
+                <span style={{ fontSize: '8px', color: 'var(--gg-muted)' }}>loading…</span>
               ) : (
                 <>
                   <Pulse color={data.marketOpen ? '#22c55e' : '#94a3b8'} />
@@ -203,7 +203,7 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
         </div>
 
         {/* Delay disclaimer */}
-        <p style={{ fontSize: '8px', color: '#cbd5e1', fontFamily: 'JetBrains Mono, monospace', marginBottom: '8px', letterSpacing: '0.5px' }}>
+        <p style={{ fontSize: '8px', color: 'var(--gg-muted)', fontFamily: 'JetBrains Mono, monospace', marginBottom: '8px', letterSpacing: '0.5px' }}>
           ⚡ NSE India · Live
         </p>
 
@@ -213,15 +213,15 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
           <RowHover key={s.symbol} flashColor={flash.has(s.symbol) ? (s.up ? '#f0fdf4' : '#fef2f2') : undefined}>
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '7px 0', borderBottom: '1px solid #f8fafc',
+              padding: '7px 0', borderBottom: '1px solid var(--gg-line)',
             }}>
               <span style={{
-                fontSize: '10px', fontWeight: 600, color: '#475569',
+                fontSize: '10px', fontWeight: 600, color: 'var(--gg-ink-2)',
                 fontFamily: 'DM Sans, sans-serif', letterSpacing: '0.3px',
               }}>{s.symbol}</span>
               <div style={{ textAlign: 'right' }}>
                 <p style={{
-                  fontSize: '11px', color: '#0f172a',
+                  fontSize: '11px', color: 'var(--gg-ink)',
                   fontFamily: 'JetBrains Mono, monospace', fontWeight: 500,
                 }}>{s.price}</p>
                 <p style={{
@@ -240,21 +240,21 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
         <SectionLabel>▲ Top Gainers</SectionLabel>
         {loading ? (
           Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #f8fafc' }}>
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--gg-line)' }}>
               <div className="skeleton-shine" style={{ width: '54px', height: '9px', borderRadius: '3px' }} />
               <div className="skeleton-shine" style={{ width: '36px', height: '9px', borderRadius: '3px' }} />
             </div>
           ))
         ) : gainers.length === 0 ? (
-          <div style={{ fontSize: '10px', color: '#cbd5e1', fontFamily: 'DM Sans, sans-serif' }}>No data</div>
+          <div style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>No data</div>
         ) : gainers.map(s => (
           <RowHover key={s.symbol}>
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '6px 0', borderBottom: '1px solid #f8fafc',
+              padding: '6px 0', borderBottom: '1px solid var(--gg-line)',
             }}>
-              <span style={{ fontSize: '10px', color: '#64748b', fontFamily: 'DM Sans, sans-serif' }}>{s.symbol}</span>
-              <span style={{ fontSize: '10px', color: '#15803d', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{s.change}</span>
+              <span style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>{s.symbol}</span>
+              <span style={{ fontSize: '10px', color: 'var(--gg-up)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{s.change}</span>
             </div>
           </RowHover>
         ))}
@@ -265,21 +265,21 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
         <SectionLabel>▼ Top Losers</SectionLabel>
         {loading ? (
           Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #f8fafc' }}>
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--gg-line)' }}>
               <div className="skeleton-shine" style={{ width: '54px', height: '9px', borderRadius: '3px' }} />
               <div className="skeleton-shine" style={{ width: '36px', height: '9px', borderRadius: '3px' }} />
             </div>
           ))
         ) : losers.length === 0 ? (
-          <div style={{ fontSize: '10px', color: '#cbd5e1', fontFamily: 'DM Sans, sans-serif' }}>No data</div>
+          <div style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>No data</div>
         ) : losers.map(s => (
           <RowHover key={s.symbol}>
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '6px 0', borderBottom: '1px solid #f8fafc',
+              padding: '6px 0', borderBottom: '1px solid var(--gg-line)',
             }}>
-              <span style={{ fontSize: '10px', color: '#64748b', fontFamily: 'DM Sans, sans-serif' }}>{s.symbol}</span>
-              <span style={{ fontSize: '10px', color: '#b91c1c', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{s.change}</span>
+              <span style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>{s.symbol}</span>
+              <span style={{ fontSize: '10px', color: 'var(--gg-down)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{s.change}</span>
             </div>
           </RowHover>
         ))}
@@ -288,23 +288,23 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
       {/* ── FII / DII ───────────────────────────────────────────────────── */}
       <Panel>
         <SectionLabel>FII / DII Activity</SectionLabel>
-        <p style={{ fontSize: '8px', color: '#cbd5e1', fontFamily: 'JetBrains Mono, monospace', marginBottom: '8px' }}>
+        <p style={{ fontSize: '8px', color: 'var(--gg-muted)', fontFamily: 'JetBrains Mono, monospace', marginBottom: '8px' }}>
           ⚡ Indicative — previous session
         </p>
         <div style={{ display: 'flex', gap: '8px' }}>
           <div style={{
-            flex: 1, background: '#f0fdf4', border: '1px solid #bbf7d0',
+            flex: 1, background: 'var(--gg-up-tint)', border: '1px solid var(--gg-line)',
             borderRadius: '6px', padding: '10px', textAlign: 'center',
           }}>
-            <p style={{ fontSize: '9px', color: '#64748b', fontFamily: 'DM Sans, sans-serif', letterSpacing: '1px', textTransform: 'uppercase' }}>FII Net</p>
-            <p style={{ fontSize: '13px', color: '#15803d', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{fiiNet}</p>
+            <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', letterSpacing: '1px', textTransform: 'uppercase' }}>FII Net</p>
+            <p style={{ fontSize: '13px', color: 'var(--gg-up)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{fiiNet}</p>
           </div>
           <div style={{
-            flex: 1, background: 'rgba(13,92,69,0.07)', border: '1px solid #bfdbfe',
+            flex: 1, background: 'rgba(13,92,69,0.07)', border: '1px solid var(--gg-line-strong)',
             borderRadius: '6px', padding: '10px', textAlign: 'center',
           }}>
-            <p style={{ fontSize: '9px', color: '#64748b', fontFamily: 'DM Sans, sans-serif', letterSpacing: '1px', textTransform: 'uppercase' }}>DII Net</p>
-            <p style={{ fontSize: '13px', color: '#0d5c45', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{diiNet}</p>
+            <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif', letterSpacing: '1px', textTransform: 'uppercase' }}>DII Net</p>
+            <p style={{ fontSize: '13px', color: 'var(--gg-forest)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 600 }}>{diiNet}</p>
           </div>
         </div>
       </Panel>
@@ -318,12 +318,12 @@ export default function StockPanel(_props: { stocks?: Stock[]; stats?: QuickStat
           <RowHover key={s.label}>
             <div style={{
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '7px 0', borderBottom: '1px solid #f8fafc',
+              padding: '7px 0', borderBottom: '1px solid var(--gg-line)',
             }}>
-              <span style={{ fontSize: '10px', color: '#64748b', fontFamily: 'DM Sans, sans-serif' }}>{s.label}</span>
+              <span style={{ fontSize: '10px', color: 'var(--gg-muted)', fontFamily: 'DM Sans, sans-serif' }}>{s.label}</span>
               <div style={{ textAlign: 'right' }}>
-                <p style={{ fontSize: '11px', color: '#0f172a', fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }}>{s.value}</p>
-                <p style={{ fontSize: '9px', color: '#94a3b8', fontFamily: 'JetBrains Mono, monospace' }}>{s.sub}</p>
+                <p style={{ fontSize: '11px', color: 'var(--gg-ink)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }}>{s.value}</p>
+                <p style={{ fontSize: '9px', color: 'var(--gg-muted)', fontFamily: 'JetBrains Mono, monospace' }}>{s.sub}</p>
               </div>
             </div>
           </RowHover>

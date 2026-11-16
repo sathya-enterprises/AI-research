@@ -19,12 +19,12 @@ function buildHref(a: Article): string {
 
 const SidePanel = ({ children, title }: { children: React.ReactNode; title: string }) => (
   <div style={{
-    background:'#fff', border:'1px solid #e6e2d8', borderRadius:'10px',
+    background:'#fff', border:'1px solid var(--gg-line)', borderRadius:'10px',
     padding:'12px 14px', boxShadow:'0 2px 10px rgba(15,23,42,0.06)',
   }}>
-    <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'10px', paddingBottom:'8px', borderBottom:'1px solid #f0f2f7' }}>
+    <div style={{ display:'flex', alignItems:'center', gap:'6px', marginBottom:'10px', paddingBottom:'8px', borderBottom:'1px solid var(--gg-line)' }}>
       <div style={{ width:'2px', height:'12px', background:'linear-gradient(180deg,#0d5c45,#c8922a)', borderRadius:'2px' }}/>
-      <p style={{ fontSize:'9px', fontWeight:700, color:'#8892a4', textTransform:'uppercase', letterSpacing:'2px', fontFamily:"'DM Sans',sans-serif", margin:0 }}>{title}</p>
+      <p style={{ fontSize:'9px', fontWeight:700, color:'var(--gg-muted)', textTransform:'uppercase', letterSpacing:'2px', fontFamily:"'DM Sans',sans-serif", margin:0 }}>{title}</p>
     </div>
     {children}
   </div>
@@ -59,12 +59,12 @@ export default function Sidebar({ related }: { related: Article[] }) {
             }}>{a.tag}</span>
             <p style={{
               fontSize:'11.5px', fontFamily:"'Playfair Display',serif",
-              fontWeight:700, color:'#1a2035', lineHeight:1.38, marginBottom:'4px',
+              fontWeight:700, color:'var(--gg-ink)', lineHeight:1.38, marginBottom:'4px',
             }}>{a.title}</p>
             <div style={{ display:'flex', gap:'6px', alignItems:'center' }}>
-              <span style={{ fontSize:'9px', color:'#64748b', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{a.source}</span>
-              <span style={{ color:'#d1d9e6', fontSize:'8px' }}>·</span>
-              <span style={{ fontSize:'8.5px', color:'#94a3b8', fontFamily:'JetBrains Mono,monospace' }}>{a.time}</span>
+              <span style={{ fontSize:'9px', color:'var(--gg-muted)', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{a.source}</span>
+              <span style={{ color:'var(--gg-muted)', fontSize:'8px' }}>·</span>
+              <span style={{ fontSize:'8.5px', color:'var(--gg-muted)', fontFamily:'JetBrains Mono,monospace' }}>{a.time}</span>
             </div>
           </div>
         ))}
@@ -85,9 +85,9 @@ export default function Sidebar({ related }: { related: Article[] }) {
           >
             <div style={{ display:'flex', alignItems:'center', gap:'7px' }}>
               <span style={{ width:'5px', height:'5px', borderRadius:'50%', background:'#22c55e', display:'inline-block', boxShadow:'0 0 4px rgba(34,197,94,0.5)' }}/>
-              <span style={{ fontSize:'10.5px', color:'#334155', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{src}</span>
+              <span style={{ fontSize:'10.5px', color:'var(--gg-ink-2)', fontFamily:"'DM Sans',sans-serif", fontWeight:500 }}>{src}</span>
             </div>
-            <span style={{ fontSize:'8.5px', color:'#0d5c45', fontFamily:'JetBrains Mono,monospace', fontWeight:600, letterSpacing:'0.5px' }}>LIVE</span>
+            <span style={{ fontSize:'8.5px', color:'var(--gg-forest)', fontFamily:'JetBrains Mono,monospace', fontWeight:600, letterSpacing:'0.5px' }}>LIVE</span>
           </div>
         ))}
       </SidePanel>

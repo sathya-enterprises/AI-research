@@ -34,7 +34,7 @@ export default function TickerTape({ stocks: fallback }: { stocks: Stock[] }) {
       // Editorial palette (matches report_design.py / workspace tokens):
       // deep forest instead of the old navy-to-teal gradient.
       background: 'linear-gradient(90deg, #12201B 0%, #162721 50%, #1B2E26 100%)',
-      borderBottom: '1px solid #24392F',
+      borderBottom: '1px solid var(--gg-forest)',
       overflow: 'hidden',
       height: '30px',
       display: 'flex',
