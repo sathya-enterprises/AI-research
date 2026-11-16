@@ -6,6 +6,7 @@ import { DefaultChatTransport, type UIMessage } from 'ai';
 import Image from 'next/image';
 import { supabase } from '@/lib/supabaseClient';
 import { loadPdfJs } from '@/lib/pdfjs-browser';
+import ReportProgress from '@/components/ReportProgress';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Source { title: string; url: string; snippet: string; }
@@ -204,6 +205,7 @@ interface Message {
   kbCompany?: KbCompany | null;
   reportData?: ReportData; reportLoading?: boolean; reportError?: string;
   reportProgress?: string; reportProgressPercent?: number; reportPreview?: string; reportPreviewTruncated?: boolean;
+  reportPhase?: string; reportStartedAt?: number;
   inlineCharts?: ChartSpec[]; wantsVisual?: boolean;
   // Report request context is retained for retrying a failed opt-in report.
   reportEligible?: boolean; reportQuestion?: string; reportFiles?: AttachedFile[];
@@ -296,6 +298,8 @@ function saveConversations(convs: Conversation[]) {
       delete rest.reportFiles;
       delete rest.reportProgress;
       delete rest.reportProgressPercent;
+      delete rest.reportPhase;
+      delete rest.reportStartedAt;
       delete rest.reportPreview;
       delete rest.reportPreviewTruncated;
       const rd = rest.reportData;
@@ -948,7 +952,7 @@ function EdBarChart({ spec, horizontal = false }: { spec: ChartSpec; horizontal?
                   const x0 = x(Math.max(lo, Math.min(0, hi))), x1 = x(v);
                   return (
                     <g key={si}>
-                      <rect x={Math.min(x0, x1)} y={y + 1} width={Math.max(1, Math.abs(x1 - x0))} height={Math.max(2, barH - 2)} rx={2} fill={colorFor(si, v)}>
+                      <rect className="ed-bar ed-bar--h" x={Math.min(x0, x1)} y={y + 1} width={Math.max(1, Math.abs(x1 - x0))} height={Math.max(2, barH - 2)} rx={2} fill={colorFor(si, v)}>
                         <title>{`${label}${series.length > 1 ? ` · ${s.name}` : ''}: ${edFormatValue(v, spec.unit)}`}</title>
                       </rect>
                       {showValues ? <text x={Math.max(x0, x1) + 6} y={y + barH / 2 + 4} fontSize={11} fill={ED_INK}>{edFormatValue(v, spec.unit)}</text> : null}
@@ -994,7 +998,7 @@ function EdBarChart({ spec, horizontal = false }: { spec: ChartSpec; horizontal?
                 const bx = gx + si * barW;
                 return (
                   <g key={si}>
-                    <rect x={bx + 1} y={Math.min(y0, y1)} width={Math.max(2, barW - 2)} height={Math.max(1, Math.abs(y1 - y0))} rx={2} fill={colorFor(si, v)}>
+                    <rect className="ed-bar ed-bar--v" x={bx + 1} y={Math.min(y0, y1)} width={Math.max(2, barW - 2)} height={Math.max(1, Math.abs(y1 - y0))} rx={2} fill={colorFor(si, v)}>
                       <title>{`${label}${series.length > 1 ? ` · ${s.name}` : ''}: ${edFormatValue(v, spec.unit)}`}</title>
                     </rect>
                     {showValues ? <text x={bx + barW / 2} y={v >= 0 ? Math.min(y0, y1) - 5 : Math.max(y0, y1) + 13} textAnchor="middle" fontSize={11} fill={ED_INK}>{edFormatValue(v, spec.unit)}</text> : null}
@@ -1058,11 +1062,11 @@ function EdLineChart({ spec }: { spec: ChartSpec }) {
           return (
             <g key={si}>
               {segments.map((seg, k) => seg.length > 1 ? (
-                <polyline key={k} points={seg.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+                <polyline key={k} className="ed-line" pathLength={1} points={seg.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
               ) : null)}
               {pts.map((p, i) => p ? (
                 <g key={i}>
-                  <circle cx={p.x} cy={p.y} r={4} fill="#FFFFFF" stroke={color} strokeWidth={2}><title>{`${p.l}${series.length > 1 ? ` · ${s.name}` : ''}: ${edFormatValue(p.v, spec.unit)}`}</title></circle>
+                  <circle className="ed-dot" cx={p.x} cy={p.y} r={4} fill="#FFFFFF" stroke={color} strokeWidth={2}><title>{`${p.l}${series.length > 1 ? ` · ${s.name}` : ''}: ${edFormatValue(p.v, spec.unit)}`}</title></circle>
                   {(labelPoints && series.length === 1) || i === pts.length - 1 ? <text x={p.x} y={p.y - 10} textAnchor="middle" fontSize={11} fill={ED_INK}>{edFormatValue(p.v, spec.unit)}</text> : null}
                 </g>
               ) : null)}
@@ -1105,7 +1109,7 @@ function EdPieChart({ spec, donut = false }: { spec: ChartSpec; donut?: boolean 
       <div className="ed-chart-pie">
         <svg viewBox="0 0 200 200" role="img" aria-label={spec.title} style={{ fontFamily: ED_FONT }}>
           {slices.map((s, i) => (
-            <path key={i} d={s.path} fill={s.color} stroke="#FFFFFF" strokeWidth={2}><title>{`${s.label}: ${edFormatValue(s.value, spec.unit)} (${s.pct.toFixed(1)}%)`}</title></path>
+            <path key={i} className="ed-slice" d={s.path} fill={s.color} stroke="#FFFFFF" strokeWidth={2}><title>{`${s.label}: ${edFormatValue(s.value, spec.unit)} (${s.pct.toFixed(1)}%)`}</title></path>
           ))}
         </svg>
       </div>
@@ -1517,27 +1521,18 @@ function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExperiment,
       <div className="report-wrap">
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           {loading && (
-            <div className="report-progress" role="status" aria-live="polite">
-              <div className="report-progress-head">
-                <span className="report-progress-kicker">
-                  <span className="dots" aria-hidden="true"><i/><i/><i/></span>
-                  {attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Report')} report in progress
-                </span>
-                {typeof msg.reportProgressPercent === 'number' ? <span className="report-progress-pct">{Math.max(0, Math.min(100, msg.reportProgressPercent))}%</span> : null}
-              </div>
-              {/* The stage text is the backend's own progress message — never simulated. */}
-              <div className="report-progress-stage">{msg.reportProgress || 'Generating report…'}</div>
-              {typeof msg.reportProgressPercent === 'number' && (
-                <div className="report-progress-track" aria-label="Report generation progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, msg.reportProgressPercent))}>
-                  <div className="report-progress-fill" style={{ width:`${Math.max(2, Math.min(100, msg.reportProgressPercent))}%` }}/>
-                </div>
-              )}
-            </div>
+            <ReportProgress
+              title={`${attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Research')} report`}
+              phase={msg.reportPhase}
+              message={msg.reportProgress}
+              percent={msg.reportProgressPercent}
+              startedAt={msg.reportStartedAt}
+            />
           )}
           {loading && !!msg.reportPreview?.trim() && (
-            <div className="report-preview-panel">
+            <div className="report-preview-panel gg-rise">
               <div className="report-preview-head">
-                <span className="report-preview-label">Working draft</span>
+                <span className="report-preview-label">Draft — read while it is checked</span>
                 <span>Evidence, citation and PDF checks are still running{msg.reportPreviewTruncated ? ' · opening sections shown' : ''}</span>
               </div>
               <div className="report-content report-preview-body" dangerouslySetInnerHTML={{ __html: renderMd(normalizeReportMarkdownSource(msg.reportPreview.slice(0, 32000))) }}/>
@@ -3456,6 +3451,7 @@ export default function GrowthGradualChat() {
     const clientRequestId = `${botMsgId}:${effectiveReportTier}:${effectiveReportStyle}:${question.length}:${Array.from(question).reduce((h, ch) => ((h * 31) + ch.charCodeAt(0)) | 0, 7)}`;
     setMessages(prev => prev.map(m => m.id === botMsgId ? {
       ...m, reportLoading: true, reportProgress: 'Preparing report…', reportProgressPercent: 1,
+      reportPhase: 'starting', reportStartedAt: Date.now(),
       reportPreview: undefined, reportPreviewTruncated: false, reportError: undefined,
     } : m));
 
@@ -3717,7 +3713,8 @@ export default function GrowthGradualChat() {
                   const progressMessage = String(progressData.message || 'Generating report…');
                   const progressPercent = Number.isFinite(Number(progressData.percent)) ? Math.max(0, Math.min(100, Number(progressData.percent))) : undefined;
                   setStatusMsg(progressPercent === undefined ? progressMessage : `${progressMessage} ${progressPercent}%`);
-                  setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, reportProgress: progressMessage, reportProgressPercent: progressPercent } : m));
+                  const progressPhase = progressData.phase ? String(progressData.phase) : undefined;
+                  setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, reportProgress: progressMessage, reportProgressPercent: progressPercent, reportPhase: progressPhase ?? m.reportPhase } : m));
                 }
                 if (event.type === 'data-report-preview' && event.data) {
                   const previewData = event.data as { delta?: string; truncated?: boolean };
@@ -3807,7 +3804,8 @@ export default function GrowthGradualChat() {
                 const progressMessage = String(statusData.progressMessage);
                 const progressPercent = Number.isFinite(Number(statusData.progressPercent)) ? Math.max(0, Math.min(100, Number(statusData.progressPercent))) : undefined;
                 setStatusMsg(progressPercent === undefined ? progressMessage : `${progressMessage} ${progressPercent}%`);
-                setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, reportProgress: progressMessage, reportProgressPercent: progressPercent } : m));
+                const progressPhase = statusData.phase ? String(statusData.phase) : undefined;
+                setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, reportProgress: progressMessage, reportProgressPercent: progressPercent, reportPhase: progressPhase ?? m.reportPhase } : m));
               }
               if (statusData.status === 'done') {
                 const result = statusData.result || statusData;

@@ -98,6 +98,50 @@ body {
 .gg-btn:active, .gg-btn-ghost:active { transform: scale(.97); }
 .gg-btn:disabled, .gg-btn-ghost:disabled, .gg-btn-ghost[aria-busy="true"] { cursor: progress; opacity: .7; transform: none; }
 
+/* ── Report progress timeline (components/ReportProgress.tsx) ─────────────── */
+@keyframes gg-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes gg-spin { to { transform: rotate(360deg); } }
+.gg-rise { animation: gg-rise var(--gg-dur-enter) var(--gg-ease) both; }
+.gg-progress {
+  width: 100%; display: flex; flex-direction: column; gap: 14px;
+  padding: 18px 20px; background: var(--gg-surface); border: 1px solid var(--gg-line); border-radius: 14px;
+  font-family: var(--gg-font-ui); animation: gg-rise var(--gg-dur-enter) var(--gg-ease) both;
+}
+.gg-progress-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gg-progress-title { font-size: 15px; font-weight: 600; color: var(--gg-ink); }
+.gg-progress-meta { display: inline-flex; gap: 12px; font-size: 13px; color: var(--gg-muted); font-variant-numeric: tabular-nums; }
+.gg-progress-meta b { color: var(--gg-ink); font-weight: 600; }
+.gg-progress-track { height: 4px; border-radius: 4px; background: #ECE7DC; overflow: hidden; }
+.gg-progress-fill { height: 100%; border-radius: 4px; background: var(--gg-forest); transition: width var(--gg-dur-emph) var(--gg-ease); }
+.gg-progress-steps { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.gg-step { display: flex; gap: 12px; align-items: flex-start; padding: 6px 0; }
+.gg-step-dot {
+  flex: none; width: 22px; height: 22px; border-radius: 999px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--gg-dur-enter) var(--gg-ease), border-color var(--gg-dur-enter) var(--gg-ease);
+}
+.gg-step--done .gg-step-dot { background: var(--gg-forest); }
+.gg-step--active .gg-step-dot { border: 3px solid #D7E6DE; border-top-color: var(--gg-forest); animation: gg-spin 900ms linear infinite; }
+.gg-step--pending .gg-step-dot { border: 2px solid var(--gg-line-strong); }
+.gg-step-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 1px; }
+.gg-step-label { font-size: 14px; color: var(--gg-muted); }
+.gg-step--done .gg-step-label { color: var(--gg-ink-2); }
+.gg-step--active .gg-step-label { color: var(--gg-ink); font-weight: 600; }
+.gg-step-detail { font-size: 13px; color: var(--gg-ink-2); overflow-wrap: anywhere; animation: gg-rise var(--gg-dur-enter) var(--gg-ease) both; }
+.gg-progress-note { font-size: 13px; color: var(--gg-muted); padding-top: 12px; border-top: 1px solid var(--gg-line); line-height: 1.5; }
+
+/* ── Charts draw in once when they appear ───────────────────────────────────── */
+@keyframes gg-line-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes gg-grow-v { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes gg-grow-h { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes gg-fade { from { opacity: 0; } to { opacity: 1; } }
+.ed-line { stroke-dasharray: 1; animation: gg-line-draw 700ms var(--gg-ease) both; }
+.ed-dot { animation: gg-fade var(--gg-dur-emph) var(--gg-ease) 500ms both; }
+.ed-bar { transform-box: fill-box; animation-duration: 500ms; animation-timing-function: var(--gg-ease); animation-fill-mode: both; }
+.ed-bar--v { transform-origin: center bottom; animation-name: gg-grow-v; }
+.ed-bar--h { transform-origin: left center; animation-name: gg-grow-h; }
+.ed-slice { animation: gg-fade 500ms var(--gg-ease) both; }
+
 /* ── Accessible focus ring — gold accent, only shown for keyboard nav ──── */
 :focus-visible {
   outline: 2px solid var(--gold);
