@@ -171,11 +171,12 @@ def main() -> int:
     parser.add_argument("--ids", default="")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--diagnostics", default="", help="captures folder (default backend/diagnostics)")
+    parser.add_argument("--captures", default=str(ROOT / "benchmark" / "captures.json"), help="prompt -> capture mapping")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
     prompts = json.loads((ROOT / "benchmark" / "prompts.json").read_text(encoding="utf-8"))["prompts"]
-    captures = json.loads((ROOT / "benchmark" / "captures.json").read_text(encoding="utf-8"))["captures"]
+    captures = json.loads(Path(args.captures).read_text(encoding="utf-8"))["captures"]
     wanted = {i.strip() for i in args.ids.split(",") if i.strip()}
     jobs = [(p["id"], captures[p["id"]]["capture"]) for p in prompts
             if captures.get(p["id"], {}).get("capture") and (not wanted or p["id"] in wanted)]
