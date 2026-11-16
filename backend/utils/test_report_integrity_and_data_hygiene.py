@@ -973,3 +973,16 @@ def test_calculations_read_units_percent_points_scales_and_signed_operands():
     pool = number_pool({"S1": "Nifty Metal | -0.73 | 29.90"})
     assert verify_calculation_labels("| Metal | -0.73 | 29.90 | 30.63 (calculated: 29.90 - (-0.73)) |", pool) == ""
     assert verify_calculation_labels("| Metal | -0.73 | 29.90 | 29.17 (calculated: 29.90 - (-0.73)) |", pool)
+
+
+def test_chart_points_are_dated_by_their_own_period_labels():
+    # Benchmark: 21 of 79 "outside the requested window" rejections were in-window points. "FY 23-24" was
+    # read as FY2023 and "31.03.2021" was dated by its row's neighbouring "2020" column.
+    from utils.chart_evidence_audit import _label_period, _period_ranges, _periods_outside_question_window
+
+    assert _period_ranges("FY 23-24")[0][:2] == _period_ranges("2023-24")[0][:2]
+    assert _period_ranges("FY21-22")[0][:2] == _period_ranges("2021-22")[0][:2]
+    question = "How did subscribers change from 2021 to 2025?"
+    assert _label_period("31.03.2021") and not _periods_outside_question_window(question, [_label_period("31.03.2021")])
+    assert _label_period("FY 24-25") and _label_period("Mar 2024") and not _label_period("Uttar Pradesh")
+    assert _periods_outside_question_window(question, [_label_period("31.03.2020")])

@@ -1222,6 +1222,18 @@ def _calendar_quarter_months(quarter: int, year: int) -> tuple[int, int]:
 
 
 _SPLIT_FISCAL_YEAR_RE = re.compile(r"(?i)(?<![\d.])(?:FY\s*'?)?((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?![\d])")
+_SHORT_SPLIT_FISCAL_YEAR_RE = re.compile(r"(?i)\bFY\s*'?(\d{2})\s*[-–/]\s*(\d{2})(?![\d])")
+_PERIOD_WORDS_RE = re.compile(
+    r"(?i)\b(?:FY|CY|Q[1-4]|H[12]|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|"
+    r"june|july|august|september|october|november|december|as\s+(?:of|on)|end|year)\b")
+
+
+def _label_period(value: object) -> str:
+    """The label itself when it is only a period ("31.03.2021", "FY 23-24", "Mar 2024", "2020-21")."""
+    text = str(value or "").strip()
+    if not text or not _period_ranges(text):
+        return ""
+    return text if not re.search(r"[A-Za-z]", _PERIOD_WORDS_RE.sub(" ", text)) else ""
 
 
 def _period_ranges(text: object) -> list[tuple[int, int, str]]:
@@ -1276,6 +1288,13 @@ def _period_ranges(text: object) -> list[tuple[int, int, str]]:
     # in-window FY points were trimmed or rejected.
     for match in list(_SPLIT_FISCAL_YEAR_RE.finditer(remaining)):
         first, tail = int(match.group(1)), int(match.group(2))
+        if tail == (first + 1) % 100:
+            add(_month_ordinal(first, 4), _month_ordinal(first + 1, 3), match.group(0))
+            mask(match)
+    # Two-digit split fiscal years ("FY 23-24", "FY21-22") run April 2023 - March 2024; read as "FY 23"
+    # they were dated a year early and in-window state tables were rejected.
+    for match in list(_SHORT_SPLIT_FISCAL_YEAR_RE.finditer(remaining)):
+        first, tail = 2000 + int(match.group(1)), int(match.group(2))
         if tail == (first + 1) % 100:
             add(_month_ordinal(first, 4), _month_ordinal(first + 1, 3), match.group(0))
             mask(match)
@@ -2470,7 +2489,12 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                                 "reason": point_mismatch,
                             })
                             continue
+                    own_period = _label_period(label) or _label_period(series) or _column_period(point)
                     outside_periods = _periods_outside_question_window(
+                        # A point labelled only by a period ("31.03.2021") is dated by that label; other
+                        # periods in its source row ("... 2020 | 2021") are its neighbours' periods.
+                        question, [own_period],
+                    ) if own_period else _periods_outside_question_window(
                         question,
                         [
                             " ".join((label, series)),
@@ -2549,7 +2573,10 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     if not local_ok:
                         local_context_miss = True
                         continue
+                own_period = _label_period(label) or _label_period(series) or _column_period(point)
                 outside_periods = _periods_outside_question_window(
+                    question, [own_period],
+                ) if own_period else _periods_outside_question_window(
                     question,
                     [
                         " ".join((label, series)),
