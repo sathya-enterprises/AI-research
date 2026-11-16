@@ -1,24 +1,58 @@
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Lora and Inter are self-hosted (below); only the price font comes from Google. */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Growth Gradual design system v1 ──────────────────────────────────────────
+   One palette: forest green and gold on warm paper. Use these tokens; do not
+   add new hex values in components. (Mockups: growth-gradual-redesign.html.) */
 :root {
-  --navy:    #0e1f3d;
-  --navy2:   #162a4e;
-  --teal:    #0d5c45;
-  --teal2:   #127a5b;
-  --gold:    #c49a4a;
-  --gold2:   #d9b77a;
-  --cream:   #f8fafc;
-  --ivory:   #ffffff;
-  --surface: #ffffff;
-  --surface2:#f1f5f9;
-  --border:  #e2e8f0;
-  --border2: #edf2f7;
-  --muted:   #64748b;
-  --text:    #0f172a;
-  --text2:   #475569;
+  --gg-forest:       #0D5C45;  /* primary: buttons, links, active states */
+  --gg-forest-deep:  #0A3B2E;  /* ticker, dark surfaces */
+  --gg-forest-tint:  #E8F1EC;  /* selected/active backgrounds */
+  --gg-gold:         #C49A4A;  /* accent fills only (fails contrast as text) */
+  --gg-gold-text:    #8A6420;  /* gold for text: 5.4:1 on white */
+  --gg-paper:        #FAF8F3;  /* page ground */
+  --gg-paper-2:      #F4F1EA;  /* sidebars, wells */
+  --gg-surface:      #FFFFFF;  /* cards */
+  --gg-ink:          #0F172A;  /* headings, primary text */
+  --gg-ink-2:        #475569;  /* body text */
+  --gg-muted:        #5B6577;  /* labels, meta (4.5:1 on paper) */
+  --gg-line:         #E6E2D8;  /* borders, dividers */
+  --gg-line-strong:  #D4CEC0;  /* input borders, emphasis rules */
+  --gg-up:           #0B7A55;  /* gains */
+  --gg-down:         #B42318;  /* losses */
+  --gg-up-tint:      #E7F4EE;
+  --gg-down-tint:    #FBECEA;
+
+  --gg-font-display: 'Lora', Georgia, serif;
+  --gg-font-ui:      'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --gg-font-mono:    'JetBrains Mono', ui-monospace, Consolas, monospace;
+
+  /* Motion: press 120ms, enter 200ms, emphasis 320ms; one easing. Nothing loops
+     forever except an indicator of work that is actually running. */
+  --gg-ease:         cubic-bezier(.2,.8,.2,1);
+  --gg-dur-press:    120ms;
+  --gg-dur-enter:    200ms;
+  --gg-dur-emph:     320ms;
+
+  /* Older names, kept so existing styles follow the new palette. */
+  --navy:    var(--gg-forest-deep);
+  --navy2:   var(--gg-forest-deep);
+  --teal:    var(--gg-forest);
+  --teal2:   var(--gg-forest);
+  --gold:    var(--gg-gold);
+  --gold2:   var(--gg-gold);
+  --cream:   var(--gg-paper);
+  --ivory:   var(--gg-surface);
+  --surface: var(--gg-surface);
+  --surface2:var(--gg-paper-2);
+  --border:  var(--gg-line);
+  --border2: var(--gg-line);
+  --muted:   var(--gg-muted);
+  --text:    var(--gg-ink);
+  --text2:   var(--gg-ink-2);
   /* fluid sidebar columns */
   --col-left:  clamp(160px, 17vw, 230px);
   --col-right: clamp(180px, 18vw, 250px);
@@ -29,22 +63,24 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-pill: 999px;
-  --shadow-xs: 0 1px 3px rgba(31,47,88,0.05);
-  --shadow-sm: 0 3px 12px rgba(31,47,88,0.065);
-  --shadow-md: 0 8px 26px rgba(31,47,88,0.10);
-  --shadow-lg: 0 14px 40px rgba(31,47,88,0.15);
-  --ease: cubic-bezier(.4,0,.2,1);
-  --ease-spring: cubic-bezier(.34,1.56,.64,1);
+  --shadow-xs: 0 1px 3px rgba(15,23,42,0.05);
+  --shadow-sm: 0 3px 12px rgba(15,23,42,0.06);
+  --shadow-md: 0 8px 26px rgba(15,23,42,0.08);
+  --shadow-lg: 0 14px 40px rgba(15,23,42,0.12);
+  --ease: var(--gg-ease);
+  --ease-spring: var(--gg-ease);
   --sticky-top: 84px;
 }
 
-html { font-size: 16px; scroll-behavior: smooth; }
+html { font-size: 16px; scroll-behavior: smooth; background: var(--gg-paper); }
 body {
-  background: var(--cream);
+  background: var(--gg-paper);
   min-height: 100dvh;
   -webkit-font-smoothing: antialiased;
   color: var(--text);
+  font-family: var(--gg-font-ui);
 }
+::selection { background: rgba(13,92,69,.16); color: var(--gg-ink); }
 
 /* ── Accessible focus ring — gold accent, only shown for keyboard nav ──── */
 :focus-visible {
@@ -193,9 +229,9 @@ body {
 
 /* ── Article title ───────────────────────────────────────────────────────── */
 .article-title {
-  font-family: 'Playfair Display', serif;
-  font-weight: 700;
-  color: var(--navy);
+  font-family: var(--gg-font-display);
+  font-weight: 500;
+  color: var(--gg-ink);
   line-height: 1.32;
   overflow-wrap: break-word;
   word-break: break-word;
@@ -370,239 +406,67 @@ body {
 }
 
 
-/* Growth Gradual premium brand accents — colour is used to clarify hierarchy,
-   not to compete with market data or report content. */
-:root {
-  --gg-emerald: #0b9671;
-  --gg-violet: #6659c8;
-  --gg-sky: #3889ad;
-  --gg-amber: #d79e3b;
-  --gg-coral: #d97b73;
-  --gg-lavender-surface: #f2f0ff;
-  --gg-mint-surface: #eaf8f2;
-}
-
-html { background: #f5f7fb; }
-body {
-  background:
-    radial-gradient(ellipse at 92% 1%, rgba(119,104,218,.055), transparent 32%),
-    radial-gradient(ellipse at 3% 25%, rgba(18,165,124,.045), transparent 30%),
-    linear-gradient(145deg,#f7f8fc 0%,#f5f6fb 54%,#f4f9f6 100%);
-}
-::selection { background: rgba(112,100,210,.18); color: #16263f; }
-
-
-/* ── Premium market surface system ────────────────────────────────────────
-   Soft jewel tones establish hierarchy without competing with financial data. */
-.mmb-section {
-  border: 1px solid rgba(112,100,210,.12);
-  border-radius: 16px;
-  background: linear-gradient(145deg,rgba(255,255,255,.97),rgba(247,248,255,.92));
-  box-shadow: 0 7px 24px rgba(42,54,99,.055);
-  padding: 13px;
-}
-.mmb-section-title {
-  color: #314469;
-  font-weight: 800;
-  letter-spacing: .07em;
-}
-.mmb-card {
-  border: 1px solid rgba(112,100,210,.12);
-  border-radius: 13px;
-  background: linear-gradient(145deg,#fff 0%,#f7f7ff 100%);
-  box-shadow: 0 2px 8px rgba(42,54,99,.035);
-  transition: transform .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease);
-}
-.mmb-card:hover {
-  border-color: rgba(16,163,127,.28);
-  box-shadow: 0 8px 20px rgba(42,54,99,.085);
-  transform: translateY(-2px);
-}
-.mmb-stat-card {
-  border: 1px solid rgba(16,163,127,.13);
-  border-radius: 12px;
-  background: linear-gradient(140deg,#f1fbf6 0%,#f5f3ff 100%);
-}
-.mobile-market-bar {
-  border-color: rgba(112,100,210,.15);
-  box-shadow: 0 8px 24px rgba(42,54,99,.065);
-  border-radius: 16px;
-}
-.article-title { color: #20345a; }
-.section-header { color: #2b3b61; }
-.meta-badge { color: #64748b; }
-.skeleton-shine {
-  background: linear-gradient(90deg,#eceffd 25%,#f8f4ff 50%,#e8f8f1 75%);
-  background-size: 420px 100%;
-}
-.search-wrap input, .search-wrap textarea {
-  border-color: rgba(112,100,210,.18);
-  box-shadow: 0 4px 16px rgba(42,54,99,.035);
-}
-.search-wrap input:focus, .search-wrap textarea:focus {
-  border-color: rgba(16,163,127,.56);
-  box-shadow: 0 0 0 4px rgba(16,163,127,.09);
-}
-@media (max-width: 680px) {
-  .mmb-section { border-radius: 14px; padding: 10px; }
-  .mmb-card { border-radius: 11px; }
-}
-
-/* ──────────────────────────────────────────────────────────────────────────
-   Premium Research Workspace refresh — refined color, stronger hierarchy,
-   and consistent report controls without changing the existing interactions.
-   ────────────────────────────────────────────────────────────────────────── */
+/* ── Chat workspace on the design-system tokens ─────────────────────────────
+   (Replaces the earlier violet/indigo "premium" layer, which fought the brand.) */
 .chat-shell {
-  border: 1px solid rgba(105, 120, 170, .2) !important;
-  border-radius: 20px !important;
-  background: linear-gradient(145deg, #ffffff 0%, #fbfcff 100%) !important;
-  box-shadow: 0 24px 70px rgba(29, 40, 88, .11), 0 3px 10px rgba(29, 40, 88, .04) !important;
+  border: 1px solid var(--gg-line) !important;
+  border-radius: 16px !important;
+  background: var(--gg-surface) !important;
+  box-shadow: var(--shadow-md) !important;
 }
-.chat-shell .sidebar {
-  background: linear-gradient(180deg, #151d3d 0%, #202957 52%, #242b58 100%) !important;
-  border-right: 1px solid rgba(255,255,255,.09) !important;
-}
-.chat-shell .sidebar-hdr {
-  background: transparent !important;
-  border-bottom-color: rgba(255,255,255,.12) !important;
-}
-.chat-shell .sidebar-logo {
-  border-color: rgba(255,255,255,.28) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 5px 18px rgba(0,0,0,.16) !important;
-}
-.chat-shell .sidebar-brand { color: #fff !important; letter-spacing: -.015em; }
-.chat-shell .sidebar-brand span { color: #b9c5ef !important; letter-spacing: .14em !important; }
-.chat-shell .new-chat-btn {
-  border: 1px solid rgba(255,255,255,.22) !important;
-  background: linear-gradient(120deg, #11a77c, #5b66d8) !important;
-  box-shadow: 0 8px 22px rgba(8, 15, 44, .26) !important;
-}
-.chat-shell .new-chat-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
-.chat-shell .conv-group-label { color: #9ba9d8 !important; letter-spacing: .15em !important; }
-.chat-shell .conv-item { border-radius: 10px !important; margin: 3px 8px !important; }
-.chat-shell .conv-item:hover { background: rgba(255,255,255,.08) !important; }
-.chat-shell .conv-item--active {
-  background: linear-gradient(100deg, rgba(25, 184, 139, .2), rgba(124, 110, 245, .16)) !important;
-  border-left-color: #4de0b4 !important;
-}
-.chat-shell .conv-item__title { color: #d5dcf5 !important; }
-.chat-shell .conv-item--active .conv-item__title { color: #fff !important; }
-.chat-shell .conv-del { color: #d3daf7 !important; background: rgba(255,255,255,.09) !important; }
-.chat-shell .chat-msgs { background: radial-gradient(ellipse at 50% 0%, rgba(225,231,255,.36), transparent 46%), #fbfcff !important; }
-.chat-shell .chat-welcome {
-  position: relative;
-  isolation: isolate;
-  padding: clamp(30px, 5vh, 58px) clamp(18px, 4vw, 48px) 30px !important;
-  gap: 22px !important;
-}
-.chat-shell .chat-welcome::before {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  width: min(72%, 560px);
-  height: 230px;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: radial-gradient(ellipse at 28% 35%, rgba(34, 197, 153, .14), transparent 52%), radial-gradient(ellipse at 74% 22%, rgba(115, 97, 238, .16), transparent 55%);
-  filter: blur(10px);
-  pointer-events: none;
-}
-.chat-shell .welcome-kicker {
-  color: #4e5b83 !important;
-  background: rgba(255,255,255,.8) !important;
-  border: 1px solid rgba(105, 120, 170, .2) !important;
-  border-radius: 999px !important;
-  box-shadow: 0 5px 18px rgba(38, 48, 95, .05) !important;
-  letter-spacing: .16em !important;
-  backdrop-filter: blur(12px);
-}
+.chat-shell .chat-msgs { background: var(--gg-paper) !important; }
 .chat-shell .welcome-title {
-  color: #192447 !important;
-  letter-spacing: -.045em !important;
-  line-height: 1.08 !important;
+  color: var(--gg-ink) !important;
+  font-family: var(--gg-font-display) !important;
+  font-weight: 500 !important;
+  letter-spacing: -.02em !important;
+  line-height: 1.12 !important;
   text-wrap: balance;
-  background: linear-gradient(100deg, #172343 4%, #31457b 52%, #6453b5 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
 }
-.chat-shell .welcome-sub { color: #68748f !important; max-width: 590px !important; line-height: 1.75 !important; }
-.chat-shell .welcome-capability {
-  background: rgba(255,255,255,.85) !important;
-  border: 1px solid rgba(106, 121, 173, .16) !important;
-  border-radius: 999px !important;
-  box-shadow: 0 5px 16px rgba(38,48,95,.045) !important;
-  color: #465574 !important;
-  padding: 9px 13px !important;
-  backdrop-filter: blur(10px);
-}
-.chat-shell .welcome-capability-icon--mint { background: #dcf9ef !important; color: #087d5b !important; }
-.chat-shell .welcome-capability-icon--violet { background: #eeeaff !important; color: #6451ca !important; }
-.chat-shell .welcome-capability-icon--gold { background: #fff1d5 !important; color: #a56a05 !important; }
-.chat-shell .sugs { max-width: 820px !important; gap: 10px !important; }
+.chat-shell .welcome-sub { color: var(--gg-ink-2) !important; max-width: 590px !important; line-height: 1.65 !important; }
 .chat-shell .sug {
-  border: 1px solid rgba(107, 121, 173, .19) !important;
-  border-radius: 14px !important;
-  background: linear-gradient(145deg, rgba(255,255,255,.98), rgba(247,248,255,.94)) !important;
-  color: #354363 !important;
-  box-shadow: 0 5px 18px rgba(35, 47, 91, .045) !important;
-  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease !important;
+  border: 1px solid var(--gg-line) !important;
+  border-radius: 12px !important;
+  background: var(--gg-surface) !important;
+  color: var(--gg-ink) !important;
+  box-shadow: none !important;
+  transition: transform var(--gg-dur-press) var(--gg-ease), border-color var(--gg-dur-press) var(--gg-ease), box-shadow var(--gg-dur-enter) var(--gg-ease) !important;
 }
 .chat-shell .sug:hover {
-  transform: translateY(-2px) !important;
-  border-color: rgba(17, 167, 124, .42) !important;
-  box-shadow: 0 12px 26px rgba(45, 57, 110, .1) !important;
-  background: linear-gradient(135deg, #f0fcf7, #f4f1ff) !important;
+  transform: translateY(-1px) !important;
+  border-color: #BFD5C9 !important;
+  box-shadow: var(--shadow-sm) !important;
+  background: var(--gg-surface) !important;
 }
-.chat-shell .msg-bubble {
-  border-radius: 17px !important;
-  border: 1px solid rgba(112, 125, 171, .16) !important;
-  box-shadow: 0 7px 24px rgba(30, 42, 87, .045) !important;
-}
+.chat-shell .sug:active { transform: scale(.99) !important; }
 .chat-shell .msg-row--user .msg-bubble {
-  background: linear-gradient(135deg, #252f63 0%, #4d4b9a 100%) !important;
+  background: var(--gg-forest) !important;
   border-color: transparent !important;
-  box-shadow: 0 9px 24px rgba(50, 55, 125, .17) !important;
+  box-shadow: none !important;
 }
 .chat-shell .msg-row--user .msg-text { color: #fff !important; }
 .chat-shell .report-body {
-  background: linear-gradient(145deg, #ffffff 0%, #f8faff 100%) !important;
-  border: 1px solid rgba(110, 125, 175, .2) !important;
-  border-radius: 18px !important;
-  box-shadow: 0 12px 34px rgba(32, 45, 94, .07) !important;
+  background: var(--gg-surface) !important;
+  border: 1px solid var(--gg-line) !important;
+  border-radius: 14px !important;
+  box-shadow: var(--shadow-sm) !important;
 }
-.chat-shell .report-btn {
-  min-height: 36px !important;
-  border-radius: 10px !important;
-  padding: 8px 13px !important;
-  font-weight: 700 !important;
-  letter-spacing: -.01em;
-}
-.chat-shell .report-btn--experiment { background: linear-gradient(135deg, #f0ecff, #faf8ff) !important; color: #6550bf !important; border-color: #dcd3ff !important; }
-.chat-shell .report-btn--action { background: linear-gradient(135deg, #e9f4ff, #f7faff) !important; color: #2c628f !important; border-color: #d2e6fa !important; }
-.chat-shell .report-content h1, .chat-shell .report-content h2 { letter-spacing: -.025em; }
-.chat-shell .inline-report-chart, .chat-shell .chart-wrap {
-  border-radius: 15px !important;
-  border-color: rgba(112, 125, 175, .2) !important;
-  box-shadow: 0 7px 22px rgba(30, 42, 87, .045) !important;
-}
-.chat-shell .chart-title { color: #26345e !important; }
+.chat-shell .report-content h1, .chat-shell .report-content h2 { font-family: var(--gg-font-display); letter-spacing: -.015em; }
 .chat-shell .chat-input-wrap, .chat-shell .composer-wrap {
-  border-color: rgba(110, 125, 175, .22) !important;
-  box-shadow: 0 12px 30px rgba(35, 47, 91, .075) !important;
+  border-color: var(--gg-line-strong) !important;
+  box-shadow: var(--shadow-md) !important;
 }
 .chat-shell button:focus-visible, .chat-shell textarea:focus-visible, .chat-shell input:focus-visible {
-  outline: 3px solid rgba(17, 167, 124, .36) !important;
+  outline: 2px solid var(--gg-forest) !important;
   outline-offset: 2px;
 }
-@media (max-width: 680px) {
-  .chat-shell { border-radius: 15px !important; }
-  .chat-shell .chat-welcome { padding: 24px 14px 20px !important; gap: 16px !important; }
-  .chat-shell .welcome-sub { font-size: 13px !important; }
-  .chat-shell .welcome-capability { padding: 7px 9px !important; }
-  .chat-shell .sug { border-radius: 12px !important; }
+.mmb-section { border: 1px solid var(--gg-line); border-radius: 12px; background: var(--gg-surface); padding: 12px; }
+.mmb-section-title { color: var(--gg-ink-2); }
+.mmb-card { border-color: var(--gg-line); background: var(--gg-surface); }
+.mmb-stat-card { border-color: var(--gg-line); background: var(--gg-paper-2); }
+.skeleton-shine {
+  background: linear-gradient(90deg, #EFEBE2 25%, #F7F4EE 50%, #EFEBE2 75%);
+  background-size: 420px 100%;
 }
 
 /* ── v93 editorial type (self-hosted, OFL) ──────────────────────────────────
@@ -630,3 +494,18 @@ body {
   --gg-ed-paper: #FAF9F5; --gg-ed-ink: #2A2A2A; --gg-ed-forest: #162721; --gg-ed-navy: #0B1B3D;
   --gg-ed-rule: #E1DDD5; --gg-ed-tint: #F3EFE6;
 }
+
+/* ── Legacy font names → brand fonts ─────────────────────────────────────────
+   About 90 component styles still name 'DM Sans' or 'Playfair Display'. They now
+   render in the brand's Inter and Lora (self-hosted) instead of extra Google fonts. */
+@font-face { font-family: 'DM Sans'; font-weight: 300; font-display: swap; src: url('/fonts/inter-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 400; font-display: swap; src: url('/fonts/inter-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 500; font-display: swap; src: url('/fonts/inter-latin-500-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 600; font-display: swap; src: url('/fonts/inter-latin-600-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 700; font-display: swap; src: url('/fonts/inter-latin-700-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 800; font-display: swap; src: url('/fonts/inter-latin-700-normal.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'DM Sans'; font-weight: 300 500; font-display: swap; src: url('/fonts/inter-latin-ext-400-normal.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: 'DM Sans'; font-weight: 600 800; font-display: swap; src: url('/fonts/inter-latin-ext-600-normal.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: 'Playfair Display'; font-style: normal; font-weight: 400 500; font-display: swap; src: url('/fonts/lora-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Playfair Display'; font-style: normal; font-weight: 600 900; font-display: swap; src: url('/fonts/lora-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Playfair Display'; font-style: italic; font-weight: 400 900; font-display: swap; src: url('/fonts/lora-latin-400-italic.woff2') format('woff2'); }

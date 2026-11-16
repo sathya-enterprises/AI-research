@@ -87,7 +87,6 @@ export default function NewsFAB() {
         .nfab__ring {
           position: absolute; inset: -7px; border-radius: 50%;
           border: 2px solid rgba(15,23,42,.3);
-          animation: nfab-pulse 2.8s ease-out infinite;
           pointer-events: none;
         }
         @keyframes nfab-pulse {
@@ -107,8 +106,6 @@ export default function NewsFAB() {
         .nfab__dot {
           width: 5px; height: 5px; border-radius: 50%;
           background: #22c55e;
-          box-shadow: 0 0 5px #22c55e;
-          animation: nfab-blink 2s ease-in-out infinite;
           position: absolute; top: 10px; right: 10px;
         }
         @keyframes nfab-blink { 0%,100% { opacity:1; } 50% { opacity:.25; } }

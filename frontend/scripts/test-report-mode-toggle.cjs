@@ -14,12 +14,12 @@ test('Report toggle label and mode state are wired together', () => {
   assert.doesNotMatch(source, /<span>Think<\/span>/);
 });
 
-test('inactive Report toggle has no glow, shadow, or active animation', () => {
+test('inactive Report toggle has no glow or shadow; active state is a steady forest outline', () => {
   assert.match(source, /\.report-mode-btn \{[\s\S]*?box-shadow:none;/);
   assert.match(source, /\.report-mode-btn:hover:not\(:disabled\):not\(\.is-active\) \{[^}]*box-shadow:none;/);
-  assert.match(source, /\.report-mode-btn\.is-active \{[\s\S]*?box-shadow:[^;]*rgba\(59,130,246/);
-  assert.match(source, /animation:report-mode-glow 2\.2s ease-in-out infinite/);
-  assert.match(source, /\.report-mode-btn\.is-active \{ animation:none; \}/);
+  // Design system v1: the active state is shown by colour and outline, not a looping glow.
+  assert.match(source, /\.report-mode-btn\.is-active \{[^}]*background:var\(--gg-forest-tint\);[^}]*box-shadow:0 0 0 1px var\(--gg-forest\);/);
+  assert.doesNotMatch(source, /animation:report-mode-glow[^;]*infinite/);
 });
 
 test('report-mode hint and accessible titles describe report generation', () => {
