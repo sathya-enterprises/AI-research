@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -28,10 +29,46 @@ CAPTURES = ROOT / "benchmark" / "captures.json"
 RUNS = ROOT / "benchmark" / "runs"
 
 
+LOCK = ROOT / "benchmark" / "runs" / "runner.lock"
+
+
 def load_captures() -> dict:
     if CAPTURES.exists():
         return json.loads(CAPTURES.read_text(encoding="utf-8"))
     return {"about": "prompt id -> capture file in backend/diagnostics/ (local, not committed)", "captures": {}}
+
+
+def save_captures(state: dict) -> None:
+    """Write via a temporary file and rename, so a crash never leaves half a JSON file."""
+    tmp = CAPTURES.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(tmp, CAPTURES)
+
+
+def acquire_lock() -> bool:
+    """One runner at a time: two runners corrupted captures.json and competed for model quota."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK.exists():
+        try:
+            pid = int(LOCK.read_text().strip() or 0)
+        except ValueError:
+            pid = 0
+        if pid and _alive(pid):
+            print(f"another benchmark runner (pid {pid}) is running; stop it or delete {LOCK}", flush=True)
+            return False
+    LOCK.write_text(str(os.getpid()))
+    return True
+
+
+def _alive(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True).stdout
+            return str(pid) in out
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
 
 
 def capture_for_report(report_id: str) -> str:
@@ -79,6 +116,8 @@ def main() -> int:
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
+    if not acquire_lock():
+        return 1
     prompts = json.loads(PROMPTS.read_text(encoding="utf-8"))["prompts"]
     state = load_captures()
     wanted = {i.strip() for i in args.ids.split(",") if i.strip()}
@@ -91,10 +130,11 @@ def main() -> int:
         result = run_prompt(prompt, args.base)
         state = load_captures()  # re-read: another process may have recorded a run meanwhile
         state["captures"][prompt["id"]] = result
-        CAPTURES.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        save_captures(state)
         print(f"=== {time.strftime('%H:%M:%S')} DONE {prompt['id']} capture={result['capture'] or 'MISSING'} "
               f"exit={result['exitCode']} {result['seconds']}s", flush=True)
     print("=== ALL DONE", flush=True)
+    LOCK.unlink(missing_ok=True)
     return 0
 
 
