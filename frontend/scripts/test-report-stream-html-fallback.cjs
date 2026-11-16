@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
-const chat = fs.readFileSync(path.join(root, 'src/components/GrowthGradualChat.tsx'), 'utf8');
+const { readChatSource } = require('./read-chat-source.cjs');
+const chat = readChatSource();
 const streamRoute = fs.readFileSync(path.join(root, 'src/app/api/chat/report/stream/[jobId]/route.ts'), 'utf8');
 const startRoute = fs.readFileSync(path.join(root, 'src/app/api/chat/report/start/route.ts'), 'utf8');
 const statusRoute = fs.readFileSync(path.join(root, 'src/app/api/chat/report/status/[jobId]/route.ts'), 'utf8');

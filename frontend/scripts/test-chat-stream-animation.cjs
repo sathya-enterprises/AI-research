@@ -3,10 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const source = fs.readFileSync(
-  path.join(__dirname, '..', 'src', 'components', 'GrowthGradualChat.tsx'),
-  'utf8',
-);
+const { readChatSource } = require('./read-chat-source.cjs');
+const source = readChatSource();
 
 test('SDK text deltas feed a separate progressive display target', () => {
   assert.match(source, /streamTargetTextRef\.current = streamedText/);

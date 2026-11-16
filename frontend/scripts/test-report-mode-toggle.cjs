@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const componentPath = path.join(__dirname, '..', 'src', 'components', 'GrowthGradualChat.tsx');
-const source = fs.readFileSync(componentPath, 'utf8');
+const { readChatSource } = require('./read-chat-source.cjs');
+const source = readChatSource();
 
 test('Report toggle label and mode state are wired together', () => {
   assert.match(source, /<span>Report<\/span>/);

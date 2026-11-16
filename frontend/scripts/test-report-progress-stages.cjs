@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const component = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'ReportProgress.tsx'), 'utf8');
-const chat = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'GrowthGradualChat.tsx'), 'utf8');
+const { readChatSource } = require('./read-chat-source.cjs');
+const chat = readChatSource();
 const backendReport = path.join(__dirname, '..', '..', 'backend', 'routes', 'report.py');
 
 test('every progress phase the backend reports maps to a timeline stage', { skip: !fs.existsSync(backendReport) }, () => {
