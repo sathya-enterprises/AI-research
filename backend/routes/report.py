@@ -16481,7 +16481,11 @@ def _attach_audit_source_evidence(
                                r"subscriptions|folios|investors|devices|passengers|tickets|registrations|sales)\b", text[match.end():match.end() + 24], re.I)
                        or (re.search(r"(?i)\b(?:number\s+of|cards?|accounts?|subscribers?|units?|vehicles?|customers?|users|connections|"
                                      r"complaints|machines|atms|branches|registrations|folios|investors|passengers)\b", re.split(r"[.;]\s", text[max(0, match.start() - 160):match.start()])[-1])
-                           and not re.search(r"(?i)₹|\brs\.?\b|\binr\b|rupees?|worth|valued|amount|value|deposits?|credit\s+of|loans?|revenue|profit|turnover",
+                           # Money words: "foreign investors poured +11,065 crore into Telecom" is rupees, not
+                           # a count of investors (markets live run failed the audit on it).
+                           and not re.search(r"(?i)₹|\brs\.?\b|\binr\b|rupees?|worth|valued|amount|value|deposits?|credit\s+of|loans?|revenue|profit|turnover|"
+                                             r"invest(?:ed|ment|ments)?\b|inflows?|outflows?|poured|pumped|bought|sold|purchases?|"
+                                             r"net\s+(?:buy|sell|flow)\w*|spent|spending|expenditure|outlay|budget|capex|aum|corpus|raised|mobili[sz]ed",
                                              re.split(r"[.;]\s", text[max(0, match.start() - 160):match.start()])[-1])))):
                 # "12 lakh units" is a count, not a rupee amount: compare it in
                 # absolute units with "1.2 million units" and "(in lakhs) | 12".

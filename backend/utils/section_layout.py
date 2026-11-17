@@ -100,7 +100,13 @@ def _metric_label(table: Table, col: int) -> str:
     header = fy_labels_in(fy_label(clean_label(table.header[col])))  # calendar quarters shown as fiscal quarters
     if table.kind == "calculated" and re.match(r"(?i)quarter coverage", table.heading or ""):
         return f"Quarterly return (%), {header}"  # the fetched dataset; its first line is not a title
-    if _PERIOD_HEADER_RE.match(header) or re.fullmatch(r"Q[1-4] FY\d{2}", header):
+    # A date column ("30-Jan-26": closing levels on that day) names when, not what: the scorecard showed
+    # "30-Jan-26, February 2026" as a metric and the audit read "30" as a claimed value.
+    day_month_year = re.fullmatch(r"(?i)(\d{1,2})[-/ ]([a-z]{3})[a-z]*[-/ ]'?(\d{2}|\d{4})", header)
+    if day_month_year:
+        day, month, year = day_month_year.groups()
+        header = f"{int(day)} {month.capitalize()} {year if len(year) == 4 else '20' + year}"
+    if _PERIOD_HEADER_RE.match(header) or re.fullmatch(r"Q[1-4] FY\d{2}", header) or day_month_year:
         base = clean_label(table.header[0]) if table.header[0] and not re.fullmatch(
             r"(?i)sectors?|index|indices|name|company|stock|item|industry|particulars", table.header[0]) else ""
         context = base or (table.heading[:40] if table.heading else "Value")

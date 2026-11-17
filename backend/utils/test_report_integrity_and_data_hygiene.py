@@ -1309,3 +1309,27 @@ def test_live_run_writer_artifacts_identifiers_and_rs_abbreviation():
     assert strip_ascii_charts(keep) == keep
     source = open("routes/report.py", encoding="utf-8").read()
     assert not re.search(r're\.split\(r"\(\?<=\[\.!\?\]\)\s\+', source)  # every splitter has the abbreviation guard
+
+
+def test_scorecard_date_column_is_labelled_by_measure_and_plain_date():
+    # markets live run: "30-Jan-26, February 2026 [S2]" as a scorecard metric; the audit read "30" as a claim.
+    from utils.section_layout import Table, _metric_label
+
+    table = Table(passage_id="S2.1", source_id="S2", heading="Nifty sectoral index closing levels",
+                  header=["Index", "30-Jan-26", "Change (%)"], rows=[["Nifty Bank", "59,610.45", "1.2"]],
+                  period_label="February 2026")
+    label = _metric_label(table, 1)
+    assert label == "Nifty sectoral index closing levels, 30 Jan 2026"
+
+
+def test_audit_reads_investor_money_flows_as_rupees_not_counts():
+    # markets live run: "foreign investors poured +11,065.00 crore into Telecom" was compared as a count.
+    import routes.report as report
+
+    page = "FPI flows in October 2026: net investment in Telecom stood at Rs 11,065 crore, the largest of any sector."
+    enriched = [{"title": "NSDL FPI fortnightly", "url": "https://www.fpi.nsdl.co.in/report", "pageFetchStatus": "ok",
+                 "evidenceOrigin": "publisher_page", "pageContent": page}]
+    manifest = [{"id": "S56", "title": "NSDL FPI fortnightly", "url": "https://www.fpi.nsdl.co.in/report"}]
+    audited = report._attach_audit_source_evidence(
+        manifest, enriched, "In October, foreign investors poured +11,065.00 crore into Telecom [S56].")
+    assert audited[0].get("unmatchedNumericClaims") in ([], None)
