@@ -341,7 +341,9 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     heading = re.sub(r"^TABLE \d+\b\s*(?:\(continued\))?\s*(?:[—-]\s*)?", "", heading_line.strip()).replace("(continued)", "").strip()
     header = _split_row(lines[0])
     rows = [_split_row(ln) for ln in lines[1:]]
-    from utils.fact_sheet import is_column_numbering
+    from utils.fact_sheet import is_column_numbering, is_schema_table
+    if is_schema_table(header):
+        return []
     rows = [r for r in rows if len(r) == len(header) and r[0] and not is_column_numbering(r)]
     if len(rows) < 2 or len(header) < 2:
         return []

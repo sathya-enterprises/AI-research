@@ -1643,6 +1643,7 @@ def _label_terms_present(label: str, text: str) -> bool:
     terms = [w for w in words if w.casefold() not in _ENTITY_FILLER]
     if not terms:
         return True
+    text = str(text or "").replace("_", " ")  # "forex_earnings_INR": "\bforex\b" fails inside a snake_case name
     if any(re.search(rf"\b{re.escape(t)}\b", text, re.I) for t in terms):
         return True
     initials = "".join(w[0] for w in re.findall(r"[A-Za-z]+", str(label or "")) if w.casefold() not in {"the", "and", "of"})
@@ -1734,7 +1735,8 @@ def _metric_terms(label: str, *, explicit: bool = False) -> set[str]:
 
 
 def _metric_label_supported(label: str, context: str, *, explicit: bool = False) -> bool:
-    context = re.sub(r"(?i)\bmarket\s+(?:cap|capitalization|capitalisation)\b", "market capitalisation", str(context or ""))
+    context = re.sub(r"(?i)\bmarket\s+(?:cap|capitalization|capitalisation)\b", "market capitalisation",
+                     str(context or "").replace("_", " "))
     terms = _metric_terms(label, explicit=explicit)
     if not terms:
         return True
@@ -1760,7 +1762,9 @@ def _metric_label_supported(label: str, context: str, *, explicit: bool = False)
 
 
 def _cell_label_matches(expected: str, observed: str) -> bool:
-    expected, observed = str(expected or "").strip(), str(observed or "").strip()
+    # Dataset column names join words with "_" ("forex_earnings_USD"); "\bforex\b" never matched inside them.
+    expected = str(expected or "").replace("_", " ").strip()
+    observed = str(observed or "").replace("_", " ").strip()
     if not expected or not observed:
         return False
     if _is_point_period(expected):
@@ -1864,7 +1868,9 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
                                     header[0].strip())):
                 header = header[1:]
             previous_rows.append(header)
-            if len(previous_rows) >= 100:
+            # A country table runs to ~200 rows: at 100 the header of "Philippines" / "Thailand" (rows 139
+            # and 175 of a WHO table) was never reached, so those points failed while "Indonesia" passed.
+            if len(previous_rows) >= 1000:
                 break
         if expected_column or column_index is not None:
             matching_headers = [header for header in previous_rows if (

@@ -1215,3 +1215,36 @@ def test_fetched_page_stored_under_its_final_url_keeps_its_fetch_status():
         manifest, report._attach_audit_source_evidence(manifest, [other, fetched], "Output was 109.14 MnT [S27]."))
     assert merged[0]["page_fetch_status"] == "ok"
     assert merged[0]["evidence_origin"] == "publisher_page"
+
+
+def test_dataset_tables_snake_case_columns_long_tables_and_schema_listings():
+    # tourism (forex_earnings_USD), healthcare (WHO table: rows 139/175 below the header), 7 prompts with a
+    # "Column | Type | Distinct | Count" listing that became a chart.
+    from types import SimpleNamespace
+
+    import utils.chart_evidence_audit as cea
+    from utils.chart_titles import clean_label
+    from utils.fact_sheet import extract_facts, is_schema_table
+    from utils.section_charts import charts_from_passage
+
+    assert clean_label("forex_earnings_USD") == "forex earnings USD" and clean_label("**Total**") == "Total"
+    note = "forex_earnings_INR in rupee crores, forex_earnings_USD in million USD"
+    text = f"year | forex_earnings_INR | forex_earnings_USD | note\n2022 | 169917 | 21360 | {note}\n2021 | 63978 | 8651 | {note}"
+    point = {"evidenceQuote": f"2021 | 63978 | 8651 | {note}", "evidenceValue": "8651", "evidenceColumn": "forex_earnings_USD"}
+    assert cea._table_point_column_matches(point, "forex earnings USD", "2021", 8651.0, point["evidenceQuote"], text) is True
+    wrong = dict(point, evidenceValue="63978")
+    assert cea._table_point_column_matches(wrong, "x", "2021", 63978.0, wrong["evidenceQuote"], text) is False
+
+    rows = "\n".join(f"Country{i:03d} | US${i} per person | {60 + i / 10:.1f} years" for i in range(150))
+    table = "Country | Health spending | Life expectancy at birth\n" + rows
+    far = {"evidenceQuote": "Country140 | US$140 per person | 74.0 years", "evidenceValue": "74.0 years",
+           "evidenceColumn": "Life expectancy at birth"}
+    assert cea._table_point_column_matches(far, "Life expectancy", "Country140", 74.0, far["evidenceQuote"], table) is True
+
+    schema = ("TABLE 20 — Columns\nColumn | Type | Distinct | Count | Description\nyear | Int64 | 26 | 26 | Year.\n"
+              "forex_earnings_INR | Int64 | 26 | 26 | Earnings.\nforex_earnings_USD | Int64 | 26 | 26 | Earnings.")
+    passage = SimpleNamespace(passage_id="S35.3", source_id="S35", kind="table", reliability=1.0, publisher="",
+                              title="", text=schema)
+    assert is_schema_table(["Column", "Type", "Distinct", "Count", "Description"])
+    assert not is_schema_table(["Year", "Count", "Value"])
+    assert charts_from_passage(passage, 1) == [] and not [f for f in extract_facts(passage) if f.kind == "table"]

@@ -46,7 +46,10 @@ _SECTOR_ALIAS_RE = {
 
 def clean_label(label: str) -> str:
     """Display label: no markdown emphasis, no leading rank number ("1 Data Processing Services")."""
-    text = re.sub(r"[*_`]", "", str(label or "")).strip()
+    # A dataset column name joins words with "_" ("forex_earnings_USD"): those are spaces, not emphasis
+    # (stripped, the chart read "forexearningsUSD" and its entity no longer matched the source column).
+    text = re.sub(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])", " ", str(label or ""))
+    text = re.sub(r"[*_`]", "", text).strip()
     # flags / pictographs in a header ("🇨🇳 China") are decoration, not part of the name
     text = re.sub("[\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF☀-➿️]+", "", text).strip()
     return _RANK_PREFIX_RE.sub("", text).strip() or text
