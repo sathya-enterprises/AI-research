@@ -303,6 +303,33 @@ FACT_REF_RE = re.compile(r"\[\[\s*(?:fact\s*:\s*)?F(\d+)\s*\]\]", re.I)
 FACT_ID_IN_CALC_RE = re.compile(r"(?<![\w.])F(\d+)(?![\w])")
 VERIFIED_MARK = "⁠"  # word joiner, invisible: the number before it was inserted from a fact id
 UNKNOWN_FACT = "[[UNKNOWN_FACT]]"
+BOUND_FLIP = "[[BOUND_FLIP]]"
+_CURRENCY_TAIL_RE = re.compile(r"(?:\brs\.?|\binr|\busd|us\$|[₹$€£])\s*$", re.I)
+_UPPER_BOUND_RE = re.compile(r"(?:\bnot\s+(?:exceeding|more\s+than|above|over|greater\s+than|higher\s+than)|"
+                             r"\b(?:less|lower|fewer)\s+than|\bbelow|\bunder|\bup\s*to|\bat\s+most|\bmaximum\s+of|"
+                             r"\bwithin|\bnot\s+to\s+exceed)\s*$", re.I)
+_LOWER_BOUND_RE = re.compile(r"(?:\bnot\s+(?:less\s+than|below|under|lower\s+than)|\bexceed(?:ing|s)?|"
+                             r"\b(?:more|greater|higher)\s+than|\bover|\babove|\bat\s+least|\bminimum\s+of|"
+                             r"\bin\s+excess\s+of|\bbeyond)\s*$", re.I)
+
+
+def _bound(text_before: str) -> str:
+    """"upper" / "lower" when the words right before a value bound it ("not exceeding Rs." / "at least")."""
+    tail = _CURRENCY_TAIL_RE.sub("", text_before.rstrip()).rstrip()
+    if _UPPER_BOUND_RE.search(tail):
+        return "upper"
+    return "lower" if _LOWER_BOUND_RE.search(tail) else ""
+
+
+def _flips_bound(fact, sentence_before: str) -> bool:
+    """The draft bounds the value the other way from its passage: "net worth not exceeding Rs. 25 crores"
+    written as "a net worth exceeding [[F23]]" (live run, IPO)."""
+    context = re.sub(r"\s+", " ", getattr(fact, "context", "") or "")
+    at = context.find(fact.raw) if fact.raw else -1
+    if at < 0:
+        return False
+    source, draft = _bound(context[:at]), _bound(sentence_before)
+    return bool(source and draft and source != draft)
 
 
 def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
@@ -336,6 +363,8 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
             fact = fact_for(m.group(1))
             if fact is None:
                 return UNKNOWN_FACT
+            if _flips_bound(fact, sentence[:m.start()]):
+                return BOUND_FLIP
             value = fact_value_text(fact)
             after = sentence[m.end():m.end() + 16].lstrip().casefold()
             if fact.unit and fact.unit != "%" and after.startswith(fact.unit.casefold()) and value.endswith(fact.unit):
@@ -494,6 +523,8 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     # The verified marks have done their job (the number policy skipped those numbers): remove them.
     body = body.replace(VERIFIED_MARK, "")
     summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
+    if BOUND_FLIP in summary:  # the summary is not checked sentence by sentence: drop the sentence here
+        summary = " ".join(x for x in re.split(r"(?<=[.!?])\s+", summary) if BOUND_FLIP not in x)
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}

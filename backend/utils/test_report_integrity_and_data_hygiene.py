@@ -1093,6 +1093,37 @@ def test_currency_column_units_go_before_the_value():
     assert "₹11,455 Cr" in values and not any("₹ Cr" in v for v in values)
 
 
+def test_a_value_bounded_the_opposite_way_from_its_passage_is_removed():
+    # Live run (IPO): the passage said "net worth not exceeding Rs. 25 crores"; the writer wrote
+    # "a net worth exceeding [[F23]]", so a correct value carried the opposite meaning.
+    from types import SimpleNamespace
+
+    from utils.section_writer import SectionDraft, _bound, numbered_facts, postprocess
+
+    assert _bound("net worth not exceeding Rs.") == "upper" and _bound("a net worth exceeding") == "lower"
+    assert _bound("at least Rs") == "lower" and _bound("below") == "upper" and _bound("the size of Rs") == ""
+    text = ("RPT norms would not apply to SMEs which have paid up capital not exceeding Rs. 10 crores and net "
+            "worth not exceeding Rs. 25 crores. The regulator also proposed further disclosure changes for issuers.")
+    passages = {"S4.12": text}
+    facts = numbered_facts([SimpleNamespace(passage_id=k, text=v) for k, v in passages.items()])
+    ids = {f.raw: i for i, f in enumerate(facts, 1)}
+    assert "25" in " ".join(ids) and "10" in " ".join(ids)
+    f10 = next(i for raw, i in ids.items() if raw.endswith("10"))
+    f25 = next(i for raw, i in ids.items() if raw.endswith("25"))
+
+    def run(raw):
+        draft = SectionDraft(section_id="t", title="t")
+        postprocess(draft, raw, allowed_passages=set(passages), allowed_numbers=set(), figures=[], min_words=1,
+                    passage_texts=passages, fact_refs=facts)
+        return draft
+
+    flipped = run(f"RPT norms would apply to SMEs with a net worth exceeding [[F{f25}]] [S4.12]. "
+                  f"Small issuers with capital not exceeding [[F{f10}]] are exempt [S4.12].")
+    assert "exceeding Rs 25" not in flipped.body and "Rs 25" not in flipped.body
+    assert "not exceeding Rs 10" in flipped.body
+    assert any("opposite way" in r.get("reason", "") for r in flipped.removed_sentences)
+
+
 def test_rs_with_a_full_stop_is_not_left_as_a_sentence_end():
     # Live run (IPO): "a net worth exceeding Rs. 25 crore [S4]." reached the report as
     # "exceeding Rs [S4]. 25 crore [S4]." - later steps split sentences at ". " before a digit.

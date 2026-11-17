@@ -481,6 +481,8 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                 reason = "requested calculation uses numbers that are not facts in the evidence"
             if "[[UNKNOWN_FACT]]" in sentence:
                 reason = "refers to a fact id that is not on the section's fact sheet"
+            if "[[BOUND_FLIP]]" in sentence:
+                reason = "bounds a value the opposite way from its passage (e.g. 'exceeding' for 'not exceeding')"
             cited = [t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)]
             cited_ids = {pid for pid in passage_texts if pid in cited or any(pid.split(".")[0] == c for c in cited)}
             tokens = statistic_tokens(re.sub(r"\(calculated(?:[^()]|\([^()]*\))*\)", " ", sentence))
