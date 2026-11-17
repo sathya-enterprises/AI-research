@@ -893,6 +893,27 @@ def _source_metric_title(source_titles: list[str], question: str) -> str:
     return ""
 
 
+def chart_meaning_reason(chart: dict, question: str, sources: list | dict | None = None) -> str:
+    """"" when the publication gate would keep the chart for its MEANING (about the question's topic and
+    entities, a title that names a measure); otherwise the reason.
+
+    The same rule the final gate applies (``_dedupe_chart_specs``), run when charts are created: the live
+    in-depth run planned 9 charts, the writer wrote around them, and the final gate removed 4 as off-topic or
+    untitled ("Value: 4 periods", "Now (₹ crore): 10 components") - their slots could have held other charts."""
+    if not isinstance(chart, dict):
+        return "not a chart"
+    source_context, source_titles = _source_details_for_chart(chart, sources)
+    if not _chart_is_relevant(chart, "", question, 1, source_context=source_context):
+        return "not about the question's topic or entities"
+    generic = re.match(r"(?is)^(\s*(?:figure\s+\d+\s*:\s*)?)value\s*:\s*(.*)$", str(chart.get("title") or ""))
+    if generic:
+        rest = re.sub(r"\s*\([a-z0-9.-]+\.[a-z]{2,}\)\s*$", "", generic.group(2), flags=re.I).strip()
+        if not (_question_chart_topic_tokens(question) & _chart_metric_tokens({"title": rest})) and not _source_metric_title(
+                source_titles, question):
+            return "its title names no measure (\"Value: ...\")"
+    return ""
+
+
 def _dedupe_chart_specs(report: str, charts: list[dict], question: str,
                         sources: list | dict | None = None) -> tuple[str, list[dict], int]:
     """Remove irrelevant and duplicate chart specs, preserving unique comparisons."""

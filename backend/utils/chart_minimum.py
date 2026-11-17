@@ -55,6 +55,11 @@ def context_charts(pool: list, existing: list, *, min_year: int | None, max_year
         values = {round(v, 4) for _, _, v in chart.points}
         if len(values) < 3 or any(len(values & other) >= 0.6 * min(len(values), len(other) or 1) for other in seen):
             continue
+        # Context is a trend: at least three dated periods on the axis. A snapshot ("Now, Nov 2026: 10
+        # components") outside the window adds nothing a reader can use (in-depth live run).
+        if len(set(_years(chart))) < 3 or any(
+                re.search(r"(?i)\b(?:now|latest|current|today|qtd|partial)\b", str(chart.spec.get("title") or "")) for _ in [0]):
+            continue
         chart = copy.deepcopy(chart)
         chart.spec["contextOutsideWindow"] = True
         chart.spec["title"] = f"{chart.spec.get('title')} (context: outside the requested period)"

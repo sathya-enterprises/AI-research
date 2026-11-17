@@ -1745,3 +1745,19 @@ def test_official_data_planner_falls_back_to_the_questions_own_series():
     steel, _ = asyncio.run(plan_datasets("How has India's crude steel production grown from 2019 to 2024?",
                                          Gateway(), today=date(2026, 11, 17)))
     assert not any(item["id"].endswith("oil_prod") for item in steel)
+
+
+def test_chart_meaning_rule_is_shared_by_creation_and_publication():
+    # The final gate removed "Value: 4 periods" / off-topic charts after the writer had written around them.
+    from utils.chart_evidence_audit import chart_meaning_reason
+
+    question = "How have electric vehicle sales and public charging infrastructure in India grown from FY2021 to FY2025?"
+    good = {"title": "Electric vehicle sales in India (units), FY2021 to FY2025", "type": "line",
+            "series": [{"name": "EV sales", "data": [{"label": "FY2021", "value": 1}, {"label": "FY2022", "value": 2}]}]}
+    off_topic = {"title": "Steel prices: TMT, HR coil and CR coil", "type": "bar",
+                 "series": [{"name": "Price", "data": [{"label": "TMT", "value": 1}, {"label": "HR", "value": 2}]}]}
+    untitled = {"title": "Value: 4 periods", "type": "line",
+                "series": [{"name": "Value", "data": [{"label": "2022", "value": 1}, {"label": "2023", "value": 2}]}]}
+    assert chart_meaning_reason(good, question) == ""
+    assert chart_meaning_reason(off_topic, question)
+    assert chart_meaning_reason(untitled, question)

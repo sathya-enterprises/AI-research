@@ -653,6 +653,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                     from utils.series_checks import chart_data_problem
                     _reason = chart_data_problem(chart.spec, question)
                 if not _reason:
+                    # The publication gate's meaning rule, at creation: an off-topic or untitled chart is dropped
+                    # here (its slot goes to another chart) instead of after the writer has written around it.
+                    from utils.chart_evidence_audit import chart_meaning_reason
+                    _reason = chart_meaning_reason(dict(chart.spec, evidencePassages=chart.passage_ids), question,
+                                                   manifest)
+                if not _reason:
                     # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
                     from collections import Counter as _Counter
                     _nums = _Counter(f"{float(x):g}" for x in re.findall(r"\d+(?:\.\d+)?", chr(10).join(
