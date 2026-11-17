@@ -5708,13 +5708,20 @@ _DEFAULT_GEMINI_REPORT_MODELS = [
     # Deep Research report. All four stay in the failover pool.
     "gemini-3-flash-preview",
     "gemini-3.6-flash",
+    # 2026-11-17 probe (models.list + one call per model on two keys): 3.8 and 3.7 Flash and Gemini 4 Hydrogen
+    # are served to these keys (503 "high demand" / timeout, not 400/404) and each has its own free-tier daily
+    # quota (20 requests per project): with only 3-flash-preview and 3.6-flash, the daily limit of every
+    # project ran out after about one report.
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-4-hydrogen",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",  # 500 requests/day on the free tier, like 3.5-flash-lite: checks and last resort
 ]
 # Only allow the model IDs that were explicitly live-tested for this project.
-# A stale environment variable must never reintroduce retired/unknown models
-# (for example gemini-3.8-flash or gemini-3.7-flash), because those 400s waste
-# the Deep Research wall-clock budget before the real models get a chance.
+# A stale environment variable must never reintroduce retired/unknown models: gemini-2.5-flash and
+# gemini-2.5-flash-lite return 404 ("no longer available to new users") on these keys.
 _configured_gemini_models = [
     m.strip() for m in re.split(r"[,;\n]+", _os.environ.get("GEMINI_REPORT_MODELS", "")) if m.strip()
 ]
