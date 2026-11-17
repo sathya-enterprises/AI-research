@@ -812,7 +812,15 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
     focused_rotation = tier == "in_depth" and is_multi_quarter_sector_rotation_request(question)
     long_window_rotation = tier == "in_depth" and is_long_window_sector_rotation_request(question)
     selected_rotation_decisions: list[str] = []
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
+        if attempt == 3 and data is not None:
+            break  # a third call only when no attempt returned an outline at all
+        if attempt == 3:
+            # Live run (quota exhausted): both outline calls failed - no model available, then invalid JSON from the
+            # last fallback model - and the report dropped to the single-call writer, without fact ids, number or
+            # claim checks or charts. Per-minute limits clear quickly: wait, then try once more.
+            import asyncio as _asyncio
+            await _asyncio.sleep(float(__import__("os").getenv("GG_V2_OUTLINE_RETRY_WAIT", "45")))
         system, prompt = outline_prompt(question, tier, overview, today, window_note, tiers=tiers, rejection=rejection,
                                         asks_block=asks.prompt_block() if asks else "")
         result = await gateway.generate(purpose="outline", section_id=f"outline#{attempt}" if attempt > 1 else "outline",
@@ -821,7 +829,7 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         candidate = result.json() if result.ok else None
         if not isinstance(candidate, dict):
             attempts.append({"attempt": attempt, "errors": [result.error or "invalid JSON"]})
-            if data is None and attempt == 2:
+            if data is None and attempt == 3:
                 raise OutlineError(f"outline call failed: {result.error or 'invalid JSON'}")
             continue
         candidate_sections = _sections_from_json(candidate, tier)

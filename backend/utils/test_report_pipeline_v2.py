@@ -239,7 +239,8 @@ def test_end_to_end_assembly_with_fake_llm(tier):
         assert "Appendix A" not in report
 
 
-def test_invalid_outline_raises_so_report_py_falls_back():
+def test_invalid_outline_raises_so_report_py_falls_back(monkeypatch):
+    monkeypatch.setenv("GG_V2_OUTLINE_RETRY_WAIT", "0")  # the third outline attempt waits for rate limits
     store, manifest = _store()
 
     class Broken(FakeGateway):
