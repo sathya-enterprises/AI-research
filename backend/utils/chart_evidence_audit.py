@@ -1032,6 +1032,15 @@ def _number_is_in(value: object, evidence: str) -> bool:
 _VALUE_TOKEN = re.compile(r"(?<![A-Za-z0-9])[-+]?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d*)?|\.\d+)(?![A-Za-z0-9])")
 
 
+def _is_header_row(line: str) -> bool:
+    """A table header row: distinct text cells, none of them a value or a date ("Sector | Total No. of IPOs")."""
+    cells = [c.strip() for c in str(line or "").strip().strip("|").split("|")]
+    return (len(cells) >= 2 and all(cells) and len(set(cells)) > 1
+            and all(re.search(r"[A-Za-z]{2,}", c) for c in cells)
+            and not any(re.fullmatch(r"[\s+\-−–(]*[₹$]?\s*[\d,]*\.?\d+\s*%?\)?|(?:FY\s*)?(?:19|20)\d{2}(?:[-/]\d{2,4})?", c, re.I)
+                        for c in cells))
+
+
 def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
     """Return the local evidence context around each occurrence of a chart value.
 
@@ -1067,9 +1076,19 @@ def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
         if "|" in line and (line.count("|") >= 2 or any(
                 0 <= neighbour < len(lines) and "|" in lines[neighbour] for neighbour in (index - 1, index + 1))):
             start = index
+            nearest = None
             while start > 0 and "|" in lines[start - 1]:
                 start -= 1
-            header = lines[max(0, start - 2):min(start + 3, index)]
+                if nearest is None and _is_header_row(lines[start]):
+                    nearest = start
+            # The table's own caption right above its header ends its context: the prose before it ("...listed
+            # from FY2012 to FY2022.") belongs to the page, and dated the XIRR table as out of window.
+            above = 1 if start > 0 and re.match(r"\s*TABLE\s+\d+\b", lines[start - 1], re.I) else 2
+            header = lines[max(0, start - above):min(start + 3, index)]
+            if nearest is not None and nearest > start:
+                # Stacked tables: the row's own header ("Sector | Total No. of SME IPOs | ...") names its
+                # measure and entities; the block's first header stays for the period context.
+                header += [ln for ln in lines[nearest:min(nearest + 2, index)] if ln not in header]
             # The table's caption names its measure; notes between it and the header
             # ("Retrieved from ...", "Empty cells are ...") pushed it out of reach.
             caption = next((lines[k] for k in range(start - 1, max(-1, start - 7), -1)

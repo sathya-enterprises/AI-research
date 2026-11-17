@@ -1036,10 +1036,54 @@ def _without_rank_column(passage):
     return shadow
 
 
+def _split_stacked_tables(passage) -> list:
+    """Two tables printed one under the other without a caption between them are two tables.
+
+    telecom live run: "S. No. | Period ending | Wireless Subscribers" rows were followed by "State | Number of
+    Districts ... | Number of villages ..." and 28 state rows; read as one table, the subscriber chart had state
+    district counts as periods and was rejected. A row of non-empty text cells (no digits) after data rows
+    starts the next table."""
+    lines = str(passage.text or "").splitlines()
+    starts, seen_data = [], False
+    for i, line in enumerate(lines):
+        if " | " not in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # distinct cells: a merged section row repeated across columns ("KHARIF | KHARIF") is not a header
+        # Header cells may hold digits inside words ("5G", "FY2024"); no cell is a value or a date.
+        is_header = (len(cells) >= 2 and all(cells) and len(set(cells)) > 1
+                     and all(re.search(r"[A-Za-z]{2,}", c) for c in cells)
+                     and not any(_parse_number(c) or _PERIOD_RE.match(c) or re.fullmatch(r"[\d./-]+", c) for c in cells))
+        if is_header and seen_data:
+            starts.append(i)
+            seen_data = False
+        elif not is_header:
+            seen_data = True
+    if not starts:
+        return [passage]
+    import copy
+    caption = next((ln for ln in lines if ln.strip() and " | " not in ln), "")
+    parts, bounds = [], [0, *starts, len(lines)]
+    for a, b in zip(bounds, bounds[1:]):
+        block = lines[a:b]
+        if a and caption:
+            block = [caption, *block]  # the later table keeps the passage's caption line for its heading
+        shadow = copy.copy(passage)
+        shadow.text = "\n".join(block)
+        parts.append(shadow)
+    return parts
+
+
 def _focused_charts(passage, index: int, qtd_start, focus: list[str] | None, min_year: int | None,
                     max_year: int | None = None) -> list[PlannedChart]:
     """Stage N: a wide table is narrowed to the question's entities and window (utils.table_focus) before
     charting; any other table is charted as before. A leading rank column is never the label."""
+    stacked = _split_stacked_tables(passage)
+    if len(stacked) > 1:
+        charts: list[PlannedChart] = []
+        for part in stacked:
+            charts += _focused_charts(part, index + len(charts), qtd_start, focus, min_year, max_year)
+        return charts
     passage = _without_rank_column(passage)
     lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
     if len(lines) >= 3:

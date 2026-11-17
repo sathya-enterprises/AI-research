@@ -1442,3 +1442,41 @@ def test_generic_page_title_is_not_a_chart_measure():
                               title="Press Release Page | Press Information Bureau", text=text)
     charts = charts_from_passage(passage, 1)
     assert charts and not charts[0].spec["title"].startswith("Press Release")
+
+
+def test_two_stacked_tables_in_one_passage_are_charted_apart():
+    # telecom live run: a state table under the subscriber table became part of the subscriber chart.
+    from types import SimpleNamespace
+
+    from utils.chart_lint import quality_reason
+    from utils.section_charts import _focused_charts, _split_stacked_tables
+
+    text = ("TABLE 38\nS. No. | Period ending | Wireless Subscribers (in crores)\n1 | 31.03.2021 | 118.09\n"
+            "2 | 31.03.2022 | 114.20\n3 | 31.03.2023 | 114.39\n4 | 31.03.2024 | 116.54\n"
+            "State | Number of Districts where 5G has been rolled out | Number of villages with 5G BTSs\n"
+            "Andhra Pradesh | 26 | 3,797\nAssam | 35 | 1,757\nBihar | 38 | 4,601\nGoa | 2 | 111")
+    passage = SimpleNamespace(passage_id="S8.3", source_id="S8", kind="table", reliability=1.0, publisher="",
+                              title="", text=text)
+    assert len(_split_stacked_tables(passage)) == 2
+    merged = SimpleNamespace(**{**vars(passage), "text": "TABLE 1\nCrop | 2023 | 2024\nKHARIF | KHARIF | KHARIF\n"
+                                                         "Paddy | 2183 | 2300\nRABI | RABI | RABI\nWheat | 2275 | 2425"})
+    assert len(_split_stacked_tables(merged)) == 1
+    charts = _focused_charts(passage, 1, None, [], 2021, 2025)
+    subscriber = [c for c in charts if "Wireless" in c.spec["title"]]
+    assert subscriber and quality_reason(subscriber[0].spec, text) == ""
+    assert all(d["label"].startswith("31.03.") for s in subscriber[0].spec["series"] for d in s["data"])
+
+
+def test_value_context_uses_the_rows_own_header_and_stops_at_its_caption():
+    # IPO: stacked tables gave a sector row the first table's header; page prose two lines above a captioned
+    # table ("listed from FY2012 to FY2022") dated the XIRR table out of the question's window.
+    import utils.chart_evidence_audit as cea
+
+    stacked = ("FY 2023-24 | FY 2024-25 | Total\nMaharashtra | 65 | 65 | 130\n"
+               "Sector | Total No. of SME IPOs | Issue size of sector (₹ cr)\nAgriculture | 11 | 270\nServices | 220 | 6935")
+    context = cea._value_windows("220", stacked)[0][1]
+    assert "Total No. of SME IPOs" in context and "FY 2023-24" in context
+    captioned = ("The cohort covers companies listed from FY2012 to FY2022.\nTABLE 9 — Value Creation Framework\n"
+                 "Company | XIRR Returns %\nAditya Vision | 106.5%\nSky Gold | 104.3%")
+    context = cea._value_windows("106.5", captioned)[0][1]
+    assert "FY2012" not in context and "TABLE 9" in context
