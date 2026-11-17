@@ -927,7 +927,10 @@ def _period_end_year(label: str) -> int | None:
         year_text = quarter_fy.group(2)
         fy_end = int(year_text) if len(year_text) == 4 else 2000 + int(year_text)
         return fy_end if quarter == 4 else fy_end - 1
-    m = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)", text)
+    iso = re.search(r"\b((?:19|20)\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", text)
+    if iso:
+        return int(iso.group(1))  # "2013-01-29" is a date in 2013, not the fiscal year "2013-01" (read as 2101)
+    m = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)(?!\s*[-/]\s*\d)", text)
     if m:
         end = int(m.group(1)[:2] + m.group(2))
         return end + 100 if end < int(m.group(1)) else end  # "1999-00" ends in 2000, not 1900

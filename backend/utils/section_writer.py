@@ -215,6 +215,29 @@ def prose_snippet(fact, before_words: int = 9, after_words: int = 7) -> str:
     return ("…" if len(context[:at].split()) > before_words else "") + " ".join(before + [fact.raw] + after) + "…"
 
 
+_MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                "October", "November", "December"]
+_MONTH_WORD_RE = re.compile(r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|"
+                            r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b")
+
+
+def _article_dated_month(fact, passage) -> str:
+    """"Month YYYY" for a prose statistic dated only by a month ("rose to 6.09 percent in October"): the most
+    recent such month on or before the article's date. "" when the sentence names a year or no month.
+
+    inflation live run: an article of 17 Nov 2026 said "in October"; the writer wrote "October 2024"."""
+    context = str(getattr(fact, "context", "") or "")
+    published = str(getattr(passage, "published", "") or "")
+    if re.search(r"\b(?:19|20)\d{2}\b|\bFY\s*'?\d{2}\b", context) or not re.match(r"(?:19|20)\d{2}-\d{2}", published):
+        return ""
+    month = _MONTH_WORD_RE.search(context)
+    if not month:
+        return ""
+    index = next(i for i, name in enumerate(_MONTH_NAMES) if name.lower().startswith(month.group(1).lower()[:3]))
+    year, published_month = int(published[:4]), int(published[5:7])
+    return f"{_MONTH_NAMES[index]} {year if index + 1 <= published_month else year - 1}"
+
+
 def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
     """The section's facts in fact-sheet order (table cells, then statistics from passage prose); fact Fn is
     element n-1.
@@ -238,6 +261,7 @@ def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
             break
     # Statistics written in the passages' sentences ("exports reached $27.85 billion in FY24"): most of the
     # numbers the writer still typed came from prose, where only word matching could check them.
+    by_id = {getattr(p, "passage_id", ""): p for p in passages or []}
     prose_seen, prose = set(), []
     for f in all_facts:
         if f.kind != "prose" or not _prose_statistic(f):
@@ -248,6 +272,10 @@ def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
         prose_seen.add(key)
         if not f.unit_text:
             f.unit_text = _prose_unit_text(f)
+        dated = _article_dated_month(f, by_id.get(f.passage_id))
+        if dated:
+            f.period = dated
+            f.dated_from_article = True  # checked against the year the writer puts beside its id
         prose.append(f)
         if len(prose) >= prose_limit:
             break
@@ -334,7 +362,8 @@ def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
     lines, prose_lines = [], []
     for i, f in enumerate(facts, 1):
         if f.kind == "prose":
-            prose_lines.append(f"- F{i} | {fact_value_text(f)} | {prose_snippet(f)} | [{f.passage_id}]")
+            dated = f" (that is {f.period}, from the article date)" if getattr(f, "dated_from_article", False) else ""
+            prose_lines.append(f"- F{i} | {fact_value_text(f)} | {prose_snippet(f)}{dated} | [{f.passage_id}]")
             continue
         metric = re.sub(r"\s+", " ", f.metric)[:50]
         lines.append(f"- F{i} | {fact_value_text(f)} | {metric or '-'} | "
@@ -357,6 +386,7 @@ FACT_ID_IN_CALC_RE = re.compile(r"(?<![\w.])F(\d+)(?![\w])")
 VERIFIED_MARK = "⁠"  # word joiner, invisible: the number before it was inserted from a fact id
 UNKNOWN_FACT = "[[UNKNOWN_FACT]]"
 BOUND_FLIP = "[[BOUND_FLIP]]"
+PERIOD_FLIP = "[[PERIOD_FLIP]]"
 _CURRENCY_TAIL_RE = re.compile(r"(?:\brs\.?|\binr|\busd|us\$|[₹$€£])\s*$", re.I)
 _UPPER_BOUND_RE = re.compile(r"(?:\bnot\s+(?:exceeding|more\s+than|above|over|greater\s+than|higher\s+than)|"
                              r"\b(?:less|lower|fewer)\s+than|\bbelow|\bunder|\bup\s*to|\bat\s+most|\bmaximum\s+of|"
@@ -461,6 +491,12 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
                 return UNKNOWN_FACT
             if _flips_bound(fact, sentence[:m.start()]):
                 return BOUND_FLIP
+            if getattr(fact, "dated_from_article", False):
+                # The clause around the id names years; the article dates this value to another one.
+                clause = sentence[max(0, m.start() - 70):m.end() + 70]
+                years = set(re.findall(r"\b(?:19|20)\d{2}\b", clause))
+                if years and fact.period[-4:] not in years:
+                    return PERIOD_FLIP
             value = fact_value_text(fact)
             after = sentence[m.end():m.end() + 16].lstrip().casefold()
             if fact.unit and fact.unit != "%" and after.startswith(fact.unit.casefold()) and value.endswith(fact.unit):
@@ -629,8 +665,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     # The verified marks have done their job (the number policy skipped those numbers): remove them.
     body = body.replace(VERIFIED_MARK, "")
     summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
-    if BOUND_FLIP in summary:  # the summary is not checked sentence by sentence: drop the sentence here
-        summary = " ".join(x for x in re.split(r"(?<=[.!?])\s+", summary) if BOUND_FLIP not in x)
+    if BOUND_FLIP in summary or PERIOD_FLIP in summary:  # the summary is not checked sentence by sentence
+        summary = " ".join(x for x in re.split(r"(?<=[.!?])\s+", summary)
+                           if BOUND_FLIP not in x and PERIOD_FLIP not in x)
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}

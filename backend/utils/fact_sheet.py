@@ -158,7 +158,8 @@ def is_column_numbering(cells: list[str]) -> bool:
 
 
 def extract_facts(passage) -> list[Fact]:
-    text = str(passage.text or "")
+    # Page markup splits a decimal ("6 .09 percent"): read as two numbers, "6%" became a fact (inflation run).
+    text = re.sub(r"(?<=\d) \.(?=\d)", ".", str(passage.text or ""))
     pid = passage.passage_id
     facts: list[Fact] = []
     lines = text.splitlines()

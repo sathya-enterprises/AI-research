@@ -1489,3 +1489,26 @@ def test_full_width_and_round_citation_brackets_become_square():
     assert normalize_citation_brackets("exports rose 9%【S23.2】 in FY25") == "exports rose 9%[S23.2] in FY25"
     assert normalize_citation_brackets("AUM grew (S12, S3.1).") == "AUM grew [S12, S3.1]."
     assert normalize_citation_brackets("Schedule (S) and (see S3 notes)") == "Schedule (S) and (see S3 notes)"
+
+
+def test_month_without_year_is_dated_by_the_article_and_checked():
+    # inflation live run: an article of 17 Nov 2026 said "rose to 6.09 percent in October"; the writer wrote
+    # "In October 2024, CPI inflation rose to [[F67]]". "6 .09" also gave a "6%" fact.
+    from types import SimpleNamespace
+
+    from utils.section_writer import fact_block, numbered_facts, resolve_fact_refs
+
+    text = ("Rising rate hike bets cloud the outlook.\nConsumer Price Index (CPI)-based inflation rose to 6 .09 percent "
+            "in October, moving above the RBI's tolerance band for the first time in two years.")
+    passage = SimpleNamespace(passage_id="S30.2", text=text, published="2026-11-17T03:30:03.000Z")
+    facts = numbered_facts([passage])
+    cpi = next(i for i, f in enumerate(facts, 1) if f.value == "6.09")
+    assert not any(f.value == "6" for f in facts)
+    assert facts[cpi - 1].period == "October 2026" and "October 2026, from the article date" in fact_block([passage], facts=facts)
+    wrong, _ = resolve_fact_refs(f"In October 2024, CPI inflation rose to [[F{cpi}]] [S30.2].", facts)
+    right, _ = resolve_fact_refs(f"In October 2026, CPI inflation rose to [[F{cpi}]] [S30.2].", facts)
+    plain, _ = resolve_fact_refs(f"CPI inflation rose to [[F{cpi}]] in October [S30.2].", facts)
+    assert "PERIOD_FLIP" in wrong and "6.09" in right and "6.09" in plain
+    january = SimpleNamespace(passage_id="S1.1", published="2026-11-17",
+                              text="Exports rose to $45.2 billion in December, a record.")
+    assert numbered_facts([january])[0].period == "December 2025"
