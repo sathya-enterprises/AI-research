@@ -1333,3 +1333,23 @@ def test_audit_reads_investor_money_flows_as_rupees_not_counts():
     audited = report._attach_audit_source_evidence(
         manifest, enriched, "In October, foreign investors poured +11,065.00 crore into Telecom [S56].")
     assert audited[0].get("unmatchedNumericClaims") in ([], None)
+
+
+def test_every_way_a_writer_writes_a_fact_id_is_resolved_or_removed():
+    # Live 30-prompt run: bare "F61", "(F30)", "[F21]", "[[F14%]]", "[[F56.1: 5171.97]]" and ids inside citations
+    # reached the published reports.
+    from utils.section_writer import normalize_fact_refs
+
+    assert normalize_fact_refs("GNPA fell by F61 in H1 [S8].", 100) == "GNPA fell by [[F61]] in H1 [S8]."
+    assert normalize_fact_refs("grew 1.54% [[F15], [F21], S30.9] [S30].", 100) == "grew 1.54% [S30.9] [S30]."
+    assert normalize_fact_refs("gains to [[F14%]] in May.", 100) == "gains to [[F14]]% in May."
+    assert normalize_fact_refs("via [[F56.1: 5171.97]] for FAME [S56].", 100) == "via 5171.97 for FAME [S56]."
+    assert normalize_fact_refs("608.3 dollars (F30) in 2015 [S1].", 100) == "608.3 dollars in 2015 [S1]."
+    assert normalize_fact_refs("Capacity [F4] and [[ fact: F5 ]] [S2].", 100) == "Capacity [[F4]] and [[F5]] [S2]."
+    assert "UNKNOWN_FACT" in normalize_fact_refs("Indonesia ([[FFF:=F31 in table]]) lagged.", 100)
+    assert "UNKNOWN_FACT" in normalize_fact_refs("reached F250 by 2024.", 100)  # not on the sheet
+    keep = "The F-16 jet, F&O volumes and PDF/F2 files. [[FIGURE 2]] [[calc: 5 - 3]] [[F7]]"
+    assert normalize_fact_refs(keep, 100) == keep
+
+    draft, facts = _fact_postprocess("The MSP for paddy rose to F2 in 2019-20 [S2.1]. It rose again later [S2.1].")
+    assert "F2" not in draft.body and facts[1].raw in draft.body

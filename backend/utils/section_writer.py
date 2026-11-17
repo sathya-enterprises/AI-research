@@ -45,7 +45,8 @@ NON-NEGOTIABLE RULES
    exactly from the passages; the system computes the value and shows its inputs. If a number you would need is
    not in the evidence, say the evidence does not show it. Sentences with numbers the evidence does not contain are removed.
    When a FACT SHEET is given, write a number that is on it by its id ([[F3]]) instead of typing it, and only use ids
-   listed there; the system inserts the exact value, unit and citation.
+   listed there; the system inserts the exact value, unit and citation. Write an id exactly as [[F3]]: two square
+   brackets, nothing else inside, never a bare F3, never inside the [S..] citation.
 4. Figures: for each figure listed, put its marker [[FIGURE N]] on its own line where it belongs, and in the adjacent
    paragraph refer to it by number ("Figure N") in a sentence that states what the data shows - the key pattern with
    the figure's own values - and why it matters for the section's goal. Never restate the figure's title or describe
@@ -373,6 +374,47 @@ def _flips_bound(fact, sentence_before: str) -> bool:
     return bool(source and draft and source != draft)
 
 
+_BRACKET_GROUP_RE = re.compile(r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]")
+_ID_WITH_VALUE_RE = re.compile(r"\[\[\s*F[\d.]+\s*:\s*([-+−]?(?:₹|Rs\.?|\$|US\$)?\s*\d[\d,]*(?:\.\d+)?\s*%?)\s*\]\]", re.I)
+_DOUBLE_ID_RE = re.compile(r"\[\[\s*(?:fact\s*:\s*)?F(\d{1,3})\s*(%?)\s*\]\]", re.I)
+_SINGLE_ID_RE = re.compile(r"(?<!\[)\[\s*F(\d{1,3})\s*\](?!\])")
+_BARE_ID_RE = re.compile(r"(?<![\w\[\-/.&])F(\d{1,3}(?:\.\d+)?)(?![\w\]\-&])")
+_LEFTOVER_ID_RE = re.compile(r"\[\[\s*F(?!IGURE)(?!\d{1,3}\]\])[^\]]*\]\]", re.I)
+
+
+def normalize_fact_refs(text: str, fact_count: int) -> str:
+    """Every way a writer wrote a fact id becomes "[[Fn]]" (or UNKNOWN_FACT).
+
+    Live 30-prompt run: besides "[[F12]]" the writers wrote bare "F61", "(F30)", "[F21]", "[[F14%]]",
+    "[[F56.1: 5171.97]]" and ids inside citations ("[[F15], [F21], S30.9]"); none were resolved and the
+    raw ids reached the published reports (52 in one EV report, 67 in the internet one)."""
+    def citation_group(m: re.Match) -> str:
+        group = m.group(0)
+        if not re.search(r"\bS\d", group) or not re.search(r"\bF\d", group):
+            return group
+        parts = [p.strip().strip("[]").strip() for p in re.split(r"\s*[,;]\s*", group[1:-1])]
+        kept = [p for p in parts if re.fullmatch(r"S\d+(?:\.\d+)?", p, re.I)]
+        return f"[{', '.join(kept)}]" if kept else ""
+
+    text = _BRACKET_GROUP_RE.sub(citation_group, text)
+    text = _ID_WITH_VALUE_RE.sub(lambda m: m.group(1).strip(), text)  # the typed value is checked as typed
+    # "608.3 international dollars (F30)": the id labels a number the writer typed; resolved, the value would
+    # be printed twice. The label goes; the typed number is checked like any other.
+    text = re.sub(r"(\d[\d,]*(?:\.\d+)?[^()\n\d]{0,40}?)\s*\(\s*F\d{1,3}\s*\)", r"\1", text)
+    text = _DOUBLE_ID_RE.sub(lambda m: f"[[F{m.group(1)}]]{m.group(2)}", text)
+    text = _SINGLE_ID_RE.sub(lambda m: f"[[F{m.group(1)}]]", text)
+    text = _LEFTOVER_ID_RE.sub(UNKNOWN_FACT, text)  # malformed "[[FFF:=F31 ...]]": nothing to resolve
+
+    def bare(m: re.Match) -> str:
+        number = m.group(1)
+        if "." not in number and 1 <= int(number) <= fact_count:
+            return f"[[F{number}]]"
+        return UNKNOWN_FACT
+
+    # Bare ids outside "[[...]]" (the canonical ids are protected by the lookbehind on "[").
+    return _BARE_ID_RE.sub(bare, text)
+
+
 def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
     """Replace the writer's fact ids with the facts' exact text.
 
@@ -393,6 +435,8 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
         return f"[[calc: {inner}]]"
 
     text = re.sub(r"\[\[\s*calc\s*:\s*([^\]]+)\]\]", calc_sub, text, flags=re.I)
+    if facts:
+        text = normalize_fact_refs(text, len(facts))
 
     pieces = re.split(r"(?<=[.!?])(\s+)", text)
     for i, sentence in enumerate(pieces):
