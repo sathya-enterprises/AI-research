@@ -1568,6 +1568,8 @@ def drop_charts_outside_requested_window(
     for chart_index, chart in enumerate(original, start=1):
         if not isinstance(chart, dict):
             continue
+        if chart.get("contextOutsideWindow"):
+            continue  # a labelled context chart: its period is outside the window by design
         title = str(chart.get("title") or f"Chart {chart_index}")
         chart_source_ids = _source_ids(chart)
         chart_context = [
@@ -2322,6 +2324,9 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
     for chart_index, chart in enumerate(chart_rows, 1):
         if str(chart.get("type") or chart.get("chartType") or "").casefold() == "table":
             continue
+        # A labelled context chart (data outside the question's window, shown to reach the chart minimum)
+        # is checked like any other chart except for the window.
+        chart_question = "" if chart.get("contextOutsideWindow") else question
         title = str(chart.get("title") or f"Chart {chart_index}")
         unit_source_id = str(chart.get("unitEvidenceSource") or "").strip().upper()
         if unit_source_id:
@@ -2372,7 +2377,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                 record.get("evidenceValue") or record.get("value"), record_quote,
             )
             outside_periods = _periods_outside_question_window(
-                question,
+                chart_question,
                 [
                     " ".join(str(record.get(key) or "") for key in ("label", "period", "date", "quarter")),
                     " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
@@ -2429,7 +2434,7 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                             ):
                                 continue
                             outside_periods = _periods_outside_question_window(
-                                question,
+                                chart_question,
                                 [
                                     column_label,
                                     " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
@@ -2534,9 +2539,9 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     outside_periods = _periods_outside_question_window(
                         # A point labelled only by a period ("31.03.2021") is dated by that label; other
                         # periods in its source row ("... 2020 | 2021") are its neighbours' periods.
-                        question, [own_period],
+                        chart_question, [own_period],
                     ) if own_period else _periods_outside_question_window(
-                        question,
+                        chart_question,
                         [
                             " ".join((label, series)),
                             " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),
@@ -2616,9 +2621,9 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         continue
                 own_period = _label_period(label) or _label_period(series) or _column_period(point)
                 outside_periods = _periods_outside_question_window(
-                    question, [own_period],
+                    chart_question, [own_period],
                 ) if own_period else _periods_outside_question_window(
-                    question,
+                    chart_question,
                     [
                         " ".join((label, series)),
                         " ".join((title, str(chart.get("xLabel") or ""), str(chart.get("yLabel") or ""))),

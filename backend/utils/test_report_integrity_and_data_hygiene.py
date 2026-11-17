@@ -1028,7 +1028,7 @@ def test_fact_ids_become_the_exact_cell_with_its_citation_and_are_not_second_gue
     assert "rose to 1815 per quintal [S2.1]." in draft.body
     assert draft.removed_sentences == []
     assert "\u2060" not in draft.body + draft.summary and "1815" in draft.summary
-    assert draft.fact_refs_used[0] == {"id": "F3", "value": "1815", "passage": "S2.1"}
+    assert {k: v for k, v in draft.fact_refs_used[0].items() if not k.startswith("_")} == {"id": "F3", "value": "1815", "passage": "S2.1"}
 
 
 def test_fact_ids_carry_units_without_doubling_them_and_work_in_calculations():
@@ -1525,3 +1525,91 @@ def test_europe_gas_footnoted_year_spaced_percent_and_repeated_id():
     values = [f.value for f in numbered_facts([passage])]
     assert "1083" in [v.replace(",", "") for v in values] and "20231" not in values
     assert normalize_fact_refs("storage of [[F7]] ([[F7]] TWh) in October", 50) == "storage of [[F7]] in October"
+
+
+def _chart_minimum_store():
+    from types import SimpleNamespace
+
+    text = ("TABLE 1 — Subscribers by operator\nOperator | Subscribers (million) | Share (%)\n"
+            "Jio | 476.58 | 40.5\nAirtel | 289.31 | 33.6\nVodafone Idea | 127.40 | 17.9\nBSNL | 34.26 | 7.2")
+    passage = SimpleNamespace(passage_id="S5.1", source_id="S5", kind="table", reliability=1.0, publisher="",
+                              title="TRAI subscriber data", text=text, published="2025-05-01")
+    return SimpleNamespace(get=lambda pid: passage if pid == "S5.1" else None, passages=[passage]), passage
+
+
+def test_report_number_chart_from_a_sentence_comparing_facts():
+    # Chart minimum: "Jio had [[F1]] and Airtel [[F3]]" becomes a chart of exactly those two source rows.
+    from types import SimpleNamespace
+
+    import utils.chart_evidence_audit as cea
+    from utils.chart_minimum import place_after_sentence, report_number_charts
+    from utils.section_writer import numbered_facts, resolve_fact_refs
+
+    store, passage = _chart_minimum_store()
+    facts = numbered_facts([passage])
+    ids = {(f.label, f.metric): i for i, f in enumerate(facts, 1)}
+    jio, airtel = ids[("Jio", "Subscribers (million)")], ids[("Airtel", "Subscribers (million)")]
+    body, used = resolve_fact_refs(f"Jio led with [[F{jio}]] subscribers while Airtel had [[F{airtel}]] [S5.1].", facts)
+    draft = SimpleNamespace(section_id="s1", fact_refs_used=used, body=body)
+    charts = report_number_charts([draft], store, start_index=900, limit=3)
+    assert len(charts) == 1 and charts[0].spec["fromReportText"] and charts[0].section_id == "s1"
+    points = [p for s in charts[0].spec["series"] for p in s["data"]]
+    assert {p["label"] for p in points} == {"Jio", "Airtel"}
+    for series in charts[0].spec["series"]:
+        for p in series["data"]:
+            assert cea._quoted_point_mismatch(charts[0].spec, series["name"], p["label"], p["value"], p,
+                                              p["evidenceQuote"], passage.text) == ""
+    placed = place_after_sentence("Intro.\n\n" + body.replace("⁠", "") + "\n\nLater.", charts[0].claim, 301,
+                                  "Jio has the most subscribers.")
+    assert placed.index("[[FIGURE 301]]") < placed.index("Later.")
+
+
+def test_context_chart_is_labelled_and_exempt_only_from_the_window():
+    from types import SimpleNamespace
+
+    import utils.chart_evidence_audit as cea
+    from utils.chart_minimum import CONTEXT_NOTE, context_charts
+    from utils.section_charts import charts_from_passage
+
+    text = "TABLE 1 — Exports (USD bn)\nYear | Exports (USD bn)\n2012 | 10.5\n2013 | 11.2\n2014 | 12.9\n2015 | 13.1"
+    passage = SimpleNamespace(passage_id="S9.1", source_id="S9", kind="table", reliability=1.0, publisher="",
+                              title="", text=text)
+    chart = charts_from_passage(passage, 1)[0]
+    far = charts_from_passage(SimpleNamespace(**{**vars(passage), "text": text.replace("201", "199")}), 2)[0]
+    picked = context_charts([far, chart], [], min_year=2018, max_year=2024, limit=1)
+    assert len(picked) == 1 and "2015" in str(picked[0].spec["series"])  # nearest to the window first
+    spec = picked[0].spec
+    assert spec["contextOutsideWindow"] and "context: outside the requested period" in spec["title"]
+    assert CONTEXT_NOTE in spec["basisNote"]
+    source = {"id": "S9", "url": "https://example.org/x", "page_fetch_status": "ok", "evidence_origin": "publisher_page",
+              "evidenceExcerpt": text, "publisherEvidenceExcerpt": text}
+    question = "How did exports change from 2018 to 2024?"
+    plain = dict(chart.spec, evidencePassages=["S9.1"])
+    flagged = dict(spec, evidencePassages=["S9.1"])
+    window = "falls outside the time window"
+    plain_reasons = [f.get("reason") for f in cea.audit_chart_evidence_consistency("", [plain], [source], question=question)
+                     .get("chartEvidenceFailures") or []]
+    flagged_reasons = [f.get("reason") for f in cea.audit_chart_evidence_consistency("", [flagged], [source], question=question)
+                       .get("chartEvidenceFailures") or []]
+    assert any(window in str(r) for r in plain_reasons)
+    assert not any(window in str(r) for r in flagged_reasons)
+
+
+def test_a_chart_whose_best_section_is_full_goes_to_the_next_fitting_section():
+    from types import SimpleNamespace
+
+    from utils.section_charts import assign_charts
+
+    def chart(cid, pids, text):
+        return SimpleNamespace(chart_id=cid, section_id="", passage_ids=pids, points=[("a", "b", 1.0)], match_text=text)
+
+    sections = [SimpleNamespace(section_id="s1", title="Exports", goal="exports", queries=["exports"], passage_ids=["S1.1"]),
+                SimpleNamespace(section_id="s2", title="Export markets", goal="markets", queries=["exports"], passage_ids=["S2.1"])]
+    charts = [chart("c1", ["S1.1"], "exports"), chart("c2", ["S1.1"], "exports"), chart("c3", ["S1.1", "S2.1"], "exports")]
+    assign_charts(charts, sections, per_section=2)
+    assert sorted(c.section_id for c in charts) == ["s1", "s1", "s2"]
+    weak = [chart("w1", ["S9.1"], "exports")]
+    assign_charts(weak, sections, per_section=2)
+    assert weak[0].section_id == ""  # a weak fit is not placed when the report is not short of charts
+    assign_charts(weak, sections, per_section=2, fill_to=8)
+    assert weak[0].section_id in {"s1", "s2"}

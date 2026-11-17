@@ -1116,8 +1116,12 @@ def _focused_charts(passage, index: int, qtd_start, focus: list[str] | None, min
 
 def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None = None, max_year: int | None = None,
                            min_reliability: float = 0.5, today: str | None = None,
-                           focus: list[str] | None = None) -> tuple[list[PlannedChart], list[dict]]:
+                           focus: list[str] | None = None,
+                           context_out: list | None = None) -> tuple[list[PlannedChart], list[dict]]:
     """Charts from every table/calculated passage; returns (verified charts, dropped log).
+
+    ``context_out`` collects untouched copies of charts dropped only for the question's window: a report
+    below its chart minimum shows them as labelled context charts.
 
     Dropped before writing: unverifiable data, periods entirely before the
     requested window, and data from sources below ``min_reliability``.
@@ -1130,9 +1134,14 @@ def build_chart_candidates(store, *, max_charts: int = 40, min_year: int | None 
             if signature in seen:
                 continue
             seen.add(signature)
-            reason = verify_chart(chart, passage.text) or _chart_data_problem(chart) or _outside_window(chart, min_year, max_year)
+            reason = verify_chart(chart, passage.text) or _chart_data_problem(chart)
             if not reason:
-                reason = clip_to_window(chart, min_year, max_year)
+                import copy as _copy
+                original = _copy.deepcopy(chart)  # clip_to_window trims the series in place
+                reason = _outside_window(chart, min_year, max_year) or clip_to_window(chart, min_year, max_year)
+                if reason and context_out is not None and (
+                        passage.kind == "calculated" or passage.reliability >= min_reliability):
+                    context_out.append(original)
             if not reason and passage.kind != "calculated" and passage.reliability < min_reliability:
                 reason = f"source reliability {passage.reliability:.2f} below {min_reliability:.2f}"
             # Stage N: a repeated title is a duplicate only when the values repeat too; otherwise it is another
@@ -1157,11 +1166,14 @@ def _terms(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]{3,}", str(text or "").casefold())}
 
 
-def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: int = 2) -> None:
+def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: int = 2,
+                  fill_to: int | None = None) -> None:
     """Give each chart to the section whose queries/passages fit it best (passage overlap first).
 
     Charts already assigned (fetched-dataset charts, utils.dataset_charts.preassign) keep their
-    section and count towards its limit."""
+    section and count towards its limit. A chart whose best section is full goes to its next-best fitting
+    section; while the report has fewer than ``fill_to`` charts, a weaker fit (score >= 1) is accepted too
+    (live run: markets verified 11 charts but placed 6)."""
     load: dict[str, int] = {}
     for chart in charts:
         if chart.section_id:
@@ -1170,8 +1182,8 @@ def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: in
     for chart in charts:
         if chart.section_id:
             continue
-        best = None
         plotted = label_entities([a for a, _, _ in chart.points] + [b for _, b, _ in chart.points])
+        options = []
         for section in sections:
             # A sector deep-dive only takes charts that plot that sector.
             if (getattr(section, "role", "") == "deep_dive" and getattr(section, "entity", "")
@@ -1179,12 +1191,27 @@ def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: in
                 continue
             score = 3.0 * len(set(chart.passage_ids) & set(section.passage_ids))
             score += len(_terms(chart.match_text) & _terms(" ".join([section.title, section.goal, *section.queries])))
-            if best is None or score > best[0]:
-                best = (score, section)
-        if best and best[0] >= 2:
-            ranked.append((best[0], chart, best[1]))
-    for score, chart, section in sorted(ranked, key=lambda x: -x[0]):
-        if load.get(section.section_id, 0) >= per_section:
-            continue
-        chart.section_id = section.section_id
-        load[section.section_id] = load.get(section.section_id, 0) + 1
+            options.append((score, section))
+        options.sort(key=lambda x: -x[0])
+        if options:
+            ranked.append((options[0][0], chart, options))
+    ranked.sort(key=lambda x: -x[0])
+    for _score, chart, options in ranked:
+        for score, section in options:
+            if score < 2:
+                break
+            if load.get(section.section_id, 0) < per_section:
+                chart.section_id = section.section_id
+                load[section.section_id] = load.get(section.section_id, 0) + 1
+                break
+    if fill_to:
+        for _score, chart, options in ranked:
+            if sum(load.values()) >= fill_to:
+                break
+            if chart.section_id:
+                continue
+            for score, section in options:
+                if score >= 1 and load.get(section.section_id, 0) < per_section:
+                    chart.section_id = section.section_id
+                    load[section.section_id] = load.get(section.section_id, 0) + 1
+                    break

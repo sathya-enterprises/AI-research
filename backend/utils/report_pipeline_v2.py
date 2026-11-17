@@ -542,8 +542,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except Exception:
         min_year, max_year = None, None
     from utils.table_focus import focus_entities as _focus_entities
+    _context_pool: list = []  # charts dropped only for the window: labelled context charts if below the minimum
     candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
-                                                     max_year=max_year, today=today, focus=_focus_entities(question))
+                                                     max_year=max_year, today=today, focus=_focus_entities(question),
+                                                     context_out=_context_pool)
     table_chart_count = len(candidates) + len(chart_drops)
     series_warnings: list[dict] = []  # Stage M: sudden breaks in otherwise stable series (kept, said out loud)
     # Data first (Stage F): charts planned from fetched datasets before writing; they go through
@@ -620,8 +622,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     from utils.section_charts import clip_to_question_window
     _windowed = []
     for chart in candidates:
+        import copy as _copy
+        _original = _copy.deepcopy(chart)  # clip_to_question_window trims the series in place
         _reason = clip_to_question_window(chart, question)
         if _reason:
+            _context_pool.append(_original)
             chart.status, chart.drop_reason = "dropped", _reason
             chart_drops.append({"chart": chart.chart_id, "title": chart.spec.get("title"),
                                 "passage": ",".join(chart.passage_ids), "reason": _reason})
@@ -641,6 +646,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             for chart in charts:
                 _reason = quality_reason(chart.spec, chr(10).join(
                     store.get(pid).text for pid in chart.passage_ids if store.get(pid))[:400], _earlier)
+                if _reason.startswith("fewer than 3 distinct values") and chart.spec.get("fromReportText") and len(
+                        {p_.get("value") for s_ in chart.spec.get("series") or [] for p_ in s_.get("data") or []}) >= 2:
+                    _reason = ""  # the comparison a sentence of the report makes (two values are a comparison)
                 if not _reason:  # Stage M: shape checks (place, unit) - any topic
                     from utils.series_checks import chart_data_problem
                     _reason = chart_data_problem(chart.spec, question)
@@ -715,6 +723,20 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             log.info("V2: %d table chart(s) restored because the dataset chart they duplicated was dropped",
                      len(restored))
         candidates = candidates + restored
+    # Chart minimum (CHART_TARGET): below it, labelled context charts (data outside the question's window)
+    # fill the gap; they pass the same quality and evidence checks, except the window.
+    context_added: list[str] = []
+    _target = CHART_TARGET.get(tier, 8)
+    if len(candidates) < _target and _context_pool:
+        try:
+            from utils.chart_minimum import context_charts
+            _ctx = context_charts(_context_pool, candidates, min_year=min_year, max_year=max_year,
+                                  limit=(_target - len(candidates)) * 2)
+            _ctx = _verify_pass(_quality_pass(_ctx))[: _target - len(candidates)]
+            candidates = candidates + _ctx
+            context_added = [str(c.spec.get("title")) for c in _ctx]
+        except Exception as exc:
+            log.warning("V2 context charts skipped: %s", type(exc).__name__)
     # Stage L: every verified chart carries a reading of its own data, so a chart the writer does not
     # mention is placed with that sentence instead of being dropped (charts are the report's backbone).
     try:
@@ -735,6 +757,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                     chart.interpretation = f"{chart.interpretation} {note}"
     except Exception as exc:
         log.warning("V2 chart interpretation skipped: %s", type(exc).__name__)
+    for chart in candidates:  # a context chart's reading says it is context, in the text as on the chart
+        if chart.spec.get("contextOutsideWindow") and chart.reading:
+            chart.reading = f"for context (outside the period asked about), {chart.reading[0].lower()}{chart.reading[1:]}"
     # Fetched-dataset charts are placed first (a deep-dive gets its own sector's chart) and come on
     # top of the per-section limit for table charts; they are numbered from 101 until the final
     # renumbering in document order, so table charts keep the numbers the writer is given.
@@ -744,7 +769,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         from utils.dataset_extractor import assign_to_sections
         assign_to_sections([c for c in data_first if c.chart_id in extracted_ids], analysis)
     table_charts = [c for c in candidates if not c.interpretation]
-    assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2))
+    assign_charts(table_charts, analysis, per_section=CHARTS_PER_SECTION.get(tier, 2),
+                  fill_to=max(0, CHART_TARGET.get(tier, 8) - len([c for c in data_first if c.section_id])))
     unassigned = [c for c in candidates if not c.section_id]
     planned = [c for c in candidates if c.section_id]
     figure_no = 0
@@ -866,6 +892,32 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     failed = [d.title for d in drafts if not d.ok]
     if len(good) < max(3, len(analysis) // 2):
         raise PipelineV2Error(f"only {len(good)} of {len(analysis)} sections were generated ({'; '.join(d.error for d in drafts if not d.ok)[:300]})")
+
+    # Chart minimum, after writing: a sentence that compares two or more inserted table facts of one measure
+    # gets a chart of exactly those source rows, placed after its paragraph (same checks as every chart).
+    report_number_added: list[str] = []
+    _have = len([c for c in planned if c.status == "referenced"])
+    _target = CHART_TARGET.get(tier, 8)
+    if _have < _target:
+        try:
+            from utils.chart_minimum import place_after_sentence, report_number_charts
+            from utils.chart_story import interpret_chart
+            _rn = report_number_charts(good, store, start_index=900, limit=(_target - _have) * 2)
+            _rn = _verify_pass(_quality_pass(_rn))[: _target - _have]
+            for chart in _rn:
+                draft = next((d for d in good if d.section_id == chart.section_id), None)
+                if draft is None:
+                    continue
+                n = 300 + len(report_number_added) + 1
+                chart.figure_number = n
+                chart.reading = interpret_chart(chart.spec, chart.passage_ids) or f"{chart.spec.get('title')}."
+                draft.body = place_after_sentence(draft.body, chart.claim, n, chart.reading)
+                chart.claim = re.sub(r"\s+", " ", CITE_RE.sub("", f"As Figure {n} shows, {chart.reading}")).strip()[:400]
+                chart.status = "referenced"
+                planned.append(chart)
+                report_number_added.append(str(chart.spec.get("title")))
+        except Exception as exc:
+            log.warning("V2 report-number charts skipped: %s", type(exc).__name__)
 
     # Executive summary from section summaries.
     exec_section = next(s for s in outline.sections if s.kind == "executive_summary")
@@ -1171,6 +1223,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                       "figuresDropped": d.figures_dropped} for d in drafts],
         "executiveSummary": {"ok": exec_result.ok, "words": len(exec_body.split()), "unsupportedNumbers": exec_unsupported[:30]},
         "charts": {"candidates": len(candidates) + len(chart_drops), "droppedBeforeWriting": chart_drops,
+                   "contextCharts": context_added, "reportNumberCharts": report_number_added,
                    "planned": len(planned), "used": len(charts_out),
                    "droppedAfterWriting": [{"title": c.spec.get("title"), "reason": c.drop_reason} for c in planned if c.status != "referenced"],
                    "droppedAfterAssembly": dropped_after_assembly,

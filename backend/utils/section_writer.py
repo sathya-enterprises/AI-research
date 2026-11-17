@@ -500,6 +500,7 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
         if not FACT_REF_RE.search(sentence):
             continue
         needed: list[str] = []
+        first_used = len(used)
 
         def sub(m: re.Match) -> str:
             fact = fact_for(m.group(1))
@@ -525,7 +526,7 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
             if percent and (fact.unit or getattr(fact, "unit_text", "")):
                 percent = ""
             needed.append(fact.passage_id)
-            used.append({"id": f"F{m.group(1)}", "value": value, "passage": fact.passage_id})
+            used.append({"id": f"F{m.group(1)}", "value": value, "passage": fact.passage_id, "_fact": fact})
             digits = re.search(r"\d[\d,]*(?:\.\d+)?", value)
             value = value[:digits.end()] + VERIFIED_MARK + value[digits.end():] if digits else value
             return value + percent.strip()
@@ -537,6 +538,8 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
             stripped = sentence.rstrip()
             end = len(stripped) - 1 if stripped and stripped[-1] in ".!?" else len(stripped)
             sentence = stripped[:end] + f" [{', '.join(missing)}]" + stripped[end:] + sentence[len(stripped):]
+        for entry in used[first_used:]:
+            entry["_sentence"] = sentence  # report-number charts group the facts a sentence compares
         pieces[i] = sentence
     return "".join(pieces), used
 
