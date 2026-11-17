@@ -45,7 +45,7 @@ _WB = [
     ("wb.hightech_share", "TX.VAL.TECH.MF.ZS", "High-technology exports", "% of manufactured exports", "high-tech exports semiconductors electronics"),
     ("wb.rnd_gdp", "GB.XPD.RSDV.GD.ZS", "Research and development expenditure", "% of GDP", "r&d research innovation technology"),
     ("wb.internet", "IT.NET.USER.ZS", "Individuals using the Internet", "% of population", "internet digital connectivity online"),
-    ("wb.mobile", "IT.CEL.SETS.P2", "Mobile cellular subscriptions", "per 100 people", "mobile phones telecom subscriptions"),
+    ("wb.mobile", "IT.CEL.SETS.P2", "Mobile cellular subscriptions", "per 100 people", "mobile phones telecom subscriptions subscribers subscriber wireless 5g"),
     ("wb.population", "SP.POP.TOTL", "Population", "people", "population demographics"),
     ("wb.urban", "SP.URB.TOTL.IN.ZS", "Urban population", "% of total population", "urbanisation urbanization cities"),
     ("wb.life_exp", "SP.DYN.LE00.IN", "Life expectancy at birth", "years", "life expectancy health mortality"),
@@ -66,6 +66,30 @@ _WB = [
     ("wb.lending_rate", "FR.INR.LEND", "Lending interest rate", "%", "interest rates lending monetary policy"),
     ("wb.gross_capital", "NE.GDI.TOTL.ZS", "Gross capital formation", "% of GDP", "investment capex capital formation infrastructure"),
     ("wb.military", "MS.MIL.XPND.GD.ZS", "Military expenditure", "% of GDP", "defence defense military spending"),
+    # Topic series the 30-prompt live run asked for and the catalog lacked (education, telecom, agriculture,
+    # trade, tourism, defence exports, labour).
+    ("wb.tertiary_enrolment", "SE.TER.ENRR", "School enrollment, tertiary", "% gross",
+     "higher education enrolment enrollment universities colleges gross enrolment ratio ger"),
+    ("wb.secondary_enrolment", "SE.SEC.ENRR", "School enrollment, secondary", "% gross",
+     "secondary education school enrolment enrollment schools"),
+    ("wb.broadband", "IT.NET.BBND.P2", "Fixed broadband subscriptions", "per 100 people",
+     "broadband internet telecom fixed subscriptions connectivity"),
+    ("wb.cereal_production", "AG.PRD.CREL.MT", "Cereal production", "metric tons",
+     "foodgrain food grain cereal production wheat rice paddy agriculture harvest crops"),
+    ("wb.cereal_yield", "AG.YLD.CREL.KG", "Cereal yield", "kg per hectare",
+     "foodgrain cereal yield wheat rice paddy agriculture productivity"),
+    ("wb.merch_exports", "TX.VAL.MRCH.CD.WT", "Merchandise exports", "current US$",
+     "exports merchandise goods trade shipments exporters"),
+    ("wb.merch_imports", "TM.VAL.MRCH.CD.WT", "Merchandise imports", "current US$",
+     "imports merchandise goods trade"),
+    ("wb.tourism_receipts", "ST.INT.RCPT.CD", "International tourism, receipts", "current US$",
+     "tourism receipts earnings foreign exchange tourists travel"),
+    ("wb.arms_exports", "MS.MIL.XPRT.KD", "Arms exports (SIPRI trend indicator values)", "TIV",
+     "defence defense exports arms weapons military exports"),
+    ("wb.arms_imports", "MS.MIL.MPRT.KD", "Arms imports (SIPRI trend indicator values)", "TIV",
+     "defence defense imports arms weapons"),
+    ("wb.labour_participation", "SL.TLF.CACT.ZS", "Labor force participation rate", "% of population ages 15+",
+     "labour labor force participation employment jobs workforce"),
 ]
 _IMF = [
     ("imf.gdp_growth", "NGDP_RPCH", "Real GDP growth", "annual %", "gdp growth economy outlook imf"),
@@ -124,9 +148,19 @@ _FRED = [
     ("fred.dollar_index", "DTWEXBGS", "Nominal broad US dollar index", "index, annual average", "dollar strength currency emerging markets"),
     ("fred.vix", "VIXCLS", "CBOE Volatility Index (VIX)", "index, annual average", "volatility risk sentiment markets"),
     ("fred.sp500", "SP500", "S&P 500 index", "index, annual average", "us stocks equities s&p 500"),
+    ("fred.eu_gas", "PNGASEUUSDM", "Natural gas price, Europe (TTF)", "US$ per MMBtu, annual average",
+     "natural gas prices europe eu ttf energy crisis lng"),
+    ("fred.us_gas", "PNGASUSUSDM", "Natural gas price, US (Henry Hub)", "US$ per MMBtu, annual average",
+     "natural gas prices us henry hub energy lng"),
+    ("fred.us_unemployment", "UNRATE", "US unemployment rate", "%, annual average",
+     "us labour labor market unemployment jobs employment"),
+    ("fred.us_payrolls", "PAYEMS", "US nonfarm payroll employment", "thousands of persons, annual average",
+     "us labour labor market payrolls employment jobs"),
+    ("fred.us_participation", "CIVPART", "US labor force participation rate", "%, annual average",
+     "us labour labor market participation workforce"),
 ]
 _FRED_ENTITY = {"fred.usd_inr": "India", "fred.usd_cny": "China", "fred.usd_jpy": "Japan", "fred.eur_usd": "Euro area",
-                "fred.brent": "World", "fred.wti": "World"}
+                "fred.brent": "World", "fred.wti": "World", "fred.eu_gas": "European Union", "fred.us_gas": "United States"}
 _FRED_PAGE = "https://fred.stlouisfed.org/series/{code}"
 _WB_PAGE = "https://data.worldbank.org/indicator/{code}"
 _IMF_PAGE = "https://www.imf.org/external/datamapper/{code}"
@@ -240,6 +274,8 @@ _GENERIC_MEASURE_WORDS = {
     "private", "public", "domestic", "national", "country", "economy", "the", "and", "for", "from", "with", "into",
     # "semiconductor sales" vs "electric car sales": a semiconductor report fetched EV car sales as a stand-in
     "sale", "revenue", "volume", "market", "demand", "output", "production", "use", "end", "application", "segment",
+    # "crude steel production" is not crude oil (steel live run planned oil production)
+    "crude",
 }
 
 
@@ -310,6 +346,15 @@ async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, 
     else:
         note["method"] = "keywords (planner unavailable)"
         plan = keyword_plan(question, limit)
+    if not plan:
+        # The planner chose nothing (telecom, education, Europe gas in the live run) although the catalog holds
+        # series of the question's own subject: keyword matches that pass the same subject check are used.
+        fallback = [item for item in keyword_plan(question, limit)
+                    if fits_measure(CATALOG[item["id"]], measures or question)]
+        if fallback:
+            note["method"] = f"{note['method']}; keyword fallback (planner chose none)"
+            plan = [{**item, "fit": "direct", "measure": "", "why": "catalog series of the question's subject"}
+                    for item in fallback]
     seen, out = set(), []
     for item in plan:
         if item["id"] not in seen:
@@ -437,6 +482,9 @@ async def fetch_dataset(client, item: dict, *, start_year: int, today: date,
                         f" HTTP {status}" if status else "", attempt)
             if not isinstance(exc, httpx.HTTPError):
                 break  # a parsing/programming error will not succeed on retry
+            if isinstance(exc, httpx.TimeoutException) and attempt >= 2:
+                break  # a publisher that is not answering (World Bank API down: 4 x 45 s per dataset) is left
+                # after two tries; the report's other evidence goes on without it
             if status is not None and 400 <= int(status) < 500 and int(status) not in {408, 429}:
                 break  # a client error (bad code/entity) will not succeed on retry
             if wait_seconds:

@@ -1724,3 +1724,24 @@ def test_question_year_window_reads_month_names_and_split_years():
     assert requested_year_bounds("in the 2023-24 fiscal year", today) == (2023, 2024)
     assert requested_year_bounds("from FY2019 to FY2024", today) == (2018, 2024)
     assert requested_year_bounds("from 2015 to 2023", today) == (2015, 2023)
+
+
+def test_official_data_planner_falls_back_to_the_questions_own_series():
+    # telecom / education / Europe gas: the planner chose no dataset although the catalog holds the subject's series.
+    import asyncio
+    from datetime import date
+    from types import SimpleNamespace
+
+    from utils.official_data import plan_datasets
+
+    class Gateway:
+        async def generate(self, **kwargs):
+            return SimpleNamespace(ok=True, json=lambda: {"datasets": []})
+
+    plan, note = asyncio.run(plan_datasets(
+        "How have gross enrolment ratios in higher education in India changed from 2018 to 2024?", Gateway(),
+        today=date(2026, 11, 17)))
+    assert plan and plan[0]["id"] == "wb.tertiary_enrolment" and "fallback" in note["method"]
+    steel, _ = asyncio.run(plan_datasets("How has India's crude steel production grown from 2019 to 2024?",
+                                         Gateway(), today=date(2026, 11, 17)))
+    assert not any(item["id"].endswith("oil_prod") for item in steel)
