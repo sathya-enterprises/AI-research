@@ -448,6 +448,9 @@ def normalize_fact_refs(text: str, fact_count: int) -> str:
     raw ids reached the published reports (52 in one EV report, 67 in the internet one)."""
     def citation_group(m: re.Match) -> str:
         group = m.group(0)
+        if not re.search(r"\bS\d", group) and len(re.findall(r"\bF\d", group)) >= 2 and re.fullmatch(
+                r"\[\s*(?:\[?\s*F\d{1,3}\s*\]?\s*[,;]?\s*)+\]", group):
+            return ""  # "[[F15], [F16]]" used as a citation (auto_sales_ice): ids are not sources
         if not re.search(r"\bS\d", group) or not re.search(r"\bF\d", group):
             return group
         parts = [p.strip().strip("[]").strip() for p in re.split(r"\s*[,;]\s*", group[1:-1])]
@@ -688,6 +691,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         draft.rewritten_numbers += policy.rewritten
     # The verified marks have done their job (the number policy skipped those numbers): remove them.
     body = body.replace(VERIFIED_MARK, "")
+    # Any other double-bracket token the writer made up ("[[Part IV]]", upi live run) is not text: removed.
+    # Figure markers stay; the policy's own markers were handled (their sentences removed) above.
+    body = re.sub(r"\s*\[\[(?!\s*FIGURE\b)[^\[\]\n]{1,80}\]\]", "", body)
     summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
     if BOUND_FLIP in summary or PERIOD_FLIP in summary:  # the summary is not checked sentence by sentence
         summary = " ".join(x for x in re.split(SENTENCE_END + r"\s+", summary)

@@ -1700,3 +1700,11 @@ def test_claim_check_judges_weak_sentences_and_removes_unsupported_ones():
     draft2 = SimpleNamespace(section_id="s1", body=body)
     assert asyncio.run(check_section(Broken(), draft2, passages))["removed"] == [] and draft2.body == body
     assert parse_verdicts('[{"i": 9, "verdict": "UNSUPPORTED"}, {"i": 1, "verdict": "maybe"}]', 2) == {}
+
+
+def test_made_up_double_bracket_tokens_and_id_only_citations_are_removed():
+    from utils.section_writer import normalize_fact_refs
+
+    assert normalize_fact_refs("lagged effects [[F15], [F16]] and more [S3].", 50) == "lagged effects  and more [S3]."
+    draft, _ = _fact_postprocess("The MSP rose to 1815 in 2019-20 [S2.1] [[Part IV]]. It rose again later [S2.1].")
+    assert "[[" not in draft.body and "1815" in draft.body
