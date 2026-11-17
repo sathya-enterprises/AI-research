@@ -650,6 +650,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     body, used = resolve_fact_refs(body, fact_refs)
     summary, used_in_summary = resolve_fact_refs(summary, fact_refs)
     draft.fact_refs_used += used + used_in_summary
+    body, summary = _RS_DOT_RE.sub("Rs ", body), _RS_DOT_RE.sub("Rs ", summary)  # inserted values ("Rs. 25 crore")
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
     body = strip_ascii_charts(body)
