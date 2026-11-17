@@ -1353,3 +1353,18 @@ def test_every_way_a_writer_writes_a_fact_id_is_resolved_or_removed():
 
     draft, facts = _fact_postprocess("The MSP for paddy rose to F2 in 2019-20 [S2.1]. It rose again later [S2.1].")
     assert "F2" not in draft.body and facts[1].raw in draft.body
+
+
+def test_audit_reads_a_flattened_pdf_table_with_its_unit_line():
+    # internet live run: TRAI "Internet Subscribers (million)" above "Mar-2023 357.99 523.26 881.25".
+    import routes.report as report
+
+    page = ("Table1.41: Subscriber Base & Tele-density - Rural & Urban\nInternet Subscribers (million) Internet tele-density (%)\n"
+            "Mar-2022 331.81 493.08 824.89 37.06 102.82 60.00\nMar-2023 357.99 523.26 881.25 39.84 107.11 63.53\n"
+            "Mar-2024 398.35 556.05 954.40 44.16 111.75 68.19")
+    enriched = [{"title": "TRAI annual report", "url": "https://trai.gov.in/report.pdf", "pageFetchStatus": "ok",
+                 "evidenceOrigin": "publisher_page", "pageContent": page}]
+    manifest = [{"id": "S30", "title": "TRAI annual report", "url": "https://trai.gov.in/report.pdf"}]
+    audited = report._attach_audit_source_evidence(
+        manifest, enriched, "Internet subscribers grew to 881.25 million in March 2023 [S30].")
+    assert audited[0].get("unmatchedNumericClaims") in ([], None)

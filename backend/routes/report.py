@@ -17103,6 +17103,7 @@ def _attach_audit_source_evidence(
         supported_claim_numbers: set[str] = set()
         token_subject_stems: dict[str, list[list[str]]] = {}
         previous_source_sentence = ""
+        _row_label_line = ""
         for sentence, origin in deduped_sentences:
             row_context = _TABLE_ROW_CONTEXT.get(sentence, "")
             subject_evidence = f"{row_context} | {sentence}" if row_context else sentence
@@ -17119,10 +17120,17 @@ def _attach_audit_source_evidence(
                 }
             # A table row labelled "(in lakhs)" with a count noun states counts in
             # lakhs: add absolute-count variants of its bare cells.
-            _count_label = re.search(r"(?i)\(\s*(?:in\s+)?(lakhs?|crores?|millions?|thousands?|billions?)\s*\)", numeric_evidence)
-            if "|" in numeric_evidence and _count_label and re.search(
+            # A PDF table flattened to text keeps its unit on the line above its rows ("Internet Subscribers
+            # (million)" then "Mar-2023 357.99 523.26 881.25"): a row of bare numbers takes that label too
+            # (internet live run: "881.25 million in March 2023" was called unsupported).
+            _numeric_row = "|" in numeric_evidence or len(re.findall(r"(?<![\w.])\d[\d,]*\.\d+(?![\w.])", numeric_evidence)) >= 3
+            if "|" not in numeric_evidence and not _numeric_row:
+                _row_label_line = numeric_evidence[-300:]  # a label line governs the numeric rows that follow it
+            _label_context = numeric_evidence if "|" in numeric_evidence else f"{_row_label_line} {numeric_evidence}"
+            _count_label = re.search(r"(?i)\(\s*(?:in\s+)?(lakhs?|crores?|millions?|thousands?|billions?)\s*\)", _label_context)
+            if _numeric_row and _count_label and re.search(
                     r"(?i)\bnumber\s+of\b|\bcards?\b|\baccounts?\b|\bunits?\b|\bsubscribers?\b|\bvehicles?\b|\bcomplaints?\b|"
-                r"\bmachines\b|\batms\b|\bbranches\b|\busers\b|\bsales\b|\bconnections\b", numeric_evidence):
+                r"\bmachines\b|\batms\b|\bbranches\b|\busers\b|\bsales\b|\bconnections\b", _label_context):
                 _mult = {"lakh": 1e5, "crore": 1e7, "million": 1e6, "thousand": 1e3, "billion": 1e9}[_count_label.group(1).casefold().rstrip("s")]
                 sent_numbers = set(sent_numbers) | {
                     f"count:{float(token.split(':', 1)[1].partition('~')[0]) * _mult:.10g}"
@@ -17140,6 +17148,7 @@ def _attach_audit_source_evidence(
                 # carry the metric name only in their caption/header line.
                 subject = _claim_subject_stems(
                     sentence + " " + previous_source_sentence[-300:] + " " + _TABLE_ROW_CONTEXT.get(sentence, "")
+                    + (" " + _row_label_line if _numeric_row and "|" not in numeric_evidence else "")
                 )
                 for claim_number in matched_claim_numbers:
                     bucket = token_subject_stems.setdefault(claim_number, [])
