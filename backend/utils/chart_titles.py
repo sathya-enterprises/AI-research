@@ -56,8 +56,14 @@ def clean_label(label: str) -> str:
 
 
 def header_is_data(header: str) -> bool:
-    """A 'header' that is a number ("5.99%", "19.86", "+2,599 Cr") means the table has no real header row."""
-    return bool(_NUMERIC_HEADER_RE.match(str(header or "").replace("−", "-")))
+    """A 'header' that is a number ("5.99%", "19.86", "+2,599 Cr") means the table has no real header row.
+
+    A bare year ("1986", "2024") is a period column, not data: "Region | 1986 | ... | 2025" tables (WSTS
+    sales by region, most official yearly series) were dropped as header-less, so no chart was built."""
+    text = str(header or "").strip()
+    if re.fullmatch(r"(?:19|20)\d{2}", text):
+        return False
+    return bool(_NUMERIC_HEADER_RE.match(text.replace("−", "-")))
 
 
 def non_comparable_metric(metric: str) -> bool:

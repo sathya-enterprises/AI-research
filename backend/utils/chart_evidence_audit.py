@@ -2062,18 +2062,26 @@ def _quoted_point_mismatch(chart: dict, series: str, label: str, value: object, 
             # table ("TABLE 1 — Electric car sales (cars)" / "Year | India" / "2022 | 48,023") failed the
             # entity and measure tests because only the bare data row was in context.
             local = f"{local} {table_header_context}"
-        if expected_period and not _relative_period_supported(
+        # A value proved to sit under the column named by its period ("Region | ... | 2020 | ..." with the
+        # cell under "2020") has that period: the row itself never repeats the year (semiconductors live run).
+        _column_named = str(point.get("evidenceColumn") or point.get("evidence_column") or "").strip()
+        period_from_column = bool(column_match is True and expected_period and _column_named
+                                  and _point_period_in_text(expected_period, _column_named))
+        if expected_period and not period_from_column and not _relative_period_supported(
             expected_period, own, context, source_text, evidence_value or value,
         ):
             period_miss = True
             continue
+        # In a long row ("World Total | 26.4 | ... 40 cells") the value's window does not reach the row label;
+        # the column matcher already tied the cell to its row, so the whole quoted row is the row's text.
+        row_text = f"{own} {quote}" if column_match is True else own
         if expected_row:
             if _is_point_period(expected_row):
-                if not _point_period_in_text(expected_row, own):
+                if not _point_period_in_text(expected_row, row_text):
                     continue
-            elif not _label_terms_present(expected_row, own):
+            elif not _label_terms_present(expected_row, row_text):
                 continue
-        if expected_category and not _label_terms_present(expected_category, own):
+        if expected_category and not _label_terms_present(expected_category, row_text):
             continue
         if expected_entity and not _label_terms_present(expected_entity, local):
             entity_miss = True

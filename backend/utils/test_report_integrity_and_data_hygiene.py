@@ -1402,3 +1402,43 @@ def test_audit_reads_money_rows_under_a_currency_scale_label():
     wrong = report._attach_audit_source_evidence(
         manifest, enriched, "Asia-Pacific semiconductor sales reached $96.17 billion in the quarter [S8].")
     assert wrong[0].get("unmatchedNumericClaims")
+
+
+def test_region_by_year_table_becomes_a_verified_chart():
+    # semiconductors live run: "Region | 1986 | ... | 2025" was dropped as header-less (years read as data);
+    # once built, long rows lost their row label and period, and the title read "Region: ...".
+    from types import SimpleNamespace
+
+    import utils.chart_evidence_audit as cea
+    from utils.chart_titles import header_is_data
+    from utils.section_charts import charts_from_passage
+
+    assert not header_is_data("2024") and header_is_data("19.86") and header_is_data("5.99%")
+    years = list(range(2010, 2025))
+    rows = {"World Total": [300 + 10 * i for i in range(len(years))], "Americas": [60 + 5 * i for i in range(len(years))],
+            "Europe": [30 + i for i in range(len(years))], "Japan": [40 + i for i in range(len(years))]}
+    text = "TABLE 1 — Data Table\nRegion | " + " | ".join(map(str, years)) + "\n" + "\n".join(
+        f"{name} | " + " | ".join(f"{v:.1f}" for v in values) for name, values in rows.items())
+    passage = SimpleNamespace(passage_id="S3.1", source_id="S3", kind="table", reliability=1.0, publisher="",
+                              title="Semiconductor Sales | Dashboard", text=text)
+    charts = charts_from_passage(passage, 1, _only_cols=list(range(11, 16)))
+    assert charts and charts[0].spec["title"].startswith("Semiconductor Sales")
+    spec = charts[0].spec
+    for series in spec["series"]:
+        for point in series["data"]:
+            reason = cea._quoted_point_mismatch(spec, series["name"], point["label"], point["value"], point,
+                                                point["evidenceQuote"], text)
+            assert reason == "", (series["name"], point["label"], reason)
+
+
+def test_generic_page_title_is_not_a_chart_measure():
+    from types import SimpleNamespace
+
+    from utils.section_charts import charts_from_passage
+
+    text = ("TABLE 1\nCategory | FY 2019-20 | FY 2020-21 | FY 2021-22 | FY 2022-23\nPassenger Vehicles | 3.30 | 5.83 | 22.36 | 62.28\n"
+            "Two-Wheelers | 26.84 | 44.83 | 252.78 | 728.21\nThree-Wheelers | 143.83 | 91.97 | 185.38 | 404.88")
+    passage = SimpleNamespace(passage_id="S43.1", source_id="S43", kind="table", reliability=1.0, publisher="",
+                              title="Press Release Page | Press Information Bureau", text=text)
+    charts = charts_from_passage(passage, 1)
+    assert charts and not charts[0].spec["title"].startswith("Press Release")

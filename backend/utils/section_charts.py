@@ -629,7 +629,24 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         metric_header = header[0] if header[0] and not re.fullmatch(
             r"(?i)sectors?|index|indices|name|company|stock|item|particulars|industry|categor(?:y|ies)|segments?|"
             r"types?|states?(?:\s*/\s*uts?)?|description", header[0].strip()) else ""
-        title = data_title(metric=metric_header or (f"Values ({unit})" if unit else "Values"),
+        title_metric = metric_header
+        if not metric_header or re.fullmatch(r"(?i)regions?|country|countries|economy|economies|markets?|areas?|"
+                                             r"zones?|entity|entities", metric_header.strip()):
+            # The first column names the rows ("Region"), not the measure: the title takes the table's caption
+            # or the page title ("Region: World Total, Americas, ..." told the reader nothing). The points keep
+            # the header as their declared measure: that is what the source row itself can show.
+            from utils.chart_titles import caption_metric
+            # A page's name is not a measure: "Press Release Page: 2 Wheelers, ..." gave two different PIB
+            # charts one title, and the duplicate check dropped one of them.
+            _generic = (r"(?i)^(?:the\s+)?(?:full\s+)?data(?:\s+table)?\b|^table\b|^information$|^all reported values|"
+                        r"press\s+(?:release|information)|^home\b|^page\b|^untitled|^report\b|^news\b|^document\b|"
+                        r"^pdf\b|^dashboard\b|^statistics?$|^overview$|^summary$")
+            title_metric = caption_metric(heading) if heading and not re.search(_generic, heading) else ""
+            if not title_metric:
+                _page = re.split(r"\s+[|–—:]\s+|:\s", str(getattr(passage, "title", "") or ""))[0]
+                title_metric = caption_metric(_page) if _page and not re.search(_generic, _page) else ""
+            title_metric = title_metric or metric_header
+        title = data_title(metric=title_metric or (f"Values ({unit})" if unit else "Values"),
                            labels=labels[:MAX_LINE_SERIES], periods=[header[c] for c in period_cols])
     else:
         metric = header[numeric_cols[0]]
