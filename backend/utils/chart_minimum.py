@@ -112,6 +112,9 @@ def report_number_charts(drafts: list, store, *, start_index: int, limit: int) -
             fact, sentence = entry.get("_fact"), entry.get("_sentence")
             if fact is None or not sentence or getattr(fact, "kind", "") != "table" or not fact.label:
                 continue
+            probe = re.sub(r"\s+", " ", sentence.replace("⁠", "")).strip()[:60]
+            if probe and probe not in re.sub(r"\s+", " ", (getattr(draft, "body", "") or "").replace("⁠", "")):
+                continue  # the sentence was removed since (number policy or claim check): no chart for it
             groups.setdefault((sentence, fact.passage_id, fact.metric), []).append(fact)
         for (sentence, passage_id, metric), facts in groups.items():
             labels = list(dict.fromkeys(f.label for f in facts))

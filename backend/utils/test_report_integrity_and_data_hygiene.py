@@ -1667,3 +1667,36 @@ def test_no_module_keeps_its_own_sentence_boundary_regex():
         if re.search(r'r"\(\?<=\[\.!\?\]\)\(?\s\+', path.read_text(encoding="utf-8")):
             offenders.append(path.name)
     assert offenders == []
+
+
+def test_claim_check_judges_weak_sentences_and_removes_unsupported_ones():
+    import asyncio
+    from types import SimpleNamespace
+
+    from utils.claim_check import candidates, check_section, parse_verdicts
+
+    passages = {"S1.1": "Retail inflation eased to 4.3 percent in March as vegetable prices fell sharply across cities.",
+                "S2.1": "The central bank kept the repo rate unchanged at 6.5 percent at its April meeting."}
+    body = ("## Inflation\nRetail inflation eased to 4.3 percent in March as vegetable prices fell [S1.1]. "
+            "The decline was caused mainly by a collapse in global crude oil demand and shipping costs [S1.1].\n\n"
+            "The central bank kept the repo rate unchanged at 6.5 percent in April [S2.1].\n\n| Year | Rate |\n| 2024 | 6.5 |")
+    items, checked = candidates(body, passages)
+    assert checked == 3 and [i["sentence"][:16] for i in items] == ["The decline was "]
+
+    class Gateway:
+        async def generate(self, **kwargs):
+            return SimpleNamespace(ok=True, text='[{"i": 1, "verdict": "UNSUPPORTED", "reason": "cause not in source"}]',
+                                   json=lambda: [{"i": 1, "verdict": "UNSUPPORTED", "reason": "cause not in source"}])
+
+    draft = SimpleNamespace(section_id="s1", body=body)
+    entry = asyncio.run(check_section(Gateway(), draft, passages))
+    assert len(entry["removed"]) == 1 and "collapse in global crude" not in draft.body
+    assert "eased to 4.3 percent" in draft.body and "| 2024 | 6.5 |" in draft.body
+
+    class Broken:
+        async def generate(self, **kwargs):
+            return SimpleNamespace(ok=False, error="timeout", text="")
+
+    draft2 = SimpleNamespace(section_id="s1", body=body)
+    assert asyncio.run(check_section(Broken(), draft2, passages))["removed"] == [] and draft2.body == body
+    assert parse_verdicts('[{"i": 9, "verdict": "UNSUPPORTED"}, {"i": 1, "verdict": "maybe"}]', 2) == {}

@@ -251,7 +251,9 @@ def test_invalid_outline_raises_so_report_py_falls_back():
                                     today="2026-11-07", gateway=Broken(OUTLINE)))
 
 
-def test_offline_replay_reproduces_the_run_from_captured_calls():
+def test_offline_replay_reproduces_the_run_from_captured_calls(monkeypatch):
+    # The claim check's judge calls are a later stage than this captured run; replay without them.
+    monkeypatch.setenv("GG_V2_CLAIM_CHECK", "0")
     from utils.evidence_store import store_from_passages
     from utils.llm_replay import ReplayGateway
 

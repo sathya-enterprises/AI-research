@@ -893,6 +893,23 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if len(good) < max(3, len(analysis) // 2):
         raise PipelineV2Error(f"only {len(good)} of {len(analysis)} sections were generated ({'; '.join(d.error for d in drafts if not d.ok)[:300]})")
 
+    # Claim check: every cited sentence is compared with its cited passages; those with little in common go to
+    # a judge model (one call per section) and UNSUPPORTED ones are removed - the check numbers never had.
+    claim_log: list[dict] = []
+    if os.getenv("GG_V2_CLAIM_CHECK", "1") != "0" and good:
+        try:
+            from utils.claim_check import check_section
+
+            async def _claim_check(draft):
+                cited_sources = {t.strip().upper().split(".")[0] for g in CITE_RE.findall(draft.body)
+                                 for t in re.split(r"\s*[,;]\s*", g)}
+                texts = {p.passage_id: p.text for p in store.passages if p.source_id.upper() in cited_sources}
+                return await check_section(gateway, draft, texts)
+
+            results = await asyncio.gather(*[_claim_check(d) for d in good], return_exceptions=True)
+            claim_log = [r if not isinstance(r, Exception) else {"error": type(r).__name__} for r in results]
+        except Exception as exc:
+            log.warning("V2 claim check skipped: %s", type(exc).__name__)
     # Chart minimum, after writing: a sentence that compares two or more inserted table facts of one measure
     # gets a chart of exactly those source rows, placed after its paragraph (same checks as every chart).
     report_number_added: list[str] = []
@@ -1240,6 +1257,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "coverage": {**asks.to_dict(), "note": note, "exhaustiveClaimsRewritten": exhaustive_rewrites,
                      "agreementLedger": ledger_meta},
         "chartTarget": _chart_target(tier, outline, used),
+        "claimCheck": claim_log,
         "seriesWarnings": series_warnings,
         "sourceDisagreements": disagreements,
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
