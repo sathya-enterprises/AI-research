@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 log = logging.getLogger("number_policy")
 
 CITE_RE = re.compile(r"\[(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\]")
-_NUM_RE = re.compile(r"(?<![\w.,\[])[-+−]?\d[\d,]*(?:\.\d+)?(?!\.\d)")
+# "Rs.10.38" (no space after "Rs.") is a number too: the "." before it is the abbreviation's, not a decimal
+# point (live run, telecom: every "Rs.176.59" in a passage was invisible to the checks).
+_NUM_RE = re.compile(r"(?:(?<![\w.,\[])|(?<=\bRs\.)|(?<=\bRe\.))[-+−]?\d[\d,]*(?:\.\d+)?(?!\.\d)")
 _FIG_RE = re.compile(r"\b(?:Figure|Fig\.)\s+\d+\b|\[\[\s*FIGURE\s+\d+\s*\]\]", re.I)
 _PERIOD_RE = re.compile(
     r"\b(?:Q[1-4]|H[12])\s*(?:FY|CY)?\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\b|\bFY\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\b|"
@@ -314,6 +316,39 @@ def _signed_sum(body: str) -> float | None:
     return total
 
 
+_SCALE_AFTER_RE = re.compile(r"[-+−]?\d[\d,]*(?:\.\d+)?\s*(trillion|tn|t|billion|bn|b|million|mn|m|lakh\s+crores?|"
+                             r"crores?|cr|lakhs?|thousand|k)?\b", re.I)
+_SCALES = {"trillion": 1e12, "tn": 1e12, "t": 1e12, "billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6,
+           "mn": 1e6, "m": 1e6, "crore": 1e7, "crores": 1e7, "cr": 1e7, "lakh": 1e5, "lakhs": 1e5,
+           "thousand": 1e3, "k": 1e3}
+
+
+def _scaled_inputs(body: str) -> list[float]:
+    """The inputs of a calculation with their scale words applied ("12.12 trillion" -> 1.212e13)."""
+    out = []
+    for m in _SCALE_AFTER_RE.finditer(body):
+        number = re.match(r"[-+−]?\d[\d,]*(?:\.\d+)?", m.group(0)).group(0)
+        word = re.sub(r"\s+", " ", (m.group(1) or "").casefold())
+        scale = 1e12 if word.startswith("lakh crore") else _SCALES.get(word, 1.0)
+        out.append(abs(_float(number) or 0.0) * scale)
+    return out
+
+
+# "62.0% (calculated: 62 / 100)", "2.7 (calculated: 2.7 * 1)": a quoted value labelled as a calculation.
+# The label is dropped and the value is checked like any other number.
+_RESTATING_CALC_RE = re.compile(
+    r"(?P<value>\d[\d,]*(?:\.\d+)?)(?P<unit>\s*(?:%|per\s?cent|times|x)?)\s*"
+    r"\(calculated:\s*(?P<input>\d[\d,]*(?:\.\d+)?)\s*%?\s*(?:/\s*100|[*×x]\s*1)\s*\)", re.I)
+
+
+def drop_restating_calculations(text: str) -> str:
+    def sub(m: re.Match) -> str:
+        if normalize(m.group("value")) == normalize(m.group("input")):
+            return m.group("value") + m.group("unit")
+        return m.group(0)
+    return _RESTATING_CALC_RE.sub(sub, text)
+
+
 def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
     """'' when every "(calculated: ...)" label in the sentence is verified, else the reason.
 
@@ -349,7 +384,10 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
         inputs = re.findall(r"[-+−]?\d[\d,]*(?:\.\d+)?", body)
         if len(inputs) < 2:
             return "calculated label without its inputs"
-        missing = [x for x in inputs if normalize(x).lstrip("-") not in pool_values | year_like_values]
+        # "100% - 76%" (the rest of a whole) and "0% - 1.8%": 100 and 0 are constants, not facts.
+        constants = {"100", "0"} if "%" in body else set()
+        missing = [x for x in inputs
+                   if normalize(x).lstrip("-") not in pool_values | year_like_values | constants]
         if missing:
             return f"calculation input(s) {', '.join(missing)} not in the cited passages"
         values = [abs(_float(x) or 0.0) for x in inputs]
@@ -362,7 +400,16 @@ def verify_calculation_labels(sentence: str, pool: list[PoolNumber]) -> str:
                 return f"calculation does not reproduce {target}"
             continue
         if "÷" in body or "/" in body:
-            derived = 100 * values[0] / values[1] if values[1] else float("nan")
+            # Scale words count: "₹12.12 trillion / 7.31 billion" is ₹1,658 a transaction and
+            # "$217B / $1.20T" is 18.1% (both were rejected when the scales were dropped).
+            scaled = _scaled_inputs(body)
+            if len(scaled) == len(values):
+                values = scaled
+            qualifier = qualifier_before(sentence[:sentence.find(target)]) if target in sentence else ""
+            ratio = values[0] / values[1] if values[1] else float("nan")
+            if _close(100 * ratio, target, qualifier) or _close(ratio, target, qualifier):
+                continue
+            return f"calculation does not reproduce {target}"
         elif "change from" in body.casefold():
             derived = 100 * (values[1] - values[0]) / values[0] if values[0] else float("nan")
         elif "−" in body or " - " in body:
@@ -429,6 +476,7 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
     passage_texts = dict(passage_texts)  # the store fallback may add a cited passage; never mutate the caller's
     result = PolicyResult(body=body)
     result.rewritten = []
+    body = drop_restating_calculations(body)
     body, calcs, failed_calcs = apply_calculations(body, sheet, None)
     result.calculated += [{"section": section_id, "number": c["value"], "inputs": c["inputs"]} for c in calcs]
     out_lines = []

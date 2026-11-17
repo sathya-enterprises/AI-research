@@ -1148,3 +1148,21 @@ def test_prose_statistics_get_fact_ids_with_their_units_and_noise_is_left_out():
     block = fact_block(passages)
     assert "NUMBERS IN THE PASSAGES' TEXT" in block
     assert "- F1 | Rs. 104545 crore | Sales Turnover of Rs. 104545 crore during FY'24 has been achieved.… | [S3.1]" in block
+
+
+def test_calculation_checks_read_scales_constants_and_rs_without_a_space():
+    # Replayed benchmark removals of correct arithmetic (upi, ai_investment, education, fmcg, telecom,
+    # insurance, inflation).
+    from utils.number_policy import drop_restating_calculations, number_pool, verify_calculation_labels
+
+    pool = number_pool({"S1.1": "In October 2022, 7.31 billion transactions moved Rs 12.12 trillion. "
+                                "Big four spent $217B against $1.20T in total. 76% of students lacked a device."})
+    assert verify_calculation_labels("an average of 1,658 (calculated: 12.12 trillion / 7.31 billion).", pool) == ""
+    assert verify_calculation_labels("18.1% (calculated: $217B / $1.20T) of all spending.", pool) == ""
+    assert verify_calculation_labels("24 percentage points (calculated: 100% - 76%) had access.", pool) == ""
+    assert verify_calculation_labels("an average of 9,999 (calculated: 12.12 trillion / 7.31 billion).", pool)
+    rs = number_pool({"S2.1": "Average revenue per GB Rs.10.38\nAverage revenue per GB Rs.9.12"})
+    assert {n.raw for n in rs} >= {"10.38", "9.12"}
+    assert drop_restating_calculations("attracted 62.0% (calculated: 62 / 100) of FDI") == "attracted 62.0% of FDI"
+    assert drop_restating_calculations("grew 2.7 times (calculated: 2.7 * 1)").startswith("grew 2.7 times")
+    assert "(calculated: 50 / 100)" in drop_restating_calculations("rose 40% (calculated: 50 / 100)")
