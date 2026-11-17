@@ -1512,3 +1512,16 @@ def test_month_without_year_is_dated_by_the_article_and_checked():
     january = SimpleNamespace(passage_id="S1.1", published="2026-11-17",
                               text="Exports rose to $45.2 billion in December, a record.")
     assert numbered_facts([january])[0].period == "December 2025"
+
+
+def test_europe_gas_footnoted_year_spaced_percent_and_repeated_id():
+    from types import SimpleNamespace
+
+    from utils.section_writer import normalize_fact_refs, numbered_facts
+
+    passage = SimpleNamespace(passage_id="S31.1", published="2024-10-10", text=(
+        "The EU maintains high levels of gas storage ( 94 % or 1,083 TWh on 1 October 2024 ), above target. "
+        "Gas consumption decreased year-to-date compared to 20231 levels."))
+    values = [f.value for f in numbered_facts([passage])]
+    assert "1083" in [v.replace(",", "") for v in values] and "20231" not in values
+    assert normalize_fact_refs("storage of [[F7]] ([[F7]] TWh) in October", 50) == "storage of [[F7]] in October"

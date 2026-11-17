@@ -183,6 +183,8 @@ def _prose_statistic(fact) -> bool:
     plain = fact.value.lstrip("-")
     if re.fullmatch(r"(?:19|20)\d{2}(?:\.\d+)?", plain):
         return False  # a year, or a year with a footnote stuck to it ("by 2047.57")
+    if not fact.unit and "," not in fact.raw and re.fullmatch(r"(?:19|20)\d{2}[1-9]", plain):
+        return False  # "compared to 20231": the year 2023 with footnote 1 (europe_gas live run)
     context = fact.context or ""
     at = context.find(fact.raw)
     if at >= 0:
@@ -196,8 +198,20 @@ def _prose_statistic(fact) -> bool:
             return False  # a heading number ("1.3 Highlights of ...")
         # A flattened table ("Total MF AUM (lakh crore) 53.4 172 461 1,152 2,791"): a run of bare numbers
         # has lost its rows and columns, so which number belongs to which year cannot be told.
-        window = context[:at].split()[-3:] + context[at + len(fact.raw):].split()[:3]
-        if sum(1 for w in window if re.fullmatch(r"[-+−]?[\d,]+(?:\.\d+)?%?", w.strip("(),"))) >= 2:
+        # Numbers with their own unit ("94 %") and day numbers of a date ("1 October") are not part of a run:
+        # "( 94 % or 1,083 TWh on 1 October" lost 1,083 TWh, and the writer wrote "94% (94% TWh)".
+        before_w, after_w = context[:at].split()[-4:], context[at + len(fact.raw):].split()[:4]
+
+        def bare_numbers(words: list[str]) -> int:
+            count = 0
+            for k, w in enumerate(words):
+                nxt = words[k + 1].strip("(),.") if k + 1 < len(words) else ""
+                if (re.fullmatch(r"[-+−]?[\d,]+(?:\.\d+)?", w.strip("(),")) and not re.fullmatch(r"%|per|percent", nxt)
+                        and not _MONTH_RE.match(nxt)):
+                    count += 1
+            return count
+
+        if bare_numbers(before_w[-3:]) + bare_numbers(after_w[:3]) >= 2:
             return False
     digits = len(re.sub(r"\D", "", plain).strip("0"))
     has_scale = bool(fact.unit) or bool(re.match(r"[₹$€£]|Rs|INR|USD", fact.raw))
@@ -445,6 +459,8 @@ def normalize_fact_refs(text: str, fact_count: int) -> str:
     text = _DOUBLE_ID_RE.sub(lambda m: f"[[F{m.group(1)}]]{m.group(2)}", text)
     text = _SINGLE_ID_RE.sub(lambda m: f"[[F{m.group(1)}]]", text)
     text = _LEFTOVER_ID_RE.sub(UNKNOWN_FACT, text)  # malformed "[[FFF:=F31 ...]]": nothing to resolve
+    # "[[F7]] ([[F7]] TWh)": the same value twice; the parenthetical goes (europe_gas: "94% (94% TWh)").
+    text = re.sub(r"(\[\[F(\d{1,3})\]\])\s*\(\s*\[\[F\2\]\][^()\n]{0,20}\)", r"\1", text)
 
     def bare(m: re.Match) -> str:
         number = m.group(1)
