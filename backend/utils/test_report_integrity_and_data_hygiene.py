@@ -1797,3 +1797,27 @@ def test_short_detailed_outline_is_filled_to_its_section_minimum():
     titles = [s.title for s in repaired]
     assert "Key Drivers and Causes" not in titles  # the outline already has a drivers section
     assert any("sector rotation" in q.casefold() for s in repaired[4:] for q in s.queries) and decisions
+
+
+def test_pdf_tables_keep_their_rows_and_columns():
+    # 15 SEBI/NSE PDFs were read as flat text; their tables could not be charted or tied to periods.
+    import fitz
+
+    from utils.source_extractor import _extract_pdf
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 60), "Table 2: Sectoral index returns (per cent)", fontsize=11)
+    rows = [["Index", "Q1 FY26", "Q2 FY26"], ["Nifty Pharma", "4.2", "-3.1"], ["Nifty Bank", "6.5", "2.4"],
+            ["Nifty IT", "-5.0", "1.8"]]
+    y = 90
+    for row in rows:
+        x = 50
+        for cell in row:
+            page.draw_rect(fitz.Rect(x, y, x + 140, y + 22))
+            page.insert_text((x + 4, y + 15), cell, fontsize=10)
+            x += 140
+        y += 22
+    text = _extract_pdf(doc.tobytes(), 20000, 8.0)
+    assert "TABLE 1 — Table 2: Sectoral index returns (per cent) (PDF page 1)" in text
+    assert "Index | Q1 FY26 | Q2 FY26" in text and "Nifty Pharma | 4.2 | -3.1" in text

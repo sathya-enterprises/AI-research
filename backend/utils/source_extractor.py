@@ -55,11 +55,71 @@ _PDF_FIN_RE = re.compile(
 )
 
 
+def _pdf_table_budget() -> float:
+    try:
+        return max(0.0, min(30.0, float(os.getenv("GG_PDF_TABLE_BUDGET_SECONDS", "6"))))
+    except (TypeError, ValueError):
+        return 6.0
+
+
 def _pdf_time_budget() -> float:
     try:
         return max(2.0, min(60.0, float(os.getenv("GG_PDF_EXTRACT_BUDGET_SECONDS", "8"))))
     except (TypeError, ValueError):
         return 8.0
+
+
+_PDF_VALUE_CELL_RE = re.compile(r"[-+−(]?\s*(?:₹|\$|Rs\.?)?\s*[\d,]*\.?\d+\s*%?\)?")
+
+
+def _pdf_tables(payload: bytes, page_indexes: list[int], time_budget: float = 6.0, max_tables: int = 14) -> list[str]:
+    """Tables of the given PDF pages with their rows and columns ("TABLE n — caption (PDF page p)" + pipe rows).
+
+    pypdf gives a PDF's tables back as flat text ("Particulars 2025-26 Mar-26 I. Equity Issues 4,50,945 17,222"),
+    so no value could be tied to its row and column: in the sector-rotation run 15 SEBI/NSE PDFs were read and
+    the series extraction accepted 0 of 5 proposals. PyMuPDF's table finder keeps the structure. Each row is
+    reduced to its non-empty cells; rows that do not line up with the header are dropped (never guessed)."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        return []
+    out: list[str] = []
+    deadline = time.monotonic() + time_budget
+    try:
+        doc = fitz.open(stream=payload, filetype="pdf")
+    except Exception:
+        return []
+    for idx in page_indexes:
+        if time.monotonic() > deadline or len(out) >= max_tables or idx >= doc.page_count:
+            break
+        page = doc[idx]
+        try:
+            tables = page.find_tables().tables
+        except Exception:
+            continue
+        for table in tables:
+            try:
+                raw = table.extract()
+            except Exception:
+                continue
+            rows = [[re.sub(r"\s+", " ", str(c)).strip() for c in row if c is not None and str(c).strip()]
+                    for row in raw]
+            rows = [r for r in rows if r]
+            header_at = next((i for i, r in enumerate(rows)
+                              if len(r) >= 2 and not any(_PDF_VALUE_CELL_RE.fullmatch(c) for c in r[1:])), None)
+            if header_at is None:
+                continue
+            header = rows[header_at]
+            body = [r for r in rows[header_at + 1:] if len(r) == len(header)]
+            numeric = sum(1 for r in body for c in r[1:] if _PDF_VALUE_CELL_RE.fullmatch(c))
+            if len(body) < 2 or numeric < len(body):
+                continue
+            x0, y0, _x1, _y1 = table.bbox
+            above = page.get_text("text", clip=fitz.Rect(0, max(0, y0 - 48), page.rect.width, y0)).splitlines()
+            caption = next((c.strip() for c in reversed(above) if re.search(r"[A-Za-z]{3,}", c)), "")
+            lines = [" | ".join(header)] + [" | ".join(r) for r in body]
+            out.append(f"TABLE {len(out) + 1} — {(caption or 'Table')[:150]} (PDF page {idx + 1})\n" + "\n".join(lines))
+    return out
 
 
 def _extract_pdf(payload: bytes, max_chars: int, time_budget: float | None = None) -> str:
@@ -92,7 +152,8 @@ def _extract_pdf(payload: bytes, max_chars: int, time_budget: float | None = Non
                     length += len(text)
                 if length >= max_chars:
                     break
-            return "\n\n".join(output)[:max_chars].strip()
+            tables = _pdf_tables(payload, list(range(page_count)), time_budget=_pdf_table_budget())
+            return "\n\n".join([*tables, *output])[:max_chars].strip()
         scored: list[tuple[float, int, str]] = []
         for idx, page in enumerate(reader.pages[:min(page_count, 90)]):
             if deadline is not None and scored and time.monotonic() > deadline:
@@ -113,7 +174,9 @@ def _extract_pdf(payload: bytes, max_chars: int, time_budget: float | None = Non
             length += len(text)
         chosen.sort(key=lambda row: row[0])
         output = [f"[PDF page {idx + 1}]\n{text}" for idx, text in chosen]
-        return "\n\n".join(output)[:max_chars].strip()
+        # Tables of the data-dense pages, with their structure, ahead of the flat text (kept within max_chars).
+        tables = _pdf_tables(payload, [idx for idx, _text in chosen], time_budget=_pdf_table_budget())
+        return "\n\n".join([*tables, *output])[:max_chars].strip()
     except Exception:
         return ""
 
