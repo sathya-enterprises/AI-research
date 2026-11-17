@@ -17136,6 +17136,22 @@ def _attach_audit_source_evidence(
                     f"count:{float(token.split(':', 1)[1].partition('~')[0]) * _mult:.10g}"
                     for token in sent_numbers if token.startswith("scalar:")
                 }
+            # "Sales (in billions) ... in USD:" above "Asia-Pacific 86.17 221.42": the bare cells are money in the
+            # label's currency and scale ("$86.17 billion" was called unsupported in the semiconductors run).
+            _money_scale = re.search(r"(?i)\(\s*(?:in\s+)?(?:(?:us\$|usd|\$|inr|rs\.?|₹|eur|€)\s*)?"
+                                     r"(lakh\s+crores?|crores?|millions?|billions?|trillions?)\s*\)", _label_context)
+            _money_currency = re.search(r"(?i)\b(usd|us\$|eur|inr|rs\.?)(?![a-z])|([$€₹])", _label_context)
+            if _numeric_row and _money_scale and _money_currency:
+                _cur = (_money_currency.group(1) or _money_currency.group(2) or "").casefold()
+                _family = ("usd" if _cur in {"usd", "us$", "$"} else "eur" if _cur in {"eur", "€"} else "inr")
+                _absolute = {"lakh crore": 1e12, "crore": 1e7, "million": 1e6, "billion": 1e9, "trillion": 1e12}[
+                    re.sub(r"\s+", " ", _money_scale.group(1).casefold()).rstrip("s")]
+                _per_unit = 1e7 if _family == "inr" else 1e6  # inr_crore / usd_million and eur_million
+                _prefix = "inr_crore" if _family == "inr" else f"{_family}_million"
+                sent_numbers = set(sent_numbers) | {
+                    f"{_prefix}:{float(token.split(':', 1)[1].partition('~')[0]) * _absolute / _per_unit:.10g}"
+                    for token in sent_numbers if token.startswith("scalar:")
+                }
             matched_claim_numbers = {claim_number for claim_number in claim_numbers
                                      if any(number_matches(claim_number, source_number) for source_number in sent_numbers)}
             supported_claim_numbers.update(matched_claim_numbers)

@@ -1385,3 +1385,20 @@ def test_percent_after_an_id_is_dropped_for_a_fact_with_another_unit():
     text = text.replace("⁠", "")
     assert "2,19,610 MW%" not in text and "2,19,610%" not in text and "2,19,610 MW" in text
     assert "45.3%" in text and "45.3%%" not in text
+
+
+def test_audit_reads_money_rows_under_a_currency_scale_label():
+    # semiconductors live run: "Sales (in billions) ... in USD:" above "Asia-Pacific 86.17 221.42".
+    import routes.report as report
+
+    page = ("WSTS quarterly update.\nSales (in billions) Quarter growth in % Year on Year growth in % in USD:\n"
+            "Asia-Pacific 86.17 221.42 23.1 108.5 45.0\nAmericas 61.20 195.10 12.2 40.1 45.2\nEurope 13.40 51.30 2.1 -3.0 -8.1")
+    enriched = [{"title": "WSTS", "url": "https://www.wsts.org/q1", "pageFetchStatus": "ok",
+                 "evidenceOrigin": "publisher_page", "pageContent": page}]
+    manifest = [{"id": "S8", "title": "WSTS", "url": "https://www.wsts.org/q1"}]
+    audited = report._attach_audit_source_evidence(
+        manifest, enriched, "Asia-Pacific semiconductor sales reached $86.17 billion in the quarter [S8].")
+    assert audited[0].get("unmatchedNumericClaims") in ([], None)
+    wrong = report._attach_audit_source_evidence(
+        manifest, enriched, "Asia-Pacific semiconductor sales reached $96.17 billion in the quarter [S8].")
+    assert wrong[0].get("unmatchedNumericClaims")
