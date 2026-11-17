@@ -1873,10 +1873,15 @@ def _table_point_column_matches(point: dict, series: str, label: str, value: obj
             if len(previous_rows) >= 1000:
                 break
         if expected_column or column_index is not None:
-            matching_headers = [header for header in previous_rows if (
-                (expected_column and any(_cell_label_matches(expected_column, cell) for cell in header))
-                or (period and any(_point_period_in_text(period, cell) for cell in header))
-            )]
+            # Rows that name the expected column are the header. Only without one does a row that names the
+            # period count: in a long table ("Entity | Code | Year | Value") the data row above ("India | IND |
+            # 2015 | 14.9") names the period in its Year cell and was taken for a header, so Kenya's 2015 value
+            # had to sit in the Year column and failed.
+            matching_headers = [header for header in previous_rows
+                                if expected_column and any(_cell_label_matches(expected_column, cell) for cell in header)]
+            if not matching_headers:
+                matching_headers = [header for header in previous_rows
+                                    if period and any(_point_period_in_text(period, cell) for cell in header)]
             if matching_headers:
                 # Rows of a large table also sit in this block. Only the rows
                 # that actually name the requested column or period can define

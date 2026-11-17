@@ -1261,3 +1261,31 @@ def test_dataset_column_listing_is_not_evidence():
     store.add_source("S1", {"url": "https://example.org/data", "title": "SIP data", "pageContent": page})
     texts = " ".join(p.text for p in store.passages)
     assert "2,89,352" in texts and "Distinct" not in texts
+
+
+def test_long_format_country_year_table_is_a_time_series_with_its_own_rows_quoted():
+    # internet_use_comparison: "Entity | Code | Year | Value" became a country bar chart with each country's
+    # 2015 value quoting its 2024 row; the column check then took the row above for a header.
+    from types import SimpleNamespace
+
+    import utils.chart_evidence_audit as cea
+    from utils.section_charts import _focused_charts
+
+    rows = []
+    for year, values in ((2015, (14.9, 16.58, 58.32)), (2016, (16.5, 16.6, 60.87)), (2017, (18.2, 17.82, 67.47)),
+                         (2018, (20.08, 19.5, 70.43))):
+        rows += [f"{name} | {code} | {year} | {v}" for (name, code), v in zip((("India", "IND"), ("Kenya", "KEN"),
+                                                                               ("Brazil", "BRA")), values)]
+    text = "TABLE 1 — internet.csv\nEntity | Code | Year | Share of the population using the Internet\n" + "\n".join(rows)
+    passage = SimpleNamespace(passage_id="S27.1", source_id="S27", kind="table", reliability=1.0, publisher="",
+                              title="", text=text)
+    charts = _focused_charts(passage, 1, None, ["Kenya", "India"], None)
+    assert len(charts) == 1 and charts[0].spec["type"] in {"line", "grouped_bar"}
+    series = {s["name"]: s["data"] for s in charts[0].spec["series"]}
+    assert set(series) == {"Kenya", "India"}
+    kenya_2016 = next(d for d in series["Kenya"] if d["label"] == "2016")
+    assert kenya_2016["value"] == 16.6 and kenya_2016["evidenceQuote"] == "Kenya | KEN | 2016 | 16.6"
+    for name, data in series.items():
+        for point in data:
+            assert cea._table_point_column_matches(point, name, point["label"], point["value"],
+                                                   point["evidenceQuote"], text) is True

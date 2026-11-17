@@ -325,6 +325,72 @@ def _is_future(text: str, qtd_start: int | None) -> bool:
     return bool(ranges) and all(start >= qtd_start + 3 for start, _end, _label in ranges)
 
 
+_LONG_PERIOD_HEADER_RE = re.compile(r"(?i)^\s*(?:year|period|date|fiscal[ _]year|fy|time)\s*$")
+_LONG_CODE_HEADER_RE = re.compile(r"(?i)^\s*(?:code|iso(?:3|[ _-]?code)?|country[ _]code|id)\s*$")
+
+
+def _charts_from_long_table(passage, chart_index: int, qtd_start, header: list[str], rows: list[list[str]],
+                            heading: str, focus: list[str] | None = None) -> list[PlannedChart] | None:
+    """A long-format table ("Entity | Code | Year | Value", one row per entity and year) as a time series.
+
+    The wide builder keyed rows by their first cell, so repeated entities overwrote each other: the
+    internet-use chart plotted each country's 2015 value with its 2024 row as the quote (rejected). The table
+    is pivoted to Year x entity, charted by the usual builder, and every point quotes its own source row.
+    Returns None when the table is not long-format."""
+    period_col = next((i for i, h in enumerate(header) if i > 0 and _LONG_PERIOD_HEADER_RE.match(h)), None)
+    if period_col is None or len(rows) < 6:
+        return None
+    entities = list(dict.fromkeys(r[0] for r in rows))
+    if len(entities) < 2 or len(entities) == len(rows) or any(_PERIOD_RE.match(e.strip()) for e in entities):
+        return None
+    measures = [i for i in range(1, len(header)) if i != period_col and not _LONG_CODE_HEADER_RE.match(header[i])
+                and sum(bool(_parse_number(r[i])) for r in rows) >= 0.7 * len(rows)]
+    if len(measures) != 1:
+        return None  # several measures per row: no single series to pivot safely
+    measure = measures[0]
+    if focus:
+        wanted = {str(f).casefold() for f in focus}
+        named = [e for e in entities if e.casefold() in wanted]
+        if named:
+            entities = named  # the question's countries, not the first eight of the table
+    entities = entities[:MAX_LINE_SERIES]
+    by_key: dict[tuple[str, str], list[str]] = {}
+    periods: list[str] = []
+    for r in rows:
+        if r[0] in entities and _parse_number(r[measure]):
+            by_key.setdefault((r[0], r[period_col]), r)
+            periods.append(r[period_col])
+    periods = list(dict.fromkeys(periods))
+    if len(periods) < 3:
+        return None
+    wide = [" | ".join([header[period_col], *entities])]
+    for p in periods:
+        wide.append(" | ".join([p, *[(by_key[(e, p)][measure] if (e, p) in by_key else "") for e in entities]]))
+    import copy
+    shadow = copy.copy(passage)
+    shadow.text = f"TABLE 1 — {clean_label(header[measure])}\n" + "\n".join(wide)
+    # The entity columns are compared as they are (as for focus entities): related_columns() keeps headers that
+    # share words, and country names share none.
+    charts = charts_from_passage(shadow, chart_index, qtd_start, _only_cols=list(range(1, len(entities) + 1)))
+    kept = []
+    for chart in charts:
+        ok = True
+        for series in chart.spec.get("series") or []:
+            for point in series.get("data") or []:
+                entity, period = str(point.get("evidenceColumn") or ""), str(point.get("evidenceRowLabel") or "")
+                source_row = by_key.get((entity, period))
+                if source_row is None:
+                    ok = False
+                    continue
+                point.update({"evidenceQuote": " | ".join(source_row), "evidenceValue": source_row[measure],
+                              "evidenceColumn": header[measure], "evidenceEntity": entity,
+                              "evidenceRowLabel": entity, "evidencePeriod": point.get("evidencePeriod") or period})
+        if ok:
+            chart.passage_ids = list(getattr(passage, "merged_ids", None) or [passage.passage_id])
+            kept.append(chart)
+    return kept
+
+
 def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None, *,
                         _only_cols: list[int] | None = None, _only_rows: set[str] | None = None,
                         _qtd: bool = False, _future: bool = False) -> list[PlannedChart]:
@@ -349,6 +415,10 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
         return []
     if any(header_is_data(h) for h in header[1:]):
         return []  # the first row is data, not a header: metric names are unknown
+    if _only_rows is None and _only_cols is None and not _qtd and not _future:
+        long_charts = _charts_from_long_table(passage, chart_index, qtd_start, header, rows, heading)
+        if long_charts is not None:
+            return long_charts
     rows, _mixed_note = homogeneous_rows(rows)
     # Stage L: a Total / aggregate row is not plotted beside its components; the chart keeps the
     # components (it used to be rejected as a whole: "a Total row is plotted with its components").
@@ -954,8 +1024,16 @@ def _focused_charts(passage, index: int, qtd_start, focus: list[str] | None, min
     """Stage N: a wide table is narrowed to the question's entities and window (utils.table_focus) before
     charting; any other table is charted as before. A leading rank column is never the label."""
     passage = _without_rank_column(passage)
+    lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
+    if len(lines) >= 3:
+        # A long-format table ("Entity | Year | Value") is pivoted first, with the question's entities first.
+        header = _split_row(lines[0])
+        rows = [r for r in (_split_row(ln) for ln in lines[1:]) if len(r) == len(header) and r[0]]
+        heading_line = next((ln for ln in str(passage.text).splitlines() if ln.strip() and " | " not in ln), "")
+        long_charts = _charts_from_long_table(passage, index, qtd_start, header, rows, heading_line, focus=focus)
+        if long_charts is not None:
+            return long_charts
     if focus or min_year is not None or max_year is not None:
-        lines = [ln for ln in str(passage.text or "").splitlines() if " | " in ln]
         if len(lines) >= 3:
             from utils.table_focus import plan as _focus_plan
             header = _split_row(lines[0])
