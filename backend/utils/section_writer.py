@@ -341,7 +341,7 @@ def fact_block(passages, limit: int = 60, facts: list | None = None) -> str:
             + "\n".join(lines) + "\n")
 
 
-FACT_REF_RE = re.compile(r"\[\[\s*(?:fact\s*:\s*)?F(\d+)\s*\]\]", re.I)
+FACT_REF_RE = re.compile(r"\[\[\s*(?:fact\s*:\s*)?F(\d+)\s*\]\](\s?%)?", re.I)
 FACT_ID_IN_CALC_RE = re.compile(r"(?<![\w.])F(\d+)(?![\w])")
 VERIFIED_MARK = "⁠"  # word joiner, invisible: the number before it was inserted from a fact id
 UNKNOWN_FACT = "[[UNKNOWN_FACT]]"
@@ -456,10 +456,16 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
                 value = value[: -len(fact.unit)].rstrip()  # the writer wrote the unit after the id itself
             if fact.unit == "%" and after.startswith(("%", "per cent", "percent")) and value.endswith("%"):
                 value = value[:-1]
+            # A "%" the writer put after the id: kept only for a fact without a unit of its own. A fact in MW
+            # read "Coal | 2,19,610%" (renewables live run); a percentage fact already carries its "%".
+            percent = m.group(2) or ""
+            if percent and (fact.unit or getattr(fact, "unit_text", "")):
+                percent = ""
             needed.append(fact.passage_id)
             used.append({"id": f"F{m.group(1)}", "value": value, "passage": fact.passage_id})
             digits = re.search(r"\d[\d,]*(?:\.\d+)?", value)
-            return value[:digits.end()] + VERIFIED_MARK + value[digits.end():] if digits else value
+            value = value[:digits.end()] + VERIFIED_MARK + value[digits.end():] if digits else value
+            return value + percent.strip()
 
         sentence = FACT_REF_RE.sub(sub, sentence)
         cited = {t.strip().upper() for g in CITE_RE.findall(sentence) for t in re.split(r"\s*[,;]\s*", g)}

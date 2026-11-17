@@ -1368,3 +1368,20 @@ def test_audit_reads_a_flattened_pdf_table_with_its_unit_line():
     audited = report._attach_audit_source_evidence(
         manifest, enriched, "Internet subscribers grew to 881.25 million in March 2023 [S30].")
     assert audited[0].get("unmatchedNumericClaims") in ([], None)
+
+
+def test_percent_after_an_id_is_dropped_for_a_fact_with_another_unit():
+    # renewables live run: "Coal | 2,19,610%" - a "%" after the id of a capacity fact.
+    from types import SimpleNamespace
+
+    from utils.section_writer import numbered_facts, resolve_fact_refs
+
+    passages = [SimpleNamespace(passage_id="S5.1", text="Capacity by source\nSource | Capacity (MW) | Share (%)\n"
+                                                         "Coal | 2,19,610 MW | 45.3\nSolar | 1,29,000 MW | 26.6")]
+    facts = numbered_facts(passages)
+    mw = next(i for i, f in enumerate(facts, 1) if f.raw.startswith("2,19,610"))
+    share = next(i for i, f in enumerate(facts, 1) if f.raw == "45.3")
+    text, _ = resolve_fact_refs(f"Coal had [[F{mw}]]% and a share of [[F{share}]]% [S5.1].", facts)
+    text = text.replace("⁠", "")
+    assert "2,19,610 MW%" not in text and "2,19,610%" not in text and "2,19,610 MW" in text
+    assert "45.3%" in text and "45.3%%" not in text
