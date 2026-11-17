@@ -1708,3 +1708,19 @@ def test_made_up_double_bracket_tokens_and_id_only_citations_are_removed():
     assert normalize_fact_refs("lagged effects [[F15], [F16]] and more [S3].", 50) == "lagged effects  and more [S3]."
     draft, _ = _fact_postprocess("The MSP rose to 1815 in 2019-20 [S2.1] [[Part IV]]. It rose again later [S2.1].")
     assert "[[" not in draft.body and "1815" in draft.body
+
+
+def test_question_year_window_reads_month_names_and_split_years():
+    # inflation: "from January 2022 to December 2024" read as 2024-2026 (no 2022-2023 chart or dataset);
+    # agri: "from 2018-19 to 2024-25" read as 2018-2026.
+    from datetime import date
+
+    from utils.data_angles import requested_year_bounds
+
+    today = date(2026, 11, 17)
+    assert requested_year_bounds("move from January 2022 to December 2024", today) == (2022, 2024)
+    assert requested_year_bounds("changed from 2018-19 to 2024-25?", today) == (2018, 2025)
+    assert requested_year_bounds("between March 2023 and June 2025", today) == (2023, 2025)
+    assert requested_year_bounds("in the 2023-24 fiscal year", today) == (2023, 2024)
+    assert requested_year_bounds("from FY2019 to FY2024", today) == (2018, 2024)
+    assert requested_year_bounds("from 2015 to 2023", today) == (2015, 2023)

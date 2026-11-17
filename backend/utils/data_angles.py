@@ -64,13 +64,35 @@ def requested_year_bounds(question: str, today: date) -> tuple[int, int]:
         if first and last:
             first, last = sorted((first, last))
             return first - 1, min(last, today.year)
+    # Split-year ranges ("from 2018-19 to 2024-25"): calendar 2018 to 2025. Only "from 2018" was read, so the
+    # window ran to the current year (agri_msp: 2018-2026).
+    split_range = re.search(
+        r"(?i)\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})\s*(?:to|until|till|through|and|-|–|—)\s*((?:19|20)\d{2})\s*[-–/]\s*(\d{2})\b",
+        text)
+    if split_range:
+        start = int(split_range.group(1))
+        end_start = int(split_range.group(3))
+        end = int(str(end_start)[:2] + split_range.group(4))
+        end = end + 100 if end < end_start else end
+        return min(start, end), min(max(start, end), today.year)
+    # Month names may stand before either year ("from January 2022 to December 2024"): read as 2024-2026,
+    # which kept every 2022-2023 inflation chart out of the report.
+    _month = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+"
     explicit_range = re.search(
-        r"(?i)\b(?:(?:from|between)\s+)?((?:19|20)\d{2})\s*(?:to|until|till|through|and|-|–|—)\s*((?:19|20)\d{2})\b",
+        rf"(?i)\b(?:(?:from|between)\s+)?(?:{_month})?((?:19|20)\d{{2}})\s*(?:to|until|till|through|and|-|–|—)\s*"
+        rf"(?:{_month})?((?:19|20)\d{{2}})\b",
         text)
     if explicit_range:
         start, end = sorted((int(explicit_range.group(1)), int(explicit_range.group(2))))
         return start, min(end, today.year)
 
+    single_split = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})\b(?!\s*[-/]\s*\d)", text)
+    if single_split and not re.search(r"(?i)\b(?:since|after)\s+(?:19|20)\d{2}", text):
+        start = int(single_split.group(1))
+        end = int(str(start)[:2] + single_split.group(2))
+        end = end + 100 if end < start else end
+        if end == start + 1:  # one fiscal year ("in 2023-24"): its two calendar years
+            return start, min(end, today.year)
     since = re.search(r"(?i)\b(?:since|from|after)\s+((?:19|20)\d{2})\b", text)
     relative_window = re.search(
         r"(?i)\b(?:past|last|over\s+the\s+past|during\s+the\s+past|in\s+the\s+last)\s+"
