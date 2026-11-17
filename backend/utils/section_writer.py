@@ -253,6 +253,47 @@ def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
     return out + prose
 
 
+_ASCII_ART_CELL_RE = re.compile(r"^[\s\-*/\\_=.+o|#~^<>]{8,}$")
+_TABLE_CAPTION_RE = re.compile(r"^\s*(?:\*\*)?\s*(?:Table|Figure|Chart)\s+\d+\b.*$", re.I)
+
+
+def strip_ascii_charts(body: str) -> str:
+    """Remove charts the writer drew with characters inside a Markdown table.
+
+    Live EV run: "| 1,000 | -------*---- |" rows under "**Table 10: Karnataka Annual EVPCS Installations**".
+    The number check removed some rows and left the rest, a broken picture. Rows whose cells are drawing
+    characters are dropped, then a table left with no data rows and its caption."""
+    lines = str(body or "").split("\n")
+    kept = []
+    for line in lines:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.lstrip().startswith("|") else []
+        if any(_ASCII_ART_CELL_RE.match(c) and c.count("-") + c.count("*") + c.count("/") >= 6
+               and not re.fullmatch(r":?-{3,}:?", c) for c in cells):
+            continue
+        kept.append(line)
+    out: list[str] = []
+    i = 0
+    while i < len(kept):
+        if kept[i].lstrip().startswith("|"):
+            j = i
+            while j < len(kept) and kept[j].lstrip().startswith("|"):
+                j += 1
+            block = kept[i:j]
+            data = [ln for ln in block if not re.fullmatch(r"[\s|:\-]+", ln.strip())]
+            if len(data) <= 1:  # a header (or nothing) left: the table was all drawing
+                while out and not out[-1].strip():
+                    out.pop()
+                if out and _TABLE_CAPTION_RE.match(out[-1]):
+                    out.pop()
+            else:
+                out.extend(block)
+            i = j
+            continue
+        out.append(kept[i])
+        i += 1
+    return "\n".join(out)
+
+
 _RS_DOT_RE = re.compile(r"\bRs\.\s*(?=\d)")
 _CURRENCY_UNIT_RE = re.compile(r"^(₹|US\$|\$|€|£|Rs\.?|INR|USD)\s*(.*)$")
 
@@ -489,6 +530,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     body, summary = (_RS_DOT_RE.sub("Rs ", part) for part in (body, summary))
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
+    body = strip_ascii_charts(body)
     # The writer sometimes copies the prompt's subsection spec into the heading:
     # "### Title — goal: Review ... (~475 words)" -> "### Title".
     # (also echoed with another label, e.g. "— regard: returns by quarter, ...").

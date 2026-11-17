@@ -47,6 +47,11 @@ _NON_STAT_RE = re.compile(
     # "12-18 months".
     r"|\b(?:nifty|sensex|bse|s&p\s+bse)(?:\s+(?:next|midcap|smallcap|microcap|largemidcap|total\s+market|india))?\s+\d{2,3}\b(?![,.]\d|\s*%)"
     r"|\b\d{1,3}\s*/\s*\d{1,3}\b(?![,.]\d|\s*%)"
+    # A number joined to a word by a hyphen names something ("National Highway-539", "COVID-19", "NH-48"), and
+    # so does a list of route numbers after it ("National Highway-40, 716, and 727A"): live EV run removed
+    # sentences for "539 is not in the evidence".
+    r"|(?<=[A-Za-z]-)\d{1,4}[A-Z]?\b(?![.,]\d|\s*%)"
+    r"|\b(?:highways?|NH|SH|routes?|lines?)[-\s]+\d{1,4}[A-Z]?(?:\s*,\s*(?:and\s+)?\d{1,4}[A-Z]?\b)+(?![.,]\d|\s*%)"
     r"|(?<![\d,.])\b\d{1,3}\s*[-–]\s*\d{1,3}\s*(?:weeks?|months?|years?|days?|quarters?)\b")
 SMALL_ORDINALS = {"0", "1", "2", "3", "4", "5"}
 _QUALIFIER_RE = re.compile(r"(?i)\b(?:over|more than|above|about|around|nearly|almost|approximately|approx\.?|roughly|close to|under|below|less than|some)\s*(?:₹|rs\.?|inr|usd|\$)?\s*$")

@@ -1289,3 +1289,23 @@ def test_long_format_country_year_table_is_a_time_series_with_its_own_rows_quote
         for point in data:
             assert cea._table_point_column_matches(point, name, point["label"], point["value"],
                                                    point["evidenceQuote"], text) is True
+
+
+def test_live_run_writer_artifacts_identifiers_and_rs_abbreviation():
+    # Live 30-prompt run: road names checked as statistics, ASCII charts in tables, "Rs." split in the audit.
+    import re
+
+    from utils.number_policy import statistic_tokens
+    from utils.section_writer import strip_ascii_charts
+
+    assert statistic_tokens("National Highway-539 and National Highway-8 have 14 and 12 stations.") == ["14", "12"]
+    assert statistic_tokens("Highways such as National Highway-40, 716, and 727A have one station.") == []
+    assert statistic_tokens("Sales rose 12-15% in 2024.") == ["12", "15"]
+    body = ("Text [S1].\n\n**Table 2: Installs**\n\n| 1,000 | ----------------*---- |\n| --- | --- |\n"
+            "| 800 | -------------/------ |\n\nMore text [S2].")
+    cleaned = strip_ascii_charts(body)
+    assert "----*" not in cleaned and "Table 2" not in cleaned and "More text" in cleaned
+    keep = "| Year | Value |\n|:--- |:--- |\n| 2024 | 5 |\n| 2025 | 6 |"
+    assert strip_ascii_charts(keep) == keep
+    source = open("routes/report.py", encoding="utf-8").read()
+    assert not re.search(r're\.split\(r"\(\?<=\[\.!\?\]\)\s\+', source)  # every splitter has the abbreviation guard

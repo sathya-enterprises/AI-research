@@ -2810,7 +2810,7 @@ def _sanitize_cover_summary_amounts(summary: object, report_body: object) -> str
 
     body_signatures = {amount_signature(match.group(0)) for match in _COVER_CURRENCY_AMOUNT_RE.finditer(body)}
     body_low = body.casefold()
-    pieces = re.split(r"(?<=[.!?])\s+|\n+", summary_text)
+    pieces = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+|\n+", summary_text)
     kept = []
     for piece in pieces:
         if not piece.strip():
@@ -6298,7 +6298,7 @@ def _deterministic_report_json(
         # raw source excerpts; the evidence chart gallery adds the charts.
         findings: list[str] = []
         for src in selected:
-            sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", str(src.get("evidence") or "")).strip())
+            sentences = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+", re.sub(r"\s+", " ", str(src.get("evidence") or "")).strip())
             sentences = [s for s in sentences if 40 <= len(s) <= 280 and "|" not in s and not s.lower().startswith(("click", "read more", "subscribe"))]
             sentences.sort(key=lambda s: (0 if re.search(r"\d", s) else 1, -len(hkw & keywords(s))))
             for sentence in sentences[:2]:
@@ -8202,7 +8202,7 @@ def _has_promoter_share_sale_context(hay: str) -> bool:
         r"divest\w*|offload\w*|transfer(?:red)?)\b", re.I,
     )
     cleaned = re.sub(r"\bnon[-‐‑– ]disposal\b", " ", str(hay or ""), flags=re.I)
-    fragments = re.split(r"(?<=[.!?])\s+|[;\n|]+", cleaned)
+    fragments = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+|[;\n|]+", cleaned)
     for index, fragment in enumerate(fragments):
         context = " ".join(fragments[max(0, index - 1):min(len(fragments), index + 2)])[:900]
         for action in action_re.finditer(fragment):
@@ -10966,7 +10966,7 @@ def _action_supported_evidence_table(section_text: str, evidence_context: str = 
         flattened = re.sub(r"\s+", " ", paragraph).strip(" -*•\t")
         if not flattened:
             continue
-        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z₹$0-9])", flattened):
+        for sentence in re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+(?=[A-Z₹$0-9])", flattened):
             sentence = sentence.strip(" -*•\t")
             if len(sentence) < 55 or len(sentence) > 420:
                 continue
@@ -13827,7 +13827,7 @@ def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: l
         # page mentions one endpoint for each of two different indicators.
         range_match = _FINANCIAL_RANGE_RE.search(metric)
         if range_match and (range_match.group("left_unit") or range_match.group("right_unit") or range_match.group("prefix")):
-            evidence_chunks = [chunk.strip() for chunk in re.split(r"(?<=[.!?])\s+|\n+", evidence) if chunk.strip()]
+            evidence_chunks = [chunk.strip() for chunk in re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+|\n+", evidence) if chunk.strip()]
             compound_supported = False
             for chunk in evidence_chunks:
                 chunk_numbers = _source_numeric_values(chunk)
@@ -13877,7 +13877,7 @@ def _publisher_evidence_supports_metric(metric: str, context: str, source_ids: l
         # denominator must align in the same sentence/table row. A publisher
         # page that mentions the number on one page and the metric elsewhere is
         # not enough evidence for the claim.
-        evidence_chunks = [chunk.strip() for chunk in re.split(r"(?<=[.!?])\s+|\n+", evidence) if chunk.strip()]
+        evidence_chunks = [chunk.strip() for chunk in re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+|\n+", evidence) if chunk.strip()]
         chunk_supported = False
         for chunk in evidence_chunks:
             chunk_numbers = _source_numeric_values(chunk)
@@ -16401,13 +16401,13 @@ def _attach_audit_source_evidence(
                 return " ".join(reversed(context))
 
             left = max(0, source_text.rfind("\n", 0, number_match.start()) + 1)
-            for boundary in re.finditer(r"(?<=[.!?])\s+", source_text[:number_match.start()]):
+            for boundary in re.finditer(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+", source_text[:number_match.start()]):
                 left = max(left, boundary.end())
             right = len(source_text)
             next_line = source_text.find("\n", number_match.end())
             if next_line >= 0:
                 right = min(right, next_line)
-            boundary = re.search(r"(?<=[.!?])\s+", source_text[number_match.end():])
+            boundary = re.search(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+", source_text[number_match.end():])
             if boundary:
                 right = min(right, number_match.end() + boundary.start())
             return source_text[left:right]
@@ -16750,7 +16750,7 @@ def _attach_audit_source_evidence(
                     if block in row_header:
                         _TABLE_ROW_HEADER[row] = row_header[block]
                 continue
-            sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9₹$])|(?<=;)\s+", block)
+            sentences = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+(?=[A-Z0-9₹$])|(?<=;)\s+", block)
             block_parts = [sentence.strip() for sentence in sentences if len(sentence.strip()) >= 35]
             parts.extend(block_parts)
             if block in row_context:
@@ -17830,7 +17830,7 @@ async def _ensure_report_page_budget(
 
 
 def _report_sentence_units(text: str) -> list[str]:
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])|\n+", str(text or ""))
+    parts = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+(?=[A-Z0-9(])|\n+", str(text or ""))
     return [re.sub(r"\s+", " ", p).strip() for p in parts if len(re.sub(r"\s+", " ", p).strip()) >= 80]
 
 
@@ -18150,7 +18150,7 @@ def _dedupe_repeated_action_sentences(report_text: str, relevant_topics: set[str
             # long enough to carry a meaningful claim are eligible for removal.
             sentences = [
                 re.sub(r"\s+", " ", sentence).strip()
-                for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z₹$0-9(])", prose)
+                for sentence in re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+(?=[A-Z₹$0-9(])", prose)
                 if sentence.strip()
             ]
             if not sentences or not any(len(sentence) >= 105 for sentence in sentences):
@@ -19055,7 +19055,7 @@ async def _expand_report_to_tier(
             room = budget_chars - used - sep
             if room < 180:
                 break
-            sentence_bits = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", block)
+            sentence_bits = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bRe\.)(?<!\bNo\.)(?<!\bvs\.)\s+(?=[A-Z0-9(])", block)
             clipped: list[str] = []
             for sentence in sentence_bits:
                 candidate = " ".join(clipped + [sentence]).strip()
