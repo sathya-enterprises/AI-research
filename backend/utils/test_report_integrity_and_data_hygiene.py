@@ -1613,3 +1613,24 @@ def test_a_chart_whose_best_section_is_full_goes_to_the_next_fitting_section():
     assert weak[0].section_id == ""  # a weak fit is not placed when the report is not short of charts
     assign_charts(weak, sections, per_section=2, fill_to=8)
     assert weak[0].section_id in {"s1", "s2"}
+
+
+def test_defect_scan_rules_catch_the_live_defects_and_not_ordinary_text():
+    from utils.defect_scan import scan_report
+
+    bad = ("GNPA fell by F61 in H1 [S8]. Storage hit 94% (94% TWh) [S3]. Coal 2,19,610 MW% [S2]. "
+           "It grew to Rs [S14]. 70,253 crore. Rate 7.04 %【S9.2】. Fell by 20231 versus last year. "
+           "Left [[UNKNOWN_FACT]] here.\n| 1,000 | ----------*---- |")
+    found = scan_report(bad)
+    for rule in ("leaked_fact_id", "doubled_value", "broken_unit", "split_rupee", "odd_citation", "footnoted_year",
+                 "leaked_marker", "ascii_chart"):
+        assert rule in found, rule
+    good = ("| Year | Value |\n| --- | --- |\n| 2024 | 1,234 |\nThe F-16 and F&O volumes rose 12% in 2024 [S1]. "
+            "Values ranged from -19337 to -9767 [S2]. [[FIGURE 2]]")
+    assert scan_report(good) == {}
+
+
+def test_rs_and_currency_after_number_are_fixed_before_fact_ids_resolve():
+    draft, facts = _fact_postprocess("The MSP for paddy rose to [[F3]] while costs hit Rs. 1,700 by 2019-20 [S2.1]. "
+                                     "Its reserve reached 1,750 ₹ Cr in 2018-19 [S2.1].")
+    assert "Rs [S" not in draft.body and "₹ Cr" not in draft.body

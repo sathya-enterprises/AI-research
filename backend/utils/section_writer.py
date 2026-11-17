@@ -349,6 +349,8 @@ def normalize_citation_brackets(text: str) -> str:
 
 
 _RS_DOT_RE = re.compile(r"\bRs\.\s*(?=\d)")
+_CURRENCY_AFTER_RE = re.compile(
+    r"(?<![\d,.])(\d[\d,]*(?:\.\d+)?)\s+([₹$€£])\s?(Cr|crore|lakh(?:\s+crore)?|Mn|Bn|million|billion|trillion)\b")
 _CURRENCY_UNIT_RE = re.compile(r"^(₹|US\$|\$|€|£|Rs\.?|INR|USD)\s*(.*)$")
 
 
@@ -495,7 +497,7 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
     if facts:
         text = normalize_fact_refs(text, len(facts))
 
-    pieces = re.split(r"(?<=[.!?])(\s+)", text)
+    pieces = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bNo\.)(?<!\bvs\.)(\s+)", text)
     for i, sentence in enumerate(pieces):
         if not FACT_REF_RE.search(sentence):
             continue
@@ -640,13 +642,14 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     # Citations in "【S3】" / "(S3)" become "[S3]" first: fact-id resolution reads them to decide whether
     # a sentence already cites its fact's passage.
     body, summary = normalize_citation_brackets(body), normalize_citation_brackets(summary)
+    # "Rs. 25 crore" -> "Rs 25 crore" before anything splits sentences: the fact-id resolver itself split
+    # "... to Rs. 70,253 crore" at "Rs." and put the citation there ("Rs [S14]. 70,253 crore", insurance run).
+    # "17,68,217 ₹ Cr" (typed by the writer) -> "₹17,68,217 Cr".
+    body, summary = (_CURRENCY_AFTER_RE.sub(r"\2\1 \3", _RS_DOT_RE.sub("Rs ", part)) for part in (body, summary))
     # Fact ids ([[F3]]) become the exact cell text before anything else reads the numbers.
     body, used = resolve_fact_refs(body, fact_refs)
     summary, used_in_summary = resolve_fact_refs(summary, fact_refs)
     draft.fact_refs_used += used + used_in_summary
-    # "Rs. 25 crore" -> "Rs 25 crore": later steps split sentences at ". " before a digit, which cut
-    # "a net worth exceeding Rs. 25 crore" into "exceeding Rs [S4]. 25 crore [S4]."
-    body, summary = (_RS_DOT_RE.sub("Rs ", part) for part in (body, summary))
     body = re.sub(r"(?m)^\s*#\s+.*$|^\s*##\s+.*$", "", body).strip()  # the pipeline owns H1/H2 headings
     body = unfence(body)
     body = strip_ascii_charts(body)
