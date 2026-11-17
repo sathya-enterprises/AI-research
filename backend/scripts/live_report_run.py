@@ -53,7 +53,9 @@ def main():
     job = start.get("jobId") or start.get("job_id")
     print("start", status, job, flush=True)
     result = None
-    while time.time() - started < 3000:
+    # in-depth reports run to a 50-minute hard stop plus the checks and render after it; under API rate limits
+    # they finished after the client had given up (ev_india_in_depth: done server-side, recorded as failed)
+    while time.time() - started < (4500 if args.tier == "in_depth" else 3000):
         time.sleep(15)
         status, body = call(args.base, f"/api/chat/report/status/{job}")
         state = body.get("status") or body.get("state")

@@ -34,6 +34,9 @@ log = logging.getLogger("llm_gateway")
 # Calls that write the report's prose. They wait for a full model rather than use a "lite" one, which wrote
 # sections at roughly half the requested length; the lite model is used only after the cooldown waits.
 LITE_AVOIDING_PURPOSES = {"section", "section_extend", "executive_summary"}
+# Checks that read and classify (the claim judge) start on the lite model: the full models' per-minute quota
+# goes to the writing calls (live run: 121 of 167 Gemini attempts were HTTP 429).
+LITE_FIRST_PURPOSES = {"claim_check"}
 
 DEFAULT_BUDGETS = {"detailed": 30, "in_depth": 90}
 
@@ -142,7 +145,7 @@ class LLMGateway:
             while True:
                 attempt += 1
                 result = await self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout, tried,
-                                                 allow_lite)
+                                                 allow_lite, prefer_lite=purpose in LITE_FIRST_PURPOSES)
                 result.attempts = attempt
                 if result.ok:
                     break
@@ -209,7 +212,7 @@ class LLMGateway:
             return result
 
     # ── providers ─────────────────────────────────────────────────────────────
-    def _attempt_plan(self, tried: set, allow_lite: bool = True) -> list[tuple[str, str]]:
+    def _attempt_plan(self, tried: set, allow_lite: bool = True, prefer_lite: bool = False) -> list[tuple[str, str]]:
         rt = self.runtime
         keys = [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k)]
         if not keys:
@@ -224,12 +227,14 @@ class LLMGateway:
             if healthy:
                 plan.append((model, healthy[self._key_cursor % len(healthy)]))
         self._key_cursor += 1
+        if prefer_lite:
+            plan.sort(key=lambda item: "lite" not in str(item[0]).casefold())
         return plan
 
     async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried,
-                           allow_lite: bool = True) -> LLMResult:
+                           allow_lite: bool = True, prefer_lite: bool = False) -> LLMResult:
         rt = self.runtime
-        plan = self._attempt_plan(tried, allow_lite)
+        plan = self._attempt_plan(tried, allow_lite, prefer_lite)
         if not plan:
             return LLMResult(ok=False, error="no_gemini_key_or_model_available")
         last_error = "no_response"
