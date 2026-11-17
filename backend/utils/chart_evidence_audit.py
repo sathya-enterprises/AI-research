@@ -1185,7 +1185,10 @@ _QUESTION_FY_RE = re.compile(r"\bFY\s*['\u2019]?(\d{2,4})\b", re.I)
 _QUESTION_ISO_DATE_RE = re.compile(r"\b((?:19|20)\d{2})-(\d{1,2})-(\d{1,2})\b")
 _QUESTION_YEAR_RANGE_RE = re.compile(r"\b((?:19|20)\d{2})\s*(?:[-\u2013\u2014]|to|through|until)\s*((?:19|20)\d{2})\b", re.I)
 _QUESTION_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# A split fiscal year ("2018-19", "FY2019-20") is one endpoint: without it "from 2018-19 to 2024-25" was not
+# read as a range, so only the two named years counted as inside the window (agri_msp published no chart).
 _QUESTION_PERIOD_ENDPOINT = (
+    rf"(?:FY\s*)?(?:19|20)\d{{2}}\s*[-\u2013/]\s*\d{{2}}(?!\d)|"
     rf"Q[1-4]\s*(?:(?:FY|CY)\s*)?['\u2019]?\d{{2,4}}|(?:FY|CY)\s*['\u2019]?\d{{2,4}}|"
     rf"{_MONTH_NAME_RE}\.?\s*,?\s*(?:19|20)\d{{2}}|(?:19|20)\d{{2}}"
 )

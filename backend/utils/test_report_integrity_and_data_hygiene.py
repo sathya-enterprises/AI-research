@@ -1166,3 +1166,32 @@ def test_calculation_checks_read_scales_constants_and_rs_without_a_space():
     assert drop_restating_calculations("attracted 62.0% (calculated: 62 / 100) of FDI") == "attracted 62.0% of FDI"
     assert drop_restating_calculations("grew 2.7 times (calculated: 2.7 * 1)").startswith("grew 2.7 times")
     assert "(calculated: 50 / 100)" in drop_restating_calculations("rose 40% (calculated: 50 / 100)")
+
+
+def test_split_fiscal_year_question_range_keeps_the_years_in_between():
+    # agri_msp: "from 2018-19 to 2024-25" was not read as a range; 2019-20 .. 2023-24 were "outside".
+    from utils.chart_evidence_audit import _periods_outside_question_window
+
+    question = "How have MSPs for wheat and paddy changed from 2018-19 to 2024-25?"
+    for label in ("2018-19", "2019-20", "2022-23", "2024-25"):
+        assert _periods_outside_question_window(question, [label], []) == []
+    assert _periods_outside_question_window(question, ["2025-26"], []) == ["2025-26"]
+    assert _periods_outside_question_window("from FY2019-20 to FY2024-25", ["2017-18"], [])
+
+
+def test_column_numbering_rows_are_not_data_and_century_rollover():
+    from types import SimpleNamespace
+
+    from utils.fact_sheet import extract_facts, is_column_numbering
+    from utils.section_charts import _period_end_year, charts_from_passage
+
+    assert is_column_numbering(["1", "2", "3", "4"]) and is_column_numbering(["(1)", "(2)", "(3)"])
+    assert not is_column_numbering(["2019", "2", "3"]) and not is_column_numbering(["1", "5", "9"])
+    assert _period_end_year("1999-00") == 2000 and _period_end_year("2018-19") == 2019
+    text = ("TABLE 1\nYear | Paddy common | Wheat | Gram\n1 | 2 | 3 | 4\n2018-19 | 1750 | 1840 | 4620\n"
+            "2019-20 | 1815 | 1925 | 4875\n2020-21 | 1868 | 1975 | 5100")
+    passage = SimpleNamespace(passage_id="S12.1", source_id="S12", kind="table", reliability=1.0, publisher="", title="",
+                              text=text)
+    assert not any(f.raw in {"2", "3", "4"} for f in extract_facts(passage))
+    charts = charts_from_passage(passage, 1)
+    assert charts and all(str(d.get("label")) != "1" for c in charts for s in c.spec["series"] for d in s["data"])

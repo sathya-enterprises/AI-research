@@ -341,7 +341,8 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
     heading = re.sub(r"^TABLE \d+\b\s*(?:\(continued\))?\s*(?:[—-]\s*)?", "", heading_line.strip()).replace("(continued)", "").strip()
     header = _split_row(lines[0])
     rows = [_split_row(ln) for ln in lines[1:]]
-    rows = [r for r in rows if len(r) == len(header) and r[0]]
+    from utils.fact_sheet import is_column_numbering
+    rows = [r for r in rows if len(r) == len(header) and r[0] and not is_column_numbering(r)]
     if len(rows) < 2 or len(header) < 2:
         return []
     if any(header_is_data(h) for h in header[1:]):
@@ -839,7 +840,8 @@ def _period_end_year(label: str) -> int | None:
         return fy_end if quarter == 4 else fy_end - 1
     m = re.search(r"\b((?:19|20)\d{2})\s*[-–/]\s*(\d{2})(?!\d)", text)
     if m:
-        return int(m.group(1)[:2] + m.group(2))
+        end = int(m.group(1)[:2] + m.group(2))
+        return end + 100 if end < int(m.group(1)) else end  # "1999-00" ends in 2000, not 1900
     years = re.findall(r"\b((?:19|20)\d{2})\b", text)
     if years:
         return int(years[-1])

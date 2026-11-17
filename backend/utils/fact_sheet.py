@@ -135,6 +135,16 @@ def _entity_in(text: str) -> str:
     return best
 
 
+def is_column_numbering(cells: list[str]) -> bool:
+    """A row that only numbers the table's columns: "1 | 2 | 3 | 4" or "(1) | (2) | (3)" (Indian government
+    tables put one under the header; read as data it became a "1, 2, 3" chart and facts like Wheat = 4)."""
+    numbers = [re.fullmatch(r"\(?\s*(\d{1,2})\s*\)?", c.strip()) for c in cells]
+    if len(cells) < 3 or not all(numbers):
+        return False
+    values = [int(m.group(1)) for m in numbers]
+    return values == list(range(values[0], values[0] + len(values))) and values[0] in (0, 1, 2)
+
+
 def extract_facts(passage) -> list[Fact]:
     text = str(passage.text or "")
     pid = passage.passage_id
@@ -159,6 +169,8 @@ def extract_facts(passage) -> list[Fact]:
                 and max(len(c) for c in cells) <= 160):
             if re.fullmatch(r"[\s|:-]+", stripped):
                 continue  # Markdown separator row
+            if header and is_column_numbering(cells):
+                continue  # "1 | 2 | 3 | ... | 8" under the header numbers the columns; it is not data
             following = lines[index + 1].strip() if index + 1 < len(lines) else ""
             above_separator = bool(re.fullmatch(r"\|?[\s|:-]*-{3,}[\s|:-]*", following))
             is_header = (not any(re.search(r"\d", c) for c in cells[1:]) or above_separator
