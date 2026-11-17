@@ -177,7 +177,13 @@ class EvidenceStore:
         chunks: list[tuple[str, str]] = []
         if page.strip():
             tables, narrative = _split_tables_and_text(page)
+            from utils.fact_sheet import is_schema_table
             for heading, rows in tables:
+                header = [c.strip() for c in str(rows[0] if rows else "").strip().strip("|").split("|")]
+                if is_schema_table(header):
+                    # A dataset portal's column listing ("Column | Type | Distinct | Count"): writers turned it
+                    # into "516 total records" sentences and tables about the data file, not the topic.
+                    continue
                 chunks += [("calculated" if internal else "table", c) for c in _table_passages(heading, rows)]
             chunks += [("calculated" if internal else "narrative", c) for c in _narrative_passages(narrative)]
         if not chunks:

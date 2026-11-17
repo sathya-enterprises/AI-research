@@ -1248,3 +1248,16 @@ def test_dataset_tables_snake_case_columns_long_tables_and_schema_listings():
     assert is_schema_table(["Column", "Type", "Distinct", "Count", "Description"])
     assert not is_schema_table(["Year", "Count", "Value"])
     assert charts_from_passage(passage, 1) == [] and not [f for f in extract_facts(passage) if f.kind == "table"]
+
+
+def test_dataset_column_listing_is_not_evidence():
+    # mutual_fund_sip / tourism: the writer turned a portal's column listing into "516 total records" prose.
+    from utils.evidence_store import EvidenceStore
+
+    page = ("TABLE 1 — SIP inflows\nYear | Inflow (Rs crore)\n2023 | 1,56,000\n2024 | 2,89,352\n2025 | 3,10,000\n\n"
+            "TABLE 2 — Columns\nColumn | Type | Distinct | Count | Description\nyear | Int64 | 11 | 516 | Year.\n"
+            "value | Float | 508 | 516 | Value.\n")
+    store = EvidenceStore()
+    store.add_source("S1", {"url": "https://example.org/data", "title": "SIP data", "pageContent": page})
+    texts = " ".join(p.text for p in store.passages)
+    assert "2,89,352" in texts and "Distinct" not in texts
