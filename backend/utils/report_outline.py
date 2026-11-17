@@ -641,11 +641,47 @@ def validate_outline(sections: list[Section], tier: str, tiers: dict | None, que
     return errors
 
 
+_STANDARD_ANGLES = (
+    ("Key Drivers and Causes", "what caused the changes the evidence shows, each driver with its supporting data",
+     "drivers causes reasons"),
+    ("Risks, Uncertainties and Outlook", "the risks and open questions the sources name, and what to watch next",
+     "risks outlook uncertainty"),
+    ("Comparison Across Periods and Peers", "how the latest figures compare with earlier periods and with peers",
+     "comparison trend previous period peers"),
+    ("Implications for Decision-Makers", "what the evidence means for investors, businesses or policy, stated with its limits",
+     "implications impact investors policy"),
+)
+
+
+def _fill_to_minimum(sections: list[Section], tier: str, decisions: list[str], question: str = "") -> list[Section]:
+    """A detailed outline below its section minimum gets standard analysis angles (drivers, risks,
+    comparison, implications) with the question's terms as retrieval queries.
+
+    Live run (sector rotation, detailed, quota-limited model): the outline came back with 4 sections against
+    a minimum of 5, repair only handled in-depth outlines, and the report came out at 4,500 words."""
+    minimum = MIN_ANALYSIS_SECTIONS.get(tier, 5)
+    if len(sections) >= minimum:
+        return sections
+    terms = " ".join(re.findall(r"[A-Za-z][A-Za-z&-]{2,}", str(question or ""))[:10])
+    existing = " ".join(s.title.casefold() for s in sections)
+    next_id = len(sections) + 1
+    for title, goal, words in _STANDARD_ANGLES:
+        if len(sections) >= minimum:
+            break
+        if any(w in existing for w in title.casefold().replace(",", "").split() if len(w) > 5):
+            continue  # the outline already has this angle
+        sections.append(Section(section_id=f"sec-{next_id}", title=title, goal=goal,
+                                queries=[f"{terms} {words}".strip(), f"{terms} {title.split()[0].lower()}".strip()]))
+        decisions.append(f"Added '{title}' (validator: {tier} outline below its minimum of {minimum} sections).")
+        next_id += 1
+    return sections
+
+
 def repair_outline(sections: list[Section], tier: str, tiers: dict | None, decisions: list[str],
                    question: str = "") -> list[Section]:
     """Deterministically add what the LLM outline still omitted after its retry (each addition logged)."""
     if not tiers or tier != "in_depth":
-        return sections
+        return _fill_to_minimum(sections, tier, decisions, question)
     tiers = _outline_tiers(tiers, question)
     next_id = len(sections) + 1
     qualifying = list(tiers.get("deep_dive", []))

@@ -1780,3 +1780,20 @@ def test_insurance_density_values_are_all_offered_and_a_reused_id_is_caught():
     table, _ = resolve_fact_refs(f"| Life | [[F{f58}]] |\n| Non-Life | [[F{f58}]] |", facts)
     single, _ = resolve_fact_refs(f"Life density was [[F{f58}]] in 2019 [S8.2].", facts)
     assert "REPEATED_FACT" in prose and table.count("REPEATED_FACT") == 2 and "58" in single
+
+
+def test_short_detailed_outline_is_filled_to_its_section_minimum():
+    # Live sector-rotation run: 4 sections against a minimum of 5; repair only handled in-depth outlines.
+    from utils.report_outline import Section, repair_outline, validate_outline
+
+    sections = [Section(section_id=f"sec-{i}", title=t, goal="g", queries=["q"]) for i, t in enumerate(
+        ["Quarterly Performance Review", "Analysis of Sector Dispersion", "Drivers of Sector Rotation",
+         "Current Market Status"], 1)]
+    question = "How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters"
+    decisions: list[str] = []
+    repaired = repair_outline(sections, "detailed", None, decisions, question=question)
+    assert len(repaired) >= 5 and not [e for e in validate_outline(repaired, "detailed", None, question=question)
+                                        if "analysis sections" in e]
+    titles = [s.title for s in repaired]
+    assert "Key Drivers and Causes" not in titles  # the outline already has a drivers section
+    assert any("sector rotation" in q.casefold() for s in repaired[4:] for q in s.queries) and decisions
