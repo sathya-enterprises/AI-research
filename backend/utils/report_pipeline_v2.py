@@ -639,6 +639,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     _tables_seen: list = []
     _quality_memory: dict[str, tuple] = {}  # chart id -> (its _earlier entry, its _tables_seen entry or None)
 
+    _sector_topic_filter = None
+    try:
+        if getattr(runtime, "_is_sector_rotation_report_request", None) and runtime._is_sector_rotation_report_request(question):
+            _sector_topic_filter = getattr(runtime, "_sector_rotation_topic_quality_filter", None)
+    except Exception:
+        _sector_topic_filter = None
+
     def _quality_pass(charts: list) -> list:
         try:
             from utils.chart_lint import quality_reason
@@ -658,6 +665,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                     from utils.chart_evidence_audit import chart_meaning_reason
                     _reason = chart_meaning_reason(dict(chart.spec, evidencePassages=chart.passage_ids), question,
                                                    manifest)
+                if not _reason and _sector_topic_filter is not None:
+                    # report.py's sector-rotation relevance gate removed 6 of 7 planned charts after writing
+                    # (one-day snapshots, holder tables): the same function decides here, before writing.
+                    try:
+                        _filtered = _sector_topic_filter("", [dict(chart.spec)], question=question)[2]
+                        if _filtered.get("removedCharts"):
+                            _reason = "not a sector-rotation view (snapshot, off-window or off-topic)"
+                    except Exception:
+                        pass
                 if not _reason:
                     # the same TABLE from another publisher (sorted differently, so the plotted rows differ)
                     from collections import Counter as _Counter
