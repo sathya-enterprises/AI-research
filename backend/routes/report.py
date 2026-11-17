@@ -16762,6 +16762,7 @@ def _attach_audit_source_evidence(
     by_path_rows: dict[str, list[dict]] = {}
     by_source_id: dict[str, dict] = {}
     by_title: dict[str, list[dict]] = {}
+    by_identity: dict[str, list[dict]] = {}
     calculated_sector_sources: list[dict] = []
     for row in enriched_sources or []:
         if not isinstance(row, dict):
@@ -16771,6 +16772,19 @@ def _attach_audit_source_evidence(
         exact_key, path_key, _ = url_keys(row.get("url") or row.get("sourceUrl") or row.get("source_url"))
         if exact_key:
             by_exact[exact_key] = row
+        # The manifest stores a fetched page under its final URL ("...aspx?lang=2&prid=2119067&reg=48") while
+        # the row keeps the search URL ("...aspx?PRID=2119067"); the shared path and title of every PIB press
+        # release made both fallbacks ambiguous, so a fetched page was reported as metadata only and its
+        # charts and numbers failed verification. Index the final URL and the registry's own identity too.
+        final_key, _final_path, _ = url_keys(row.get("pageFetchFinalUrl"))
+        if final_key:
+            by_exact.setdefault(final_key, row)
+        try:
+            identity = source_identity_key(row)
+        except Exception:
+            identity = ""
+        if identity:
+            by_identity.setdefault(identity, []).append(row)
         if path_key:
             by_path_rows.setdefault(path_key, []).append(row)
         title_key = norm_title(row.get("title") or row.get("name"))
@@ -16845,6 +16859,16 @@ def _attach_audit_source_evidence(
         # another source's stale S1 would attach plausible-looking but incorrect
         # evidence to a claim. Fall back to IDs only when no URL/title match exists.
         original = by_exact.get(exact_key) if exact_key else None
+        if original is None:
+            try:
+                identity_matches = by_identity.get(source_identity_key(item), []) if exact_key else []
+            except Exception:
+                identity_matches = []
+            # Several rows for one identity (search duplicates of one page): prefer the fetched one.
+            fetched_matches = [r for r in identity_matches
+                               if str(r.get("pageFetchStatus") or "").casefold() == "ok"]
+            if len(fetched_matches) == 1 or (not fetched_matches and len(identity_matches) == 1):
+                original = (fetched_matches or identity_matches)[0]
         if original is None and path_key:
             path_matches = by_path_rows.get(path_key, [])
             if len(path_matches) == 1:

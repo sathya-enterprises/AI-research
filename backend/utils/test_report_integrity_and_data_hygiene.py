@@ -1195,3 +1195,23 @@ def test_column_numbering_rows_are_not_data_and_century_rollover():
     assert not any(f.raw in {"2", "3", "4"} for f in extract_facts(passage))
     charts = charts_from_passage(passage, 1)
     assert charts and all(str(d.get("label")) != "1" for c in charts for s in c.spec["series"] for d in s["data"])
+
+
+def test_fetched_page_stored_under_its_final_url_keeps_its_fetch_status():
+    # steel_production: S27 was fetched (PIB, HTTP 200, tables) but the manifest held the final URL and the
+    # fetched row the search URL; every PIB release shares path and title, so no row matched and the source
+    # was reported as metadata only (its production chart failed verification).
+    import routes.report as report
+
+    table = "TABLE 1\nYear | Quantity (in MnT)\n2019-20 | 109.14\n2020-21 | 103.54"
+    fetched = {"title": "Press Release: Press Information Bureau", "url": "https://pib.gov.in/PressReleseDetailm.aspx?PRID=2119067",
+               "pageFetchFinalUrl": "https://www.pib.gov.in/PressReleseDetailm.aspx?PRID=2119067&reg=48&lang=2",
+               "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page", "pageContent": table, "snippet": table}
+    other = {"title": "Press Release: Press Information Bureau", "url": "https://pib.gov.in/PressReleseDetailm.aspx?PRID=2000001",
+             "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page", "pageContent": "Other release text."}
+    manifest = [{"id": "S27", "title": "Press Release: Press Information Bureau",
+                 "url": "https://pib.gov.in/pressrelesedetailm.aspx?lang=2&prid=2119067&reg=48"}]
+    merged = report._merge_source_evidence_statuses(
+        manifest, report._attach_audit_source_evidence(manifest, [other, fetched], "Output was 109.14 MnT [S27]."))
+    assert merged[0]["page_fetch_status"] == "ok"
+    assert merged[0]["evidence_origin"] == "publisher_page"
