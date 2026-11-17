@@ -22,7 +22,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_NUM_RE = re.compile(r"(?<![\w.,])([+\-−–]?)\s?(?:₹|Rs\.?\s?|INR\s?|US\$|USD\s?|\$)?\s?(\d[\d,]*(?:\.\d+)?)(?!\.\d)")
+# A sign sits against its number or currency ("-3.2%", "−₹40"); a dash followed by a space separates a label
+# from its value ("Non-Life - USD 20" was read as -20, insurance live run).
+_NUM_RE = re.compile(r"(?<![\w.,])((?:[+\-−–](?!\s))?)(?:₹|Rs\.?\s?|INR\s?|US\$|USD\s?|\$)?\s?(\d[\d,]*(?:\.\d+)?)(?!\.\d)")
 _UNIT_AFTER_RE = re.compile(r"^\s?(%|per\s?cent|lakh\s+crores?|lakh\s+crs?\.?|crores?|crs?\.?(?![a-z])|trillion|tn\b|billion|bn\b|"
                             r"million|mn\b|bps|x(?![a-z])|times)", re.I)
 _PERIOD_RE = re.compile(r"(?i)\b(?:Q[1-4]\s*(?:FY|CY)?\s*'?\d{2,4}|H[12]\s*FY\s*'?\d{2,4}|FY\s*'?\d{2,4}(?:\s*[-/–]\s*\d{2,4})?|"

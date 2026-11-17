@@ -204,11 +204,16 @@ def _prose_statistic(fact) -> bool:
         before_w, after_w = context[:at].split()[-4:], context[at + len(fact.raw):].split()[:4]
 
         def bare_numbers(words: list[str]) -> int:
+            # Years and currency-marked amounts are not part of a flattened run: "USD 78 in 2019 (Life- USD 58
+            # and Non-Life - USD 20)" offered only 58, and the writer used that one id for 78, 58 and 20.
             count = 0
             for k, w in enumerate(words):
+                token = w.strip("(),.")
                 nxt = words[k + 1].strip("(),.") if k + 1 < len(words) else ""
-                if (re.fullmatch(r"[-+−]?[\d,]+(?:\.\d+)?", w.strip("(),")) and not re.fullmatch(r"%|per|percent", nxt)
-                        and not _MONTH_RE.match(nxt)):
+                prev = words[k - 1].strip("(),.-") if k else ""
+                if (re.fullmatch(r"[-+−]?[\d,]+(?:\.\d+)?", token) and not re.fullmatch(r"%|per|percent", nxt)
+                        and not _MONTH_RE.match(nxt) and not re.fullmatch(r"(?:19|20)\d{2}", token)
+                        and not re.fullmatch(r"(?i)usd|us\$|\$|rs|inr|₹|eur|€|£", prev)):
                     count += 1
             return count
 
@@ -404,6 +409,7 @@ VERIFIED_MARK = "⁠"  # word joiner, invisible: the number before it was insert
 UNKNOWN_FACT = "[[UNKNOWN_FACT]]"
 BOUND_FLIP = "[[BOUND_FLIP]]"
 PERIOD_FLIP = "[[PERIOD_FLIP]]"
+REPEATED_FACT = "[[REPEATED_FACT]]"
 _CURRENCY_TAIL_RE = re.compile(r"(?:\brs\.?|\binr|\busd|us\$|[₹$€£])\s*$", re.I)
 _UPPER_BOUND_RE = re.compile(r"(?:\bnot\s+(?:exceeding|more\s+than|above|over|greater\s+than|higher\s+than)|"
                              r"\b(?:less|lower|fewer)\s+than|\bbelow|\bunder|\bup\s*to|\bat\s+most|\bmaximum\s+of|"
@@ -505,6 +511,17 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
     for i, sentence in enumerate(pieces):
         if not FACT_REF_RE.search(sentence):
             continue
+        # One fact is one value: the same id twice in a sentence ("from [[F104]] in FY15 to [[F104]] in FY23") or
+        # in one table ("[[F70]]" for life, non-life and total density, insurance live run) stands for values
+        # the fact sheet did not offer. Those occurrences become REPEATED_FACT; the policy removes the
+        # sentence / table row.
+        table_ids = [m.group(1) for line in sentence.split("\n") if line.lstrip().startswith("|")
+                     for m in FACT_REF_RE.finditer(line)]
+        prose_ids = [m.group(1) for line in sentence.split("\n") if not line.lstrip().startswith("|")
+                     for m in FACT_REF_RE.finditer(line)]
+        repeated = {n for ids in (table_ids, prose_ids) for n in ids if ids.count(n) >= 2}
+        if repeated:
+            sentence = FACT_REF_RE.sub(lambda m: REPEATED_FACT if m.group(1) in repeated else m.group(0), sentence)
         needed: list[str] = []
         first_used = len(used)
 
@@ -695,9 +712,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     # Figure markers stay; the policy's own markers were handled (their sentences removed) above.
     body = re.sub(r"\s*\[\[(?!\s*FIGURE\b)[^\[\]\n]{1,80}\]\]", "", body)
     summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
-    if BOUND_FLIP in summary or PERIOD_FLIP in summary:  # the summary is not checked sentence by sentence
+    if any(m in summary for m in (BOUND_FLIP, PERIOD_FLIP, REPEATED_FACT)):  # the summary: not checked per sentence
         summary = " ".join(x for x in re.split(SENTENCE_END + r"\s+", summary)
-                           if BOUND_FLIP not in x and PERIOD_FLIP not in x)
+                           if not any(m in x for m in (BOUND_FLIP, PERIOD_FLIP, REPEATED_FACT)))
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
     numbers = {f.figure_number for f in figures}

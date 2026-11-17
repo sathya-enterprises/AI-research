@@ -535,6 +535,8 @@ def apply_number_policy(body: str, *, passage_texts: dict[str, str], allowed_num
                 reason = "requested calculation uses numbers that are not facts in the evidence"
             if "[[UNKNOWN_FACT]]" in sentence:
                 reason = "refers to a fact id that is not on the section's fact sheet"
+            if "[[REPEATED_FACT]]" in sentence:
+                reason = "the same fact id stands for different values (a value the fact sheet did not offer)"
             if "[[PERIOD_FLIP]]" in sentence:
                 reason = "dates a value to another year than its article (a month named without a year)"
             if "[[BOUND_FLIP]]" in sentence:

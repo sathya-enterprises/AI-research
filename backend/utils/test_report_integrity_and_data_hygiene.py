@@ -1761,3 +1761,22 @@ def test_chart_meaning_rule_is_shared_by_creation_and_publication():
     assert chart_meaning_reason(good, question) == ""
     assert chart_meaning_reason(off_topic, question)
     assert chart_meaning_reason(untitled, question)
+
+
+def test_insurance_density_values_are_all_offered_and_a_reused_id_is_caught():
+    # insurance live run: only "USD 58" of "USD 78 in 2019 (Life- USD 58 and Non-Life - USD 20)" was a fact; the
+    # writer used that one id for 78, 58 and 20 (and "from [[F104]] in FY15 to [[F104]] in FY23").
+    from types import SimpleNamespace
+
+    from utils.section_writer import numbered_facts, resolve_fact_refs
+
+    passage = SimpleNamespace(passage_id="S8.2", published="2024-01-01", text=(
+        "Insurance density was USD 11.5 in 2001, reached to USD 78 in 2019 (Life- USD 58 and Non-Life - USD 20)."))
+    facts = numbered_facts([passage])
+    values = {f.value for f in facts}
+    assert {"78", "58", "20"} <= values
+    f58 = next(i for i, f in enumerate(facts, 1) if f.value == "58")
+    prose, _ = resolve_fact_refs(f"Density rose from [[F{f58}]] to [[F{f58}]] by 2019 [S8.2].", facts)
+    table, _ = resolve_fact_refs(f"| Life | [[F{f58}]] |\n| Non-Life | [[F{f58}]] |", facts)
+    single, _ = resolve_fact_refs(f"Life density was [[F{f58}]] in 2019 [S8.2].", facts)
+    assert "REPEATED_FACT" in prose and table.count("REPEATED_FACT") == 2 and "58" in single
