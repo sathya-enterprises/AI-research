@@ -877,6 +877,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                          prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120)
     exec_body = (exec_result.text.split(SUMMARY_MARKER)[0].strip() if exec_result.ok else "")
     exec_body = re.sub(r"(?m)^\s*#{1,6}\s+.*$", "", exec_body).strip()
+    from utils.section_writer import normalize_citation_brackets
+    exec_body = normalize_citation_brackets(exec_body)  # "【S3】" / "(S3)" -> "[S3]"
     summary_passages = {t.strip().upper() for d in good for g in CITE_RE.findall(d.summary) for t in re.split(r"\s*[,;]\s*", g)}
     exec_body = CITE_RE.sub(lambda m: "[" + ", ".join(t for t in re.split(r"\s*[,;]\s*", m.group(1)) if t.strip().upper() in summary_passages) + "]", exec_body)
     exec_body = exec_body.replace("[]", "")

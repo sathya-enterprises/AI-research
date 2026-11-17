@@ -295,6 +295,17 @@ def strip_ascii_charts(body: str) -> str:
     return "\n".join(out)
 
 
+_ODD_CITATION_RE = re.compile(r"[【〔［(]\s*(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\s*[】〕］)]")
+
+
+def normalize_citation_brackets(text: str) -> str:
+    """"【S23.2】" (full-width brackets, one writer model) and "(S12)" become "[S23.2]" / "[S12]".
+
+    Live run: 22 of pharma's citations reached the report in 【】, unlinked and unchecked, and the number
+    check saw those sentences as uncited."""
+    return _ODD_CITATION_RE.sub(lambda m: f"[{m.group(1)}]", str(text or ""))
+
+
 _RS_DOT_RE = re.compile(r"\bRs\.\s*(?=\d)")
 _CURRENCY_UNIT_RE = re.compile(r"^(₹|US\$|\$|€|£|Rs\.?|INR|USD)\s*(.*)$")
 
@@ -571,6 +582,9 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         body, summary = text.split(SUMMARY_MARKER, 1)
     else:
         body, summary = text, ""
+    # Citations in "【S3】" / "(S3)" become "[S3]" first: fact-id resolution reads them to decide whether
+    # a sentence already cites its fact's passage.
+    body, summary = normalize_citation_brackets(body), normalize_citation_brackets(summary)
     # Fact ids ([[F3]]) become the exact cell text before anything else reads the numbers.
     body, used = resolve_fact_refs(body, fact_refs)
     summary, used_in_summary = resolve_fact_refs(summary, fact_refs)

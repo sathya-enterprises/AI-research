@@ -1480,3 +1480,12 @@ def test_value_context_uses_the_rows_own_header_and_stops_at_its_caption():
                  "Company | XIRR Returns %\nAditya Vision | 106.5%\nSky Gold | 104.3%")
     context = cea._value_windows("106.5", captioned)[0][1]
     assert "FY2012" not in context and "TABLE 9" in context
+
+
+def test_full_width_and_round_citation_brackets_become_square():
+    # pharma live run: "【S23.2】" citations reached the report unlinked; pms used "(S12)".
+    from utils.section_writer import normalize_citation_brackets
+
+    assert normalize_citation_brackets("exports rose 9%【S23.2】 in FY25") == "exports rose 9%[S23.2] in FY25"
+    assert normalize_citation_brackets("AUM grew (S12, S3.1).") == "AUM grew [S12, S3.1]."
+    assert normalize_citation_brackets("Schedule (S) and (see S3 notes)") == "Schedule (S) and (see S3 notes)"
