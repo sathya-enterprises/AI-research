@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from utils.source_ids import normalize_sid, sid_number
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
 _PERIOD_RE = re.compile(
@@ -280,7 +281,7 @@ def _lines(text: str) -> list[str]:
         if not raw:
             continue
         if len(raw) > 400 and "|" not in raw:
-            out.extend(part.strip() for part in re.split(r"(?<=[.!?])\s+", raw) if part.strip())
+            out.extend(part.strip() for part in re.split(SENTENCE_END + r"\s+", raw) if part.strip())
         else:
             out.append(raw)
     return out

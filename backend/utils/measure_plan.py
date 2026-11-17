@@ -18,6 +18,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("measure_plan")
 
@@ -187,7 +188,7 @@ def _explicit_measure_phrases(question: str) -> list[str]:
     text = _request_text(question)
     if not text:
         return []
-    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])|[;\n]+", text)
+    sentences = re.split(SENTENCE_END + r"\s+(?=[A-Z])|[;\n]+", text)
     found: list[str] = []
     for sentence in sentences:
         raw = re.sub(r"\s+", " ", sentence).strip(" \t\r\n.,;:")

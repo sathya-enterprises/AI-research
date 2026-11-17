@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("stage_i_gates")
 
@@ -349,5 +350,5 @@ def qualify_low_reliability(section_text: str, reliability: dict[str, float], th
         return re.sub(r"(\s*\[[^\]]+\])?([.!?])?\s*$", lambda m: f" (reported by a lower-reliability source){m.group(1) or ''}{m.group(2) or '.'}",
                       sentence.rstrip(), count=1)
 
-    parts = re.split(r"(?<=[.!?])(\s+)(?=[A-Z])", section_text)
+    parts = re.split(SENTENCE_END + r"(\s+)(?=[A-Z])", section_text)
     return "".join(fix(p) if not p.isspace() else p for p in parts), actions

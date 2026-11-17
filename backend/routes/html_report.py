@@ -36,6 +36,7 @@ from utils.report_scanability import strip_generation_markers
 from routes.source_manifest import build_source_registry, normalise_source_manifest, ensure_cited_source_records
 from utils.chart_evidence_audit import sanitize_charts_for_publication
 from routes.report_design import BODY_CLASS as _EDITORIAL_BODY_CLASS, editorial_css as _editorial_css, editorial_render_theme as _editorial_render_theme, font_face_css as _editorial_font_faces
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("html_report")
 
@@ -2212,7 +2213,7 @@ def _json_block_at(lines: list[str], start: int) -> tuple[str, int] | None:
 
 def _split_long_paragraph(text: str, threshold: int = 155) -> list[str]:
     """Split only long prose at sentence boundaries, favoring clear transitions."""
-    sentence_parts = re.split(r"(?<=[.!?])\s+(?=(?:[A-Z0-9“\"(]))", text.strip())
+    sentence_parts = re.split(SENTENCE_END + r"\s+(?=(?:[A-Z0-9“\"(]))", text.strip())
     if len(sentence_parts) < 3 or len(re.findall(r"\S+", text)) <= threshold:
         return [text]
     transitions = re.compile(r"^(?:however|yet|by contrast|in contrast|that said|more importantly|meanwhile|operationally|financially|for investors|at the same time|in practice|as a result|consequently|additionally|furthermore|on the other hand|from a |at project level|at sector level|on balance)\b", re.IGNORECASE)

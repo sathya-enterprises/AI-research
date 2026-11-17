@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("evidence_check")
 
@@ -121,7 +122,7 @@ def _fact_supported(sheet, store, claim: str, sources: set[str], context: str = 
     return True
 
 
-_CLAIM_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*])")
+_CLAIM_SENTENCE_RE = re.compile(SENTENCE_END + r"\s+(?=[A-Z*])")
 
 
 def _flag_values(group: dict) -> list[str]:

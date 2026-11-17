@@ -24,6 +24,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("editorial_pass")
 
@@ -150,7 +151,7 @@ def remove_repetition(sections: list[EditedSection], report: EditorialReport, th
         for li, line in enumerate(lines):
             if not line.strip() or line.lstrip().startswith(("|", "#", "[CHART_", "[[FIGURE")):
                 continue
-            pieces = re.split(r"(?<=[.!?])(\s+)(?=[A-Z*\[(\"'₹$])", line)
+            pieces = re.split(SENTENCE_END + r"(\s+)(?=[A-Z*\[(\"'₹$])", line)
             kept = []
             for piece in pieces:
                 words, numbers = _sentence_key(piece)
@@ -178,7 +179,7 @@ _PERIOD_RE = re.compile(r"(?i)\b(?:Q[1-4]\s*(?:FY)?\s*'?\d{2,4}|FY\s*'?\d{2}|(?:
 def detect_contradictions(sections: list[EditedSection], report: EditorialReport) -> None:
     facts: dict[tuple[str, str, str], tuple[str, str]] = {}
     for sec in sections:
-        for sentence in re.split(r"(?<=[.!?])\s+", CITE_RE.sub("", sec.body)):
+        for sentence in re.split(SENTENCE_END + r"\s+", CITE_RE.sub("", sec.body)):
             entities = _ENTITY_RE.findall(sentence)
             metric = _METRIC_RE.search(sentence)
             period = _PERIOD_RE.search(sentence)

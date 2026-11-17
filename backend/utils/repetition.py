@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("repetition")
 
@@ -92,7 +93,7 @@ def echoes_body(sentence: str, body: str, threshold: float = 0.6) -> bool:
     mine = _tokens(sentence)
     if len(mine) < 4:
         return False
-    for s in re.split(r"(?<=[.!?])\s+", str(body or "")):
+    for s in re.split(SENTENCE_END + r"\s+", str(body or "")):
         other = _tokens(s)
         if other and len(mine & other) / len(mine | other) >= threshold:
             return True
@@ -273,7 +274,7 @@ class _Facts:
 
 
 def _sentences(line: str) -> list[str]:
-    return re.split(r"(?<=[.!?])\s+(?=[A-Z\[(*\"'])", line)
+    return re.split(SENTENCE_END + r"\s+(?=[A-Z\[(*\"'])", line)
 
 
 def _owns(title: str, sentence: str, pos: int | None = None) -> bool:

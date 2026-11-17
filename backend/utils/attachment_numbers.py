@@ -14,6 +14,7 @@ This module closes that gap with the same rule the web path uses:
 from __future__ import annotations
 
 import re
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 # A comma groups digits only as thousands (1,234,567) or Indian lakhs (12,34,567); in CSV text "50,4862.15"
 # is two cells, not one number.
@@ -143,7 +144,7 @@ def check_attachment_numbers(report: str, allowed: set[str]) -> tuple[str, list[
             out_lines.append(line)
             continue
         kept = []
-        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z\[(\"'])", line):
+        for sentence in re.split(SENTENCE_END + r"\s+(?=[A-Z\[(\"'])", line):
             bad = [raw for raw in _claimed(sentence)
                    if not _supported(raw, allowed) and not _derived(raw, sentence, allowed)]
             if bad:

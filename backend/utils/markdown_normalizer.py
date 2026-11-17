@@ -12,6 +12,7 @@ import html as _html
 
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.*)\|\s*$")
 import logging
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _log = logging.getLogger("markdown_normalizer")
 
@@ -223,7 +224,7 @@ def _remove_unverified_metric_placeholders(text: str) -> str:
     blocks = re.split(r"(\n[ \t]*\n)", str(text or ""))
     structural_start = re.compile(r"(?m)(?=^\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s+))")
     prefix_re = re.compile(r"^(\s*(?:(?:[-*+]\s+)|(?:\d+[.)]\s+)|(?:>\s+)|(?:#{1,6}\s+))?)")
-    sentence_split_re = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\u201c\"'(\[])")
+    sentence_split_re = re.compile(SENTENCE_END + r"\s+(?=[A-Z0-9\u201c\"'(\[])")
     for block in blocks:
         if not block or re.fullmatch(r"\n[ \t]*\n", block):
             output.append(block)
@@ -730,7 +731,7 @@ def _dedupe_repeated_markdown_blocks(text: str) -> str:
             seen_long_blocks.add(signature)
 
         if not table_like and not is_list and not headingish and not stripped.startswith(("#", ">", "[CHART_", "[WEB_IMG_", "[FILE_IMG_", "[PAGE_IMG_", "http://", "https://", "```")) and "|" not in stripped:
-            sentence_rows = re.split(r"(?<=[.!?])\s+", stripped)
+            sentence_rows = re.split(SENTENCE_END + r"\s+", stripped)
             kept_sentences = []
             sentence_scope = seen_sentences.setdefault(current_h2, set())
             for sentence in sentence_rows:

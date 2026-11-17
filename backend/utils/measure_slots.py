@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 
 from utils.primary_sources import host_of, is_primary
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _STOP = {"the", "and", "for", "from", "with", "into", "over", "under", "per", "all", "total", "annual", "rate",
          "rates", "number", "share", "level", "levels", "size", "value", "values"}
@@ -103,7 +104,7 @@ def _data_blocks(text: str) -> list[str]:
 
     # Keep numeric prose local: matching a topic/entity somewhere on a whole page is not evidence that
     # every statistic on that page belongs to that topic/entity.
-    pieces = re.split(r"(?<=[.!?])\s+(?=[A-Z])|(?:\r?\n){2,}", text)
+    pieces = re.split(SENTENCE_END + r"\s+(?=[A-Z])|(?:\r?\n){2,}", text)
     return [piece.strip() for piece in pieces if _NUMBER.search(piece)]
 
 

@@ -21,6 +21,7 @@ import itertools
 import logging
 import re
 from dataclasses import dataclass, field
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("number_policy")
 
@@ -443,7 +444,7 @@ _HEADING_RE = re.compile(r"^\s*#{1,6}\s")
 
 
 def _sentences(paragraph: str) -> list[str]:
-    return re.split(r"(?<=[.!?])(\s+)(?=[A-Z*\[(\"'₹$])", paragraph)
+    return re.split(SENTENCE_END + r"(\s+)(?=[A-Z*\[(\"'₹$])", paragraph)
 
 
 def _paragraph_names(paragraph: str, entity: str) -> bool:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _STOP = {
     "what", "whether", "does", "this", "that", "with", "from", "into", "over", "under",
@@ -19,7 +20,7 @@ _STOP = {
     "earnings", "growth", "trend", "trends", "risk", "risks", "key", "actual", "using",
 }
 _GENERIC = {"the", "and", "for", "are", "will", "have", "has", "been", "their", "they", "how", "why", "than", "also", "only", "most", "more", "less"}
-_CLAIM_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_CLAIM_RE = re.compile(SENTENCE_END + r"\s+|\n+")
 _CITE_RE = re.compile(r"\[S(\d+)\]", re.I)
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 _NUMBER_RE = re.compile(r"(?:\b\d+(?:\.\d+)?%|\b(?:₹|Rs\.?\s*)?\d[\d,.]*\b|\b(?:Q[1-4]|FY)\d{2,4}\b)", re.I)

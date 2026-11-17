@@ -11,6 +11,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from typing import Any
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _MONEY_RE = re.compile(r"(?<![\w.])(?:USD|US\$|INR|Rs\.?|₹|\$|€|£)\s*[-+]?\d[\d,]*(?:\.\d+)?\s*(?:bn|billion|mn|million|m|k|crore|cr|lakh|lakhs|%)?", re.I)
 _NUM_RE = re.compile(
@@ -227,7 +228,7 @@ def extract_numeric_evidence(sources: list[dict[str, Any]]) -> list[dict[str, An
             # Evaluate incidental-number noise against the sentence containing
             # this match, not the entire physical line: extracted snippets often
             # flatten several unrelated sentences onto one line.
-            sentence_boundaries = [m.end() for m in re.finditer(r"(?<=[.!?])\s+(?=[A-Z0-9])", line)]
+            sentence_boundaries = [m.end() for m in re.finditer(SENTENCE_END + r"\s+(?=[A-Z0-9])", line)]
             sentence_start_pos = max([0] + [pos for pos in sentence_boundaries if pos <= rel_pos])
             sentence_end_pos = min([len(line)] + [pos for pos in sentence_boundaries if pos > rel_pos])
             sentence_fragment = line[sentence_start_pos:sentence_end_pos]
@@ -238,7 +239,7 @@ def extract_numeric_evidence(sources: list[dict[str, Any]]) -> list[dict[str, An
             # the exact line below is preserved separately for verification.
             prefix = text[:match.start()]
             recent_prefix_start = max(0, len(prefix) - 1800)
-            sentence_breaks = list(re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", prefix[recent_prefix_start:]))
+            sentence_breaks = list(re.finditer(SENTENCE_END + r"\s+(?=[A-Z])", prefix[recent_prefix_start:]))
             line_break = prefix.rfind("\n")
             sentence_start = (recent_prefix_start + sentence_breaks[-1].end()) if sentence_breaks else max(line_break + 1, recent_prefix_start)
             context = _clean(text[sentence_start:match.start()])[-220:]

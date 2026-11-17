@@ -1033,12 +1033,9 @@ _VALUE_TOKEN = re.compile(r"(?<![A-Za-z0-9])[-+]?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)
 
 
 def _is_header_row(line: str) -> bool:
-    """A table header row: distinct text cells, none of them a value or a date ("Sector | Total No. of IPOs")."""
-    cells = [c.strip() for c in str(line or "").strip().strip("|").split("|")]
-    return (len(cells) >= 2 and all(cells) and len(set(cells)) > 1
-            and all(re.search(r"[A-Za-z]{2,}", c) for c in cells)
-            and not any(re.fullmatch(r"[\s+\-−–(]*[₹$]?\s*[\d,]*\.?\d+\s*%?\)?|(?:FY\s*)?(?:19|20)\d{2}(?:[-/]\d{2,4})?", c, re.I)
-                        for c in cells))
+    """A table header row (the shared rule in utils.evidence_text)."""
+    from utils.evidence_text import is_header_row
+    return is_header_row(line)
 
 
 def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:

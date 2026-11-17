@@ -23,6 +23,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9.%-]*")
 _NUMBER_RE = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?%?")
@@ -133,7 +134,7 @@ def _narrative_passages(text: str) -> list[str]:
     out, buf = [], ""
     for para in paragraphs:
         if len(para) > MAX_PASSAGE:
-            sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", para)
+            sentences = re.split(SENTENCE_END + r"\s+(?=[A-Z0-9])", para)
             for sentence in sentences:
                 if len(buf) + len(sentence) + 1 > MAX_PASSAGE and len(buf) >= MIN_PASSAGE:
                     out.append(buf.strip())

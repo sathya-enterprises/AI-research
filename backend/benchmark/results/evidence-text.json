@@ -1,0 +1,830 @@
+{
+  "label": "evidence-text",
+  "scoredAt": "2026-11-17T16:51:22",
+  "notCaptured": [],
+  "totals": {
+    "numbersRemoved": 226,
+    "unsupportedClaims": 4,
+    "chartFailures": 0,
+    "candidatesVerified": 186,
+    "candidatesBuilt": 293
+  },
+  "rows": [
+    {
+      "id": "ev_india_detailed",
+      "capture": "research_capture_20261115_103310_fc269465.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 6030,
+      "wordsPlanned": 7614,
+      "gatesFailing": [],
+      "sourcesCited": 32,
+      "exactSourceRows": false,
+      "numbersRemoved": 0,
+      "numbersRemovedReasons": [],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 21,
+      "candidatesVerified": 16,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source row does not support the chart point's exact period."
+      ],
+      "replaySeconds": 33.6
+    },
+    {
+      "id": "ev_india_in_depth",
+      "capture": "research_capture_20261115_221336_d5ced555.json",
+      "outcome": "draft",
+      "status": "WARNING",
+      "chartsPublished": 5,
+      "wordsWritten": 12896,
+      "wordsPlanned": 14040,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 66,
+      "exactSourceRows": true,
+      "numbersRemoved": 10,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "input(s) 41758, 1000414 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "is not a well-formed number",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 46,
+      "candidatesVerified": 30,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source row does not establish the chart's stated unit.",
+        "The quoted source row does not support the chart point's exact period."
+      ],
+      "replaySeconds": 216.7
+    },
+    {
+      "id": "banking_asset_quality",
+      "capture": "research_capture_20261115_234432_7de39bff.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 4602,
+      "wordsPlanned": 5060,
+      "gatesFailing": [],
+      "sourcesCited": 19,
+      "exactSourceRows": true,
+      "numbersRemoved": 1,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 20,
+      "candidatesVerified": 9,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does ",
+        "The quoted source row does not establish the chart's stated measure.",
+        "The quoted source row does not support the chart point's exact period."
+      ],
+      "replaySeconds": 33.7
+    },
+    {
+      "id": "markets_sector_rotation",
+      "capture": "research_capture_20261115_235312_ac012033.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 4,
+      "wordsWritten": 6710,
+      "wordsPlanned": 5980,
+      "gatesFailing": [
+        "V2 evidence check (rewrite-or-remove loop, report.py's check)"
+      ],
+      "sourcesCited": 32,
+      "exactSourceRows": true,
+      "numbersRemoved": 2,
+      "numbersRemovedReasons": [
+        "has a different unit in the evidence",
+        "input(s) 67.54 not in the cited passages"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 18,
+      "candidatesVerified": 15,
+      "candidateRejections": [
+        "The heatmap cell is not supported by the cited source row and period column.",
+        "The quoted source value cannot be tied to a local row or statement."
+      ],
+      "replaySeconds": 57.0
+    },
+    {
+      "id": "renewables_capacity",
+      "capture": "research_capture_20261116_000556_6ecf809e.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 4624,
+      "wordsPlanned": 4872,
+      "gatesFailing": [],
+      "sourcesCited": 19,
+      "exactSourceRows": true,
+      "numbersRemoved": 0,
+      "numbersRemovedReasons": [],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 7,
+      "candidatesVerified": 7,
+      "candidateRejections": [],
+      "replaySeconds": 35.2
+    },
+    {
+      "id": "healthcare_sea",
+      "capture": "research_capture_20261116_001302_752f3fbe.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 5888,
+      "wordsPlanned": 7503,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 16,
+      "exactSourceRows": true,
+      "numbersRemoved": 18,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "input(s) 100 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 14,
+      "candidatesVerified": 9,
+      "candidateRejections": [
+        "The quoted source line for this chart point is not present in the source evidence or does ",
+        "The quoted source value cannot be tied to a local row or statement."
+      ],
+      "replaySeconds": 27.7
+    },
+    {
+      "id": "semiconductors_global",
+      "capture": "research_capture_20261116_001907_bf9edc04.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 5263,
+      "wordsPlanned": 5490,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 23,
+      "exactSourceRows": true,
+      "numbersRemoved": 5,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 5,
+      "candidatesVerified": 5,
+      "candidateRejections": [],
+      "replaySeconds": 109.3
+    },
+    {
+      "id": "internet_use_comparison",
+      "capture": "research_capture_20261115_005940_71819b1f.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 2544,
+      "wordsPlanned": 5560,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 13,
+      "exactSourceRows": false,
+      "numbersRemoved": 6,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 16,
+      "candidatesVerified": 13,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source row does not establish the chart's stated unit.",
+        "The quoted source row does not support the chart point's entity or category."
+      ],
+      "replaySeconds": 92.2
+    },
+    {
+      "id": "pms_workbook",
+      "capture": "research_capture_20261116_002543_e73f51ee.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 7,
+      "wordsWritten": 5727,
+      "wordsPlanned": 7606,
+      "gatesFailing": [],
+      "sourcesCited": 1,
+      "exactSourceRows": false,
+      "numbersRemoved": 3,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 1,
+      "chartFailures": 0,
+      "candidatesBuilt": 3,
+      "candidatesVerified": 2,
+      "candidateRejections": [
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 22.8
+    },
+    {
+      "id": "insurance_penetration",
+      "capture": "research_capture_20261116_004258_f2060c11.json",
+      "outcome": "published",
+      "status": "PASS",
+      "chartsPublished": 0,
+      "wordsWritten": 4192,
+      "wordsPlanned": 5610,
+      "gatesFailing": [],
+      "sourcesCited": 21,
+      "exactSourceRows": true,
+      "numbersRemoved": 1,
+      "numbersRemovedReasons": [
+        "input(s) 100 not in the cited passages"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 2,
+      "candidatesVerified": 0,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 26.9
+    },
+    {
+      "id": "telecom_5g",
+      "capture": "research_capture_20261116_004903_638cce30.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 4735,
+      "wordsPlanned": 5290,
+      "gatesFailing": [],
+      "sourcesCited": 15,
+      "exactSourceRows": true,
+      "numbersRemoved": 14,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "input(s) 17.01 not in the cited passages",
+        "input(s) 176.59 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence",
+        "row: 12,732,415 not in the evidence",
+        "row: 19,430 not in the evidence",
+        "row: 941.82 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 1,
+      "candidatesVerified": 1,
+      "candidateRejections": [],
+      "replaySeconds": 160.4
+    },
+    {
+      "id": "pharma_exports",
+      "capture": "research_capture_20261116_005655_a4804776.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 5833,
+      "wordsPlanned": 6522,
+      "gatesFailing": [],
+      "sourcesCited": 29,
+      "exactSourceRows": true,
+      "numbersRemoved": 4,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "is in the evidence for another metric or entity",
+        "is not a well-formed number"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 2,
+      "candidatesVerified": 1,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 45.9
+    },
+    {
+      "id": "fmcg_rural",
+      "capture": "research_capture_20261116_010601_f2bca2a2.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 5511,
+      "wordsPlanned": 5356,
+      "gatesFailing": [],
+      "sourcesCited": 25,
+      "exactSourceRows": true,
+      "numbersRemoved": 8,
+      "numbersRemovedReasons": [
+        "has a different unit in the evidence",
+        "input(s) 1 not in the cited passages",
+        "input(s) 12 not in the cited passages",
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 4,
+      "candidatesVerified": 3,
+      "candidateRejections": [
+        "The chart value does not match the quoted source row, period, or named table column."
+      ],
+      "replaySeconds": 17.3
+    },
+    {
+      "id": "real_estate_housing",
+      "capture": "research_capture_20261116_011121_e350be7e.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 5,
+      "wordsWritten": 6252,
+      "wordsPlanned": 7533,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 18,
+      "exactSourceRows": true,
+      "numbersRemoved": 9,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "input(s) 335476 not in the cited passages",
+        "input(s) 82,892, 70,229 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "row: 35.5 not in the evidence",
+        "row: 36.6 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 9,
+      "candidatesVerified": 8,
+      "candidateRejections": [
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 18.8
+    },
+    {
+      "id": "agri_msp",
+      "capture": "research_capture_20261116_011825_e6285200.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 6226,
+      "wordsPlanned": 7586,
+      "gatesFailing": [],
+      "sourcesCited": 19,
+      "exactSourceRows": true,
+      "numbersRemoved": 25,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 2,
+      "chartFailures": 0,
+      "candidatesBuilt": 3,
+      "candidatesVerified": 1,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 73.9
+    },
+    {
+      "id": "india_inflation",
+      "capture": "research_capture_20261116_012604_15c8af21.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 4698,
+      "wordsPlanned": 6582,
+      "gatesFailing": [],
+      "sourcesCited": 27,
+      "exactSourceRows": true,
+      "numbersRemoved": 5,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "input(s) 100 not in the cited passages",
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 15,
+      "candidatesVerified": 1,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 52.6
+    },
+    {
+      "id": "us_labour_market",
+      "capture": "research_capture_20261116_013254_e327c695.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 4367,
+      "wordsPlanned": 4642,
+      "gatesFailing": [],
+      "sourcesCited": 20,
+      "exactSourceRows": true,
+      "numbersRemoved": 14,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity",
+        "is not in the evidence",
+        "row: 17.7 not in the evidence",
+        "row: 50.5 not in the evidence",
+        "row: 72.3 not in the evidence",
+        "row: 76.8 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 5,
+      "candidatesVerified": 4,
+      "candidateRejections": [
+        "The chart value does not match the quoted source row, period, or named table column."
+      ],
+      "replaySeconds": 40.6
+    },
+    {
+      "id": "europe_gas",
+      "capture": "research_capture_20261116_013942_09821453.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 5343,
+      "wordsPlanned": 4800,
+      "gatesFailing": [],
+      "sourcesCited": 20,
+      "exactSourceRows": true,
+      "numbersRemoved": 0,
+      "numbersRemovedReasons": [],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 0,
+      "candidatesVerified": 0,
+      "candidateRejections": [],
+      "replaySeconds": 18.5
+    },
+    {
+      "id": "china_exports",
+      "capture": "research_capture_20261116_015447_b6071d2d.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 7291,
+      "wordsPlanned": 7615,
+      "gatesFailing": [],
+      "sourcesCited": 26,
+      "exactSourceRows": true,
+      "numbersRemoved": 15,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 4,
+      "candidatesVerified": 2,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 36.6
+    },
+    {
+      "id": "ai_investment",
+      "capture": "research_capture_20261116_020151_35cd5e65.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 3,
+      "wordsWritten": 6903,
+      "wordsPlanned": 7679,
+      "gatesFailing": [],
+      "sourcesCited": 28,
+      "exactSourceRows": true,
+      "numbersRemoved": 8,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "input(s) 1 not in the cited passages",
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 11,
+      "candidatesVerified": 7,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 33.5
+    },
+    {
+      "id": "india_ipo_market",
+      "capture": "research_capture_20261116_021412_b54d7ee0.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 6613,
+      "wordsPlanned": 7511,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 24,
+      "exactSourceRows": true,
+      "numbersRemoved": 2,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity",
+        "is not a well-formed number"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 10,
+      "candidatesVerified": 10,
+      "candidateRejections": [],
+      "replaySeconds": 56.4
+    },
+    {
+      "id": "mutual_fund_sip",
+      "capture": "research_capture_20261116_022332_31985aa7.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 4980,
+      "wordsPlanned": 5019,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 22,
+      "exactSourceRows": true,
+      "numbersRemoved": 13,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence",
+        "row: 508, 516 not in the evidence",
+        "row: 516 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 6,
+      "candidatesVerified": 4,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 20.8
+    },
+    {
+      "id": "steel_production",
+      "capture": "research_capture_20261116_023122_1ffd0de8.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 3721,
+      "wordsPlanned": 4920,
+      "gatesFailing": [],
+      "sourcesCited": 21,
+      "exactSourceRows": true,
+      "numbersRemoved": 7,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 1,
+      "chartFailures": 0,
+      "candidatesBuilt": 10,
+      "candidatesVerified": 7,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 81.0
+    },
+    {
+      "id": "oil_prices_india",
+      "capture": "research_capture_20261116_111136_bf404887.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 5666,
+      "wordsPlanned": 5832,
+      "gatesFailing": [],
+      "sourcesCited": 21,
+      "exactSourceRows": true,
+      "numbersRemoved": 10,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "input(s) 1, 5 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence",
+        "row: 75.23 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 9,
+      "candidatesVerified": 9,
+      "candidateRejections": [],
+      "replaySeconds": 38.9
+    },
+    {
+      "id": "defence_exports",
+      "capture": "research_capture_20261116_111925_80c283ed.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 5121,
+      "wordsPlanned": 6140,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 20,
+      "exactSourceRows": true,
+      "numbersRemoved": 5,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "is in the evidence for another metric or entity"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 3,
+      "candidatesVerified": 3,
+      "candidateRejections": [],
+      "replaySeconds": 10.1
+    },
+    {
+      "id": "tourism_recovery",
+      "capture": "research_capture_20261116_112659_538496b8.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 2,
+      "wordsWritten": 6025,
+      "wordsPlanned": 7704,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 34,
+      "exactSourceRows": true,
+      "numbersRemoved": 17,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence",
+        "row: 144 not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 17,
+      "candidatesVerified": 10,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The chart value does not match the quoted source row, period, or named table column.",
+        "The heatmap cell is not supported by the cited source row and period column.",
+        "The quoted source line for this chart point is not present in the source evidence or does ",
+        "The quoted source row does not establish the chart's stated measure."
+      ],
+      "replaySeconds": 77.0
+    },
+    {
+      "id": "education_outcomes",
+      "capture": "research_capture_20261116_113651_87650b46.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 6294,
+      "wordsPlanned": 7512,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 20,
+      "exactSourceRows": true,
+      "numbersRemoved": 9,
+      "numbersRemovedReasons": [
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 2,
+      "candidatesVerified": 0,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 23.0
+    },
+    {
+      "id": "upi_payments",
+      "capture": "research_capture_20261116_114400_dfa2d100.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 6066,
+      "wordsPlanned": 7500,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 17,
+      "exactSourceRows": true,
+      "numbersRemoved": 8,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "has a different unit in the evidence",
+        "input(s) 81.9, 77.8 not in the cited passages",
+        "is in the evidence for another metric or entity",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 5,
+      "candidatesVerified": 1,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user."
+      ],
+      "replaySeconds": 44.6
+    },
+    {
+      "id": "auto_sales_ice",
+      "capture": "research_capture_20261116_120039_7abac6f4.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 0,
+      "wordsWritten": 4785,
+      "wordsPlanned": 5840,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 16,
+      "exactSourceRows": true,
+      "numbersRemoved": 3,
+      "numbersRemovedReasons": [
+        "calculation uses numbers that are not facts in the evidence",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 6,
+      "candidatesVerified": 1,
+      "candidateRejections": [
+        "The chart source period falls outside the time window requested by the user.",
+        "The quoted source line for this chart point is not present in the source evidence or does ",
+        "The quoted source value cannot be tied to a local row or statement."
+      ],
+      "replaySeconds": 25.2
+    },
+    {
+      "id": "climate_emissions",
+      "capture": "research_capture_20261116_121413_1a87b1de.json",
+      "outcome": "published",
+      "status": "WARNING",
+      "chartsPublished": 1,
+      "wordsWritten": 6948,
+      "wordsPlanned": 7739,
+      "gatesFailing": [
+        "V2 number policy (fact-sheet lookup)"
+      ],
+      "sourcesCited": 21,
+      "exactSourceRows": true,
+      "numbersRemoved": 4,
+      "numbersRemovedReasons": [
+        "has a different unit in the evidence",
+        "is not in the evidence"
+      ],
+      "unsupportedClaims": 0,
+      "chartFailures": 0,
+      "candidatesBuilt": 19,
+      "candidatesVerified": 7,
+      "candidateRejections": [
+        "The chart value does not match the quoted source row, period, or named table column.",
+        "The quoted source line for this chart point is not present in the source evidence or does "
+      ],
+      "replaySeconds": 37.3
+    }
+  ]
+}

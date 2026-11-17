@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from functools import lru_cache
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("leak_gate")
 
@@ -98,7 +99,7 @@ def leaked(sentence: str) -> str:
     return ""
 
 
-_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*\[(\"'])")
+_SPLIT_RE = re.compile(SENTENCE_END + r"\s+(?=[A-Z*\[(\"'])")
 
 
 def remove_leaks(text: str) -> tuple[str, list[dict]]:

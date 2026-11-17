@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from utils.figure_refs import rewrite_removed_figure_refs
 from utils.number_policy import apply_number_policy, statistic_tokens
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("section_writer")
 
@@ -497,7 +498,7 @@ def resolve_fact_refs(text: str, facts: list | None) -> tuple[str, list[dict]]:
     if facts:
         text = normalize_fact_refs(text, len(facts))
 
-    pieces = re.split(r"(?<=[.!?])(?<!\bRs\.)(?<!\bNo\.)(?<!\bvs\.)(\s+)", text)
+    pieces = re.split(SENTENCE_END + r"(\s+)", text)
     for i, sentence in enumerate(pieces):
         if not FACT_REF_RE.search(sentence):
             continue
@@ -563,7 +564,7 @@ def repair_citations(body: str, passage_numbers: dict[str, set[str]]) -> tuple[s
     if not passage_numbers:
         return body, 0
     repaired = 0
-    pieces = re.split(r"(?<=[.!?])(\s+)", body)
+    pieces = re.split(SENTENCE_END + r"(\s+)", body)
     for i, sentence in enumerate(pieces):
         matches = list(CITE_RE.finditer(sentence))
         if not matches:
@@ -689,7 +690,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     body = body.replace(VERIFIED_MARK, "")
     summary = summary.replace(VERIFIED_MARK, "").replace(UNKNOWN_FACT, "")
     if BOUND_FLIP in summary or PERIOD_FLIP in summary:  # the summary is not checked sentence by sentence
-        summary = " ".join(x for x in re.split(r"(?<=[.!?])\s+", summary)
+        summary = " ".join(x for x in re.split(SENTENCE_END + r"\s+", summary)
                            if BOUND_FLIP not in x and PERIOD_FLIP not in x)
     summary = CITE_RE.sub(fix, summary.strip())
     # Figures: keep only those referenced in the prose; place missing markers after the first reference.
@@ -716,7 +717,7 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
         # Claim = the sentence that interprets the figure, without markers/headings
         # (a marker on the line above used to end up inside the chart takeaway).
         prose = FIGURE_MARKER_RE.sub(" ", re.sub(r"(?m)^\s*#{1,6}\s.*$", " ", body))
-        sentence = next((s for s in re.split(r"(?<=[.!?])\s+|\n\s*\n", prose) if re.search(rf"\bFigure\s+{n}\b", s)), "")
+        sentence = next((s for s in re.split(SENTENCE_END + r"\s+|\n\s*\n", prose) if re.search(rf"\bFigure\s+{n}\b", s)), "")
         fig.claim = re.sub(r"\s+([.,;:])", r"\1", re.sub(r"\s+", " ", CITE_RE.sub("", sentence))).strip()[:400]
         fig.status = "referenced"
         draft.figures_referenced.append(n)

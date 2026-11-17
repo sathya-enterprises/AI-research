@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Iterable
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Metric lexicon. Order matters: more specific phrases first.
@@ -313,7 +314,7 @@ def extract_requested_entities(question: str) -> list[str]:
     # FY2020... Compare SBI, HDFC Bank, ICICI Bank and Axis Bank using ..."). Try
     # the first sentence as before, then later sentences that open with an explicit
     # comparison verb, and return the first enumeration of >= 2 entities.
-    sentences = [x for x in re.split(r"(?<=[.!?])\s+|\n", text) if x.strip()]
+    sentences = [x for x in re.split(SENTENCE_END + r"\s+|\n", text) if x.strip()]
     for index, sentence in enumerate(sentences[:8]):
         if index and not re.match(r"^\s*(?:please\s+)?(?:compare|comparing|contrast|benchmark|rank)\b", sentence, re.I):
             continue
@@ -1520,7 +1521,7 @@ class _Extractor:
     # ── prose ──────────────────────────────────────────────────────────────
     def _transaction_events(self, text: str, source_id: str, evidence_origin: str, fallback_entity: str = "") -> None:
         """Extract explicitly stated promoter-sale quantities without guessing."""
-        for sentence in re.split(r"(?<=[.!?])\s+", str(text or "")):
+        for sentence in re.split(SENTENCE_END + r"\s+", str(text or "")):
             if not re.search(r"\b(?:sold|offloaded|divested|disposed|block deal|bulk deal)\b", sentence, re.I):
                 continue
             mentions = self.resolver.mentions(sentence)
@@ -1577,7 +1578,7 @@ class _Extractor:
                     if period:
                         state["period"] = period
                     continue
-                for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z(])", line):
+                for sentence in re.split(SENTENCE_END + r"\s+(?=[A-Z(])", line):
                     self._sentence(sentence, source_id, evidence_origin, ref, state)
             source_period = state["period"] or source_period
 

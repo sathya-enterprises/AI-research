@@ -1634,3 +1634,36 @@ def test_rs_and_currency_after_number_are_fixed_before_fact_ids_resolve():
     draft, facts = _fact_postprocess("The MSP for paddy rose to [[F3]] while costs hit Rs. 1,700 by 2019-20 [S2.1]. "
                                      "Its reserve reached 1,750 ₹ Cr in 2018-19 [S2.1].")
     assert "Rs [S" not in draft.body and "₹ Cr" not in draft.body
+
+
+def test_shared_evidence_text_rules():
+    import re
+
+    from utils.evidence_text import SENTENCE_END, is_header_row, normalize_numbers, split_sentences, stacked_table_starts
+
+    text = "PAT rose to Rs. 4.67 lakh crore in Q1. Item No. 5 was cut, e.g. the levy. Next sentence here."
+    assert split_sentences(text) == ["PAT rose to Rs. 4.67 lakh crore in Q1.", "Item No. 5 was cut, e.g. the levy.",
+                                     "Next sentence here."]
+    assert re.split(SENTENCE_END + r"\s+", "A. B") == ["A.", "B"]
+    assert normalize_numbers("rose to 6 .09 percent") == "rose to 6.09 percent"
+    assert is_header_row("Sector | Total No. of SME IPOs | Issue size (₹ cr)")
+    assert is_header_row("Particulars | Mar-20 | Mar-21") and is_header_row("State | Districts with 5G | Villages")
+    assert not is_header_row("Maharashtra | 65 | 130") and not is_header_row("KHARIF | KHARIF | KHARIF")
+    assert not is_header_row("1 | 31.03.2021 | 118.09") and not is_header_row("Coal | 12 GW | 45%")
+    lines = ["S. No. | Period | Subscribers", "1 | 31.03.2021 | 118.09", "State | Districts | Villages", "Goa | 2 | 111"]
+    assert stacked_table_starts(lines) == [2]
+
+
+def test_no_module_keeps_its_own_sentence_boundary_regex():
+    # One rule for every checker: a module with its own "(?<=[.!?])\s+" drifts (the "Rs." split was fixed 4x).
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in list((root / "utils").glob("*.py")) + list((root / "routes").glob("*.py")):
+        if path.name.startswith("test_") or path.name == "evidence_text.py":
+            continue
+        if re.search(r'r"\(\?<=\[\.!\?\]\)\(?\s\+', path.read_text(encoding="utf-8")):
+            offenders.append(path.name)
+    assert offenders == []

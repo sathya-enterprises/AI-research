@@ -12,6 +12,7 @@ import re
 from collections import Counter
 
 from utils.chart_evidence_audit import audit_chart_evidence_consistency
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 
 def _norm(text: str) -> str:
@@ -567,7 +568,7 @@ def _potential_market_forecast_conflicts(report: str) -> list[dict]:
     compared. A source-backed report should reconcile the scopes before publish.
     """
     text = str(report or "")
-    segments = re.split(r"(?<=[.!?])\s+(?=[A-Z₹$0-9(])|\n+", text)
+    segments = re.split(SENTENCE_END + r"\s+(?=[A-Z₹$0-9(])|\n+", text)
     money_re = re.compile(
         r"(?:\bUSD\s*|\bUS\s*\$\s*|\$\s*)([\d,]+(?:\.\d+)?)\s*"
         r"(trillion|tn|billion|bn|million|mn)\b", re.I

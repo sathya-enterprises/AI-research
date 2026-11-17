@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 log = logging.getLogger("gate_healing")
 
@@ -71,7 +72,7 @@ GATES: list[Gate] = [
 ]
 HARD_PUBLICATION_KEYS = [g.key for g in GATES if g.audit == "publicationAudit" and g.kind == "hard"]
 
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z*\[(\"'₹$])")
+_SENTENCE_END = re.compile(SENTENCE_END + r"\s+(?=[A-Z*\[(\"'₹$])")
 
 
 def gate_table() -> list[dict]:

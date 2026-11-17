@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _OFFICIAL = ("commerce.gov.in", "pib.gov.in", "mea.gov.in", "egazette.gov.in", "sansad.in", "indiantradeportal.gov.in")
 _ORD_DATE = r"\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December),?\s+20\d{2}"
@@ -109,7 +110,7 @@ def build_ledger(store, manifest: list[dict]) -> dict[str, Row]:
     rows: dict[str, Row] = {}
     _register_rows(store, official, rows)
     for passage in store.passages:
-        for sentence in re.split(r"(?<=[.!?])\s+", str(passage.text or "")):
+        for sentence in re.split(SENTENCE_END + r"\s+", str(passage.text or "")):
             names = [_norm_name(m.group(1)) for m in _AGREEMENT_RE.finditer(sentence)]
             if len(set(names)) != 1:
                 continue  # none, or several agreements in one sentence (dates could belong to either)

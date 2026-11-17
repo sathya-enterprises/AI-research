@@ -24,6 +24,7 @@ from utils.chart_titles import clean_label, header_is_data, non_comparable_metri
 from utils.entity_tiers import SYNONYMS, canonical
 
 import logging
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _log = logging.getLogger("section_layout")
 
@@ -187,7 +188,7 @@ _FIGURE_MENTION_RE = re.compile(r"\b(?:Figure|Fig\.)\s*\d+", re.I)
 def takeaways(summary: str, max_sentences: int = 3) -> str:
     # A takeaway box stands apart from the figures: a sentence that points at "Figure N" (whose
     # number may belong to another section) is left out.
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", str(summary or ""))
+    sentences = [s.strip() for s in re.split(SENTENCE_END + r"\s+(?=[A-Z])", str(summary or ""))
                  if len(s.strip()) > 30 and not _FIGURE_MENTION_RE.search(s)]
     if len(sentences) < 2:
         return ""
@@ -225,7 +226,7 @@ def move_watch_items(body: str, max_items: int = 3) -> tuple[str, str]:
                     paragraphs_out.append(para)
                 continue
             keep = []
-            for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", para.strip()):
+            for sentence in re.split(SENTENCE_END + r"\s+(?=[A-Z])", para.strip()):
                 if len(moved) < max_items and _WATCH_SENTENCE_RE.search(sentence) and CITE_RE.search(sentence):
                     moved.append(sentence.strip())
                 else:
@@ -309,7 +310,7 @@ def timeline_from_body(body: str, *, max_events: int = 6) -> str:
     are needed; otherwise ''."""
     events: dict[tuple[int, int], str] = {}
     prose = re.sub(r"(?m)^\s*(?:#|\||>|\[CHART).*$", " ", body or "")
-    for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z*])", prose):
+    for sentence in re.split(SENTENCE_END + r"\s+(?=[A-Z*])", prose):
         match = _DATE_RE.search(sentence)
         cites = CITE_RE.findall(sentence)
         if not match or not cites:

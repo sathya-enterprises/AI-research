@@ -15,6 +15,7 @@ entity and period with materially different amounts (after unit conversion: "₹
 from __future__ import annotations
 
 import re
+from utils.evidence_text import SENTENCE_END  # one sentence-boundary rule for every checker
 
 _CITE_RE = re.compile(r"\[(S\d+(?:\.\d+)?(?:\s*[,;]\s*S\d+(?:\.\d+)?)*)\]")
 _PERIOD_RE = re.compile(
@@ -109,7 +110,7 @@ def statements(report: str) -> list[dict]:
             continue
         if line.lstrip().startswith(("|", ">", "!")):
             continue
-        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line):
+        for sentence in re.split(SENTENCE_END + r"\s+(?=[A-Z])", line):
             cites = [c.strip() for g in _CITE_RE.findall(sentence) for c in re.split(r"\s*[,;]\s*", g)]
             plain = _CITE_RE.sub("", sentence)
             periods = {re.sub(r"\s+", " ", p.casefold()) for p in _PERIOD_RE.findall(plain)}

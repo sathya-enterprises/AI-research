@@ -135,31 +135,14 @@ def _entity_in(text: str) -> str:
     return best
 
 
-_SCHEMA_FIRST_RE = re.compile(r"(?i)^(?:column|field|variable|attribute)(?:\s+name)?$")
-_SCHEMA_OTHER_RE = re.compile(r"(?i)^(?:type|data\s*type|dtype|distinct|unique|count|non[- ]?null|nulls?|missing|description)$")
-
-
-def is_schema_table(header: list[str]) -> bool:
-    """A dataset's column listing ("Column | Type | Distinct | Count | Description"): it describes the data,
-    its numbers are counts of values, not statistics (it became a "Distinct: year, ..." chart)."""
-    cells = [c.strip() for c in header]
-    return (len(cells) >= 3 and bool(_SCHEMA_FIRST_RE.match(cells[0]))
-            and sum(bool(_SCHEMA_OTHER_RE.match(c)) for c in cells[1:]) >= 2)
-
-
-def is_column_numbering(cells: list[str]) -> bool:
-    """A row that only numbers the table's columns: "1 | 2 | 3 | 4" or "(1) | (2) | (3)" (Indian government
-    tables put one under the header; read as data it became a "1, 2, 3" chart and facts like Wheat = 4)."""
-    numbers = [re.fullmatch(r"\(?\s*(\d{1,2})\s*\)?", c.strip()) for c in cells]
-    if len(cells) < 3 or not all(numbers):
-        return False
-    values = [int(m.group(1)) for m in numbers]
-    return values == list(range(values[0], values[0] + len(values))) and values[0] in (0, 1, 2)
+# Shared table-reading rules (utils.evidence_text): a dataset's column listing and a column-numbering row
+# ("1 | 2 | 3") are not data. Re-exported here for existing imports.
+from utils.evidence_text import is_column_numbering, is_schema_table, normalize_numbers  # noqa: E402,F401
 
 
 def extract_facts(passage) -> list[Fact]:
     # Page markup splits a decimal ("6 .09 percent"): read as two numbers, "6%" became a fact (inflation run).
-    text = re.sub(r"(?<=\d) \.(?=\d)", ".", str(passage.text or ""))
+    text = normalize_numbers(passage.text)
     pid = passage.passage_id
     facts: list[Fact] = []
     lines = text.splitlines()
