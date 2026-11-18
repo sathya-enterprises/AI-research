@@ -356,3 +356,15 @@ def test_final_sector_cleanup_restores_heatmap_anchor_removed_with_excluded_sect
     assert "[CHART_1]" in updated
     assert len(charts) == 1 and charts[0]["title"] == heatmap["title"]
 
+
+
+def test_monthly_flow_line_series_survives_sector_rotation_gate():
+    months = ["Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Jun 2026"]
+    flow = {"title": "Net FII Flow (₹ crore): 6 months, as of 06 Jul 2026", "type": "line",
+            "series": [{"name": "Net FII flow", "data": [{"label": m, "value": v} for m, v in zip(months, (-12, 8, -30, 15, 22, -5))]}]}
+    snapshot = {"title": "PE Ratio (x): 11 NSE sector indices, as of 15 Oct 2026", "type": "bar",
+                "series": [{"name": "PE", "data": [{"label": f"Sector {i}", "value": 10 + i} for i in range(11)]}]}
+    _text, kept, _meta = _sector_rotation_topic_quality_filter(
+        "[CHART_1]\n\n[CHART_2]", [flow, snapshot],
+        question="How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters.")
+    assert [c["title"] for c in kept] == [flow["title"]]

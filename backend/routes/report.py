@@ -9507,7 +9507,10 @@ def _sector_rotation_topic_quality_filter(
                         _all_numeric.append(_fv)
                     if len(_valid) >= 2:
                         _valid_periods.update(str(_pt.get("label") or "") for _pt in _valid)
-                _has_quarter_axis = sum(bool(_quarter_re.search(x)) for x in _valid_periods) >= 2
+                # a monthly flow series (6+ months) is a time axis too; requiring quarter labels removed
+                # "Net FII Flow: 6 months" from the in-depth sector-rotation report (2026-11-19)
+                _has_quarter_axis = (sum(bool(_quarter_re.search(x)) for x in _valid_periods) >= 2
+                                     or _chart_has_historical_period_axis(chart))
                 _flat = len(_all_numeric) >= 3 and (max(_all_numeric) - min(_all_numeric)) < 1e-9
                 if not _has_quarter_axis or _flat:
                     is_irrelevant = True
