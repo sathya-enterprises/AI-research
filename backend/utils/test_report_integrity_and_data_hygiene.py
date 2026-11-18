@@ -1857,3 +1857,15 @@ def test_promoter_ledger_is_merged_as_a_section_not_a_replacement():
     assert "\n## Scope and method" not in merged
     assert merge_ledger_into_report(report, "") == report
     assert merge_ledger_into_report("## A\n\nText.", ledger).rstrip().endswith("- x")
+
+
+def test_fta_question_keeps_trade_measure_charts_and_rejects_unrelated_ones():
+    from utils.chart_evidence_audit import chart_meaning_reason
+    q = ("List down the why, what, how of all the FTAs signed by India in the past 1 year, "
+         "with a comparison to India's longer past FTAs and internationally.")
+    def chart(title, labels):
+        return {"title": title, "type": "bar",
+                "series": [{"name": title.split(":")[0], "data": [{"label": l, "value": v} for l, v in zip(labels, (310, 262, 275))]}]}
+    assert chart_meaning_reason(chart("Exports vs Imports: 2014-15 to 2024-25", ["2014-15", "2015-16", "2016-17"]), q) == ""
+    assert chart_meaning_reason(chart("Services Trade Balance: 2014-15 to 2024-25", ["2014-15", "2015-16", "2016-17"]), q) == ""
+    assert chart_meaning_reason(chart("CIT (%): Singapore, Malaysia, Indonesia", ["Singapore", "Malaysia", "Indonesia"]), q) != ""

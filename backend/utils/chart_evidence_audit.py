@@ -694,6 +694,24 @@ def _requested_chart_entities(question: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+# A question's subject word and the measures that describe it share no words: an FTA question's charts are
+# exports, imports, tariffs and trade balances. In-depth FTA run (2026-11-18): India's 2014-25 export, import
+# and trade-balance series were all removed as "not about the question's topic", leaving 1 chart in 70 pages.
+_TOPIC_MEASURE_EXPANSIONS = {
+    "fta": {"trade", "export", "import", "tariff", "partner", "agreement", "duty", "balance"},
+    "cepa": {"trade", "export", "import", "tariff", "partner", "agreement", "duty", "balance"},
+    "tepa": {"trade", "export", "import", "tariff", "partner", "agreement", "investment"},
+    "agreement": {"trade", "export", "import", "tariff", "partner"},
+}
+
+
+def _expand_topic_terms(terms: set[str]) -> set[str]:
+    expanded = set(terms)
+    for term in terms:
+        expanded |= _TOPIC_MEASURE_EXPANSIONS.get(term, set())
+    return expanded
+
+
 def _question_chart_topic_tokens(question: str, entities: list[str] | None = None) -> set[str]:
     topic_question = str(question or "").casefold()
     for entity in entities if entities is not None else _requested_chart_entities(question):
@@ -702,7 +720,7 @@ def _question_chart_topic_tokens(question: str, entities: list[str] | None = Non
             pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized.split()) + r"(?![a-z0-9])"
             topic_question = re.sub(pattern, " ", topic_question)
     acronyms = {t.casefold() for t in re.findall(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])", str(question or ""))}
-    return _topic_terms(topic_question) | {t for t in acronyms if t not in _CHART_SCOPE_STOPWORDS}
+    return _expand_topic_terms(_topic_terms(topic_question) | {t for t in acronyms if t not in _CHART_SCOPE_STOPWORDS})
 
 
 def _normalized_entity_text(text: object) -> str:
