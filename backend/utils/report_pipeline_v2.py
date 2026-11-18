@@ -578,7 +578,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 # Stage N: a 60-page live report got 3 charts; more data-dense passages are read (each call is
                 # small, ~2.5k tokens, and every proposed point is still verified against its passage)
                 store, gateway, question=question, today=today, limit=16 if tier == "in_depth" else 6,
-                queries=[f"{s.title} {s.goal}" for s in analysis])
+                # the storyline's points first: each point's measure and entities pick the passages read
+                queries=[f"{pt.measure} {' '.join(pt.entities[:3])}".strip() for pt in story_points]
+                + [f"{s.title} {s.goal}" for s in analysis])
             dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "extracted": extract_note}
             extracted_ids |= {c.chart_id for c in extracted}
             dataset_charts = list(dataset_charts) + extracted
