@@ -47,7 +47,7 @@ def test_tiers_follow_evidence_thresholds():
     assert "Momentum" not in deep | compact   # metric row label, not an entity
 
 
-def test_broad_eight_quarter_rotation_uses_six_core_sections_and_at_most_three_deep_dives(monkeypatch):
+def test_broad_eight_quarter_rotation_uses_six_core_sections_and_at_most_five_deep_dives(monkeypatch):
     question = "How can you explain and analyse the sector rotation in Indian stock markets in the past 8 quarters?"
     assert is_multi_quarter_sector_rotation_request(question)
     assert not is_multi_quarter_sector_rotation_request("Explain sector rotation in Indian markets")
@@ -59,11 +59,11 @@ def test_broad_eight_quarter_rotation_uses_six_core_sections_and_at_most_three_d
     monkeypatch.setattr("utils.entity_tiers.discover_entities",
                         lambda store, question="", seeds=None, scope="": entities)
     tiers = entity_tiers(None, tier="in_depth", question=question)
-    assert len(tiers["deep_dive"]) == 4
-    assert len(tiers["compact"]) == 3
+    assert len(tiers["deep_dive"]) == 5
+    assert len(tiers["compact"]) == 2
     bounded_tiers = _outline_tiers(tiers, question)
-    assert len(bounded_tiers["deep_dive"]) == 3
-    assert len(bounded_tiers["compact"]) == 4
+    assert len(bounded_tiers["deep_dive"]) == 5
+    assert len(bounded_tiers["compact"]) == 2
 
     empty_tiers = {"deep_dive": [], "compact": [], "coverage_note": []}
     sections = [Section(f"sec-{index}", f"Analysis {index}") for index in range(1, 7)]
@@ -74,7 +74,7 @@ def test_broad_eight_quarter_rotation_uses_six_core_sections_and_at_most_three_d
 
     _system, prompt = outline_prompt(question, "in_depth", "evidence overview", "2026-11-14", "", tiers=empty_tiers)
     assert "Plan exactly six distinct core sections" in prompt
-    assert "at most three short DEEP-DIVE sections" in prompt
+    assert "at most five DEEP-DIVE sections" in prompt
     assert "do not create one long section per index" in prompt
     assert "Q4 2024=Q3 FY25" in prompt
 
@@ -82,8 +82,8 @@ def test_broad_eight_quarter_rotation_uses_six_core_sections_and_at_most_three_d
     # the model cannot restore one repeated chapter per sector.
     raw = [Section(f"model-{index}", f"Sector chapter {index}") for index in range(1, 20)]
     normalized = _bound_multi_quarter_sector_rotation_sections(raw, tiers, question)
-    assert len(normalized) == 9
-    assert sum(section.role == "deep_dive" for section in normalized) == 3
+    assert len(normalized) == 11
+    assert sum(section.role == "deep_dive" for section in normalized) == 5
     assert sum(section.role == "compact" for section in normalized) == 1
     assert all(not section.subsections for section in normalized)
     assert normalized[4].entities == [entity.name for entity in bounded_tiers["compact"]]
@@ -106,12 +106,12 @@ def test_build_outline_normalizes_a_sprawling_no_attachment_rotation_plan():
     ))
 
     analysis = outline.analysis_sections()
-    assert 3 <= len(analysis) <= 9  # unsupported themes may still be omitted by the evidence-thin gate
-    assert len([section for section in analysis if section.role == "deep_dive"]) <= 3
+    assert 3 <= len(analysis) <= 11  # unsupported themes may still be omitted by the evidence-thin gate
+    assert len([section for section in analysis if section.role == "deep_dive"]) <= 5
     assert len([section for section in analysis if section.role == "compact"]) <= 1
     assert outline.meta["outlineAttempts"][0]["sections"] == 19
-    assert outline.meta["outlineAttempts"][0]["normalizedSections"] == 6 + min(3, len(tiers["deep_dive"]))
-    assert outline.meta["plannedAnalysisWords"] <= 10500
+    assert outline.meta["outlineAttempts"][0]["normalizedSections"] == 6 + min(5, len(tiers["deep_dive"]))
+    assert outline.meta["plannedAnalysisWords"] <= 16000
 
 
 def test_validator_rejects_small_outline_and_repair_adds_missing_entities():

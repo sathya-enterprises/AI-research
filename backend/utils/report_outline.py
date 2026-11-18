@@ -42,6 +42,13 @@ TIER_RULES = {
 MIN_ANALYSIS_SECTIONS = {"detailed": 5, "in_depth": 12}
 DEEP_DIVE_WORDS = 1900      # ~5 pages; a deep-dive is 3-5 pages
 COMPACT_WORDS_PER_ENTITY = 220
+# Long-window sector rotation (6+ quarters): six whole-universe core chapters plus evidence-ranked sector deep-dives.
+# Each core chapter is one leaf covering every sector, so the generic 950-word leaf cap cut them to ~2.5 pages
+# and the in-depth report to ~37 pages (live run 2026-11-18); they get chapter-sized budgets instead.
+ROTATION_DEEP_DIVES = 5
+ROTATION_CORE_WORDS = (600, 1900)    # floor, cap per core chapter (evidence-weighted between them)
+ROTATION_DEEP_DIVE_WORDS = 1300
+ROTATION_TOTAL_WORDS = 16000
 DEEP_DIVE_SUBSECTIONS = (
     ("Performance and momentum", "returns by quarter, relative strength and how leadership changed"),
     ("Flows and ownership", "FPI/DII and fund flows into the sector and what they signal"),
@@ -156,12 +163,12 @@ def _outline_tiers(tiers: dict | None, question: str = "") -> dict | None:
         deep = list(filtered.get("deep_dive") or [])
         compact = list(filtered.get("compact") or [])
         compact_names = {str(getattr(entity, "name", "")).casefold() for entity in compact}
-        for entity in deep[3:]:
+        for entity in deep[ROTATION_DEEP_DIVES:]:
             name = str(getattr(entity, "name", "")).casefold()
             if name and name not in compact_names:
                 compact.append(entity)
                 compact_names.add(name)
-        filtered["deep_dive"] = deep[:3]
+        filtered["deep_dive"] = deep[:ROTATION_DEEP_DIVES]
         filtered["compact"] = compact
     return filtered
 
@@ -285,8 +292,8 @@ def outline_prompt(question: str, tier: str, overview: str, today: str, window_n
             "1. The verified completed-quarter matrix is the complete sector universe; do not create one long section per index.\n"
             "2. Plan exactly six distinct core sections (the whole-universe quarter matrix and leadership changes; compounded "
             "leaders/laggards; sector flows; earnings, valuation and macro drivers; compact sector comparison; risks, limits "
-            "and outlook), plus at most three short DEEP-DIVE sections for the evidence-ranked entities listed below. "
-            "This gives 6-9 analysis sections total. One compact comparison section must cover every COMPACT entity.\n"
+            "and outlook), plus at most five DEEP-DIVE sections for the evidence-ranked entities listed below. "
+            "This gives 6-11 analysis sections total. One compact comparison section must cover every COMPACT entity.\n"
             "3. Keep each section's goal distinct. Do not repeat the same performance summary, table, or chart explanation in every sector section. "
             "Do not add generic repeated subsections to the six core sections. For a named-sector deep dive, use at most two subsections: "
             "its verified quarter pattern, then source-supported drivers/risks. Do not create a separate section for a partial current quarter; "
@@ -485,14 +492,22 @@ def resolve_thin_evidence(store, sections: list[Section], decisions: list[str]) 
 def size_budgets(store, sections: list[Section], tier: str, meta: dict, question: str = "") -> None:
     rules = TIER_RULES.get(tier, TIER_RULES["detailed"])
     focused_rotation = tier == "in_depth" and is_multi_quarter_sector_rotation_request(question)
+    long_rotation = tier == "in_depth" and is_long_window_sector_rotation_request(question)
     leaves = [leaf for sec in sections if sec.status == "keep" for leaf in sec.leaves()]
     for leaf in leaves:
         weight, _ = _evidence_strength(store, leaf.passage_ids)
         leaf.word_budget = max(rules["leaf_floor"], min(rules["leaf_cap"], 95 * weight))
+    if long_rotation:
+        # core chapters are single leaves spanning the whole sector universe: chapter-sized, not leaf-sized
+        floor, cap = ROTATION_CORE_WORDS
+        for sec in sections:
+            if sec.status == "keep" and sec.role == "cross_cutting" and not sec.subsections:
+                weight, _ = _evidence_strength(store, sec.passage_ids)
+                sec.word_budget = max(floor, min(cap, 95 * weight))
     for sec in sections:
         if sec.status != "keep":
             continue
-        cap = (900 if focused_rotation else DEEP_DIVE_WORDS) if sec.role == "deep_dive" else (
+        cap = ((ROTATION_DEEP_DIVE_WORDS if long_rotation else 900) if focused_rotation else DEEP_DIVE_WORDS) if sec.role == "deep_dive" else (
             min(1800, max(600, COMPACT_WORDS_PER_ENTITY * max(1, len(sec.entities)))) if sec.role == "compact" else None)
         if cap:
             leaves_here = sec.leaves()
@@ -504,7 +519,8 @@ def size_budgets(store, sections: list[Section], tier: str, meta: dict, question
             sec.word_budget = sum(s.word_budget for s in sec.leaves()) + 120
     total = sum(s.word_budget for s in sections if s.status == "keep")
     evidence_words = total
-    total_cap = min(rules["total_cap"], 10500) if focused_rotation else rules["total_cap"]
+    total_cap = (min(rules["total_cap"], ROTATION_TOTAL_WORDS if long_rotation else 10500) if focused_rotation
+                 else rules["total_cap"])
     if total > total_cap:
         factor = total_cap / total
         for leaf in leaves:
@@ -625,8 +641,8 @@ def validate_outline(sections: list[Section], tier: str, tiers: dict | None, que
                else MIN_ANALYSIS_SECTIONS.get(tier, 5))
     if len(sections) < minimum:
         errors.append(f"only {len(sections)} analysis sections; at least {minimum} are required")
-    if tier == "in_depth" and is_multi_quarter_sector_rotation_request(question) and len(sections) > 9:
-        errors.append(f"{len(sections)} analysis sections; this bounded sector-rotation request allows at most 9")
+    if tier == "in_depth" and is_multi_quarter_sector_rotation_request(question) and len(sections) > 6 + ROTATION_DEEP_DIVES:
+        errors.append(f"{len(sections)} analysis sections; this bounded sector-rotation request allows at most {6 + ROTATION_DEEP_DIVES}")
     if tiers and tier == "in_depth":
         qualifying = list(tiers.get("deep_dive", []))
         for sec, covered in merged_deep_dives(sections, tiers):
@@ -755,7 +771,7 @@ def _bound_multi_quarter_sector_rotation_sections(
     if not is_long_window_sector_rotation_request(question):
         return sections
     tiers = _outline_tiers(tiers, question) or {}
-    deep_entities = list(tiers.get("deep_dive") or [])[:3]
+    deep_entities = list(tiers.get("deep_dive") or [])[:ROTATION_DEEP_DIVES]
     compact_entities = list(tiers.get("compact") or [])
     compact_names = [str(getattr(entity, "name", "")).strip() for entity in compact_entities]
     compact_names = [name for name in compact_names if name]
@@ -878,8 +894,8 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         errors = validate_outline(candidate_sections, tier, tiers, question=question)
         attempts.append({"attempt": attempt, "sections": generated_section_count,
                          "normalizedSections": len(candidate_sections), "errors": errors})
-        candidate_is_bounded = len(candidate_sections) <= 9
-        current_is_bounded = len(sections) <= 9
+        candidate_is_bounded = len(candidate_sections) <= 6 + ROTATION_DEEP_DIVES
+        current_is_bounded = len(sections) <= 6 + ROTATION_DEEP_DIVES
         if (data is None
                 or (focused_rotation and candidate_is_bounded and not current_is_bounded)
                 or (focused_rotation and candidate_is_bounded == current_is_bounded

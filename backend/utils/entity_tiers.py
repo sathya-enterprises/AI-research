@@ -394,8 +394,12 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
         if not is_market_topic(question):
             max_deep = min(max_deep, 8)  # Stage K: a non-market in-depth report has at most 8 entity deep-dives
         if is_multi_quarter_sector_rotation_request(question):
-            max_deep = min(max_deep, 4)  # the matrix covers the full sector universe; deep dives focus on standout evidence
+            from utils.report_outline import ROTATION_DEEP_DIVES
+            max_deep = min(max_deep, ROTATION_DEEP_DIVES)  # the matrix covers the full sector universe; deep dives focus on standout evidence
     entities = merge_case_variants(discover_entities(store, question=question, seeds=seeds, scope=scope))
+    # a one-character name ('C' from a table's column letters) is not an entity: it got a deep-dive and headings
+    # 'C: Evidence-Backed Rotation Deep Dive' in a live run
+    entities = [e for e in entities if len(re.sub(r"[^0-9A-Za-z]", "", str(e.name or ""))) >= 2]
     _seed_keys = {str(x).casefold() for x in seeds or []}
     for _e in entities:  # an entity the plan named is seeded however it was discovered (table or text)
         if _e.name.casefold() in _seed_keys:
