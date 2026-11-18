@@ -28,8 +28,16 @@ def split_sentences(text: str, *, next_char: str = "") -> list[str]:
 _SPLIT_DECIMAL_RE = re.compile(r"(?<=\d) \.(?=\d)")
 
 
+# Scanned filings (OCR) print an Indian digit-group comma as a dot: "2,04.11,079" and "1,94,98.166" for
+# 2,04,11,079 and 1,94,98,166 shares. A dot after a two-digit group is grouping, not a decimal point, when
+# another group follows ("04.11,079") or when three digits end the number ("98.166": a 2-digit group cannot
+# be the last group before a decimal). Live run: the writer wrote the right value, the check found only the
+# misprint and removed the table rows (promoter holdings).
+_OCR_GROUP_DOT_RE = re.compile(r"(?<=\d,\d{2})\.(?=\d{2},\d{2,3}(?!\d))|(?<=\d,\d{2})\.(?=\d{3}(?![\d.,]))")
+
+
 def normalize_numbers(text: str) -> str:
-    return _SPLIT_DECIMAL_RE.sub(".", str(text or ""))
+    return _OCR_GROUP_DOT_RE.sub(",", _SPLIT_DECIMAL_RE.sub(".", str(text or "")))
 
 
 def cells_of(line: str) -> list[str]:

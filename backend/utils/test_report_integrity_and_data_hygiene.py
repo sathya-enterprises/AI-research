@@ -1869,3 +1869,15 @@ def test_fta_question_keeps_trade_measure_charts_and_rejects_unrelated_ones():
     assert chart_meaning_reason(chart("Exports vs Imports: 2014-15 to 2024-25", ["2014-15", "2015-16", "2016-17"]), q) == ""
     assert chart_meaning_reason(chart("Services Trade Balance: 2014-15 to 2024-25", ["2014-15", "2015-16", "2016-17"]), q) == ""
     assert chart_meaning_reason(chart("CIT (%): Singapore, Malaysia, Indonesia", ["Singapore", "Malaysia", "Indonesia"]), q) != ""
+
+
+def test_ocr_grouping_dots_do_not_remove_correct_table_rows():
+    from utils.evidence_text import normalize_numbers
+    from utils.number_policy import apply_number_policy
+    assert normalize_numbers("Kodali 2,04.11,079 67.07 1,94,98.166") == "Kodali 2,04,11,079 67.07 1,94,98,166"
+    assert normalize_numbers("1,234.567 and 12,34,567.125 and 98.166") == "1,234.567 and 12,34,567.125 and 98.166"
+    passage = {"S15.4": "Name of shareholder Pre-sale shares % Post-sale shares %\nMr. Srikanth Kodali 2,04.11,079 67.07 1,94,98.166 64.07"}
+    body = ("| Shareholder | Pre-sale shares | Pre-sale % | Post-sale shares | Post-sale % |\n| --- | --- | --- | --- | --- |\n"
+            "| Srikanth Kodali | 2,04,11,079 | 67.07% | 1,94,98,166 | 64.07% |")
+    result = apply_number_policy(body, passage_texts=passage, allowed_numbers=set(), section_id="sec-1")
+    assert "2,04,11,079" in result.body, result.removed
