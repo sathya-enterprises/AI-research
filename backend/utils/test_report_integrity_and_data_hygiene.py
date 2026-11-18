@@ -1821,3 +1821,25 @@ def test_pdf_tables_keep_their_rows_and_columns():
     text = _extract_pdf(doc.tobytes(), 20000, 8.0)
     assert "TABLE 1 — Table 2: Sectoral index returns (per cent) (PDF page 1)" in text
     assert "Index | Q1 FY26 | Q2 FY26" in text and "Nifty Pharma | 4.2 | -3.1" in text
+
+
+def test_storyline_points_are_proved_only_by_charts_that_show_their_measure():
+    from types import SimpleNamespace
+
+    from utils.storyline import Point, match_points, storyline_note
+
+    def chart(cid, title, labels, series="x"):
+        return SimpleNamespace(chart_id=cid, spec={"title": title, "series": [
+            {"name": series, "data": [{"label": lab, "value": i} for i, lab in enumerate(labels)]}]})
+
+    returns = Point(measure="quarterly price return of Nifty sectoral indices", chart="trend",
+                    why="which sectors led or lagged each quarter")
+    flows = Point(measure="net foreign portfolio investment flows by sector", chart="comparison")
+    capacity = Point(measure="installed steel capacity", chart="trend")
+    charts = [chart("snap", "Sector returns today: Nifty Metal, Nifty IT", ["Nifty Metal", "Nifty IT", "Nifty Bank"]),
+              chart("heat", "Nifty sectoral index price returns by quarter", ["Q1 FY26", "Q2 FY26", "Q3 FY26", "Q4 FY26"]),
+              chart("factor", "Steel capacity factor (%)", ["2021", "2022", "2023", "2024"])]
+    proving = match_points([returns, flows, capacity], charts)
+    assert proving == {"heat": returns.measure}  # not the snapshot; no flows chart; capacity factor is not capacity
+    assert returns.proof_title.startswith("Nifty sectoral") and not flows.proof and not capacity.proof
+    assert "1. which sectors led or lagged each quarter" in storyline_note([returns, flows])

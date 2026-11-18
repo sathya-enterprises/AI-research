@@ -486,8 +486,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                           window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
                           chart_verifier=None, entity_search_stats: dict | None = None,
                           evidence_auditor=None, deadline: tuple[float, float] | None = None,
-                          section_body_transform=None) -> dict:
-    """``deadline``: (target, hard stop) as time.monotonic() values for the whole report job (in-depth:
+                          section_body_transform=None, story_plan=None) -> dict:
+    """``story_plan``: the measure plan (utils.measure_plan) - the points the report must make, each with the
+    measure that proves it (utils.storyline).
+
+    ``deadline``: (target, hard stop) as time.monotonic() values for the whole report job (in-depth:
     40 / 50 minutes). V2 keeps ~6 minutes for report.py's checks and the render after it."""
     started = time.perf_counter()
     deadline_log: dict = {"target": None, "hardStop": None, "waves": [], "extensionsSkipped": 0, "concise": []}
@@ -517,7 +520,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                           compounded=regime.compounded, leaders=regime.leaders, laggards=regime.laggards)
         window_note = f"{window_note}\n{regime.facts_block()}".strip()
     try:
-        outline = await build_outline(store, gateway, question=question, tier=tier, today=today, window_note=window_note,
+        from utils.storyline import points_from_plan, storyline_note
+        story_points = points_from_plan(story_plan) if story_plan is not None else []
+        outline = await build_outline(store, gateway, question=question, tier=tier, today=today,
+                                      window_note=(window_note + storyline_note(story_points)).strip(),
                                       asks=asks,
                                       tiers=tiers)
     except OutlineError as exc:
@@ -745,6 +751,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             log.info("V2: %d table chart(s) restored because the dataset chart they duplicated was dropped",
                      len(restored))
         candidates = candidates + restored
+    # Storyline: each point gets the verified chart that proves it (right measure, entities, time axis for a
+    # trend); those charts lead, carry their point to the writer, and are kept first when the chart budget cuts.
+    try:
+        from utils.storyline import match_points
+        _proving = match_points(story_points, candidates)
+        for _chart in candidates:
+            _point = _proving.get(str(_chart.chart_id))
+            if _point:
+                _why = next((pt.why for pt in story_points if pt.measure == _point), "")
+                _chart.spec["storyPoint"] = f"{_why} ({_point})" if _why else _point
+        candidates = sorted(candidates, key=lambda c: 0 if c.spec.get("storyPoint") else 1)
+    except Exception as exc:
+        log.warning("V2 storyline matching skipped: %s", type(exc).__name__)
     # Chart minimum (CHART_TARGET): below it, labelled context charts (data outside the question's window)
     # fill the gap; they pass the same quality and evidence checks, except the window.
     context_added: list[str] = []
@@ -808,6 +827,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     planned_data = [c for c in planned if c.figure_number and c.interpretation][: MAX_TOTAL_CHARTS.get(tier, 36)]
     table_quota = max(0, min(MAX_CHARTS.get(tier, 10), MAX_TOTAL_CHARTS.get(tier, 36) - len(planned_data)))
     planned_table = [c for c in planned if c.figure_number and not c.interpretation]
+    planned_table.sort(key=lambda c: 0 if c.spec.get("storyPoint") else 1)  # story charts survive the cut
     for chart in planned_table[table_quota:]:
         chart.section_id, chart.figure_number = "", 0  # over the report's chart budget (page cap)
         unassigned.append(chart)
@@ -1280,6 +1300,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                      "agreementLedger": ledger_meta},
         "chartTarget": _chart_target(tier, outline, used),
         "claimCheck": claim_log,
+        "storyline": [pt.to_dict() for pt in story_points],
         "seriesWarnings": series_warnings,
         "sourceDisagreements": disagreements,
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.

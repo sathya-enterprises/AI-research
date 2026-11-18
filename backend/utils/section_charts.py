@@ -142,6 +142,9 @@ class PlannedChart:
         """Compact data listing for the section writer."""
         unit = self.spec.get("unit") or ""
         head = f"Figure {self.figure_number}: {self.spec.get('title')} (unit: {unit or 'as labelled'}; evidence: {', '.join(self.passage_ids)})"
+        if self.spec.get("storyPoint"):
+            # The storyline point this figure proves: the paragraph around the figure makes that point with it.
+            head += f"\n  PROVES THE REPORT'S POINT: {self.spec['storyPoint']}"
         rows: dict[str, list[str]] = {}
         for series, column, value in self.points:
             rows.setdefault(series, []).append(f"{column}={plain_number(value)}{unit if unit == '%' else ''}")

@@ -25075,6 +25075,8 @@ async def generate_report(request: Request):
                 # Stage H: in-depth runtime deadline from job start (target 40 min, hard stop 50 min).
                 deadline=((_job_started_at + 40 * 60, _job_started_at + 50 * 60) if report_tier == "in_depth" else None),
                 section_body_transform=_v2_section_body_transform,
+                # the measure plan is the report's storyline: the points it must make and what proves each one
+                story_plan=locals().get("_measure_plan"),
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
