@@ -1881,3 +1881,18 @@ def test_ocr_grouping_dots_do_not_remove_correct_table_rows():
             "| Srikanth Kodali | 2,04,11,079 | 67.07% | 1,94,98,166 | 64.07% |")
     result = apply_number_policy(body, passage_texts=passage, allowed_numbers=set(), section_id="sec-1")
     assert "2,04,11,079" in result.body, result.removed
+
+
+def test_sector_rotation_keeps_flow_charts_and_rejects_fund_returns():
+    from utils.chart_evidence_audit import chart_meaning_reason
+    q = "How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters."
+    def chart(title, labels):
+        return {"title": title, "type": "bar",
+                "series": [{"name": title.split(":")[0], "data": [{"label": l, "value": v} for l, v in zip(labels, (12.5, -3.2, 7.7, 4.1))]}]}
+    assert chart_meaning_reason(chart("FPI Net Equity Flow (INR crore): January 2026 to April 2026",
+                                      ["Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026"]), q) == ""
+    assert chart_meaning_reason(chart("NET INVESTMENT (crore): Automobile, Capital Goods, Chemicals",
+                                      ["Automobile", "Capital Goods", "Chemicals", "Banks"]), q) == ""
+    assert chart_meaning_reason(chart("1 Year: Axis Large Cap Fund, Canara Robeco Large Cap Fund",
+                                      ["Axis Large Cap Fund", "Canara Robeco Large Cap Fund", "HDFC Top 100", "SBI Bluechip"]), q) != ""
+    assert chart_meaning_reason(chart("India VIX: Mean, Median, Maximum", ["Mean", "Median", "Maximum", "Minimum"]), q) != ""

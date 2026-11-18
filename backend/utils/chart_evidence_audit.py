@@ -702,6 +702,10 @@ _TOPIC_MEASURE_EXPANSIONS = {
     "cepa": {"trade", "export", "import", "tariff", "partner", "agreement", "duty", "balance"},
     "tepa": {"trade", "export", "import", "tariff", "partner", "agreement", "investment"},
     "agreement": {"trade", "export", "import", "tariff", "partner"},
+    # sector rotation is shown by where money moves: in-depth run (2026-11-18) removed "FPI Net Equity Flow"
+    # by month and FPI net investment by sector as off-topic
+    "rotation": {"fpi", "fii", "dii", "flow", "investment", "weight", "weightage", "allocation", "sectoral"},
+    "sector": {"sectoral"},
 }
 
 
