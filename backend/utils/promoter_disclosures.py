@@ -741,3 +741,30 @@ def render_promoter_extraction_failure_report(
         "exchangeMethodSources": method_ids,
         "quarterSourceIds": {label: sorted(set(values)) for label, values in quarter_ids.items()},
     }
+
+
+LEDGER_SECTION_TITLE = "Verified Exchange-Filing Ledger"
+_MERGE_BEFORE = re.compile(r"^## +(?:Methodology|Appendix|Sources|References)\b", re.I | re.M)
+
+
+def merge_ledger_into_report(report_text: str, ledger_markdown: str) -> str:
+    """Add the filing ledger to a checked analytical report as one section, instead of replacing the report.
+
+    The ledger replaced the whole report when the writer was unchecked; with the V2 pipeline's number and claim
+    checks, replacing it threw away 14,338 checked words and left a 9-page report (live run 2026-11-18). The
+    ledger's own headings become subsections; it goes before the methodology / appendix, or at the end.
+    """
+    ledger = re.sub(r"^(#{2,5}) ", lambda m: "#" + m.group(1) + " ", str(ledger_markdown or "").strip(), flags=re.M)
+    if not ledger:
+        return report_text
+    section = (
+        f"## {LEDGER_SECTION_TITLE}\n\n"
+        "This section lists only promoter sale records found in directly fetched NSE/BSE filings, with their evidence "
+        "status. It is a verified sample, not an exhaustive market-wide list; the analysis above draws on the wider "
+        "source set.\n\n" + ledger + "\n"
+    )
+    text = str(report_text or "").rstrip()
+    match = _MERGE_BEFORE.search(text)
+    if match:
+        return text[:match.start()].rstrip() + "\n\n" + section + "\n" + text[match.start():] + "\n"
+    return text + "\n\n" + section

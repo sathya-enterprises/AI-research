@@ -67,6 +67,7 @@ from utils.deep_research_coverage import (
 from utils.promoter_disclosures import (
     extract_verified_promoter_events,
     render_promoter_extraction_failure_report,
+    merge_ledger_into_report,
     render_promoter_evidence_report,
 )
 from utils.chart_catalog import (
@@ -26902,6 +26903,7 @@ async def generate_report(request: Request):
         except Exception as exc:
             log.warning("Report: source-appendix normalization skipped: %s", type(exc).__name__)
 
+        _PROMOTER_MERGE_MIN_WORDS = 2500  # a substantive checked V2 report keeps its analysis
         promoter_exit_request = bool(
             re.search(r"\bpromoters?\b", question, re.I)
             and re.search(r"\b(?:stake\s+sales?|exits?|sell(?:ing)?|disposals?)\b", question, re.I)
@@ -26920,7 +26922,17 @@ async def generate_report(request: Request):
                 _promoter_report, _promoter_ledger_meta = render_promoter_evidence_report(
                     question, _promoter_events, _promoter_publisher_rows, as_of_date=_today_date,
                 )
-                if _promoter_report:
+                if _promoter_report and _v2_used and len(str(report_text or "").split()) >= _PROMOTER_MERGE_MIN_WORDS:
+                    # The V2 report's numbers and claims are already checked against the evidence: keep its
+                    # analysis (proportion, reasons) and add the filing ledger as one section.
+                    report_text = merge_ledger_into_report(report_text, normalize_report_markdown(_promoter_report))
+                    _promoter_ledger_meta["mergedIntoReport"] = True
+                    source_manifest = ensure_cited_source_records(report_text, source_manifest)
+                    audit_sources = _attach_audit_source_evidence(source_manifest, enriched, report_text)
+                    record_research_stage("promoter_transaction_ledger", _promoter_ledger_meta)
+                    log.info("Promoter evidence ledger merged into the V2 report: dated_completed=%d",
+                             _promoter_ledger_meta.get("datedCompletedCount", 0))
+                elif _promoter_report:
                     # The generic writer produced contradictory counts and
                     # company-specific claims without source matches. Replace
                     # that narrative with a filing-derived ledger so each
@@ -26967,7 +26979,11 @@ async def generate_report(request: Request):
                         "No transaction count or issuer-level exit claim is asserted. Activity is unknown, not zero.\n"
                     )
                     _promoter_ledger_meta = {"applicable": True, "extractionFailed": True}
-                if _promoter_report:
+                if _promoter_report and _v2_used and len(str(report_text or "").split()) >= _PROMOTER_MERGE_MIN_WORDS:
+                    report_text = merge_ledger_into_report(report_text, normalize_report_markdown(_promoter_report))
+                    _promoter_ledger_meta["mergedIntoReport"] = True
+                    record_research_stage("promoter_transaction_ledger", _promoter_ledger_meta)
+                elif _promoter_report:
                     _promoter_ledger_rendered_report = normalize_report_markdown(_promoter_report)
                     _promoter_ledger_trusted = bool(_promoter_ledger_rendered_report)
                     report_text = _promoter_ledger_rendered_report

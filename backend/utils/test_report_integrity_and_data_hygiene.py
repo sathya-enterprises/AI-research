@@ -1843,3 +1843,17 @@ def test_storyline_points_are_proved_only_by_charts_that_show_their_measure():
     assert proving == {"heat": returns.measure}  # not the snapshot; no flows chart; capacity factor is not capacity
     assert returns.proof_title.startswith("Nifty sectoral") and not flows.proof and not capacity.proof
     assert "1. which sectors led or lagged each quarter" in storyline_note([returns, flows])
+
+
+def test_promoter_ledger_is_merged_as_a_section_not_a_replacement():
+    from utils.promoter_disclosures import merge_ledger_into_report, LEDGER_SECTION_TITLE
+    report = ("## Executive Summary\n\nPromoters sold stakes for debt reduction [S1].\n\n## Reasons\n\nAnalysis.\n\n"
+              "## Methodology and Evidence Base\n\nMethod.\n")
+    ledger = "## Scope and method\n\nScope.\n\n## Verified completed sale transactions\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n### Proposed offers\n\n- x\n"
+    merged = merge_ledger_into_report(report, ledger)
+    assert "Promoters sold stakes for debt reduction" in merged and "## Reasons" in merged
+    assert merged.index(f"## {LEDGER_SECTION_TITLE}") < merged.index("## Methodology and Evidence Base")
+    assert "### Scope and method" in merged and "#### Proposed offers" in merged
+    assert "\n## Scope and method" not in merged
+    assert merge_ledger_into_report(report, "") == report
+    assert merge_ledger_into_report("## A\n\nText.", ledger).rstrip().endswith("- x")
