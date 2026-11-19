@@ -52,7 +52,7 @@ def test_complex_visuals_span_full_width_in_grid_sections():
     )
     assert ".gg-section-body--grid > .gg-table-wrap" in html
     assert "grid-column: 1 / -1 !important" in html
-    assert ".gg-table th, .gg-table td { overflow-wrap: break-word !important; word-break: normal !important;" in html
+    assert ".gg-table th, .gg-table td { overflow-wrap: anywhere !important; word-break: normal !important;" in html
 
 
 def test_unattributed_web_images_are_not_rendered():

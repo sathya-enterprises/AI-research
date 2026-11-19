@@ -3121,7 +3121,11 @@ body.gg-tier--in_depth .gg-table {{ table-layout: fixed; font-size: 11px; }}
 body.gg-tier--in_depth .gg-table th {{ background: #17384F; color: #FFFFFF; border-color: #17384F; padding: 8px 9px; line-height: 1.25; overflow-wrap: anywhere; }}
 body.gg-tier--in_depth .gg-table td {{ color: #263941; padding: 7px 9px; line-height: 1.35; overflow-wrap: anywhere; }}
 body.gg-tier--in_depth .gg-table tbody tr:nth-child(even) {{ background: #EAF1EC; }}
-body.gg-tier--in_depth .gg-table .gg-cell-numeric {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+body.gg-tier--in_depth .gg-table .gg-cell-numeric {{ text-align: right; font-variant-numeric: tabular-nums; }}
+body.gg-tier--in_depth .gg-table td.gg-cell-numeric {{ white-space: nowrap; }}
+/* a numeric column's HEADER wraps: "NUMBER OF EQUITY SHARES HELD AFTER THE ACQUISITION/DISPOSAL" on one line made a
+   filing table wider than the A4 page, and Chrome shrank the whole PDF (cover included) to fit it */
+body.gg-tier--in_depth .gg-table th.gg-cell-numeric {{ white-space: normal; overflow-wrap: anywhere; }}
 body.gg-tier--in_depth .gg-source-note {{ color: #40525B; }}
 body.gg-tier--in_depth .gg-source-note-label {{ color: #243D4B; }}
 body.gg-tier--in_depth .gg-callout {{ background: #F1F6F2; border-color: #D1DDD5; border-left-color: #387C58; }}
@@ -3581,9 +3585,11 @@ body.gg-tier--in_depth .gg-stat-card {{ box-shadow:none; }}
 .gg-section-body--grid > .gg-figure {{ break-inside: avoid; page-break-inside: avoid; }}
 .gg-table-scroll {{ min-width: 0; width: 100%; max-width: 100%; overflow-x: auto; }}
 .gg-table {{ width: 100%; max-width: 100%; table-layout: auto !important; }}
-.gg-table th, .gg-table td {{ overflow-wrap: break-word !important; word-break: normal !important; hyphens: auto; }}
+/* "anywhere", not "break-word": only "anywhere" lets an auto-width table shrink below its longest word. A filing
+   table's uppercase headers ("ACQUISITION/DISPOSAL") made it wider than A4 and Chrome shrank the whole PDF. */
+.gg-table th, .gg-table td {{ overflow-wrap: anywhere !important; word-break: normal !important; hyphens: auto; }}
 body.gg-tier--in_depth .gg-table {{ font-size: 10.5pt; }}
-body.gg-tier--in_depth .gg-table th {{ overflow-wrap: break-word !important; word-break: normal !important; }}
+body.gg-tier--in_depth .gg-table th {{ overflow-wrap: anywhere !important; word-break: normal !important; }}
 body.gg-tier--in_depth .gg-section-body > p {{ text-align: justify !important; text-justify: inter-word; }}
 .gg-sources-count {{ margin: 2px 0 8px; color: var(--muted); font-size: 9pt; font-weight: 600; }}
 .gg-source-list {{ display: block !important; margin: 0 !important; padding-left: 22px !important; list-style: decimal !important; }}

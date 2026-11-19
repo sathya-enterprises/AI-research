@@ -577,6 +577,11 @@ body.gg-house--market_currents .gg-house-callout,
 body.gg-house--market_currents .gg-table-wrap,
 body.gg-house--market_currents .gg-stat-card { break-inside: avoid !important; page-break-inside: avoid !important; }
 body.gg-house--market_currents .gg-sources, body.gg-house--market_currents #data-sources { break-before: page; }
+/* Wide tables (5+ columns) get print-sized padding: the 9-column sector-quarter matrix with 12px side padding
+   came to 706px on a 695px printable width, and Chrome shrank the whole PDF (cover included) to fit it. */
+body.gg-house--market_currents .gg-table--wide thead th,
+body.gg-house--market_currents .gg-table--wide tbody td { padding: 6px 5px !important; }
+body.gg-house--market_currents .gg-table--wide tbody td { font-size: 9.5px !important; }
 body.gg-house--market_currents .gg-section-heading h2 { font-size: 15.5pt !important; }
 body.gg-house--market_currents .gg-section-body p, body.gg-house--market_currents .gg-section-body li { font-size: 10pt !important; }
 body.gg-house--market_currents .gg-house-callout p { font-size: 9.8pt !important; }

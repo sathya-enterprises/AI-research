@@ -4374,7 +4374,10 @@ body.gg-tier--in_depth .gg-section { margin-bottom: 14px; }
   .gg-table tr { break-inside: avoid-page; page-break-inside: avoid; }
   .gg-table th, .gg-table td {
     white-space: normal !important; word-break: normal !important;
-    overflow-wrap: break-word !important; hyphens: auto !important;
+    /* "anywhere" (not break-word) lets an auto-width table shrink below its longest word: one 7-column filing
+       table ("ACQUISITION/DISPOSAL", 11-digit share counts) was 869px on a 794px page, and Chrome then shrank
+       the whole PDF to fit it, leaving the cover short of the page edges. */
+    overflow-wrap: anywhere !important; hyphens: auto !important;
   }
   .gg-table--wide th, .gg-table--wide td { padding: 4.5pt 5pt !important; font-size: 8.5pt !important; line-height: 1.25 !important; }
   .gg-table--wide th { font-size: 8pt !important; letter-spacing: .01em !important; }
@@ -4494,8 +4497,8 @@ main { padding-top: 2mm !important; padding-bottom: 7mm !important; }
 table.gg-table { width: 100% !important; max-width: 100% !important; table-layout: auto !important; border-collapse: collapse !important; font-size: 8.8pt !important; line-height: 1.3 !important; }
 .gg-table thead { display: table-header-group !important; }
 .gg-table tr { break-inside: avoid-page !important; page-break-inside: avoid !important; }
-.gg-table th { padding: 6.5pt 7pt !important; background: #17384F !important; color: #fff !important; border: .5pt solid #17384F !important; font-family: Arial, sans-serif !important; font-size: 7.6pt !important; line-height: 1.25 !important; letter-spacing: .035em !important; text-transform: uppercase !important; white-space: normal !important; overflow-wrap: break-word !important; }
-.gg-table td { padding: 6pt 7pt !important; background: #fff !important; border-bottom: .5pt solid #DCE5DF !important; font-size: 8.7pt !important; line-height: 1.32 !important; color: #34464F !important; vertical-align: top !important; white-space: normal !important; overflow-wrap: break-word !important; word-break: normal !important; hyphens: auto !important; font-variant-numeric: tabular-nums !important; }
+.gg-table th { padding: 6.5pt 7pt !important; background: #17384F !important; color: #fff !important; border: .5pt solid #17384F !important; font-family: Arial, sans-serif !important; font-size: 7.6pt !important; line-height: 1.25 !important; letter-spacing: .035em !important; text-transform: uppercase !important; white-space: normal !important; overflow-wrap: anywhere !important; }
+.gg-table td { padding: 6pt 7pt !important; background: #fff !important; border-bottom: .5pt solid #DCE5DF !important; font-size: 8.7pt !important; line-height: 1.32 !important; color: #34464F !important; vertical-align: top !important; white-space: normal !important; overflow-wrap: anywhere !important; word-break: normal !important; hyphens: auto !important; font-variant-numeric: tabular-nums !important; }
 .gg-table tbody tr:nth-child(even) td { background: #F5F8F6 !important; }
 .gg-table--wide th { font-size: 7.1pt !important; padding: 5pt 5.5pt !important; }
 .gg-table--wide td { font-size: 8pt !important; padding: 5.5pt 5.5pt !important; }
