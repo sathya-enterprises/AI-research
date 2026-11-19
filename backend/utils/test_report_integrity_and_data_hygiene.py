@@ -1896,3 +1896,21 @@ def test_sector_rotation_keeps_flow_charts_and_rejects_fund_returns():
     assert chart_meaning_reason(chart("1 Year: Axis Large Cap Fund, Canara Robeco Large Cap Fund",
                                       ["Axis Large Cap Fund", "Canara Robeco Large Cap Fund", "HDFC Top 100", "SBI Bluechip"]), q) != ""
     assert chart_meaning_reason(chart("India VIX: Mean, Median, Maximum", ["Mean", "Median", "Maximum", "Minimum"]), q) != ""
+
+
+def test_dataset_extraction_stops_at_its_time_budget(monkeypatch):
+    import asyncio, time, types
+    from utils import dataset_extractor as DX
+    passages = [types.SimpleNamespace(passage_id=f"S{i}.1", title="t", publisher="p", source_id=f"S{i}", text="x")
+                for i in range(4)]
+    monkeypatch.setattr(DX, "candidate_passages", lambda *a, **k: passages)
+    monkeypatch.setenv("GG_V2_DATASET_EXTRACT_SECONDS", "0.2")
+
+    class SlowGateway:
+        async def generate(self, **kwargs):
+            await asyncio.sleep(30)
+
+    started = time.monotonic()
+    charts, note = asyncio.run(DX.extract_dataset_charts(None, SlowGateway(), question="q", today="2026-11-19"))
+    assert time.monotonic() - started < 5
+    assert charts == [] and note["timedOut"] == 4

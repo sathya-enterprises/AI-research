@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import date
 
@@ -543,12 +544,25 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
     def _title(passage) -> str:
         return str(passage.title or passage.publisher or passage.source_id)
 
-    results = await asyncio.gather(*[
+    tasks = [asyncio.ensure_future(
         gateway.generate(purpose="dataset_extract", section_id=passage.passage_id, system=SYSTEM,
                          prompt=PROMPT.format(question=question, pid=passage.passage_id, source=_title(passage)[:120],
                                               text=str(passage.text)[:6000]),
-                         max_tokens=2048, temperature=0.0, json_mode=True, timeout=60, retries=1)
-        for passage in passages], return_exceptions=True)
+                         max_tokens=2048, temperature=0.0, json_mode=True, timeout=60, retries=1))
+        for passage in passages]
+    # The whole step has a time budget: under rate limits it took 9 minutes before any section was written.
+    # Calls still waiting at the budget are cancelled and recorded; whatever finished is used.
+    budget = float(os.getenv("GG_V2_DATASET_EXTRACT_SECONDS", "180"))
+    done, pending = await asyncio.wait(tasks, timeout=budget) if tasks else (set(), set())
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        note["timedOut"] = len(pending)
+        log.warning("V2 dataset extraction: %d of %d passage call(s) cancelled at the %.0fs budget",
+                    len(pending), len(tasks), budget)
+    results = [task.exception() or task.result() if task in done and not task.cancelled()
+               else TimeoutError("dataset extraction time budget") for task in tasks]
     note["responses"] = len(results)
     for passage, result in zip(passages, results):
         title = _title(passage)

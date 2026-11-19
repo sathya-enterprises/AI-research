@@ -36,7 +36,13 @@ log = logging.getLogger("llm_gateway")
 LITE_AVOIDING_PURPOSES = {"section", "section_extend", "executive_summary"}
 # Checks that read and classify (the claim judge) start on the lite model: the full models' per-minute quota
 # goes to the writing calls (live run: 121 of 167 Gemini attempts were HTTP 429).
-LITE_FIRST_PURPOSES = {"claim_check"}
+# dataset_extract proposals are verified value by value against the passage in code, so the lite model (higher
+# rate limits) is enough; on the full models 16 small calls took 9 minutes of rate-limit waits in a live run
+LITE_FIRST_PURPOSES = {"claim_check", "dataset_extract"}
+# Report prose that Gemini cannot serve right now goes to Groq at once instead of after 20-45 s sleeps: in the
+# in-depth sector-rotation run every core section waited out Gemini cooldowns (about 20 min of sleeps across
+# calls) and was then written by Groq anyway. The waits remain when Groq also fails.
+GROQ_BEFORE_WAIT_PURPOSES = {"section", "section_extend", "executive_summary"}
 
 DEFAULT_BUDGETS = {"detailed": 30, "in_depth": 90}
 
@@ -81,6 +87,7 @@ class GatewayStats:
     failed: int = 0
     budget_refusals: int = 0
     network_retries: int = 0
+    groq_before_wait: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     by_purpose: Counter = field(default_factory=Counter)
@@ -88,7 +95,7 @@ class GatewayStats:
 
     def to_dict(self) -> dict:
         return {"calls": self.calls, "succeeded": self.succeeded, "failed": self.failed,
-                "budgetRefusals": self.budget_refusals, "networkRetries": self.network_retries, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
+                "budgetRefusals": self.budget_refusals, "networkRetries": self.network_retries, "groqBeforeWait": self.groq_before_wait, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
                 "byPurpose": dict(self.by_purpose), "models": dict(self.models)}
 
 
@@ -117,6 +124,15 @@ class LLMGateway:
         return max(0, int(self.budget) - int(self.stats.calls))
 
     # ── public ────────────────────────────────────────────────────────────────
+    async def _sleep_without_slot(self, delay: float) -> None:
+        """Wait out a backoff without holding a concurrency slot: a sleeping call blocked one of the 3 slots, so
+        other sections queued behind calls that were only waiting for a rate limit to clear."""
+        self.semaphore.release()
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            await self.semaphore.acquire()
+
     async def generate(self, *, purpose: str, prompt: str, system: str = "", section_id: str = "",
                        max_tokens: int = 4096, temperature: float = 0.2, json_mode: bool = False,
                        timeout: float = 90.0, retries: int = 1) -> LLMResult:
@@ -141,6 +157,7 @@ class LLMGateway:
             # Report prose is written by the full models: under rate limits half the sections went to the lite
             # model and the report came out at about half its planned length. Lite stays a last resort.
             allow_lite = purpose not in LITE_AVOIDING_PURPOSES
+            groq_tried = False
             attempt = 0
             while True:
                 attempt += 1
@@ -160,9 +177,19 @@ class LLMGateway:
                     self.stats.network_retries += 1
                     log.warning("V2 LLM %s/%s: transient failure (%s); retrying in %ds", purpose, section_id or "-",
                                 str(result.error or "")[:60], delay)
-                    await asyncio.sleep(delay)
+                    await self._sleep_without_slot(delay)
                     tried.clear()
                     continue
+                rate_limited = (str(result.error or "") == "no_gemini_key_or_model_available"
+                                or str(result.error or "").startswith("http_429"))
+                if (rate_limited and not json_mode and purpose in GROQ_BEFORE_WAIT_PURPOSES and not groq_tried
+                        and os.getenv("GG_V2_GROQ_BEFORE_WAIT", "1") != "0"):
+                    groq_tried = True
+                    fallback = await self._groq_fallback(prompt, system, result)
+                    if fallback.ok:
+                        result = fallback
+                        self.stats.groq_before_wait += 1
+                        break
                 # Stage K: every key/model rate-limited (HTTP 429) - per-minute limits clear quickly, so wait and
                 # retry twice (20 s, 40 s) before giving up; a daily-quota failure still fails (and is labelled)
                 if str(result.error or "") == "no_gemini_key_or_model_available" and not cooldown_backoff and not allow_lite:
@@ -174,18 +201,18 @@ class LLMGateway:
                     delay = cooldown_backoff.pop(0)
                     self.stats.network_retries += 1
                     log.warning("V2 LLM %s/%s: every model is cooling down; retrying in %ds", purpose, section_id or "-", delay)
-                    await asyncio.sleep(delay)
+                    await self._sleep_without_slot(delay)
                     tried.clear()
                     continue
                 if str(result.error or "").startswith("http_429") and rate_backoff:
                     delay = rate_backoff.pop(0)
                     self.stats.network_retries += 1
                     log.warning("V2 LLM %s/%s: rate-limited on every key; retrying in %ds", purpose, section_id or "-", delay)
-                    await asyncio.sleep(delay)
+                    await self._sleep_without_slot(delay)
                     tried.clear()
                     continue
                 break
-            if not result.ok and not json_mode:
+            if not result.ok and not json_mode and not groq_tried:
                 result = await self._groq_fallback(prompt, system, result)
             result.elapsed_ms = int((time.perf_counter() - started) * 1000)
             if not result.tokens_in:

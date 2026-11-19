@@ -224,3 +224,37 @@ def test_section_prose_falls_back_to_lite_after_the_cooldown_waits(monkeypatch):
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     res = asyncio.run(G.LLMGateway(runtime, "detailed", budget=5, capture=False).generate(purpose="section", prompt="p"))
     assert res.ok and seen_models == ["model-a-lite"] and waits == [20, 45]
+
+
+def test_section_prose_goes_to_groq_before_sleeping_when_gemini_is_rate_limited(monkeypatch):
+    """In-depth run: sections slept through 20-45 s cooldowns and were then written by Groq anyway."""
+    _patch_http(monkeypatch, lambda request: _ok("gemini text"))
+    runtime = _runtime(groq_text="groq prose")
+    runtime.limited.update({"gemini:model:model-a", "gemini:model:model-b"})
+    waits = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    gw = G.LLMGateway(runtime, "in_depth", budget=5, capture=False)
+    res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
+    assert res.ok and res.text == "groq prose" and waits == []
+    assert gw.stats.groq_before_wait == 1
+
+
+def test_json_calls_still_wait_and_release_their_slot_while_sleeping(monkeypatch):
+    _patch_http(monkeypatch, lambda request: _ok('{"ok": true}'))
+    runtime = _runtime(groq_text="groq prose")
+    runtime.limited.update({"gemini:model:model-a", "gemini:model:model-b"})
+    slot_free_while_sleeping = []
+    gw = G.LLMGateway(runtime, "in_depth", budget=5, capture=False, concurrency=1)
+
+    async def fake_sleep(seconds):
+        slot_free_while_sleeping.append(not gw.semaphore.locked())
+        runtime.limited.clear()
+
+    monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
+    res = asyncio.run(gw.generate(purpose="outline", prompt="p", json_mode=True, retries=1))
+    assert res.ok and slot_free_while_sleeping == [True]
+    assert gw.semaphore.locked() is False  # the slot count is balanced afterwards
