@@ -1112,6 +1112,7 @@ export const CHAT_CSS = `
         .chat-shell.gg-premium .report-preview-body { max-height: min(56vh, 520px); overflow-y: auto; padding: 14px 18px !important; }
         .chat-shell.gg-premium .report-alert { width: 100%; display: grid; gap: 3px; padding: 10px 14px; border-left: 2px solid var(--ed-negative); background: var(--gg-down-tint); color: #5E231B; font-size: 13px; line-height: 1.5; }
         .chat-shell.gg-premium .report-alert--error .report-alert-label { color: var(--ed-negative) !important; }
+        .chat-shell.gg-premium .report-alert--ok { border-left-color: var(--gg-forest); background: rgba(56,124,88,.08); color: var(--gg-forest-deep); }
         .chat-shell.gg-premium .report-status-banner { width: 100%; display: block; padding: 12px 16px; border-left: 2px solid var(--ed-warning); background: var(--ed-warning-tint); color: var(--gg-gold-text); font-size: 13px; line-height: 1.55; }
         .chat-shell.gg-premium .report-status-banner .report-status-label { display: block; margin-bottom: 4px; color: var(--ed-warning) !important; }
         .chat-shell.gg-premium .report-status-banner strong { color: #3E2A06; }

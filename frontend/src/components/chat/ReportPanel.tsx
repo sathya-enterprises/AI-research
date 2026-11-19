@@ -87,6 +87,108 @@ export function getReportSectionOptions(reportData?: ReportData): string[] {
 // current report's prose or source list, so it is a clean research experiment.
 // Action = edit the CURRENT generated report. It calls the existing section-edit
 // endpoint and preserves every unrelated section/chart/source.
+/** Sends the report through the backend email route (Brevo). Recipients come
+ *  from the text box, a CSV/XLSX with an "email" column, or both. */
+export function ReportEmailModal({ report, onClose }: { report: ReportData; onClose: () => void }) {
+  const [recipients, setRecipients] = useState('');
+  const [subject, setSubject] = useState(report.title?.trim() || 'Growth Gradual Research Report');
+  const [listFile, setListFile] = useState<File | null>(null);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const canSend = !sending && (!!recipients.trim() || !!listFile);
+
+  const send = async () => {
+    if (!canSend) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const form = new FormData();
+      form.append('subject', subject.trim() || 'Growth Gradual Research Report');
+      form.append('recipients', recipients);
+      form.append('report', report.report || '');
+      form.append('title', report.title || '');
+      form.append('summary', report.summary || '');
+      form.append('keyStats', JSON.stringify(report.keyStats ?? []));
+      form.append('sources', JSON.stringify(report.sources ?? []));
+      if (listFile) form.append('file', listFile);
+      const res = await fetch('/api/chat/report/email', { method: 'POST', body: form });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.success) {
+        setResult({ ok: true, text: String(body.message || 'Report sent.') });
+      } else {
+        setResult({ ok: false, text: String(body?.error || `Email failed (HTTP ${res.status}).`) });
+      }
+    } catch {
+      setResult({ ok: false, text: 'Could not reach the email service. Please try again.' });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="report-prompt-overlay" onClick={e => { if (e.target === e.currentTarget && !sending) onClose(); }}>
+      <div className="report-prompt-modal" role="dialog" aria-modal="true" aria-label="Email report">
+        <div className="report-prompt-head">
+          <div>
+            <div className="report-prompt-kicker">Share report</div>
+            <div className="report-prompt-title">Email</div>
+            <div className="report-prompt-subtitle">Send this report, with its summary, key figures and sources, to one or more people.</div>
+          </div>
+          <button type="button" onClick={onClose} disabled={sending} className="report-prompt-close">×</button>
+        </div>
+        <div className="report-prompt-body">
+          <label className="report-prompt-label" htmlFor="gg-email-to">Recipients</label>
+          <input
+            id="gg-email-to"
+            autoFocus
+            type="text"
+            value={recipients}
+            onChange={e => setRecipients(e.target.value)}
+            placeholder="name@company.com, another@company.com"
+            disabled={sending}
+            className="report-prompt-section-select"
+          />
+          <div className="report-prompt-hint">Separate addresses with commas, or add a list below.</div>
+
+          <label className="report-prompt-label" htmlFor="gg-email-list" style={{ marginTop: 12 }}>Recipient list (optional)</label>
+          <input
+            id="gg-email-list"
+            type="file"
+            accept=".csv,.xlsx"
+            onChange={e => setListFile(e.target.files?.[0] ?? null)}
+            disabled={sending}
+            className="report-prompt-section-select"
+          />
+          <div className="report-prompt-hint">A CSV or Excel file with an “email” column.</div>
+
+          <label className="report-prompt-label" htmlFor="gg-email-subject" style={{ marginTop: 12 }}>Subject</label>
+          <input
+            id="gg-email-subject"
+            type="text"
+            value={subject}
+            onChange={e => setSubject(e.target.value)}
+            disabled={sending}
+            className="report-prompt-section-select"
+          />
+
+          {result && (
+            <div className={`report-alert ${result.ok ? 'report-alert--ok' : 'report-alert--error'}`} role={result.ok ? 'status' : 'alert'} style={{ marginTop: 12 }}>
+              <span>{result.text}</span>
+            </div>
+          )}
+
+          <div className="report-prompt-actions">
+            <button type="button" onClick={onClose} disabled={sending} className="report-prompt-cancel">{result?.ok ? 'Close' : 'Cancel'}</button>
+            <button type="button" onClick={send} disabled={!canSend} className="report-prompt-submit">
+              {sending ? 'Sending…' : 'Send email'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ReportPromptModal({
   mode,
   initialPrompt = '',
@@ -189,12 +291,10 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
   // shown when there's actually prior conversation to include (i.e. not the
   // very first response in the thread).
   const [includeContext, setIncludeContext] = useState(true);
-  const attachmentReport = (msg.reportFiles ?? []).some(file => file.status === 'attached');
-  // Derive the depth from current report state. Attachment analysis stays at
-  // the data-focused tier without synchronizing props through an effect.
-  const selectedTier: ReportTier = attachmentReport
-    ? 'detailed'
-    : (msg.reportData?.reportTier ?? initialTier);
+  const [emailOpen, setEmailOpen] = useState(false);
+  // Attached files no longer change the depth: In-Detail and Deep Research both
+  // work with attachments (the composer's "Use only attached files" toggle sets the scope).
+  const selectedTier: ReportTier = msg.reportData?.reportTier ?? initialTier;
 
   const rd = msg.reportData;
   const loading = msg.reportLoading ?? false;
@@ -267,6 +367,9 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
 
   return (
     <>
+      {emailOpen && rd && (
+        <ReportEmailModal report={rd} onClose={() => setEmailOpen(false)} />
+      )}
       {promptMode && (
         <ReportPromptModal
           mode={promptMode}
@@ -292,7 +395,7 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           {loading && (
             <ReportProgress
-              title={`${attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Research')} report`}
+              title={`${REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'Research'} report`}
               phase={msg.reportPhase}
               message={msg.reportProgress}
               percent={msg.reportProgressPercent}
@@ -333,13 +436,13 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
           )}
           {!loading && !done && !!error && eligible && (
             <div className="report-tier-status" aria-label="Selected report depth">
-              <span className="report-tier-status-label">{attachmentReport ? 'Report scope' : 'Report depth'}</span>
-              <strong>{attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'In-Detail')}</strong>
-              <span>{attachmentReport ? 'Planned from the attached data' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.scope ?? 'Expanded analysis')}</span>
+              <span className="report-tier-status-label">Report depth</span>
+              <strong>{REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.label ?? 'In-Detail'}</strong>
+              <span>{REPORT_TIER_OPTIONS.find(o => o.value === selectedTier)?.scope ?? 'Expanded analysis'}</span>
             </div>
           )}
           {!loading && !done && !!error && eligible && (
-            <button className="report-btn" onClick={() => onGenerate(hasPriorContext ? includeContext : false, attachmentReport ? 'detailed' : selectedTier)}>
+            <button className="report-btn" onClick={() => onGenerate(hasPriorContext ? includeContext : false, selectedTier)}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
               Retry Report
             </button>
@@ -387,6 +490,10 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
                   ? <><span className="dots" style={{marginRight:4}}><i/><i/><i/></span>Building PDF…</>
                   : <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>{isDraftReport(rd) ? 'Download draft PDF' : 'Download PDF'}</>}
               </button>
+              <button className="report-btn" onClick={() => setEmailOpen(true)} title="Send this report by email">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+                Email
+              </button>
             </>
           )}
         </div>
@@ -395,7 +502,7 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
             {/* v93 report masthead: everything shown is read from the generated report payload. */}
             <header className="report-masthead">
               <div className="report-masthead-kicker">
-                Growth Gradual · {attachmentReport ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === (rd.reportTier ?? selectedTier))?.label ?? 'Research')} report
+                Growth Gradual · {REPORT_TIER_OPTIONS.find(o => o.value === (rd.reportTier ?? selectedTier))?.label ?? 'Research'} report
                 {isDraftReport(rd) ? <span className="report-masthead-flag">Draft</span> : null}
               </div>
               {rd.title ? <h1 className="report-masthead-title">{rd.title}</h1> : null}

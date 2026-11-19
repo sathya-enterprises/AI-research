@@ -84,6 +84,11 @@ export default function GrowthGradualChat() {
   // generateReport reads the style through a ref so its many call sites stay unchanged.
   const selectedReportStyleRef = useRef<ReportStyle>('market_currents');
   selectedReportStyleRef.current = selectedReportStyle;
+  // "Use only attached files": the report's evidence is limited to the attachments
+  // (no web research). The depth (In-Detail / Deep Research) is chosen separately.
+  const [attachmentOnly, setAttachmentOnly] = useState(true);
+  const attachmentOnlyRef = useRef(true);
+  attachmentOnlyRef.current = attachmentOnly;
   const [reportModeEnabled, setReportModeEnabled] = useState(false);
   const [reportTierMenuOpen, setReportTierMenuOpen] = useState(false);
   const reportTierHydratedRef = useRef(false);
@@ -214,6 +219,8 @@ export default function GrowthGradualChat() {
         setSelectedReportTier('detailed');
         window.localStorage.setItem('gg-report-tier-v2', 'detailed');
       }
+      const savedScope = window.localStorage.getItem('gg-attachment-only-v1');
+      if (savedScope === 'true' || savedScope === 'false') setAttachmentOnly(savedScope === 'true');
       const savedStyle = window.localStorage.getItem('gg-report-style-v1');
       if (savedStyle === 'market_currents' || savedStyle === 'feature_article') {
         setSelectedReportStyle(savedStyle);
@@ -235,6 +242,13 @@ export default function GrowthGradualChat() {
       window.localStorage.setItem('gg-report-style-v1', selectedReportStyle);
     } catch { /* ignore storage failures */ }
   }, [selectedReportStyle]);
+
+  useEffect(() => {
+    if (!reportTierHydratedRef.current) return;
+    try {
+      window.localStorage.setItem('gg-attachment-only-v1', String(attachmentOnly));
+    } catch { /* ignore storage failures */ }
+  }, [attachmentOnly]);
 
   // Close the compact report-depth menu when clicking anywhere outside it.
   useEffect(() => {
@@ -1308,12 +1322,12 @@ export default function GrowthGradualChat() {
     // route can take minutes and prevents progress from reaching the browser.
     const normalizedTier = String(reportTier || 'detailed').trim().toLowerCase();
     const hasAttachedData = files.some(file => file.status === 'attached');
-    const effectiveReportTier: ReportTier = hasAttachedData ? 'detailed' : ['detailed', 'in_depth'].includes(normalizedTier)
+    const effectiveReportTier: ReportTier = ['detailed', 'in_depth'].includes(normalizedTier)
       ? normalizedTier as ReportTier
       : 'detailed';
+    const useOnlyAttachments = hasAttachedData && attachmentOnlyRef.current;
     console.info('[report] using background streaming pipeline', {
-      reportTier: effectiveReportTier,
-      planningMode: hasAttachedData ? 'attachment_analysis' : effectiveReportTier,
+      reportTier: effectiveReportTier, attachmentOnly: useOnlyAttachments,
     });
     // Duplicate-submission guard: a double click or a retry while this
     // message's report is still in flight must not start a second job.
@@ -1506,6 +1520,7 @@ export default function GrowthGradualChat() {
           question, reportTier: effectiveReportTier, reportStyle: effectiveReportStyle, sources: priorSources, fileContext: fileTextContext, clientRequestId,
           conversationContext: conversationContext || '', fileImages, embeddedFileImages,
           sourceDocuments, sessionId: getOrCreateSessionId(), hasRag: ragIndexed,
+          attachmentOnly: useOnlyAttachments,
         };
         const started = await fetch('/api/chat/report/start', {
           method: 'POST',
@@ -1537,8 +1552,8 @@ export default function GrowthGradualChat() {
           return { ok: false, status: started.status || 502, data: { error: safeError } };
         }
         const maxWaitMs = effectiveReportTier === 'in_depth' ? 60 * 60_000 : 30 * 60_000;
-        setStatusMsg(hasAttachedData
-          ? 'Analyzing attached data and preparing the report…'
+        setStatusMsg(useOnlyAttachments
+          ? `${effectiveReportTier === 'in_depth' ? 'Deep Research' : 'In-Detail'} report from your attached files only is running…`
           : effectiveReportTier === 'in_depth'
           ? 'Deep Research is running — collecting evidence and building the comprehensive report…'
           : 'In-Detail research is running — expanding evidence and building the detailed report…');
@@ -2285,13 +2300,16 @@ export default function GrowthGradualChat() {
                   disabled={streaming}
                   aria-haspopup="menu"
                   aria-expanded={reportTierMenuOpen}
-                  title={hasCurrentAttachments ? 'Choose report style for attached-data analysis' : 'Choose report depth and style'}
+                  title="Choose report depth, scope and style"
                 >
                   <span className="report-tier-trigger-dot" aria-hidden="true" />
                   <span className="report-tier-trigger-text">
                     <span className="report-tier-trigger-kicker">Report</span>
                     <span className="report-tier-trigger-value">
-                      {hasCurrentAttachments ? 'Attachment analysis' : (REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail')}
+                      {REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.label ?? 'In-Detail'}
+                      {hasCurrentAttachments && attachmentOnly && (
+                        <><span className="report-tier-trigger-sep" aria-hidden="true"> · </span>Attached files only</>
+                      )}
                       <span className="report-tier-trigger-sep" aria-hidden="true"> · </span>
                       {REPORT_STYLE_OPTIONS.find(o => o.value === selectedReportStyle)?.label ?? 'Market Currents'}
                     </span>
@@ -2301,13 +2319,24 @@ export default function GrowthGradualChat() {
 
                 {reportTierMenuOpen && (
                   <div className="report-tier-menu" role="dialog" aria-label="Report settings">
-                    {hasCurrentAttachments ? (
+                    {hasCurrentAttachments && (
                       <>
-                        <div className="report-tier-menu-head"><span>Data scope</span></div>
-                        <p className="report-tier-menu-note">The report will be planned from the attached files, their available data points, and any readable tables or images.</p>
+                        <div className="report-tier-menu-head"><span>Sources</span></div>
+                        <label className="report-context-toggle report-scope-toggle" title="When on, the report uses only your attached files; when off, it adds web research">
+                          <input
+                            type="checkbox"
+                            checked={attachmentOnly}
+                            onChange={e => setAttachmentOnly(e.target.checked)}
+                          />
+                          <span className="report-context-track"><span className="report-context-thumb"/></span>
+                          <span className="report-context-label">Use only attached files</span>
+                        </label>
+                        <p className="report-tier-menu-note">{attachmentOnly
+                          ? 'Every figure comes from your attached files. No web research is added.'
+                          : 'Your attached files are combined with web research.'}</p>
                       </>
-                    ) : (
-                      <>
+                    )}
+                    <>
                         <div className="report-tier-menu-head"><span>Depth</span></div>
                         <div className="report-seg" role="radiogroup" aria-label="Report depth">
                           {REPORT_TIER_OPTIONS.map(option => (
@@ -2325,8 +2354,7 @@ export default function GrowthGradualChat() {
                           ))}
                         </div>
                         <p className="report-tier-menu-note">{REPORT_TIER_OPTIONS.find(o => o.value === selectedReportTier)?.description}</p>
-                      </>
-                    )}
+                    </>
                     <div className="report-tier-menu-head"><span>Style</span></div>
                     <div className="report-style-grid" role="radiogroup" aria-label="Report style">
                       {REPORT_STYLE_OPTIONS.map(option => (

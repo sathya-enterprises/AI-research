@@ -107,7 +107,7 @@ from utils.source_ids import (
 )
 from utils.uploaded_workbook_analytics import (
     UPLOAD_CHART_EVIDENCE_CHARS,
-    is_file_only_workbook_report, build_attachment_analytics,
+    is_file_only_workbook_report, resolve_attachment_only, build_attachment_analytics,
     attachment_analytics_section, append_attachment_analytics_section,
     ensure_server_workbook_chart_markers,
     assign_workbook_source, workbook_charts_section,
@@ -22564,8 +22564,8 @@ async def generate_report(request: Request):
         log.warning("Attachment analytics preflight failed safely: %s", type(_workbook_analytics_exc).__name__)
     if not _analytics_context.strip() and source_documents:
         log.warning("Attachment analytics unavailable: attached sources supplied no extracted text.")
-    file_only_report = is_file_only_workbook_report(
-        question, file_context, source_documents, has_rag=has_rag,
+    file_only_report = resolve_attachment_only(
+        body.get("attachmentOnly"), question, file_context, source_documents, has_rag=has_rag,
     )
     if file_only_report:
         # An attachment-first request must not silently reuse prior web sources,
@@ -22642,10 +22642,9 @@ async def generate_report(request: Request):
         body["requestedPageCount"] = requested_page_count
         log.info("Report explicit page target resolved: pages=%d tier=%s", requested_page_count, report_tier)
     if file_only_report:
-        if report_tier != "detailed":
-            log.info("Attachment-first report: replacing research tier %s with data-driven planning", report_tier)
-        report_tier = "detailed"
-        body["reportTier"] = "detailed"
+        # The selected depth (In-Detail or Deep Research) is kept: the "use only
+        # attached files" toggle limits the evidence, not how deep the analysis goes.
+        log.info("Attachment-only report at the selected depth: %s", report_tier)
     _tier_error = report_tier_error(report_tier)
     if _tier_error:
         return JSONResponse({"error": _tier_error}, status_code=400)

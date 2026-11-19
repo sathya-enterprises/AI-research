@@ -498,6 +498,23 @@ def is_file_only_workbook_report(question: str, file_context: str, source_docume
     return bool(report_intent)
 
 
+def resolve_attachment_only(flag: object, question: str, file_context: str, source_documents: object = None,
+                            has_rag: bool = False) -> bool:
+    """The "Use only attached files" toggle decides; the wording heuristic is the fallback for old clients.
+
+    ON with an attachment: the report uses the attached files as its only evidence.
+    OFF: the attachment is combined with web research at the selected depth.
+    ON with nothing attached: there is nothing to restrict to, so normal research runs.
+    """
+    if isinstance(flag, str):
+        flag = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}.get(flag.strip().casefold())
+    if isinstance(flag, bool):
+        document_rows = source_documents if isinstance(source_documents, list) else []
+        has_attachment = bool(str(file_context or "").strip()) or bool(document_rows) or bool(has_rag)
+        return flag and has_attachment
+    return is_file_only_workbook_report(question, file_context, source_documents, has_rag=has_rag)
+
+
 def _split_file_blocks(file_context: str) -> list[tuple[str, str]]:
     text = str(file_context or "")
     markers = list(_FILE_MARKER.finditer(text))
