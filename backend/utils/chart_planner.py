@@ -171,11 +171,16 @@ _PROMOTER_SALES = ChartNeed(
     chart_types=("bar", "line", "stacked_bar"),
     terms=(r"\bpromoter\w*\b.{0,80}(?:sold|sale|sell|stake|reduc|offload|exit|dilut)\w*",
            r"(?:sold|sale|offload|exit|dilut)\w*.{0,80}\bpromoter\w*"),
-    entity_terms=(r"\b[A-Z][A-Za-z&.\- ]{2,40}\s+(?:Ltd|Limited|Industries|Bank|Technologies|Pharma|Motors)\b",),
-    min_lines=4, min_periods=3, min_entities=3,
-    hosts=("bseindia.com", "nseindia.com", "sebi.gov.in"),
-    queries=(f"promoter stake sale bulk block deal India {_YEAR} list of promoter exits quarter",
-             "promoter holding decrease shareholding pattern quarter NSE BSE"),
+    # A quarterly series is one measure over 4+ quarters, usually a market-wide
+    # total ("promoters sold shares worth Rs X crore in Q2"), so "promoters"
+    # itself counts as the entity; company names still count for exit lists.
+    entity_terms=(r"\b[A-Z][A-Za-z&.\- ]{2,40}\s+(?:Ltd|Limited|Industries|Bank|Technologies|Pharma|Motors)\b",
+                  r"\bpromoters?\b"),
+    min_lines=4, min_periods=4, min_entities=1,
+    hosts=("bseindia.com", "nseindia.com", "sebi.gov.in", "primeinfobase.com"),
+    queries=(f"promoters sold stake worth crore quarter-wise India {_YEAR - 1} {_YEAR} Prime Database block deals",
+             "NSE Market Pulse promoter holding share of listed companies quarterly trend",
+             f"promoter stake sales value crore each quarter FY{str(_YEAR - 1)[2:]} FY{str(_YEAR)[2:]} India"),
 )
 _PROMOTER_HOLDING = ChartNeed(
     key="promoter_holding_change", title="Promoter holding change by company",
@@ -331,6 +336,22 @@ def _period_context_for_line(lines: list[str], index: int) -> tuple[set[str], li
     return periods, context_lines
 
 
+_SERIES_MIN_LINES = 4
+
+
+def _source_carries_series(need: ChartNeed, lines: int, periods: int, entities: int) -> bool:
+    """Whether ONE source holds enough comparable figures to draw this chart on its own.
+
+    Counting lines, periods and entities across all sources let four unrelated
+    filings (one company each, different dates) pass as a "quarterly series".
+    """
+    return (
+        lines >= min(need.min_lines, _SERIES_MIN_LINES)
+        and periods >= need.min_periods
+        and entities >= need.min_entities
+    )
+
+
 def assess_chart_coverage(needs: list[ChartNeed], sources: list[dict]) -> list[NeedCoverage]:
     """How well do ``sources`` (dicts with id/text/url/title) cover each planned chart?
 
@@ -354,8 +375,12 @@ def assess_chart_coverage(needs: list[ChartNeed], sources: list[dict]) -> list[N
         per_sid: dict[str, int] = {}
         periods: set[str] = set()
         entities: set[str] = set()
+        best_source_ok = False
+        best_source: tuple[int, int, int] = (0, 0, 0)
         for sid, lines in prepared:
             hits = 0
+            sid_periods: set[str] = set()
+            sid_entities: set[str] = set()
             for line_index, line in enumerate(lines):
                 if not _NUMBER_RE.search(line):
                     continue
@@ -368,6 +393,12 @@ def assess_chart_coverage(needs: list[ChartNeed], sources: list[dict]) -> list[N
                 row_entities: set[str] = set()
                 for er in entity_res:
                     row_entities.update(re.sub(r"\s+", " ", m.group(0)).casefold() for m in er.finditer(line))
+                if not row_entities and "|" in line and len(row_context) > 1:
+                    # A time-series table names its entity once, in the header
+                    # ("| Quarter | Promoters sold (Rs crore) |"), not on every row.
+                    for er in entity_res:
+                        row_entities.update(re.sub(r"\s+", " ", m.group(0)).casefold()
+                                            for m in er.finditer(row_context[1]))
                 if not row_entities and "|" in line:
                     # Structured tables identify the entity in their first
                     # cell. Use it for needs without a fixed entity catalogue,
@@ -383,13 +414,20 @@ def assess_chart_coverage(needs: list[ChartNeed], sources: list[dict]) -> list[N
                 hits += 1
                 periods.update(row_periods)
                 entities.update(row_entities)
+                sid_periods.update(row_periods)
+                sid_entities.update(row_entities)
             if hits:
                 per_sid[sid] = hits
+                stats = (hits, len(sid_periods), len(sid_entities))
+                if _source_carries_series(need, *stats):
+                    best_source_ok = True
+                if stats > best_source:
+                    best_source = stats
         total = sum(per_sid.values())
         cov = NeedCoverage(need=need, lines=total, periods=len(periods), entities=len(entities),
                            source_ids=sorted(per_sid, key=lambda s: (-per_sid[s], sid_number(s)))[:6])
         entities_ok = len(entities) >= need.min_entities
-        if total >= need.min_lines and len(periods) >= need.min_periods and entities_ok:
+        if total >= need.min_lines and len(periods) >= need.min_periods and entities_ok and best_source_ok:
             cov.status = "satisfied"
         elif total > 0:
             cov.status = "partial"
@@ -400,6 +438,12 @@ def assess_chart_coverage(needs: list[ChartNeed], sources: list[dict]) -> list[N
                 gaps.append(f"{len(periods)}/{need.min_periods} periods")
             if not entities_ok:
                 gaps.append(f"{len(entities)}/{need.min_entities} entities")
+            if not gaps and not best_source_ok:
+                # Scattered single figures across many pages are not a chart: one
+                # chart's points must come from one comparable dataset.
+                lines_, periods_, entities_ = best_source
+                gaps.append(f"no single source holds the series (best source: {lines_} lines, "
+                            f"{periods_} periods, {entities_} entities)")
             cov.reason = "has " + ", ".join(gaps)
         else:
             cov.reason = "no retrieved source carries these figures"
