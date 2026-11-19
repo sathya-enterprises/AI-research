@@ -2327,18 +2327,12 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     continue
                 for col_index, cell in enumerate(row[1:], 1):
                     cell_text = str(cell or "").strip()
-                    # Canonical Unicode em/en dashes are explicit normalized
-                    # missing-value markers; legacy/plain dash spellings below
-                    # still represent an absent row.
-                    if _MISSING_CELL.fullmatch(cell_text):
-                        cell_text = "not verified"
-                    # A dash in an extracted comparison table means no row was
-                    # observed for that entity/period. It is not an explicit
-                    # claim that a chart's separately sourced observation is
-                    # unverified.
-                    if cell_text in {"-", "—", "–", "—", "–"}:
-                        continue
-                    if not (
+                    # A dash (placeholder normalisation also writes "not verified" as an em dash) blocks a chart
+                    # point only under a period column of the same period. Under any other column ("Flow signal")
+                    # it says nothing about the chart: a writer scorecard with "—" in one column removed the
+                    # calculated NSE return charts for those sectors (in-depth run, 2026-11-19).
+                    is_dash = cell_text in {"-", "—", "–"} or bool(_MISSING_CELL.fullmatch(cell_text))
+                    if not is_dash and not (
                         _UNVERIFIED.search(cell_text)
                         or _UNVERIFIED_CELL.fullmatch(cell_text)
                         or _MISSING_CELL.fullmatch(cell_text)
@@ -2346,6 +2340,8 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         continue
                     period = str(headers[col_index] if col_index < len(headers) else "")
                     years = set(re.findall(r"20\d{2}", period))
+                    if is_dash and not years:
+                        continue  # a dash under a non-period column ("Flow signal") says nothing about the chart's period
                     for series, label, value in _points(chart):
                         identity = f"{series} {label} {title}".casefold()
                         if not entity_terms.intersection(re.findall(r"[a-z]{3,}", identity)):
@@ -2353,6 +2349,8 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                         chart_years = set(re.findall(r"20\d{2}", f"{series} {label}"))
                         if years and chart_years and not years.intersection(chart_years):
                             continue
+                        if is_dash and not years.intersection(chart_years):
+                            continue  # a dash blocks only the chart point of the same period
                         conflicts.append({
                             "chartIndex": chart_index, "chartTitle": title[:180],
                             "tableRow": row_index, "entity": entity[:100], "period": period[:100],

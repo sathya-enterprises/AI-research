@@ -1914,3 +1914,17 @@ def test_dataset_extraction_stops_at_its_time_budget(monkeypatch):
     charts, note = asyncio.run(DX.extract_dataset_charts(None, SlowGateway(), question="q", today="2026-11-19"))
     assert time.monotonic() - started < 5
     assert charts == [] and note["timedOut"] == 4
+
+
+def test_a_dash_in_a_report_table_does_not_remove_a_chart_of_that_entity():
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+    report = ("| Sector | 8Q return | Flow signal | Pattern |\n| --- | --- | --- | --- |\n"
+              "| NIFTY METAL | +26.36% | — | Persistent Cyclical Leader |\n"
+              "| NIFTY FMCG | -26.33% | not verified | Laggard |\n")
+    chart = {"title": "Compounded Sector Return Across 8 Completed Quarters", "type": "bar",
+             "series": [{"name": "Return", "data": [{"label": "NIFTY METAL", "value": 26.36}]}]}
+    fmcg = {"title": "FMCG flows", "type": "bar", "series": [{"name": "Flow", "data": [{"label": "NIFTY FMCG", "value": 5}]}]}
+    out = audit_chart_evidence_consistency(report, [chart, fmcg], [])
+    conflicts = " ".join(str(x.get("entity")) for x in out.get("chartTableVerificationConflicts") or [])
+    assert "METAL" not in conflicts.upper()
+    assert "FMCG" in conflicts.upper()

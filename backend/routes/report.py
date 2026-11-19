@@ -9411,7 +9411,20 @@ def _chart_has_historical_period_axis(chart: dict) -> bool:
             label,
         )
     }
-    return len(month_labels) >= 6
+    if len(month_labels) >= 6:
+        return True
+    # Month names without a year ("January ... June", a source table's monthly flows): six distinct months are
+    # a time axis too. "Net FII Flow: 6 months" was removed from the in-depth report because its labels had no year.
+    bare_months = {
+        match.group(1)[:3].casefold()
+        for label in labels
+        for match in re.finditer(
+            r"(?i)^\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+            r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s*$",
+            label,
+        )
+    }
+    return len(bare_months) >= 6
 
 
 def _sector_rotation_topic_quality_filter(

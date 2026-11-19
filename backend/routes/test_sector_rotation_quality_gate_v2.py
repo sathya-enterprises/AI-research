@@ -368,3 +368,13 @@ def test_monthly_flow_line_series_survives_sector_rotation_gate():
         "[CHART_1]\n\n[CHART_2]", [flow, snapshot],
         question="How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters.")
     assert [c["title"] for c in kept] == [flow["title"]]
+
+
+def test_month_names_without_year_are_a_time_axis():
+    months = ["January", "February", "March", "April", "May", "June"]
+    flow = {"title": "Net FII Flow (₹ crore): 6 months, as of 06 Jul 2026", "type": "bar",
+            "series": [{"name": "Net FII flow", "data": [{"label": m, "value": v} for m, v in zip(months, (-35962, 22615, -117775, -60847, -32963, -49340))]}]}
+    _text, kept, _meta = _sector_rotation_topic_quality_filter(
+        "[CHART_1]", [flow],
+        question="How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters.")
+    assert [c["title"] for c in kept] == [flow["title"]]
