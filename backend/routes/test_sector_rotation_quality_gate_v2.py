@@ -378,3 +378,18 @@ def test_month_names_without_year_are_a_time_axis():
         "[CHART_1]", [flow],
         question="How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters.")
     assert [c["title"] for c in kept] == [flow["title"]]
+
+
+def test_action_edit_is_not_blocked_by_numbers_the_report_already_published():
+    import json
+    from routes.report import _LEGAL_IDENTIFIER_BEFORE, _numeric_blocker_already_published as published
+    orig = ("On 13 April 2026 the stake fell from **12.50 % (1,93,75,000 shares)** [S26].\n\n"
+            "Getalong sold 10,000 shares at ₹7.45 each [S4].")
+    def blocker(token, source):
+        return "numeric_evidence:" + json.dumps({"claim": "x", "claimTokens": [token], "sourceIds": [source]})
+    assert published(blocker("percent:12.5", "S26"), orig)
+    assert published(blocker("scalar:7.45", "S4"), orig)
+    assert not published(blocker("scalar:9.99", "S4"), orig)      # a number the edit introduces still blocks
+    assert not published(blocker("scalar:7.45", "S9"), orig)      # same number, different source
+    assert not published("publication:danglingChartRefs:1", orig)
+    assert _LEGAL_IDENTIFIER_BEFORE.search("under SAST Regulation ") and not _LEGAL_IDENTIFIER_BEFORE.search("the sector rose ")

@@ -493,7 +493,47 @@ async def _audit_action_candidate(
     baseline = run_audits(original_report, original_sources, original_charts, original_images)
     final = run_audits(candidate_report, candidate_sources, candidate_charts, candidate_images)
     new_blockers = sorted(_action_audit_blockers(final) - _action_audit_blockers(baseline))
+    new_blockers = [b for b in new_blockers if not _numeric_blocker_already_published(b, original_report)]
     return final, _merge_source_evidence_statuses(manifest, candidate_sources), new_blockers
+
+
+def _numeric_blocker_already_published(blocker: str, original_report: str) -> bool:
+    """A numeric-evidence finding on a number the original report already published with the same source.
+
+    The edit-time audit sees short source excerpts, not the passages the report was written from, so a sentence
+    the edit rewords or moves ("12.50% (1,93,75,000 shares)" [S26], "Rs 7.45" [S4]) reads as a new unsupported
+    claim and the edit was refused. A number the edit introduces still blocks."""
+    if not blocker.startswith("numeric_evidence:"):
+        return False
+    try:
+        signature = json.loads(blocker.split(":", 1)[1])
+    except Exception:
+        return False
+    tokens = [str(t) for t in signature.get("claimTokens") or []]
+    source_ids = [str(x).upper() for x in signature.get("sourceIds") or []]
+    if not tokens or not source_ids:
+        return False
+    published: dict[str, set[float]] = {}
+    for paragraph in re.split(r"\n\s*\n", str(original_report or "")):
+        cited = {c.strip().upper() for group in re.findall(r"\[((?:S\d+(?:\.\d+)?\s*[,;]?\s*)+)\]", paragraph)
+                 for c in re.split(r"\s*[,;]\s*", group) if c.strip()}
+        values = set()
+        for raw in re.findall(r"\d[\d,]*(?:\.\d+)?", paragraph):
+            try:
+                values.add(round(float(raw.replace(",", "")), 6))
+            except ValueError:
+                pass
+        for source_id in cited:
+            published.setdefault(source_id.split(".")[0], set()).update(values)
+    for token in tokens:
+        raw = token.split(":", 1)[-1].partition("~")[0]
+        try:
+            value = round(float(raw), 6)
+        except ValueError:
+            return False
+        if not any(value in published.get(sid.split(".")[0], set()) for sid in source_ids):
+            return False
+    return True
 
 
 async def _finalize_action_response(response: JSONResponse, body: dict) -> JSONResponse:
@@ -9427,6 +9467,12 @@ def _chart_has_historical_period_axis(chart: dict) -> bool:
     return len(bare_months) >= 6
 
 
+_LEGAL_IDENTIFIER_BEFORE = re.compile(
+    r"(?i)\b(?:regulations?|reg\.|sections?|sec\.|rules?|clauses?|articles?|schedules?|chapters?|paras?|paragraphs?|"
+    r"sub-?regulation|sub-?section|circular\s+no\.?|notification\s+no\.?)\s*\(?\s*$"
+)
+
+
 def _sector_rotation_topic_quality_filter(
     report_text: str, charts: list, question: str = "",
 ) -> tuple[str, list, dict]:
@@ -16447,6 +16493,11 @@ def _attach_audit_source_evidence(
             if not math.isfinite(amount):
                 continue
             if amount.is_integer() and 1900 <= amount <= 2100:
+                continue
+            # "Regulation 29(2)", "Section 31", "Rule 19A", "Form C": a legal identifier, not a statistic. An Action
+            # edit was refused because "SAST Regulation 29" was treated as an unsupported number.
+            if not match.group("unit") and not match.group("currency") and _LEGAL_IDENTIFIER_BEFORE.search(
+                    text[max(0, match.start() - 30):match.start()]):
                 continue
             currency = (match.group("currency") or "").casefold().replace(".", "")
             currency = {
