@@ -98,3 +98,15 @@ def test_one_market_wide_quarterly_series_satisfies_the_promoter_chart():
     )
     cov = assess_chart_coverage([need], [{"id": "S9", "text": text}])[0]
     assert cov.status == "satisfied", cov.reason
+
+
+def test_market_wide_promoter_data_is_recognised_but_a_single_filing_is_not():
+    from routes.report import _is_promoter_market_wide_data
+
+    market = ("At Rs 1.5 lakh crore, promoter selling breaks all records in 2025. Promoters sold shares worth "
+              "Rs 1.5 lakh crore across listed companies, against Rs 1.1 lakh crore in 2024. Promoter holding in "
+              "NSE-listed companies fell to 40.6% in the March quarter from 41.9%.")
+    filing = ("Disclosure under Regulation 29(2) of SEBI (SAST). The promoter group of Fiem Industries Limited "
+              "sold 3,90,000 equity shares on 05 Sep 2025.")
+    assert _is_promoter_market_wide_data(market.casefold())
+    assert not _is_promoter_market_wide_data(filing.casefold())

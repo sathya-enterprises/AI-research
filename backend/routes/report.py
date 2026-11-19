@@ -8265,6 +8265,36 @@ def _has_promoter_share_sale_context(hay: str) -> bool:
     return False
 
 
+_PROMOTER_MARKET_WIDE_MAX = 10
+# "promoter holding fell to 41.9%", "promoters sold shares worth Rs 1.5 lakh crore",
+# "promoter selling", "India Ownership Report" - one measure for all listed companies.
+_PROMOTER_AGGREGATE_RE = re.compile(
+    r"\bpromoters?['’]?\s+(?:holding|shareholding|stake|ownership|selling|sales?|sold|offload\w*|"
+    r"cut\s+stake|reduced?\s+stake|share\s+in)\b|\bownership\s+report\b|"
+    r"\b(?:sold|selling|offload\w*|stake\s+sales?)\b.{0,60}\bby\s+promoters\b",
+    re.I,
+)
+_PROMOTER_AGGREGATE_SCOPE_RE = re.compile(
+    r"\b(?:listed\s+(?:companies|firms|entities)|nse[- ]listed|bse[- ]listed|nifty\s*(?:50|500)|"
+    r"all\s+companies|market[- ]wide|across\s+(?:the\s+)?market|india\s+inc|"
+    r"\d+\s+(?:companies|firms)|record|quarter|calendar\s+year|fy\s*\d{2})\b",
+    re.I,
+)
+_PROMOTER_AGGREGATE_FIGURE_RE = re.compile(
+    r"(?:\d[\d,.]*\s*(?:%|per\s*cent|lakh\s+crore|crore|cr\b|billion|bn\b))", re.I,
+)
+
+
+def _is_promoter_market_wide_data(text: str) -> bool:
+    """A page with market-wide promoter figures (totals, holding share), not one company's filing."""
+    sample = str(text or "")[:60_000]
+    return bool(
+        _PROMOTER_AGGREGATE_RE.search(sample)
+        and _PROMOTER_AGGREGATE_SCOPE_RE.search(sample)
+        and len(_PROMOTER_AGGREGATE_FIGURE_RE.findall(sample)) >= 3
+    )
+
+
 def _filter_relevant_sources(
     sources: list[dict], question: str, intent: "RequestIntent | None", *,
     require_context: bool = False, report_tier: str | None = None,
@@ -8705,6 +8735,7 @@ def _filter_relevant_sources(
         _has_affirmative_sale_action = _has_promoter_share_sale_context
 
         official_disclosure = []
+        market_wide_data = []
         for _score, _hits, _idx, src in scored:
             url = str(src.get("url") or "")
             host = (urlparse(url).hostname or "").casefold()
@@ -8713,6 +8744,26 @@ def _filter_relevant_sources(
                 host == domain_name or host.endswith("." + domain_name)
                 for domain_name in ("nseindia.com", "bseindia.com", "sebi.gov.in")
             )
+            if promoter_event_task and len(market_wide_data) < _PROMOTER_MARKET_WIDE_MAX:
+                # The question also asks for the proportion of and reasons for
+                # promoter selling, which only market-wide data answers (total
+                # promoter selling per quarter, promoter holding share). Keep
+                # those pages; the transaction ledger still reads only direct
+                # exchange filings (extract_verified_promoter_events).
+                data_text = hay
+                if require_context:
+                    fetched = str(src.get("pageContent") or src.get("page_content") or "").strip()
+                    fetch_status = str(src.get("pageFetchStatus") or src.get("page_fetch_status") or "").casefold()
+                    data_text = (" ".join((str(src.get("title") or ""), fetched)).casefold()
+                                 if fetch_status in {"ok", "success", "fetched"} and len(fetched) >= 180 else "")
+                # Single-company exchange filings keep the strict in-window
+                # transaction checks below; only exchange-wide publications
+                # (ownership reports, Market Pulse) take this path.
+                exchange_wide = not official_host or bool(re.search(
+                    r"ownership\s+report|market\s+pulse|listed\s+companies", data_text))
+                if data_text and exchange_wide and _is_promoter_market_wide_data(data_text):
+                    market_wide_data.append(src)
+                    continue
             promoter_signal = bool(re.search(
                 r"\b(?:promoter|promoters|promoter group|selling shareholder|seller)\b", hay,
             ))
@@ -8781,8 +8832,10 @@ def _filter_relevant_sources(
                     if _promoter_source_window_match(src, hay) is False:
                         continue
             official_disclosure.append(src)
-        if official_disclosure:
-            return internal + official_disclosure
+        if market_wide_data:
+            log.info("Promoter-sale relevance gate kept %d market-wide promoter data source(s)", len(market_wide_data))
+        if official_disclosure or market_wide_data:
+            return internal + official_disclosure + market_wide_data
         if promoter_event_task:
             log.warning("Promoter-sale relevance gate retained 0/%d official in-window transaction sources", len(scored))
             return internal
