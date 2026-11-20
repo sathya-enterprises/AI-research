@@ -1,0 +1,712 @@
+[
+  {
+    "question": "Prepare an in-depth comparison of health outcomes in India, China, Brazil, and N",
+    "tier": "in_depth",
+    "chartsShipped": 8,
+    "sourceTables": 49,
+    "proseGroups": 33,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 7 rows] 2322814 :: | Name | Under-five mortality rate (per 1000 live births) |",
+      "[table 7 rows] AC597B1 :: | Name | Maternal mortality ratio (per 100 000 live births) |",
+      "[table 6 rows] An assessment of progress towards universal health :: | | Brazil | Russia | India | China | South Africa |"
+    ],
+    "proseExamples": [
+      "[comparison x5] Specifically, China grew by 6.1% in 2019, followed by India with a 4.2% annual growth rate, Russia with 1.3%, and Brazil and South Africa with growth ",
+      "[comparison x4] From 2010 to 2019, the probability of dying from an NCD between birth and age 80 years decreased in 152 (82%) of 185 countries for females and in 147 ",
+      "[comparison x3] Non-communicable diseases (NCDs) include cancers; cardiovascular diseases; diabetes; endocrine, blood, and immune disorders; non-infectious respirator"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Assess the expansion of solar electricity in India, China, Brazil, and Nigeria f",
+    "tier": "detailed",
+    "chartsShipped": 3,
+    "sourceTables": 19,
+    "proseGroups": 44,
+    "reportTables": 2,
+    "tableExamples": [
+      "[table 8 rows] Setting 1.5°C compatible wind and solar targets :: | Brazil | 50 | 140 | 200 |",
+      "[table 15 rows] Global photovoltaic capacity installations :: | Country | 2022 1 | 2023 2 | 2024 |",
+      "[table 16 rows] Global photovoltaic capacity installations :: | Country | 2019 1 | 2020 2 | 2021 3 |"
+    ],
+    "proseExamples": [
+      "[comparison x5] Among countries with the largest absolute annual additions, leaders were China (+276.74 GW), United States (+36.91 GW), India (+24.53 GW), Brazil (+15",
+      "[comparison x5] Leaders are China with 886.66 GW, India with 97.38 GW, Japan with 91.61 GW, South Korea with 26.65 GW, and Turkey with 19.88 GW.",
+      "[comparison x5] Top five: United States at 176.68 GW, Brazil at 53.11 GW (up from zero in 2000), Mexico at 11.99 GW, Chile at 11.05 GW (up from zero in 2000), and Can"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Compare renewable electricity generation trends in India, China, Brazil, and Nig",
+    "tier": "detailed",
+    "chartsShipped": 6,
+    "sourceTables": 45,
+    "proseGroups": 43,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 5 rows] Generation | Ministry Of Power :: | Thermal | Increased by | 2.81 % |",
+      "[table 15 rows] Generation | Ministry Of Power :: | EAR | Growth in Fossil Fuel Generation(%) | Growth in Renewable Generation (Including Hy",
+      "[table 6 rows] Generation | Ministry Of Power :: | No. of Thermal Power Stations from which data have been received | 200 |"
+    ],
+    "proseExamples": [
+      "[comparison x3] Brazil 4.15 mn t $7.23 bn $31.14 bn 377.8 kt (2023,2024) $54.1 mn (2023,2024) $3.81 bn (2023,2024)",
+      "[comparison x4] China 21.21 mn t $450.13 bn $52.2 mn 1.83 mn t (2023,2024) $63.64 bn (2023,2024) $3.6 mn (2023,2024)",
+      "[comparison x3] Brazil 962.4 kt $12.4 mn $1.45 bn 69.9 kt (2023,2024) $2.1 mn (2023,2024) $238.0 mn (2023,2024)"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Compare internet use (% of individuals using the internet) and mobile-cellular s",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 51,
+    "proseGroups": 4,
+    "reportTables": 6,
+    "tableExamples": [
+      "[table 8 rows] Internet and mobile · Longseries :: Country | Year ↕ Sort by year of last observation | Value ↓ Sort by value, highest first",
+      "[table 20 rows] Internet and mobile · Longseries :: Year | Country | Value",
+      "[table 8 rows] Internet and mobile · Longseries :: Country | Year ↕ Sort by year of last observation | Value ↓ Sort by value, highest first"
+    ],
+    "proseExamples": [
+      "[comparison x5] The highest annual growth rates were recorded in a number of developing countries: Mozambique added 73.79% in 2025 compared with 2024, Tanzania 21.78%",
+      "[comparison x4] Stagnation is evident in major markets in Latin America and Southeast Asia: Brazil recorded only a 0.17% increase in 2025 compared with 2024, Mexico d",
+      "[comparison x3] Out of total 1092.79 million internet subscribers, number of broadband subscribers is 1065.88 million and number of narrowband subscribers is 26.91 mi"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How can you explain and analyse the sector rotation in Indian stock markets in t",
+    "tier": "in_depth",
+    "chartsShipped": 3,
+    "sourceTables": 23,
+    "proseGroups": 43,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 11 rows] CALCULATED NSE SECTOR RETURNS — 8 COMPLETED CALEND :: Sector | Q4 2024 | Q1 2025 | Q2 2025 | Q3 2025 | Q4 2025 | Q1 2026 | Q2 2026 | Q3 2026",
+      "[table 16 rows] February 2026: Where the Action Was :: Index | 30-Jan-26 | 27-Feb-26 | Return (%)",
+      "[table 5 rows] February 2026: Where the Action Was :: Company | Return (%) | Market Cap (Rs Cr)"
+    ],
+    "proseExamples": [
+      "[comparison x6] On the sectoral front, the top performing sectors for the quarter ended September 2025 were Nifty Auto (+11.2%), Nifty Metal (+5.3%) and Nifty India C",
+      "[comparison x4] For H1FY26, the top performing sectors were Nifty Auto (+24.6%), Nifty India Consumption (+12.5%) and Nifty Metal (+10.4%), while Nifty IT (-8.8%) was",
+      "[comparison x6] For 9MCY25, the top performing sectors were Nifty Auto (+16.2%), Nifty Metal (+16.0%) and Nifty Financial Services (+10.7%), while Nifty IT (-22.3%), "
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Analyze the attached Excel workbook “PMSPRFFEB2026”  and give an end-to end repo",
+    "tier": "detailed",
+    "chartsShipped": 8,
+    "sourceTables": 0,
+    "proseGroups": 0,
+    "reportTables": 5,
+    "tableExamples": [],
+    "proseExamples": [],
+    "verdict": "ok"
+  },
+  {
+    "question": "How have electric vehicle sales and public charging infrastructure in India grow",
+    "tier": "in_depth",
+    "chartsShipped": 5,
+    "sourceTables": 42,
+    "proseGroups": 25,
+    "reportTables": 15,
+    "tableExamples": [
+      "[table 7 rows] EV Market Report in India: 2025 :: | EV | Electric Vehicle | EV is defined as a broad view of vehicle that can be operated by",
+      "[table 29 rows] E Mobility | Bureau of Energy Efficiency (BEE), Mi :: S. No | States | Link for State EV Policies",
+      "[table 29 rows] E Mobility | Bureau of Energy Efficiency (BEE), Mi :: S. No | States | Link for State EV Policies"
+    ],
+    "proseExamples": [
+      "[comparison x5] wheelers 3.06%, Goods vehicle 2.86%, Tractor 2.28%, Trailer 1.78%, Others 0.94% and",
+      "[comparison x7] Among the rest, Light Motor Vehicles constitute 7%, 3 wheelers 3.06%, Goods vehicle 2.86%, Tractor 2.28%, Trailer 1.78%, Others 0.94% and lastly Buses",
+      "[comparison x3] Grant support is also available for EV public charging stations (EV PCS) and upgradation of testing agencies . ₹2,000 crore has been earmarked for nat"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did Indian scheduled commercial banks' asset quality (GNPA and NNPA ratios) ",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 12,
+    "proseGroups": 13,
+    "reportTables": 3,
+    "tableExamples": [
+      "[table 77 rows] Publications | Official Website of Reserve Bank of :: Item | Public Sector Banks | Private Sector Banks | Foreign Banks | Small Finance Banks | ",
+      "[table 25 rows] Publications | Official Website of Reserve Bank of :: | Table IV.1: Consolidated Balance Sheet of Scheduled Commercial Banks | | | | | | | | | |",
+      "[table 4 rows] Publications | Official Website of Reserve Bank of :: Item | Public Sector Banks | Private Sector Banks | Foreign Banks | Small Finance Banks | "
+    ],
+    "proseExamples": [
+      "[comparison x4] IV.6 Excluding the impact of merger, the growth in bank credit and investments was 12.5 per cent and 9.9 per cent, respectively, during 2024-25 as com",
+      "[comparison x4] · Banking activity has strengthened significantly in India, with domestic deposits and credit nearly tripling between 2015 and 2025 - deposits grew fr",
+      "[comparison x4] Bank deposits and credit (domestic) have nearly tripled between 2015 and 2025, with deposits rising from ₹88.35 lakh crore to ₹231.90 lakh crore and c"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Which Nifty sectoral indices outperformed and underperformed over the last four ",
+    "tier": "detailed",
+    "chartsShipped": 6,
+    "sourceTables": 24,
+    "proseGroups": 68,
+    "reportTables": 10,
+    "tableExamples": [
+      "[table 5 rows] February 2026: Where the Action Was :: Company | Return (%) | Market Cap (Rs Cr)",
+      "[table 6 rows] India Strategy :: | Nifty-500 sectoral earnings growth in 4QFY26 4QFY26 PAT growth YoY (%) | | | | | Key sec",
+      "[table 15 rows] Sector indices in Q3 2026: IT and pharma up, FMCG  :: Index | Q3 2026 | 2026 so far (to 1 Oct)"
+    ],
+    "proseExamples": [
+      "[comparison x4] IT (+12.6%), Nifty Metal (+11.3%) and Nifty Bank (+9.1%), while Nifty Media (-6.4%) and Nifty",
+      "[comparison x4] Financial Services (+17.4%), while Nifty Media (-20.5%), Nifty Realty (-16.6%), Nifty IT (-12.6%)",
+      "[comparison x6] In the Nifty 50 index, the top performing stocks for the quarter ended December 2025 were Shriram Finance (+61.7%), Titan Company (+20.3%) and Asian P"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How has India's installed solar and wind power capacity grown from FY2020 to FY2",
+    "tier": "detailed",
+    "chartsShipped": 4,
+    "sourceTables": 17,
+    "proseGroups": 23,
+    "reportTables": 5,
+    "tableExamples": [
+      "[table 7 rows] MINISTRY OF NEW AND RENEWABLE ENERGY :: | | Sector-wise Achievements (as on 31.12.2025) |",
+      "[table 4 rows] Energy Security in India :: | Sector | Cumulative Achievements (till 31.03.2014) | 2014-15 | 2023-24 | 2024-25 (01.04.",
+      "[table 21 rows] RENEWABLE ENERGY STATISTICS :: | Sl. No. | CONTENTS | PAGE NO. |"
+    ],
+    "proseExamples": [
+      "[comparison x5] This includes 89.43 GW of solar power, 46.92 GW of large hydro, 47.19 GW of wind power, 10.35 GW of bio-power, and 5.07 GW of small hydro power.",
+      "[comparison x5] In the financial year 2023/24, a record RE capacity of 18.56 GW was added, including 15.03 GW from solar power, 3.25 GW from wind power, 0.137 GW from",
+      "[comparison x3]  India’s Solar Power Growth: 89,431.98 MW Installed And 58.58% Renewable Contribution As Of August 2024  NHPC invites bids for 1,200 mw solar projec"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have life expectancy and current health expenditure per capita changed in In",
+    "tier": "detailed",
+    "chartsShipped": 3,
+    "sourceTables": 18,
+    "proseGroups": 26,
+    "reportTables": 5,
+    "tableExamples": [
+      "[table 10 rows] Do Health Expenditures Converge Among ASEAN Countr :: Mean | Max . | Min . | Std. Dev . | Mean | Max . | Min . | Std. Dev .",
+      "[table 10 rows] Do Health Expenditures Converge Among ASEAN Countr :: Sequence | ADF | PP | KPSS",
+      "[table 10 rows] Do Health Expenditures Converge Among ASEAN Countr :: Sequence | ADF | PP | KPSS"
+    ],
+    "proseExamples": [
+      "[comparison x4] At 23%, total government expenditures as share of GDP are relatively high in Vietnam (Figure 3 6 and Table 1 7) – driven to some extent by high govern",
+      "[series x3] This contrasts specifically to a slowing China, where the economy has gradually shifted from 6.0% percent growth in 2019 before the pandemic, to a for",
+      "[comparison x3] In 2016, 7.9 percent of people (8.4 percent in rural and 7.0 percent in urban"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did global semiconductor sales by region (Americas, Europe, China, Japan, As",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 15,
+    "proseGroups": 31,
+    "reportTables": 5,
+    "tableExamples": [
+      "[table 5 rows] Semiconductor Sales | BizStats-Dashboard :: Region | 1986 | 1987 | 1988 | 1989 | 1990 | 1991 | 1992 | 1993 | 1994 | 1995 | 1996 | 1997",
+      "[table 5 rows] Semiconductor Sales | BizStats-Dashboard :: | Region | 1986 | 1987 | 1988 | 1989 | 1990 | 1991 | 1992 | 1993 | 1994 | 1995 | 1996 | 19",
+      "[table 5 rows] Semiconductor market by end-use region — China ind :: Chart | Rank | Country / region | Value | vs 2023 | China ÷"
+    ],
+    "proseExamples": [
+      "[series x3] The program aims to lift America’s global production share from 12 % (2022) to 20 % by 2030 .The European Union Chips Act (2023) , valued at USD 47 bn",
+      "[series x3] The program aims to lift America’s global production share from 12 % (2022) to 20 % by 2030.The European Union Chips Act (2023), valued at USD 47 bn, ",
+      "[comparison x3] with 19.2%, China with 10.2%, and Europe with 7.2%."
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Analyse this PMS performance workbook: which portfolio managers and strategies d",
+    "tier": "detailed",
+    "chartsShipped": 7,
+    "sourceTables": 0,
+    "proseGroups": 0,
+    "reportTables": 6,
+    "tableExamples": [],
+    "proseExamples": [],
+    "verdict": "ok"
+  },
+  {
+    "question": "How have life and non-life insurance penetration and density in India changed fr",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 15,
+    "proseGroups": 20,
+    "reportTables": 4,
+    "tableExamples": [
+      "[table 3 rows] Press Release Page | Press Information Bureau :: FY 2020-21 | FY 2024-25 | Growth",
+      "[table 3 rows] Press Release Page | Press Information Bureau :: FY 2020-21 | FY 2024-25 | Growth",
+      "[table 8 rows] Insurance Penetration and Density in India (IRDAI  :: Country | Life penetration % | Total penetration % | Life density USD | Total density USD"
+    ],
+    "proseExamples": [
+      "[comparison x3] Insurance penetration stood at 3.7% with life insurance at 2.7% and non-life at 1% while insurance density increased marginally to USD 97.0.",
+      "[comparison x3] India’s insurance penetration remained strong at 3.7% in FY25, with non-life insurance maintaining a steady 1.0% share and life insurance continuing t",
+      "[comparison x4] During FY26, general insurers accounted for 82.87% of total non-life insurance premiums, led by The New India Assurance Company Limited (12.75%), ICIC"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How have India's mobile subscribers, data usage per user and 5G rollout progress",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 15,
+    "proseGroups": 33,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 33 rows] Telecom Regulatory Authority of India :: | (Data as on Q.E. 30 | th June, 2025) |",
+      "[table 5 rows] Press Release Page | Press Information Bureau :: S. No. | Period ending | Wireless Subscribers (in crores)",
+      "[table 34 rows] Press Release Page | Press Information Bureau :: S. No. | Period ending | Wireless Subscribers (in crores)"
+    ],
+    "proseExamples": [
+      "[comparison x4] Jio 489.72 478.78 482.09 488.19 498.06 1.70% 4.03% 3.31% 2.02%",
+      "[comparison x4] Airtel 398.07 392.80 395.15 401.14 403.11 1.27% 2.62% 2.01% 0.49%",
+      "[comparison x4] Idea 218.12 213.32 208.10 206.19 204.99 -6.02% -3.91% -1.50% -0.58%"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How have India's pharmaceutical exports grown from FY2020 to FY2025, which desti",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 10,
+    "proseGroups": 16,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 99 rows] Drug formulations & biologicals keep India's pharm :: IRFC Share Price | 83.82 | -29.7%",
+      "[table 12 rows] मंत्री (श्री :: | Financial Year | Exports (USD billion) |",
+      "[table 11 rows] PLI Scheme: A Mixed Bag With 12% Disbursement of I :: | S. No. | Period | Incentive Disbursed (in Rs. Crore) | |"
+    ],
+    "proseExamples": [
+      "[comparison x4] As on 31.03.2026, under the PLI Schemes, 892 applications have been approved across 14 sectors, resulting in actual investment of over ₹2.40 lakh cror",
+      "[series x3] In FY26, exports of drugs and pharmaceuticals stood at US$ 31.13 billion, compared with US$ 30.47 billion in FY25 and US$ 27.85 billion in FY24.",
+      "[comparison x3] In Q1 FY27, the United States of America remained the largest export destination, with exports valued at US$ 1.36 billion (44.61%), followed by the Un"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did rural versus urban FMCG volume growth in India evolve over the last eigh",
+    "tier": "detailed",
+    "chartsShipped": 3,
+    "sourceTables": 8,
+    "proseGroups": 28,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 99 rows] Rural continues to outpace urban FMCG market with  :: IRFC Share Price | 80.43 | -25.4%",
+      "[table 99 rows] FMCG urban sales growth outpaces rural in 2025, ov :: IRFC Share Price | 83.5 | -25.4%",
+      "[table 99 rows] 2018 sees fastest annual FMCG growth by volume in  :: IRFC Share Price | 85.96 | -30.6%"
+    ],
+    "proseExamples": [
+      "[comparison x3] On the contrary, the volume growth recorded by the 22 listed FMCG companies (only those which contribute to volume growth of the industry meaningfully",
+      "[comparison x3] E-commerce volumes grew 34.8% and modern trade 17.5% in April–June even as overall volumes fell, and Datum Intelligence expects online festive sales o",
+      "[comparison x3] Hindustan Unilever posted 7% underlying volume growth, Marico's India business expanded 10%, Godrej Consumer Products reported an 8% year-on-year incr"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have housing sales, new launches and unsold inventory changed across India's",
+    "tier": "detailed",
+    "chartsShipped": 2,
+    "sourceTables": 2,
+    "proseGroups": 12,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 3 rows] Beyond the Growth Trajectory :: | Capital Value | 8,590 | 7,550 | 16,600 | 8,380 | 7,720 | 7,300 | 6,790 | 5,820 |",
+      "[table 8 rows] Housing sales dip 28% in top 7 Indian cities :: | | | | Share of investor base (in%) | | | | | | | |"
+    ],
+    "proseExamples": [
+      "[comparison x4] Affordable housing still makes up a sizable chunk of stock in Delhi-NCR (26 per cent) and Mumbai (30 per cent), but remains scarce in Bengaluru (5 per",
+      "[comparison x3] Mumbai bucked the trend, with 33 per cent of new supply in the affordable segment, followed by Kolkata (23 per cent) and Pune (15 per cent).",
+      "[comparison x5] Demand patterns across the top seven cities highlight a clear shift toward higher-priced segments: * Luxury Housing: Area sold increased by 14% in 202"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have India's foodgrain production and minimum support prices for wheat and p",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 22,
+    "proseGroups": 10,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 9 rows] Strengthening India's Agricultural Backbone :: | Crop | 2013-14 | 2023-24 Absolute Difference (2023-24 over 2013-14) | | Difference (%) |",
+      "[table 28 rows] Press Release: Press Information Bureau :: S.N. | Crops | MSP 2026-27 (₹/quintal) | Cost of Production 2026-27 (₹/quintal) | Margin O",
+      "[table 28 rows] Press Release: Press Information Bureau :: S.N. | Crops | MSP 2026-27 (₹/quintal) | Cost of Production 2026-27 (₹/quintal) | Margin O"
+    ],
+    "proseExamples": [
+      "[comparison x3] wheat has surged from ₹4.40 lakh crore and ₹2.27 lakh crore in 2004-13 to ₹12.51 lakh crore and ₹5.44",
+      "[comparison x4] Additionally, the total MSP paid to farmers for paddy and wheat has surged from ₹4.40 lakh crore and ₹2.27 lakh crore in 2004-13 to ₹12.51 lakh crore ",
+      "[series x3] In 2004-05, total foodgrain production stood at 204.6 million tonnes. (4 th advance estimates) This increased to 252 million tonnes in 2014-15 and fur"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How did India's CPI inflation and the RBI repo rate move from January 2022 to De",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 37,
+    "proseGroups": 67,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 18 rows] Publications | Official Website of Reserve Bank of :: Total meetings | Meetings with full consensus | Meetings without full consensus | Variatio",
+      "[table 21 rows] Annual Report | Official Website of Reserve Bank o :: Category | Country | Policy Rate (per cent) (As on March 31, 2024) | Pause Since",
+      "[table 30 rows] Annual Report | Official Website of Reserve Bank o :: Constant | 2.34*** | 2.27***"
+    ],
+    "proseExamples": [
+      "[comparison x5] Assuming a normal monsoon, CPI inflation for 2024-25 was projected at 4.5 per cent with Q1 at 4.9 per cent, Q2 at 3.8 per cent, Q3 at 4.6 per cent and",
+      "[comparison x4] Taking into account the expectations of food inflation easing due to pick-up in the SWM and healthy progress in sowing coupled with strong buffer stoc",
+      "[comparison x3] October CPI accelerating to 5.54% and 6.1% on food costs and WPI surging to 11.39% in"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How did the US unemployment rate, job openings and wage growth evolve from 2021 ",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 2,
+    "proseGroups": 8,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 23 rows] Annual average rate of job openings 5.7 percent in :: | Year | Job openings rate | Hires rate | Total separations rate | Quits rate | Layoffs an",
+      "[table 32 rows] Table  16. Annual average job openings rates by in :: | Industry and region | 2021 | 2022 | 2023 | 2024 | 2025 |"
+    ],
+    "proseExamples": [
+      "[comparison x4] After a long recovery from the 2007-09 recession, the LFP rate was 63.1 percent in 2019 (slightly above the estimated trend value of 62.8 percent), an",
+      "[comparison x3] The annual average total separations rate was 3.6 percent, compared to 3.9 percent in 2022 and 3.8 percent in 2019.",
+      "[comparison x3] Over the year, total compensation rose 3.4 percent, wages and salaries rose 3.2 percent, and benefit costs rose 3.8 percent."
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did EU natural gas prices, storage levels and the share of Russian pipeline ",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 2,
+    "proseGroups": 49,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 21 rows] Europe's Gas Storage Compared to Historical Consum :: | Country | Total Storage Capacity (TWh) | % of Storage Filled | Storage as a % of Annual ",
+      "[table 8 rows] Europe's Gas Storage Compared to Historical Consum :: | Year (January price/tonne) | Cobalt | Lithium | Natural Graphite | Nickel |"
+    ],
+    "proseExamples": [
+      "[series x3] Indeed, the share of Russian natural gas (both pipeline and LNG) in total EU gas imports, which increased 35 percent in 2015 to 41 percent in 2020, dr",
+      "[comparison x5] In turn, by 2024, Russian gas via Ukraine accounted for just 5 percent of EU’s gas supply, with significant reliance limited to Austria, Hungary, and ",
+      "[comparison x4] EU’s biggest gas supplier (34 %, 23.3 bcm), followed by Russia (18 %, 12.4 bcm), the US (16 %, 11 bcm), North Africa (15 %,"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How have China's exports to the United States, the EU and ASEAN changed from 201",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 25,
+    "proseGroups": 31,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 8 rows] Vietnam as China's No.4 Oversea Export Destination :: | | | | | Export Transfer due to trade | | |",
+      "[table 4 rows] Chinese foreign trade in figures :: | Foreign Trade Values | 2019 | 2020 | 2021 | 2022 | 2023 |",
+      "[table 5 rows] Chinese foreign trade in figures :: | Foreign Trade Indicators | 2019 | 2020 | 2021 | 2022 | 2023 |"
+    ],
+    "proseExamples": [
+      "[comparison x3] Trade transfer effect = 1 + 3 + 6 2.00% 3.72% 5.71%",
+      "[comparison x3] The competitive effect caused by the accelerated transfer 4.38% 5.36% 8.82%of industrial chain due to trade friction =4.1+7.1",
+      "[comparison x3] The total impact of trade friction =1+3+6+4.1+6.1 6.37% 9.08% 14.54%"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How much private investment flowed into artificial intelligence by country from ",
+    "tier": "detailed",
+    "chartsShipped": 2,
+    "sourceTables": 25,
+    "proseGroups": 17,
+    "reportTables": 2,
+    "tableExamples": [
+      "[table 35 rows] Visualizing Global AI Investment by Country :: | Geographic area | Investment ($B, 2013-2024) |",
+      "[table 15 rows] Visualizing Global AI Investment by Country :: | Geographic Area | Number of Newly Funded AI Companies (2013–2024) |",
+      "[table 25 rows] Visualizing Global AI Investment by Country :: | Focus Area | Total Investment ($B, 2024) |"
+    ],
+    "proseExamples": [
+      "[comparison x3] US private AI investment reached $67.2 billion in 2023, roughly 8.7 times the next highest country, China ($7.8 billion), and 17.8 times the United Ki",
+      "[comparison x3] The gap is widening rather than closing: since 2022, private AI investment fell 44.2% in China and 14.1% in the European Union plus the United Kingdom",
+      "[comparison x3] By skill cluster, machine learning stayed the most in-demand at 0.7% of US postings, ahead of artificial intelligence (0.5%) and natural language proc"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did the number of IPOs and the amount raised on Indian exchanges (mainboard ",
+    "tier": "detailed",
+    "chartsShipped": 2,
+    "sourceTables": 42,
+    "proseGroups": 13,
+    "reportTables": 2,
+    "tableExamples": [
+      "[table 30 rows] RBI Bulletin | Official Website of Reserve Bank of :: FY 2023-24 | FY 2024-25 | Total",
+      "[table 17 rows] RBI Bulletin | Official Website of Reserve Bank of :: Name | IPO Size (₹ crore) | Name | IPO Size (₹ crore)",
+      "[table 30 rows] RBI Bulletin | Official Website of Reserve Bank of :: FY 2023-24 | FY 2024-25 | Total"
+    ],
+    "proseExamples": [
+      "[comparison x4] The findings indicate that the SME IPOs were on average over-subscribed by 97.4 times whereas the Mainboard IPOs were over-subscribed by 30.4 times (p",
+      "[comparison x4] The median one-year excess returns were similar across SMEs and non-SMEs (2.4% vs. −3.1%), while the median excess returns for SME IPOs were higher th",
+      "[comparison x3] Primary market fund-raising in India is equivalent to nearly 49% of private capital raised, compared with just 9% in the US and 13% in Europe."
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have monthly SIP inflows and mutual fund industry AUM in India grown from FY",
+    "tier": "detailed",
+    "chartsShipped": 2,
+    "sourceTables": 35,
+    "proseGroups": 209,
+    "reportTables": 3,
+    "tableExamples": [
+      "[table 7 rows] AMFI Monthly Note :: | Category | Mar 2025 | Feb 2025 (1 month) | 1 month % change | Sep 2024 (6 months) | 6 mo",
+      "[table 6 rows] AMFI Monthly Note :: | Category | Mar 2025 | Feb 2025 | Jan 2025 | Dec 2024 | Nov 2024 | Oct 2024 | Mar 2024 |",
+      "[table 7 rows] AMFI Monthly Note :: | Category | Feb 2025 | Jan 2025 (1 month) | 1 month % change | Aug 2024 (6 months) | 6 mo"
+    ],
+    "proseExamples": [
+      "[comparison x3] In contrast, globally, the gap is significant—particularly in the United States, where mutual fund AUM per capita rose from 16% of GDP in the late 198",
+      "[comparison x3] sectoral/ thematic (15.45%) and flexi-cap (14.79%) funds accounted for 30.24% of the total equity AUM.",
+      "[comparison x4] funds 4,55,088 4,27,156 6.5% 4,67,188 -2.6% 2,97,358 53.0% 1,48,830 205.8%"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How has India's crude steel production and capacity grown from 2019 to 2024 comp",
+    "tier": "detailed",
+    "chartsShipped": 2,
+    "sourceTables": 45,
+    "proseGroups": 40,
+    "reportTables": 3,
+    "tableExamples": [
+      "[table 7 rows] Press Release Page | Press Information Bureau :: Year | Crude Steel (in MnT) | Finished Steel (in MnT)",
+      "[table 7 rows] Press Release Page | Press Information Bureau :: Year | Crude Steel (in MnT) | Finished Steel (in MnT)",
+      "[table 7 rows] Press Release Page | Press Information Bureau :: Year | Crude Steel (in MnT) | Finished Steel (in MnT)"
+    ],
+    "proseExamples": [
+      "[series x3] It registered production growth from 43.44 MT in 2004-05 to 88.98 MT in 2014-15 and 168.4 MT in 2025-26 .",
+      "[series x3] It registered production growth from 43.44 MT in 2004-05 to 88.98 MT in 2014-15 and 168.4 MT in 2025-26.",
+      "[comparison x3] Crucial to this success has been the National Steel Policy (NSP) 2017, which set ambitious targets to achieve a crude steel capacity of 300 million to"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did Brent crude prices and India's crude oil import bill change from FY2021 ",
+    "tier": "detailed",
+    "chartsShipped": 4,
+    "sourceTables": 43,
+    "proseGroups": 12,
+    "reportTables": 1,
+    "tableExamples": [
+      "[table 5 rows] India's Crude Oil Import Bill Soars 46% as Middle  :: WTI Crude Futures • 11 mins | 85.48 | -0.24 | -0.28%",
+      "[table 4 rows] India's Crude Oil Import Bill Soars 46% as Middle  :: Gasoline Futures • 11 mins | 2.530 | -0.008 | -0.33%",
+      "[table 5 rows] India's Crude Oil Import Bill Soars 46% as Middle  :: Marine • 819 days | 75.08 | -2.22 | -2.87%"
+    ],
+    "proseExamples": [
+      "[comparison x4] Crude imports cost USD 13.7 billion during the month, petroleum product imports USD 1.3 billion and LNG imports USD 1.2 billion, against petroleum pro",
+      "[comparison x3] India sources around 90 per cent of its crude oil requirements, 50 per cent of its liquefied natural gas (LNG), and 60 per cent of its liquefied petro",
+      "[comparison x6] Percentage share of HS crude in total crude oil processing 72.8% 76.6% 77.7% 79.9% 76.5% 77.5%"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have India's defence exports and domestic defence production grown from FY20",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 0,
+    "proseGroups": 4,
+    "reportTables": 0,
+    "tableExamples": [],
+    "proseExamples": [
+      "[comparison x4] In 2024-25, defence exports reached ₹15,233 crore from the private sector and ₹8,389 crore from DPSUs, up from ₹15,209 crore and ₹5,874 crore in 2023-",
+      "[series x3] Defence Investment Strengthening Military Capabilities 3.1-Fold Growth in Defence Budget: The defence budget rose from ₹ 2.53 lakh crore in 2013–14 to",
+      "[comparison x3] Since FY17, overall output has risen by about 140 per cent to roughly Rs 1.78 trillion, while production by private firms has nearly trebled, growing "
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did foreign tourist arrivals and foreign exchange earnings from tourism in I",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 16,
+    "proseGroups": 19,
+    "reportTables": 6,
+    "tableExamples": [
+      "[table 26 rows] Initial Pages Tourism Statistics 2022 English.pmd :: | | Table 2.8.1 Distribution of Nationality wise FTAS in India according to Purpose 2021 |",
+      "[table 10 rows] Press Release Page | Press Information Bureau :: | S. No. | Country | 2020 | 2021 | 2022 | 2023 | 2024 |",
+      "[table 30 rows] Full book Text.cdr :: | 2.9 | Average Duration of stay of Foreign Tourist Arrivals in India | 41 |"
+    ],
+    "proseExamples": [
+      "[series x5] Inbound Tourism n International Tourist Arrivals (ITAs) in India reached 20.57 million, reflecting an increase of 8.89% over the previous year and 14.",
+      "[series x4] A gradual recovery was observed in subsequent years, with FTAs rebounding sharply to 6.44 million in 2022 (a 323.68% increase) and reaching 9.95 milli",
+      "[comparison x3] This strong r ebound highl ight s the grow ing confidence of the Indian diaspora in travelling to India post-pandemic. . n The region-wise analysis fo"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How have gross enrolment ratios in higher education and learning outcomes in Ind",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 8,
+    "proseGroups": 20,
+    "reportTables": 3,
+    "tableExamples": [
+      "[table 5 rows] Demand for Grants 2026-27 Analysis : Education :: Grade | Language | Mathematics",
+      "[table 5 rows] Demand for Grants 2026-27 Analysis : Education :: Level of Enrolment | Rural | Urban | All",
+      "[table 4 rows] Demand for Grants 2026-27 Analysis : Education :: Position | Sanctioned | Filled | Vacant | Vacancy"
+    ],
+    "proseExamples": [
+      "[comparison x3] India today operates one of the world’s largest school systems, serving 24.69 crore students across 14.71 lakh schools, supported by over 1.01 crore t",
+      "[comparison x4] - Primary GER stands at 90.9%, upper primary at 90.3%, secondary at 78.7%, and higher secondary at 58.4%, with large GER–NER gaps at secondary, indica",
+      "[comparison x3] - Around 93.6% of schools have electricity, but internet (63.5%) and computers (64.7%) remain unevenly available.​"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How have UPI transaction volumes and values grown from FY2020 to FY2025, and wha",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 43,
+    "proseGroups": 14,
+    "reportTables": 3,
+    "tableExamples": [
+      "[table 9 rows] UPI Statistics (2016 to 2026 Data) - GrabOn :: | Financial Year | Number of UPI Transactions |",
+      "[table 18 rows] UPI Statistics (2016 to 2026 Data) - GrabOn :: | Month | UPI Transaction Volume |",
+      "[table 9 rows] UPI Statistics (2016 to 2026 Data) - GrabOn :: | UPI Application | Market Share |"
+    ],
+    "proseExamples": [
+      "[comparison x3] CRED (0.8%), Super Money (0.7%), and Amazon Pay (0.6%) make it to the top 7 players in the UPI space.",
+      "[comparison x6] PoS terminals grew 29% to 11.2 million from 8.6 million in Jan 2025, Bharat QR rose 12% to 6.72 million from 6 million in Jan 2025, and UPI QRs more t",
+      "[comparison x3] Part IV: Revenue and Financials — Three Very Different Numbers PhonePe Rs 7,115 Cr, Paytm Rs 6,900 Cr, Google Pay Rs 1,547 Cr."
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How did India's passenger vehicle, two-wheeler and commercial vehicle domestic s",
+    "tier": "detailed",
+    "chartsShipped": 0,
+    "sourceTables": 16,
+    "proseGroups": 24,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 13 rows] In the 20th century, the old modes of transport, t :: | Vehicular Penetration in Select Developed & Developing Countries, 2010 | | | | |",
+      "[table 5 rows] In the 20th century, the old modes of transport, t :: | Category | 2009-10 | Automobile Production Trends 2010-11 | 2011-12 | (Number of | Vehic",
+      "[table 15 rows] Mint Street Memos| Official Website of Reserve Ban :: Total | Total Excl. Two-wheelers | Passenger | Commercial | Two-wheelers"
+    ],
+    "proseExamples": [
+      "[series x4] The share of automobile sector in cumulative FDI inflow for the period 2000-16 was 5.3% which dipped slightly for the period 2000-2021 to 4.9% basical",
+      "[comparison x3] and taxis (13.5%), other vehicles (8.3%), goods vehicles (4.8%) and buses including omni",
+      "[comparison x3] Amongst the various categories of vehicles, the highest CAGR during the period 2002 to 2012 was recorded by cars, jeeps and taxis (11%), followed by t"
+    ],
+    "verdict": "missed"
+  },
+  {
+    "question": "How have CO2 emissions of China, the United States, India and the EU changed fro",
+    "tier": "detailed",
+    "chartsShipped": 1,
+    "sourceTables": 8,
+    "proseGroups": 14,
+    "reportTables": 0,
+    "tableExamples": [
+      "[table 14 rows] Annex: Progress of major emitters towards climate  :: | Country | Source | Last reported data year |",
+      "[table 23 rows] Progress of major emitters towards climate targets :: | Country | Source | Last reported data year |",
+      "[table 3 rows] Download &nbsp; :: EDGAR Country Code | Country | 1970 | 1971 | 1972 | 1973 | 1974 | 1975 | 1976 | 1977 | 197"
+    ],
+    "proseExamples": [
+      "[series x4] The European Union has updated its targets, progressing from a 55 percent reduction by 2030 to 66.25–72.5 percent by 2035, and further to 90 percent b",
+      "[comparison x3] As shown in Figure ES-1, China’s average annual reduction rate after peak will need to be 1.4–2.1 percent, while the annual reduction rates observed i",
+      "[comparison x4] Together they account for 49.8% of global population, 63.2% of global gross domestic product, 64.2% of global fossil fuel consumption and 62.7% of glo"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "How can you explain & analyze the sector rotation in Indian stock markets in the",
+    "tier": "in_depth",
+    "chartsShipped": 5,
+    "sourceTables": 9,
+    "proseGroups": 41,
+    "reportTables": 14,
+    "tableExamples": [
+      "[table 11 rows] CALCULATED NSE SECTOR RETURNS — 8 COMPLETED CALEND :: Sector | Q4 2024 | Q1 2025 | Q2 2025 | Q3 2025 | Q4 2025 | Q1 2026 | Q2 2026 | Q3 2026",
+      "[table 14 rows] Sectoral Indices performance in April, 2024 | Indi :: | Sectoral Index | 1-month Returns (%) | 3-month Returns (%) |",
+      "[table 5 rows] Indian Stock Market Index Returns & Valuation Dash :: | Index | Exchange | Category | 1Y Return | P/E |"
+    ],
+    "proseExamples": [
+      "[comparison x6] On the sectoral front, the top performing sectors for the quarter ended September 2025 were Nifty Auto (+11.2%), Nifty Metal (+5.3%) and Nifty India C",
+      "[comparison x4] For H1FY26, the top performing sectors were Nifty Auto (+24.6%), Nifty India Consumption (+12.5%) and Nifty Metal (+10.4%), while Nifty IT (-8.8%) was",
+      "[comparison x6] For 9MCY25, the top performing sectors were Nifty Auto (+16.2%), Nifty Metal (+16.0%) and Nifty Financial Services (+10.7%), while Nifty IT (-22.3%), "
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Explain the proportion and reasons for stake sales by Indian business promoters ",
+    "tier": "in_depth",
+    "chartsShipped": 1,
+    "sourceTables": 8,
+    "proseGroups": 10,
+    "reportTables": 10,
+    "tableExamples": [
+      "[table 5 rows] To, National Stock Exchange of India Limited Listi :: | Sr. No. | Name of the Promoters/ PAC | No. of Equity shares sold |",
+      "[table 3 rows] Further, please find below mentioned the details o :: | Manager (CRD) BSE Limited Phiroze Jeejeebhoy Towers, Dalal Street, Mumbai – | | 400001 |",
+      "[table 9 rows] Further, please find below mentioned the details o :: | Name Promoter | of the | Holding before Transfer & % holding | No. of Shares Transferred"
+    ],
+    "proseExamples": [
+      "[comparison x3] US$11 bn of FPI and US$30 bn of promoters and other investors selling offset by US$41 bn of DII buying in",
+      "[comparison x3] FPIs sold US$11 bn, others (promoters, retail) sold US$30 bn and DIIs bought US$41 bn in 1HCY25",
+      "[comparison x4] Meanwhile, the share of the Government (as promoter) increased to 9.39 per cent from 9.27 per cent during the quarter.After having overtaken foreign i"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "List down the why, what, how of all the FTAs signed by India in the past 1 year,",
+    "tier": "in_depth",
+    "chartsShipped": 5,
+    "sourceTables": 3,
+    "proseGroups": 8,
+    "reportTables": 16,
+    "tableExamples": [
+      "[table 5 rows] Signed, Sealed and Exporting :: | | Table-2: Expansion in Exported Tariff Lines under Recent FTAs | | |",
+      "[table 18 rows] India's Trade Agreements 2026: FTA List, Status an :: # | Agreement | Signed | In force",
+      "[table 5 rows] मंत्री (श्री :: | Sl. No. | Name of the Agreement | Date of Signing Agreement | of the | Implementation of"
+    ],
+    "proseExamples": [
+      "[series x5] Inbound Tourism n International Tourist Arrivals (ITAs) in India reached 20.57 million, reflecting an increase of 8.89% over the previous year and 14.",
+      "[series x4] A gradual recovery was observed in subsequent years, with FTAs rebounding sharply to 6.44 million in 2022 (a 323.68% increase) and reaching 9.95 milli",
+      "[comparison x3] This strong r ebound highl ight s the grow ing confidence of the Indian diaspora in travelling to India post-pandemic. . n The region-wise analysis fo"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "Analyze electric vehicle adoption in India over the past 5 years: sales by segme",
+    "tier": "in_depth",
+    "chartsShipped": 16,
+    "sourceTables": 60,
+    "proseGroups": 54,
+    "reportTables": 31,
+    "tableExamples": [
+      "[table 3 rows] Electric Vehicles in India :: Source of Capital | Share | Interest Rate | Cost Contribution",
+      "[table 25 rows] Electric Vehicles in India :: S. No. | Corridor | S. No. | Corridor",
+      "[table 11 rows] RBI Bulletin | Official Website of Reserve Bank of :: Region | Key Initiatives | Brief overview"
+    ],
+    "proseExamples": [
+      "[comparison x4] Reflecting this ambition, the Indian government aims to increase the share of EV sales to 30% in private cars, 70% in commercial vehicles, 40% in buse",
+      "[comparison x3] Grant support is also available for EV public charging stations (EV PCS) and upgradation of testing agencies . ₹2,000 crore has been earmarked for nat",
+      "[comparison x4] https://pmedrive.heavyindustries.gov.in/docs/policy_document/Gazette%20Notification%2010%2008%202026%20on%20enhancement%20of%20Outlay%2011900%20cr.pdf"
+    ],
+    "verdict": "under-used"
+  },
+  {
+    "question": "give me a report  with a graph with clean sections",
+    "tier": "detailed",
+    "chartsShipped": 7,
+    "sourceTables": 0,
+    "proseGroups": 0,
+    "reportTables": 5,
+    "tableExamples": [],
+    "proseExamples": [],
+    "verdict": "ok"
+  }
+]
