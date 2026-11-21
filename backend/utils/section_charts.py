@@ -473,6 +473,12 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
             col_units[col] = units
     if _only_cols is not None:
         numeric_cols = [c for c in numeric_cols if c in _only_cols]
+    # "Date | Buy value | Sell value | Net value": the net column is the measure the table exists for (live
+    # market run charted gross FII buying, 23,596 cr, beside a net figure of 10,308 cr in the same row).
+    net_cols = [c for c in numeric_cols if re.search(r"(?i)\bnet\b", header[c])]
+    if net_cols and any(re.search(r"(?i)\b(?:buy|sell|bought|sold|gross|purchases?|sales?|inflows?|outflows?)\b",
+                                  header[c]) for c in numeric_cols if c not in net_cols):
+        numeric_cols = net_cols + [c for c in numeric_cols if c not in net_cols]
     if not numeric_cols:
         return []
     if qtd_start and not _qtd and not _future and _only_cols is None and _only_rows is None:
@@ -546,6 +552,12 @@ def charts_from_passage(passage, chart_index: int, qtd_start: int | None = None,
                 and not re.search(r"(?i)\b(?:total|overall|aggregate|net)\b", header[c])]
         # entity columns chosen by the question (utils.table_focus) are compared as they are
         cols = cols if _only_cols is not None else related_columns(cols, header, rows)
+        # A buy / sell / net flow table over dates is read through its net column (a total of parts is
+        # excluded above; net = buy - sell is the measure itself).
+        if net_cols and _only_cols is None and unit_of(net_cols[:1]) is not None and any(
+                re.search(r"(?i)\b(?:buy|sell|bought|sold|gross|purchases?|sales?|inflows?|outflows?)\b", header[c])
+                for c in numeric_cols if c not in net_cols):
+            cols = net_cols[:1]
         if cols and unit_of(cols) is not None:
             cols = cols[:MAX_COLUMN_SERIES]
             unit = unit_of(cols) or ""

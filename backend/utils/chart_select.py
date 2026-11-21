@@ -67,6 +67,31 @@ def index_level_comparison(spec: dict) -> bool:
     return len(indices) >= 2 and len(indices) >= 0.6 * len(labels) and bool(values) and max(values) / min(values) > 2
 
 
+def index_point_change_comparison(spec: dict) -> bool:
+    """A bar chart of the POINT changes of different indices ("Chg: Nifty Bank 1,572, Nifty IT 403"): a point
+    move depends on the index level, so it is no more comparable across indices than the level is."""
+    if str(spec.get("type") or "").casefold() not in {"bar", "horizontal_bar", "column"}:
+        return False
+    measure = " ".join(str(spec.get(k) or "") for k in ("title", "yLabel", "unit"))
+    measure += " " + " ".join(str(s.get("name") or "") for s in spec.get("series") or [] if isinstance(s, dict))
+    if "%" in measure or re.search(r"(?i)per ?cent|return", measure) or not re.search(r"(?i)chg|change|points?", measure):
+        return False
+    labels = _labels(spec)
+    indices = [label for label in labels if _INDEX_LABEL_RE.search(label)]
+    return len(indices) >= 2 and len(indices) >= 0.6 * len(labels)
+
+
+def numeric_labels(spec: dict) -> bool:
+    """Most category labels are numbers ("-2.36", "1.38"): a misread table, not a readable chart."""
+    labels = [label.strip() for label in _labels(spec) if label.strip()]
+    # years ("2015", "2024") are period labels of a time series, not misread numbers
+    # "1336 343 455 292 -425": a whole data row read as one label is a misread table too
+    numeric = [label for label in labels
+               if re.fullmatch(r"(?:[-+−]?[0-9][0-9,]*(?:[.][0-9]+)?%?)(?:[ ]+[-+−]?[0-9][0-9,]*(?:[.][0-9]+)?%?)*", label)
+               and not re.fullmatch(r"(?:19|20)[0-9]{2}", label)]
+    return len(labels) >= 3 and len(numeric) >= 0.5 * len(labels)
+
+
 def _publisher(chart, domain_of: dict | None = None) -> str:
     """The publishing site of a chart's first source (several pages of one site are one publisher)."""
     spec = getattr(chart, "spec", chart) or {}
@@ -146,15 +171,23 @@ def select_charts(charts: list, domain_of: dict | None = None, question: str = "
         if short_window and long_horizon_chart(spec):
             dropped.append({"title": title, "reason": "measures a year or more; the question asks about a short recent period"})
             continue
+        if numeric_labels(spec):
+            dropped.append({"title": title, "reason": "its category labels are numbers (a misread table)"})
+            continue
+        if index_point_change_comparison(spec):
+            dropped.append({"title": title, "reason": "compares point changes across indices (their % changes are comparable)"})
+            continue
         if index_level_comparison(spec):
             dropped.append({"title": title, "reason": "compares index levels across different indices (their % changes are comparable, their levels are not)"})
             continue
         stem = measure_stem(title)
-        key = (stem, _publisher(chart, domain_of))
+        # Short-window market news repeats one view across sites (each site's top movers): the cap counts the
+        # view, whichever site it comes from. Long-horizon questions never reach the cap (see below).
+        key = (stem,) if short_window else (stem, _publisher(chart, domain_of))
         # Short-window questions draw on market news pages that repeat one view (each day's top movers); a
         # long-horizon question's repeated measure is usually distinct data (registrations per vehicle segment).
         if short_window and stem and seen[key] >= MAX_SAME_VIEW:
-            dropped.append({"title": title, "reason": f"the same '{stem}' view from the same source is already shown {MAX_SAME_VIEW} times"})
+            dropped.append({"title": title, "reason": f"the same '{stem}' view is already shown {MAX_SAME_VIEW} times"})
             continue
         seen[key] += 1
         kept.append(chart)

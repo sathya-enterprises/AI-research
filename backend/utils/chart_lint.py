@@ -37,7 +37,7 @@ PLACEHOLDER_RE = re.compile(r"\$#%|#%|\bXX+%?|\[(?:value|x|data|number)\]|\{\{[^
 FORECAST_ROW_RE = re.compile(r"(?i)\b(?:forecast|projected|projection|estimated?|expected)\b|\b20\d{2}\s?[EeFfPp]\b")
 EXAMPLE_RE = re.compile(r"(?i)\b(?:example|examples|illustrative|illustration|sample|hypothetical|for instance|e\.g\.)\b")
 _MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*"
-_TIME_RE = re.compile(rf"(?i)^\s*(?:\d{{1,2}}\s+{_MONTHS}\s+\d{{4}}|{_MONTHS}\s+\d{{2,4}}|Q[1-4]\s*(?:FY)?\s*'?\d{{2,4}}|"
+_TIME_RE = re.compile(rf"(?i)^\s*(?:\d{{1,2}}\s+{_MONTHS},?\s+\d{{4}}|{_MONTHS}\s+\d{{2,4}}|Q[1-4]\s*(?:FY)?\s*'?\d{{2,4}}|"
                       rf"FY\s*'?\d{{2,4}}E?|H[12]\s*FY\d{{2,4}}|\d{{4}}(?:-\d{{2}})?|\d{{4}}-\d{{2}}-\d{{2}}|Week\s+\d+)\s*$")
 _SEASONAL_RE = re.compile(rf"(?i)^\s*(?:{_MONTHS}|Q[1-4]|H[12])\s*$")
 _ACRONYMS = {"FII", "DII", "FPI", "RS", "NIM", "PE", "P/E", "IT", "QTD", "YTD", "YOY", "MOM", "PSU", "FMCG", "GDP", "CPI",
@@ -110,7 +110,7 @@ def time_key(label: str) -> float | None:
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", t)
     if m:
         return int(m.group(1)) * 400 + int(m.group(2)) * 32 + int(m.group(3))
-    m = re.fullmatch(rf"(?i)(\d{{1,2}})\s+({_MONTHS})\s+(\d{{4}})", t)
+    m = re.fullmatch(rf"(?i)(\d{{1,2}})\s+({_MONTHS}),?\s+(\d{{4}})", t)  # "20 Nov, 2026" too
     if m:
         return int(m.group(3)) * 400 + _MONTH_NUM[m.group(2)[:3].lower()] * 32 + int(m.group(1))
     m = re.fullmatch(rf"(?i)({_MONTHS})\s+'?(\d{{2,4}})", t)

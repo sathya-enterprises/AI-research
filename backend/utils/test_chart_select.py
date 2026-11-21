@@ -67,3 +67,35 @@ def test_a_sector_title_names_its_subject_before_the_colon():
     assert [e.name for e in _headline_entities(section, [cement, energy])] == ["Cement"]
     merged = Section(section_id="sec-7", title="Cement and Power: Capacity", role="deep_dive", entity="")
     assert {e.name for e in _headline_entities(merged, [cement, energy])} == {"Cement", "Energy"}
+
+
+def test_misread_tables_and_point_changes_across_indices_are_dropped_but_year_series_are_kept():
+    from utils.chart_select import index_point_change_comparison, numeric_labels
+    assert numeric_labels(_chart("Jan-26: 13 indices", ["-2.36", "-3.34", "-1.07", "-4.13"], [1.38, 0.46, -0.33, -0.66]))
+    assert numeric_labels(_chart("Feb’26 Mar’26", ["1336 343 455 292", "529 -1311 -39", "-459 -225 -827"], [1, 2, 3]))
+    assert not numeric_labels(_chart("Users (%)", ["2015", "2016", "2017", "2018"], [10, 12, 15, 19]))
+    labels = ["Nifty Bank", "Nifty Financial Services", "Nifty IT"]
+    assert index_point_change_comparison(_chart("Chg: 3 NSE sector indices", labels, [1572.2, 571.55, 403.2]))
+    assert not index_point_change_comparison(_chart("Day change (%): indices", labels, [2.49, 2.02, 1.3]))
+
+
+def test_short_window_movers_cap_counts_the_view_across_sites():
+    charts = [_chart(f"Change (%): stocks {i}", [f"s{i}a", f"s{i}b", f"s{i}c"], [1 + i, 2 + i, 3 + i], source=f"S{i}")
+              for i in range(4)]
+    domains = {"S0": "moneycontrol.com", "S1": "icicidirect.com", "S2": "moneycontrol.com", "S3": "livemint.com"}
+    kept, _dropped = select_charts(charts, domains, MONTH_Q, today="2026-11-21")
+    assert len(kept) == 2
+
+
+def test_a_buy_sell_net_flow_table_over_dates_is_charted_as_net_in_date_order():
+    from types import SimpleNamespace
+    from utils.section_charts import _focused_charts
+    text = ("TABLE 2 — FII/FPI trading activity\nDATE | BUY VALUE (Cr) | SELL VALUE (Cr) | NET VALUE (Cr)\n"
+            "20 Nov, 2026 | 23,596.40 | 13,287.98 | 10,308.42\n19 Nov, 2026 | 20,706.95 | 13,295.54 | 7,411.41\n"
+            "18 Nov, 2026 | 17,250.10 | 12,100.20 | 5,149.90\n17 Nov, 2026 | 19,930.98 | 15,735.60 | 4,195.38")
+    passage = SimpleNamespace(text=text, passage_id="S10.1", source_id="S10", kind="table", reliability=0.9,
+                              parent_source_id="", parent_data_context="", title="", url="")
+    chart = _focused_charts(passage, 1, None, None, None, None)[0]
+    assert chart.spec["type"] == "line" and [s["name"] for s in chart.spec["series"]] == ["NET VALUE"]
+    assert [label for _s, label, _v in chart.points][0] == "17 Nov, 2026"
+    assert [value for _s, _l, value in chart.points] == [4195.38, 5149.9, 7411.41, 10308.42]
