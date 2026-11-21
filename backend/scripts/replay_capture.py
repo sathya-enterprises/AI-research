@@ -166,7 +166,7 @@ def replay_chart_candidates(capture: dict, audited: list, enriched: list) -> dic
     from utils.data_angles import requested_year_bounds
     from utils.evidence_store import store_from_passages
     from utils.official_data import official_charts
-    from utils.report_pipeline_v2 import MAX_CHARTS
+    from utils.report_pipeline_v2 import CANDIDATE_CAP
     from utils.section_charts import build_chart_candidates
     from utils.table_focus import focus_entities
 
@@ -178,7 +178,7 @@ def replay_chart_candidates(capture: dict, audited: list, enriched: list) -> dic
         min_year, max_year = requested_year_bounds(question, date.fromisoformat(today))
     except Exception:
         min_year, max_year = None, None
-    candidates, drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
+    candidates, drops = build_chart_candidates(store, max_charts=CANDIDATE_CAP.get(tier, 60), min_year=min_year,
                                                max_year=max_year, today=today, focus=focus_entities(question))
     candidates = list(candidates) + list(official_charts(store, question) or [])
     # As in the pipeline: points outside the question's window are trimmed before verification.

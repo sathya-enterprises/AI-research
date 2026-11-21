@@ -39,6 +39,10 @@ def blank_dash_cells(markdown: str) -> str:
 
 
 MAX_CHARTS = {"detailed": 10, "in_depth": 36}
+# Table charts built before the quality and evidence checks. Candidates are built in source order, not by
+# relevance, and the checks remove about half: a cap of 2x MAX_CHARTS stopped at 20 candidates in reports
+# holding 60-120 table passages (UPI, banks, SIP) before their best tables were read.
+CANDIDATE_CAP = {"detailed": 60, "in_depth": 120}
 CHARTS_PER_SECTION = {"detailed": 2, "in_depth": 3}
 # All charts in the report (fetched-dataset + table charts): a detailed report has a 32-page cap,
 # and its layout fills ~28 pages without charts, so it carries at most 6 (Stage F target >= 5).
@@ -549,7 +553,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         min_year, max_year = None, None
     from utils.table_focus import focus_entities as _focus_entities
     _context_pool: list = []  # charts dropped only for the window: labelled context charts if below the minimum
-    candidates, chart_drops = build_chart_candidates(store, max_charts=MAX_CHARTS.get(tier, 10) * 2, min_year=min_year,
+    candidates, chart_drops = build_chart_candidates(store, max_charts=CANDIDATE_CAP.get(tier, 60), min_year=min_year,
                                                      max_year=max_year, today=today, focus=_focus_entities(question),
                                                      context_out=_context_pool)
     table_chart_count = len(candidates) + len(chart_drops)

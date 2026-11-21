@@ -66,6 +66,59 @@ def _tokens(text: str) -> list[str]:
     return [t.strip(".%-") for t in _TOKEN_RE.findall(str(text or "").casefold()) if t.strip(".%-") and t not in _STOP]
 
 
+_FLAT_PERIOD_RE = re.compile(
+    r"\b(?:19|20)\d{2}(?:\s*[-–/]\s*(?:19|20)?\d{2})?\b"            # 2023, 2023-24, 2019/2020
+    r"|\bFY\s*'?\d{2}(?:\d{2})?(?:\s*[-–]\s*\d{2})?\b"               # FY24, FY2024, FY 2023-24
+    r"|\bQ[1-4]\s*(?:FY\s*)?'?\d{2,4}\b"                              # Q1 FY25, Q3 2024
+    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[-' ]+(?:19|20)?\d{2}\b",  # Mar-25, June 2024
+    re.I,
+)
+_FLAT_VALUE = r"[-+−]?\(?\d[\d,]*(?:\.\d+)?\)?%?"
+_FLAT_ROW_RE = re.compile(
+    rf"^\s*(?:\d{{1,3}}[.)]?\s+)?(?P<label>[A-Za-z][A-Za-z0-9&.,'()/\-– ]{{0,70}}?)\s+(?P<values>(?:{_FLAT_VALUE}\s+)+{_FLAT_VALUE})\s*$"
+)
+
+
+def _flat_table_at(lines: list[str], index: int) -> tuple[list[str], int] | None:
+    """A table a PDF/HTML extractor flattened into spaced text, rebuilt as pipe rows.
+
+    Government and regulator PDFs (RBI, TRAI, ministries) reach the store as
+    ``Wireless 1170.53 1153.72 1150.66`` under a ``Mar-24 Jun-24 Sep-24`` line, so the
+    chart builder (which reads pipe tables) never saw them. Only blocks whose
+    header line names one period per value column are rebuilt: a column whose
+    period is unknown would chart a number against a guessed date.
+    Returns (pipe rows, index after the block) or None.
+    """
+    header = lines[index].strip()
+    if "|" in header or len(header) > 220:
+        return None
+    periods = [re.sub(r"\s+", " ", m.group(0)).strip() for m in _FLAT_PERIOD_RE.finditer(header)]
+    if len(periods) < 2 or len(set(p.casefold() for p in periods)) != len(periods):
+        return None
+    # the header is a period line, not a sentence that mentions years
+    leftover = _FLAT_PERIOD_RE.sub(" ", header)
+    if len(re.findall(r"[A-Za-z]{3,}", leftover)) > 6 or re.search(r"[.;:]\s+[A-Z]", leftover):
+        return None
+    rows: list[str] = []
+    j = index + 1
+    while j < len(lines):
+        match = _FLAT_ROW_RE.match(lines[j])
+        if not match:
+            break
+        values = re.findall(_FLAT_VALUE, match.group("values"))
+        if len(values) != len(periods):
+            break
+        label = match.group("label").strip(" .,-–")
+        if not label or _FLAT_PERIOD_RE.fullmatch(label):
+            break
+        rows.append("| " + label + " | " + " | ".join(values) + " |")
+        j += 1
+    if len(rows) < 3:
+        return None
+    caption = re.sub(r"\s+", " ", leftover).strip(" |-–:") or "Item"
+    return ["| " + caption[:60] + " | " + " | ".join(periods) + " |"] + rows, j
+
+
 def _split_tables_and_text(page: str) -> tuple[list[tuple[str, list[str]]], str]:
     """Separate pipe tables from narrative text.
 
@@ -108,6 +161,16 @@ def _split_tables_and_text(page: str) -> tuple[list[tuple[str, list[str]]], str]
         if stripped.startswith("[") and stripped.endswith("]") and "PUBLISHER" in stripped:
             i += 1
             continue  # extractor section labels
+        flat = _flat_table_at(lines, i)
+        if flat:
+            rows, i = flat
+            heading = "Table"
+            while narrative and not narrative[-1].strip():
+                narrative.pop()
+            if narrative and len(narrative[-1].strip()) <= 200:
+                heading = narrative.pop().strip()
+            tables.append((heading, rows))
+            continue
         narrative.append(lines[i])
         i += 1
     return tables, "\n".join(narrative)

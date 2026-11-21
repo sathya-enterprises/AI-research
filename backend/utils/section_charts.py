@@ -27,7 +27,9 @@ _NUM_CELL_RE = re.compile(
     r"([\d,]*\.?\d+)\s*"
     r"(million\s+tonnes?|billion\s+tonnes?|thousand\s+tonnes?|"
     r"%|x|pts|bps|cr|crore|bn|mn|lakh|million|billion|trillion|thousands?|yrs?|years?|"
-    r"gw|mw|kw|gwh|mwh|twh|kwh|bu|tonnes?|metric\s+tons?|mt|kt|kg|km|ha|\u2030)?\s*\)?$", re.I)
+    r"gw|mw|kw|gwh|mwh|twh|kwh|bu|tonnes?|metric\s+tons?|mt|kt|kg|km|ha|\u2030|[BMKT])?\s*\)?$", re.I)
+# "$462.6B", "1.2T": a capital magnitude letter right after the number (a lower-case "m"/"k" is a unit, not a scale)
+_MAGNITUDE_LETTER = {"B": "billion", "M": "million", "K": "thousand", "T": "trillion"}
 _HEADER_UNIT_RE = re.compile(
     r"(?i)(?<![a-z0-9])((?:(?:US\$|USD|INR|EUR|GBP|JPY|Rs\.?|rupees?|dollars?|euros?|pounds?|yen|\$|\u20b9|\u20ac|\u00a3|\u00a5)\s*"
     r"(?:lakh\s+crores?|lakh\s+crs?\.?|crores?|crs?\.?|lakhs?|million|billion|trillion|thousand|bn|mn|cr|lakh|m|b|t|k)?)|"
@@ -166,6 +168,10 @@ def _parse_number(cell: str) -> tuple[float, str] | None:
     if not match:
         return None
     sign, currency, digits, unit = match.groups()
+    if unit and len(unit) == 1 and unit.upper() in _MAGNITUDE_LETTER:
+        if unit != unit.upper():
+            return None  # "5m", "3k": metres / a lower-case label, not a magnitude
+        unit = _MAGNITUDE_LETTER[unit]
     try:
         value = float(digits.replace(",", ""))
     except ValueError:
@@ -1042,6 +1048,78 @@ def _without_rank_column(passage):
     return shadow
 
 
+_UNIT_ROW_LABEL = re.compile(r"(?i)^\(?\s*(?:units?|unit of measure|measure|in|values? in|figures? in)\s*\)?:?$")
+
+
+def _is_numeric_cell(cell: str) -> bool:
+    return _parse_number(cell) is not None and not _PERIOD_RE.match(str(cell or "").strip())
+
+
+def _with_normalized_header(passage):
+    """Tables whose column names span two rows are charted with one combined header row.
+
+    Two shapes are common across publishers (any topic), and both used to give no chart at all:
+      * a unit row under the header - "Country | 1990 | 2000" then "unit | Mton CO2 | Mton CO2";
+      * a grouped header - "Crop | Cost | MSP" then "2021-22 | 2025-26 | Difference | 2021-22 | ...",
+        where each group name spans several period columns (optionally with "Sl." / "No." split too).
+    Only header rows change; every data row stays a substring of the source row, so evidence quotes
+    still match the passage.
+    """
+    lines = str(passage.text or "").splitlines()
+    table_idx = [i for i, ln in enumerate(lines) if " | " in ln]
+    if len(table_idx) < 4:
+        return passage
+    h_i, s_i, d_i = table_idx[0], table_idx[1], table_idx[2]
+    header, second, data = _split_row(lines[h_i]), _split_row(lines[s_i]), _split_row(lines[d_i])
+    if any(_is_numeric_cell(c) for c in second):
+        return passage  # the second row is data
+    new_header: list[str] | None = None
+    caption_unit = ""
+    if len(second) == len(header) and len(header) >= 3 and (
+            _UNIT_ROW_LABEL.match(second[0].strip())
+            or (not second[0].strip() and len({c.casefold() for c in second[1:] if c}) == 1)):
+        units = second[1:]
+        if all(len(u) <= 30 for u in units) and any(u for u in units):
+            distinct = {u.casefold() for u in units if u}
+            if len(distinct) == 1:
+                # one unit for the whole table: it belongs on the caption, so period headers
+                # ("1990 | 2000") stay periods and the table can become a time series
+                new_header, caption_unit = list(header), next(u for u in units if u)
+            else:
+                new_header = [header[0]] + [f"{h} ({u})" if u and u.casefold() not in h.casefold() else h
+                                            for h, u in zip(header[1:], units)]
+    elif len(data) > len(second) >= 2 and len(data) > len(header):
+        sub = list(second)
+        lead = list(header)
+        label_cols = len(data) - len(sub)
+        if sub and not _PERIOD_RE.match(sub[0].strip()) and label_cols + 1 <= len(lead) and \
+                len(data) - (len(sub) - 1) == label_cols + 1 and len(sub) - 1 >= 2:
+            # "Sl. | Crop | Cost | MSP" over "No. | 2021-22 | ...": the first cell continues the first header
+            lead[0] = f"{lead[0]} {sub[0]}".strip()
+            sub = sub[1:]
+            label_cols = len(data) - len(sub)
+        groups = lead[label_cols:]
+        if label_cols >= 1 and groups and len(sub) % len(groups) == 0:
+            span = len(sub) // len(groups)
+            if span >= 2 and sum(bool(_PERIOD_RE.match(c.strip())) for c in sub) >= len(groups):
+                new_header = lead[:label_cols] + [f"{groups[i // span]} {sub[i]}" for i in range(len(sub))]
+    if not new_header or len(new_header) != len(data):
+        return passage
+    out = list(lines)
+    out[h_i] = " | ".join(new_header)
+    del out[s_i]
+    if caption_unit:
+        caption_at = next((i for i in range(h_i) if out[i].strip() and " | " not in out[i]), None)
+        if caption_at is None:
+            out.insert(h_i, f"({caption_unit})")
+        elif caption_unit.casefold() not in out[caption_at].casefold():
+            out[caption_at] = f"{out[caption_at].rstrip()} ({caption_unit})"
+    import copy
+    shadow = copy.copy(passage)
+    shadow.text = "\n".join(out)
+    return shadow
+
+
 def _split_stacked_tables(passage) -> list:
     """Two tables printed one under the other without a caption between them are two tables.
 
@@ -1071,6 +1149,8 @@ def _focused_charts(passage, index: int, qtd_start, focus: list[str] | None, min
                     max_year: int | None = None) -> list[PlannedChart]:
     """Stage N: a wide table is narrowed to the question's entities and window (utils.table_focus) before
     charting; any other table is charted as before. A leading rank column is never the label."""
+    # a unit / grouped second header row is part of the header, not the start of a stacked table
+    passage = _with_normalized_header(passage)
     stacked = _split_stacked_tables(passage)
     if len(stacked) > 1:
         charts: list[PlannedChart] = []
