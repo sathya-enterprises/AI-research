@@ -24,3 +24,14 @@ def test_string_values_from_form_posts_are_understood():
 def test_old_clients_without_the_flag_keep_the_wording_heuristic():
     assert resolve_attachment_only(None, "Summarise this document", "[File: fund.pdf] text", DOCS) is True
     assert resolve_attachment_only(None, "Summarise this document, search the web too", "[File: fund.pdf] text", DOCS) is False
+
+
+def test_market_wide_investor_flow_questions_are_not_local_startup_discovery():
+    from routes.report import _is_local_company_investor_discovery
+
+    assert not _is_local_company_investor_discovery(
+        "Produce a report with graphs on how the Indian share market performed over the last one month, "
+        "and what share of the move came from foreign and domestic investor flows.")
+    assert not _is_local_company_investor_discovery("FPI and DII flows into Indian equities in November")
+    # genuine place-based discovery still is
+    assert _is_local_company_investor_discovery("List software startups and angel investors in Electronic City, Bengaluru")

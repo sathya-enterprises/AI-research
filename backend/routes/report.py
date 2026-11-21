@@ -9876,6 +9876,11 @@ def _is_local_company_investor_discovery(text: str) -> bool:
         r"\b(?:promoter(?:s)?|stake sales?|share pledg(?:e|ing)|bulk deals?|block deals?|"
         r"offer(?:s)? for sale|listed compan(?:y|ies)|shareholding pattern|"
         r"corporate actions?|stock market|equity market|securities|nse|bse|sebi|"
+        # Market-wide finance (live run: "how the Indian share market performed ... foreign and domestic
+        # investor flows" was read as a startup/investor directory search and every source was rejected).
+        r"share markets?|stock exchanges?|sensex|nifty|indices|index|equities|fpis?|fiis?|diis?|"
+        r"(?:foreign|domestic) (?:portfolio |institutional )?investors?|investor flows?|in[- ]?flows?|out[- ]?flows?|"
+        r"mutual funds?|ipos?|market cap(?:italisation|italization)?|"
         r"insider trading|open[- ]market sale|divestment|divestiture|share sale|"
         r"npa|roe|roa|net profit|total assets|deposits|advances|balance sheet|annual reports?|"
         r"investor[- ]relations|rbi|banking sector|banks?|fy\s?\d{2,4}|fiscal years?|quarterly results)\b",
