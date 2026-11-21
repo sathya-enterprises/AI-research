@@ -4,6 +4,7 @@ from __future__ import annotations
 
 _CALCULATED_SECTOR_ORIGIN = "calculated_from_daily_market_data"
 _CALCULATED_SECTOR_INTERNAL_URL = "internal://verified-sector-quarterly-returns"
+_CALCULATED_INDEX_WINDOW_URL = "internal://verified-index-window-returns"
 
 
 def is_trusted_calculated_sector_source(source: object) -> bool:
@@ -30,6 +31,10 @@ def is_trusted_calculated_sector_source(source: object) -> bool:
     url = str(source.get("url") or "").strip().casefold()
     if url == _CALCULATED_SECTOR_INTERNAL_URL and "calculated nse sector returns" in title:
         return True
+    # The index change over a short requested window (utils.market_data.format_index_window_returns_as_source)
+    # is the same kind of server-calculated dataset with its exact rows in the chart evidence excerpt.
+    if url == _CALCULATED_INDEX_WINDOW_URL and "calculated index returns" in title:
+        return True
 
     kind = str(source.get("kind") or source.get("source_type") or source.get("sourceType") or "").strip().casefold()
     publisher = str(source.get("publisher") or "").strip().casefold()
@@ -37,5 +42,5 @@ def is_trusted_calculated_sector_source(source: object) -> bool:
         not url
         and kind == "verified data"
         and publisher == "calculated from daily market data"
-        and "sector return" in title
+        and ("sector return" in title or "index return" in title)
     )

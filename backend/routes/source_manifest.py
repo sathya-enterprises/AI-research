@@ -343,6 +343,7 @@ _INTERNAL_SOURCE_DISPLAY = {
     "verified-stock-fundamentals": ("Stock fundamentals snapshot", "Growth Gradual market data"),
     "verified-sector-quarterly-returns": ("NSE sector returns by calendar quarter (calculated)", "Calculated from daily market data"),
     "verified-index-quotes": ("Index quotes snapshot", "Growth Gradual market data"),
+    "verified-index-window-returns": ("Index returns over the requested period (calculated)", "Calculated from daily market data"),
     "verified-screener-fundamentals": ("Company fundamentals (Screener data)", "Screener.in via Growth Gradual"),
     "verified-tax-calculation": ("Tax calculation", "Growth Gradual calculator"),
 }

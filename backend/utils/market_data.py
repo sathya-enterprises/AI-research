@@ -13,6 +13,7 @@ treat this as best-effort and fall back to scraped sources when empty.
 import asyncio
 import logging
 import math
+import re
 from typing import Optional
 
 import httpx
@@ -936,6 +937,103 @@ def format_sector_quarterly_returns_as_source(rows: list[dict]) -> Optional[dict
         "snippet": " | ".join(lines[:5])[:2000],
         "fullContent": evidence_text,
         "chartEvidenceExcerpt": evidence_text[:16000],
+        "evidenceOrigin": "calculated_from_daily_market_data",
+        "pageFetchStatus": "not_applicable",
+        "evidenceAvailable": True,
+    }
+
+
+# ── Index performance over a short requested window ("last one month") ───────────────────────────────
+# A one-month market report had no chart of how far the market moved over the month: only today's quotes
+# were fetched. The change over the window is calculated from daily closes, like the sector quarterly returns.
+INDEX_WINDOW_URL = "internal://verified-index-window-returns"
+_WORD_NUMBERS = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "fortnight": 1}
+_WINDOW_RE = re.compile(
+    r"(?i)\b(?:last|past|previous|recent|over the last|over the past|in the last|in the past)\s+"
+    r"(?:(\d{1,3}|one|a|an|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+)?"
+    r"(days?|weeks?|fortnight|months?)\b")
+
+
+def requested_window_days(question: str) -> int | None:
+    """Days in a short window the question asks about ("last one month" -> 30); None beyond about 6 months."""
+    match = _WINDOW_RE.search(str(question or ""))
+    if not match:
+        return None
+    raw, unit = (match.group(1) or "one").casefold(), match.group(2).casefold()
+    count = int(raw) if raw.isdigit() else _WORD_NUMBERS.get(raw, 1)
+    days = count * (1 if unit.startswith("day") else 7 if unit.startswith("week") else 14 if unit == "fortnight" else 30)
+    return days if 1 <= days <= 186 else None
+
+
+def _window_change(points: list[dict], days: int) -> dict | None:
+    """Change from the first close on or after (latest date - days) to the latest close."""
+    from datetime import date, timedelta
+    dated = []
+    for point in points or []:
+        try:
+            dated.append((date.fromisoformat(str(point["date"])[:10]), float(point["close"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(dated) < 2:
+        return None
+    dated.sort()
+    end_day, end_close = dated[-1]
+    start_from = end_day - timedelta(days=days)
+    start = next(((d, c) for d, c in dated if d >= start_from), None)
+    if not start or start[0] >= end_day or not start[1]:
+        return None
+    return {"start_date": start[0].isoformat(), "start_close": start[1], "end_date": end_day.isoformat(),
+            "end_close": end_close, "change": (end_close / start[1] - 1.0) * 100.0}
+
+
+async def fetch_index_window_returns(days: int, concurrency: int = 5) -> list[dict]:
+    """Benchmark and sector index change over the last ``days`` (best effort; unavailable indices omitted)."""
+    range_str = "3mo" if days <= 60 else "6mo" if days <= 150 else "1y"
+    symbols = [(yf, label) for _stooq, yf, label in INDEX_SYMBOLS] + list(SECTOR_INDEX_SYMBOLS)
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+    async with httpx.AsyncClient() as client:
+        async def one(symbol: str, label: str) -> dict | None:
+            async with semaphore:
+                points = await _yf_chart_history(client, symbol, range_str, "1d")
+            change = _window_change(points or [], days)
+            return {"label": label, **change} if change else None
+        results = await asyncio.gather(*[one(s, l) for s, l in symbols], return_exceptions=True)
+    rows = [r for r in results if isinstance(r, dict)]
+    log.info("market_data: index change over the last %d days for %d/%d indices", days, len(rows), len(symbols))
+    return rows
+
+
+def format_index_window_returns_as_source(rows: list[dict], days: int) -> Optional[dict]:
+    """The window changes as an auditable calculated table (the closes each change is computed from follow)."""
+    if not rows:
+        return None
+    from datetime import date
+    def _d(text: str) -> str:
+        return date.fromisoformat(text).strftime("%d %b %Y")
+    start, end = _d(rows[0]["start_date"]), _d(rows[0]["end_date"])
+    title = f"CALCULATED INDEX RETURNS — LAST {days} DAYS ({start} TO {end})"
+    lines = [
+        f"{title} (calculated from daily index closes from Yahoo Finance; change = latest close / first close in "
+        f"the window - 1; a calculated dataset, not an official NSE publication).",
+        # the column names the window, not its dates: a date in the current quarter made the chart "(QTD, partial)"
+        f"Index | Change over the last {days} days (%)",
+    ]
+    ordered = sorted(rows, key=lambda r: -r["change"])
+    lines += [f"{r['label']} | {r['change']:+.2f}%" for r in ordered]
+    lines.append("")
+    lines.append("Closes used:")
+    lines += [f"{r['label']}: {_d(r['start_date'])} close {r['start_close']:,.2f}; {_d(r['end_date'])} close "
+              f"{r['end_close']:,.2f}" for r in ordered]
+    text = "\n".join(lines)
+    return {
+        "title": title,
+        "url": INDEX_WINDOW_URL,
+        "kind": "Verified data",
+        "publisher": "Calculated from daily market data",
+        "snippet": " | ".join(lines[:4])[:2000],
+        "fullContent": text,
+        "chartEvidenceExcerpt": text[:16000],
         "evidenceOrigin": "calculated_from_daily_market_data",
         "pageFetchStatus": "not_applicable",
         "evidenceAvailable": True,

@@ -23526,6 +23526,22 @@ async def generate_report(request: Request):
             except Exception as e:
                 log.warning("Report: historical index fetch failed, continuing without it: %s", e)
 
+        # A short requested window ("last one month", "past 2 weeks"): how far each index moved over exactly
+        # that window, calculated from daily closes (a one-month report had only today's quotes to chart).
+        try:
+            from utils.market_data import (fetch_index_window_returns, format_index_window_returns_as_source,
+                                           requested_window_days)
+            _window_days = requested_window_days(question)
+            if _window_days:
+                _window_rows = await fetch_index_window_returns(_window_days)
+                _window_source = format_index_window_returns_as_source(_window_rows, _window_days)
+                if _window_source:
+                    sources = [_window_source] + sources
+                    log.info("Report: prepended index returns over the last %d days (%d indices)",
+                             _window_days, len(_window_rows))
+        except Exception as e:
+            log.warning("Report: index window returns unavailable, continuing without them: %s", e)
+
     # Verified stock fundamentals: the same "scraped snippets are hit-or-miss
     # on precise numbers" problem as the index block above, but for individual
     # companies. Without this, a "Company A vs Company B" valuation/debt
