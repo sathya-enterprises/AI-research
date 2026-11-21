@@ -248,10 +248,16 @@ def _report_progress(phase: str, message: str, percent: int, *, preview: str | N
     })
     # Only send a bounded provisional draft. The final validated report remains
     # the source of truth and replaces this preview when the job completes.
-    if preview is not None and not job.get("draftPreview"):
+    if preview is not None:
         # Normalize after decoding escaped Unicode too; otherwise model output such
         # as \u003cdiv can become literal HTML only after the cleanup pass.
         raw_preview = normalize_report_markdown(_decode_leaked_unicode_escapes(str(preview or "").strip()))
+        # The stream sends only what follows what the reader already has, so a preview may only grow
+        # (sections written so far, then more sections). A later preview that rewrites the start is ignored;
+        # the checked report replaces the preview when the job completes.
+        existing = str(job.get("draftPreview") or "")
+        if existing and not raw_preview.startswith(existing):
+            return
         job["draftPreview"] = raw_preview[:_REPORT_PREVIEW_MAX_CHARS]
         job["draftPreviewTruncated"] = len(raw_preview) > _REPORT_PREVIEW_MAX_CHARS
         job["draftPreviewTotalChars"] = len(raw_preview)
@@ -17678,6 +17684,12 @@ async def _auto_repair_report_once(
                 if patched != report_text:
                     return normalize_report_markdown(strip_generation_markers(patched)), f"gemini:{model}:exact-patches"
                 log.info("Report patch repair found no safe applicable patches")
+            except httpx.TimeoutException as exc:
+                # A read timeout means the model is overloaded, not that this key is bad: another key waits
+                # the same 24 s for nothing (live log: two timed-out attempts cost 54 s and changed nothing).
+                log.warning("Report patch repair attempt timed out model=%s error=%s; not retrying",
+                            model, type(exc).__name__)
+                return "", ""
             except Exception as exc:
                 log.warning("Report patch repair attempt failed model=%s error=%s", model, type(exc).__name__)
     return "", ""
@@ -25199,7 +25211,7 @@ async def generate_report(request: Request):
                 manifest=source_manifest, today=_v2_today.isoformat(),
                 gateway=locals().get("_report_llm_gateway"),
                 window_note=_v2_window_note,
-                progress=lambda message: _report_progress("writing", message, 70),
+                progress=lambda message, preview=None: _report_progress("writing", message, 70, preview=preview),
                 tiers=_v2_tiers, chart_verifier=_v2_chart_preverify, entity_search_stats=_v2_entity_stats,
                 # V2 runs this same source-evidence check on its own text and drops what it flags.
                 evidence_auditor=_v2_manifest_auditor(source_manifest, enriched),

@@ -486,6 +486,18 @@ def _chart_target(tier: str, outline, used: list) -> dict:
     return {"target": target, "used": len(used), "met": len(used) >= target, "deepDivesWithoutChart": gaps}
 
 
+def _sections_preview(drafts: list) -> str:
+    """The sections written so far, in order, as a readable draft (no citations or figure markers yet)."""
+    parts = []
+    for draft in drafts:
+        if not getattr(draft, "ok", False):
+            continue
+        body = FIGURE_MARKER_RE.sub("", CITE_RE.sub("", str(getattr(draft, "body", "") or "")))
+        body = re.sub(r"[ \t]+([.,;:])", r"\1", body)  # "rose 11% [S2.1]." -> "rose 11%."
+        parts.append(f"## {draft.title}\n\n{body.strip()}")
+    return "\n\n".join(parts)
+
+
 async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest: list[dict], today: str,
                           window_note: str = "", progress=None, gateway=None, tiers: dict | None = None,
                           chart_verifier=None, entity_search_stats: dict | None = None,
@@ -917,6 +929,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         deadline_log["waves"].append({"sections": f"{start + 1}-{start + len(wave)}", "mode": mode,
                                       "seconds": round(wave_seconds[-1])})
         drafts.extend(results)
+        # Readable draft while the rest is written: the sections finished so far, in order. Each update
+        # extends the previous one (the stream only appends); the checked report replaces it at the end.
+        if progress:
+            _preview = _sections_preview(drafts)
+            if _preview.strip():
+                try:
+                    progress(f"Written {len(drafts)} of {len(analysis)} sections…", preview=_preview)
+                except TypeError:  # a progress callback without preview support
+                    pass
     # Chart/text coherence: the paragraph that interprets a figure must be about the
     # chart's own entities and values; otherwise the chart is dropped and the text's
     # figure framing is removed at assembly (the sentence keeps its own citation).

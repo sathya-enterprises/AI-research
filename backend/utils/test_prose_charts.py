@@ -71,3 +71,26 @@ def test_a_data_table_shown_in_the_report_gets_a_chart_of_its_source_table():
     # a table that is not a copy of a source table gets no chart
     other = SimpleNamespace(section_id="sec-3", body="| A | B |\n| --- | --- |\n| x | 1 |\n| y | 7 |\n| z | 9 |\n| w | 11 |")
     assert report_table_charts([other], store, start_index=1, limit=3) == []
+
+
+def test_preview_grows_section_by_section_and_never_rewrites_what_was_sent():
+    import routes.report as report
+    from utils.report_pipeline_v2 import _sections_preview
+
+    first = [SimpleNamespace(ok=True, title="Market performance", body="Nifty rose 11% [S2.1].\n\n[[FIGURE 1]]")]
+    preview_one = _sections_preview(first)
+    assert preview_one == "## Market performance\n\nNifty rose 11%."
+    preview_two = _sections_preview(first + [SimpleNamespace(ok=True, title="Flows", body="FPIs bought.")])
+    assert preview_two.startswith(preview_one)
+
+    report._REPORT_JOBS["t-preview"] = {"startedAt": 0}
+    token = report._CURRENT_REPORT_JOB_ID.set("t-preview")
+    try:
+        report._report_progress("writing", "1 of 2", 70, preview=preview_one)
+        report._report_progress("writing", "2 of 2", 70, preview=preview_two)
+        assert report._REPORT_JOBS["t-preview"]["draftPreview"].endswith("FPIs bought.")
+        report._report_progress("validating_draft", "assembled", 76, preview="## Executive Summary\n\nrewritten")
+        assert report._REPORT_JOBS["t-preview"]["draftPreview"].endswith("FPIs bought.")  # not a rewrite
+    finally:
+        report._CURRENT_REPORT_JOB_ID.reset(token)
+        report._REPORT_JOBS.pop("t-preview", None)
