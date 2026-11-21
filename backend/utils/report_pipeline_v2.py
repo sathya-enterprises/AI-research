@@ -880,6 +880,19 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     section_transform_log: list[str] = []
     from utils.net_recovery import wait_budget as _wait_budget
     network_wait_left = _wait_budget()
+    # Claim checks start as soon as a wave of sections is written, so they run while the next wave is
+    # written (they used to wait for every section). Each check reads and rewrites only its own section,
+    # and all of them finish before anything else edits the sections (see below).
+    _claim_enabled = os.getenv("GG_V2_CLAIM_CHECK", "1") != "0"
+    _claim_tasks: dict[str, "asyncio.Task"] = {}
+
+    async def _claim_check(draft):
+        from utils.claim_check import check_section
+        cited_sources = {t.strip().upper().split(".")[0] for g in CITE_RE.findall(draft.body)
+                         for t in re.split(r"\s*[,;]\s*", g)}
+        texts = {p.passage_id: p.text for p in store.passages if p.source_id.upper() in cited_sources}
+        return await check_section(gateway, draft, texts)
+
     for start in range(0, len(analysis), wave_size):
         wave = analysis[start:start + wave_size]
         covered = [_covered_line(d) for d in drafts if d.ok]
@@ -948,6 +961,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                     progress(f"Written {len(drafts)} of {len(analysis)} sections…", preview=_preview)
                 except TypeError:  # a progress callback without preview support
                     pass
+        if _claim_enabled:
+            for draft in results:
+                if draft.ok and draft.section_id not in _claim_tasks:
+                    _claim_tasks[draft.section_id] = asyncio.ensure_future(_claim_check(draft))
+    # Every claim check finishes before the coherence pass below edits section text.
+    _claim_results: dict[str, object] = {}
+    if _claim_tasks:
+        _done = await asyncio.gather(*_claim_tasks.values(), return_exceptions=True)
+        _claim_results = dict(zip(_claim_tasks.keys(), _done))
     # Chart/text coherence: the paragraph that interprets a figure must be about the
     # chart's own entities and values; otherwise the chart is dropped and the text's
     # figure framing is removed at assembly (the sentence keeps its own citation).
@@ -983,17 +1005,14 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # Claim check: every cited sentence is compared with its cited passages; those with little in common go to
     # a judge model (one call per section) and UNSUPPORTED ones are removed - the check numbers never had.
     claim_log: list[dict] = []
-    if os.getenv("GG_V2_CLAIM_CHECK", "1") != "0" and good:
+    if _claim_enabled and good:
         try:
-            from utils.claim_check import check_section
-
-            async def _claim_check(draft):
-                cited_sources = {t.strip().upper().split(".")[0] for g in CITE_RE.findall(draft.body)
-                                 for t in re.split(r"\s*[,;]\s*", g)}
-                texts = {p.passage_id: p.text for p in store.passages if p.source_id.upper() in cited_sources}
-                return await check_section(gateway, draft, texts)
-
-            results = await asyncio.gather(*[_claim_check(d) for d in good], return_exceptions=True)
+            # Checks started per wave (above); a section without one (should not happen) is checked now.
+            missing = [d for d in good if d.section_id not in _claim_results]
+            if missing:
+                extra = await asyncio.gather(*[_claim_check(d) for d in missing], return_exceptions=True)
+                _claim_results.update({d.section_id: r for d, r in zip(missing, extra)})
+            results = [_claim_results[d.section_id] for d in good]
             claim_log = [r if not isinstance(r, Exception) else {"error": type(r).__name__} for r in results]
         except Exception as exc:
             log.warning("V2 claim check skipped: %s", type(exc).__name__)
