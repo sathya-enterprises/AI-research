@@ -276,3 +276,30 @@ def test_400_cools_the_model_so_later_calls_skip_it(monkeypatch):
     assert first.ok and second.ok and second.model == "model-b"
     assert "gemini:model:model-a" in rt.limited and gw.stats_rejected_models == {"model-a"}
     assert seen.count("model-a") == 1  # the rejecting model was tried once, not on every call
+
+
+def test_a_model_cooled_while_a_call_was_running_is_not_tried_by_that_call(monkeypatch):
+    seen = []
+
+    def handler(request):
+        model = request.url.path.split("/")[-1].split(":")[0]
+        seen.append(model)
+        return httpx.Response(503) if model == "model-a" else _ok("text")
+
+    _patch_http(monkeypatch, handler)
+    rt = _runtime()
+    rt.GEMINI_MODELS = ["model-a", "model-c", "model-b"]
+    # model-c is cooled by another call after this call made its plan (simulated: cooled before its turn)
+    real_cooling = rt._gemini_model_cooling
+    calls = {"n": 0}
+
+    def cooling(model):
+        calls["n"] += 1
+        if calls["n"] > 3:  # after the plan was built
+            rt.limited.add("gemini:model:model-c")
+        return real_cooling(model)
+
+    rt._gemini_model_cooling = cooling
+    gw = G.LLMGateway(rt, "detailed", budget=5, concurrency=1, capture=False)
+    result = asyncio.run(gw.generate(purpose="section", section_id="sec-1", prompt="p", system="s"))
+    assert result.ok and result.model == "model-b" and "model-c" not in seen

@@ -269,6 +269,11 @@ class LLMGateway:
             return LLMResult(ok=False, error="no_gemini_key_or_model_available")
         last_error = "no_response"
         for model, key in plan[:3]:
+            # The plan was made when this call started; a slow first attempt can take minutes, during which
+            # another call may have found a model broken (HTTP 400) or overloaded. Re-check before using it.
+            if rt._gemini_model_cooling(model):
+                last_error = f"model_cooling model={model}"
+                continue
             tried.add((model, key))
             config = {"maxOutputTokens": int(max_tokens), "temperature": float(temperature)}
             if json_mode:
