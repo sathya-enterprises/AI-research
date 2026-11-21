@@ -117,6 +117,7 @@ class LLMGateway:
         # by every following call.
         self._model_429: dict[str, dict[str, float]] = {}
         self.stats_rate_limited_models = 0
+        self.stats_rejected_models: set[str] = set()  # models that answered HTTP 400 (skipped for 10 min)
 
     @property
     def remaining(self) -> int:
@@ -318,6 +319,15 @@ class LLMGateway:
             if status == 503:
                 rt.mark_rate_limited(f"gemini:model:{model}", rt.GEMINI_MODEL_COOLDOWN_MS)
                 last_error = f"http_503 model={model}"
+                continue
+            if status == 400:
+                # The model rejects the request itself (live run: gemini-3.8-flash and gemini-3.7-flash failed
+                # 9 of 9 calls with 400 and were retried on every section). Cool the model so the other models
+                # take the calls; any other key would get the same 400.
+                rt.mark_rate_limited(f"gemini:model:{model}", _env_int("GG_V2_MODEL_400_COOLDOWN_MS", 600_000))
+                self.stats_rejected_models.add(model)
+                log.warning("V2 gateway: %s rejected the request (HTTP 400); model skipped for the next 10 min", model)
+                last_error = f"http_400 model={model}"
                 continue
             if not response.is_success:
                 last_error = f"http_{status} model={model}"

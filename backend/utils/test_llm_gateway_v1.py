@@ -258,3 +258,21 @@ def test_json_calls_still_wait_and_release_their_slot_while_sleeping(monkeypatch
     res = asyncio.run(gw.generate(purpose="outline", prompt="p", json_mode=True, retries=1))
     assert res.ok and slot_free_while_sleeping == [True]
     assert gw.semaphore.locked() is False  # the slot count is balanced afterwards
+
+
+def test_400_cools_the_model_so_later_calls_skip_it(monkeypatch):
+    seen = []
+
+    def handler(request):
+        model = request.url.path.split("/")[-1].split(":")[0]
+        seen.append(model)
+        return httpx.Response(400, json={"error": {"message": "bad"}}) if model == "model-a" else _ok("text")
+
+    _patch_http(monkeypatch, handler)
+    rt = _runtime()
+    gw = G.LLMGateway(rt, "detailed", budget=5, concurrency=1, capture=False)
+    first = asyncio.run(gw.generate(purpose="section", section_id="sec-1", prompt="p", system="s"))
+    second = asyncio.run(gw.generate(purpose="section", section_id="sec-2", prompt="p", system="s"))
+    assert first.ok and second.ok and second.model == "model-b"
+    assert "gemini:model:model-a" in rt.limited and gw.stats_rejected_models == {"model-a"}
+    assert seen.count("model-a") == 1  # the rejecting model was tried once, not on every call
