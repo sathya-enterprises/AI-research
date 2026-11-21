@@ -19444,6 +19444,7 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
             passage = store.get(pid) if store is not None else None
             if passage is None:
                 continue
+            quoted_from_page = False
             rows = [ln.strip() for ln in passage.text.splitlines() if " | " in ln]
             # The table's caption names the measure ("TABLE 1 — Share of electricity from solar
             # (%)"); without it, once the report's own claims had narrowed the source excerpt, an
@@ -19458,17 +19459,22 @@ def _register_v2_chart_evidence(charts: list, store) -> int:
                 rows = [caption] + rows
             # Stage J: an extracted-dataset chart quotes lines of a page-derived passage (prose or a
             # chart's data printed as text); those exact quotes are registered too. Snippet passages never.
-            if isinstance(chart, dict) and chart.get("provenance") == "extracted dataset" and passage.kind in {"table", "narrative"}:
+            # Sentence charts (utils.prose_charts) quote one sentence of a narrative passage in the same way.
+            if isinstance(chart, dict) and (chart.get("provenance") == "extracted dataset" or chart.get("fromSourceSentence")) \
+                    and passage.kind in {"table", "narrative"}:
                 for series in chart.get("series") or []:
                     for point in series.get("data") or []:
                         quote = str(point.get("evidenceQuote") or "").strip()
                         if quote and quote in passage.text and str(point.get("evidenceSource") or "").upper() == passage.source_id.upper():
                             rows.append(quote)
+                            quoted_from_page = True
             if not rows:
                 continue
             sid = passage.source_id
             lines[sid] = list(dict.fromkeys(lines.get(sid, []) + rows))[-600:]
-            if passage.kind == "table":
+            # A quote checked above to be an exact line of a fetched page passage (never a search snippet:
+            # those passages are "search_excerpt") is publisher chart evidence like a table row.
+            if passage.kind == "table" or quoted_from_page:
                 table_ids.add(sid)
             registered.add(sid)
     _CHART_EVIDENCE_LINES.set(lines)

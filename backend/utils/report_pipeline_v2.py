@@ -557,6 +557,14 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                                      max_year=max_year, today=today, focus=_focus_entities(question),
                                                      context_out=_context_pool)
     table_chart_count = len(candidates) + len(chart_drops)
+    # Figures a source states in one sentence ("Primary GER stands at 90.9%, upper primary at 90.3%...") are
+    # candidates too: several topics hold most of their data as prose. They pass the same gates below.
+    if os.getenv("GG_V2_PROSE_CHARTS", "1") != "0":
+        try:
+            from utils.prose_charts import prose_charts as _prose_charts
+            candidates = list(candidates) + _prose_charts(store, question, start_index=500)
+        except Exception as exc:  # never abort a report for an optional chart source
+            log.warning("V2 sentence charts skipped: %s: %s", type(exc).__name__, str(exc)[:160])
     series_warnings: list[dict] = []  # Stage M: sudden breaks in otherwise stable series (kept, said out loud)
     # Data first (Stage F): charts planned from fetched datasets before writing; they go through
     # the same verification below and are placed in their own sector's deep-dive.

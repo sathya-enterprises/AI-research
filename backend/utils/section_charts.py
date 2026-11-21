@@ -1275,13 +1275,16 @@ def assign_charts(charts: list[PlannedChart], sections: list, *, per_section: in
                 load[section.section_id] = load.get(section.section_id, 0) + 1
                 break
     if fill_to:
+        # Below the report's chart target, a section may take one chart over its limit: the data for a
+        # question often clusters on one section (UPI: the overall-volume section held the only two
+        # placed charts while a verified FY2019-20 to FY2024-25 volume chart for it was left out).
         for _score, chart, options in ranked:
             if sum(load.values()) >= fill_to:
                 break
             if chart.section_id:
                 continue
             for score, section in options:
-                if score >= 1 and load.get(section.section_id, 0) < per_section:
+                if score >= 1 and load.get(section.section_id, 0) < per_section + 1:
                     chart.section_id = section.section_id
                     load[section.section_id] = load.get(section.section_id, 0) + 1
                     break

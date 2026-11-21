@@ -1,0 +1,1148 @@
+[
+  {
+    "question": "Prepare an in-depth comparison of health outcomes in India, China, Brazil, and N",
+    "tier": "in_depth",
+    "tablePassages": 145,
+    "built": 12,
+    "quality": 7,
+    "verified": 2,
+    "shippedInRun": 8,
+    "prose": 0,
+    "placed": 2,
+    "verifiedTitles": [
+      "Deaths per 100,000 births: Nigeria, India, Brazil and 1 other",
+      "Life Expectancy At Birth Both Sexes vs Male Life Expectancy At Birth vs Female Life Expect"
+    ],
+    "placedTitles": [
+      "Deaths per 100,000 births: Nigeria, India, Brazil and 1 other",
+      "Life Expectancy At Birth Both Sexes vs Male Life Expectancy At Birth vs Female Life Expect"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 4,
+      "verify: The chart source period falls outside the time window reques": 3,
+      "verify: The quoted source row does not establish the chart's stated ": 2,
+      "quality: fewer than # distinct values (or all values equal)": 1
+    }
+  },
+  {
+    "question": "Assess the expansion of solar electricity in India, China, Brazil, and Nigeria f",
+    "tier": "detailed",
+    "tablePassages": 30,
+    "built": 12,
+    "quality": 8,
+    "verified": 4,
+    "shippedInRun": 3,
+    "prose": 0,
+    "placed": 4,
+    "verifiedTitles": [
+      "Economy (estimate): Germany, United States, Italy and 2 others, 2020 to 2023",
+      "solar-capacity-china-vs-world: china, 2010 to 2024",
+      "Latest data preview (GW): China and Rest of world, 2021 to 2024",
+      "China’s share (%): 2021, 2022, 2023 and 1 other, 2021 to 2024"
+    ],
+    "placedTitles": [
+      "Economy (estimate): Germany, United States, Italy and 2 others, 2020 to 2023",
+      "solar-capacity-china-vs-world: china, 2010 to 2024",
+      "Latest data preview (GW): China and Rest of world, 2021 to 2024",
+      "China’s share (%): 2021, 2022, 2023 and 1 other, 2021 to 2024"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 2,
+      "quality: fewer than # distinct values (or all values equal)": 1,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1,
+      "verify: The chart source period falls outside the time window reques": 1,
+      "verify: The quoted source row does not establish the chart's stated ": 1,
+      "verify: The quoted source row does not support the chart point's ent": 1
+    }
+  },
+  {
+    "question": "Compare renewable electricity generation trends in India, China, Brazil, and Nig",
+    "tier": "detailed",
+    "tablePassages": 105,
+    "built": 14,
+    "quality": 10,
+    "verified": 8,
+    "shippedInRun": 6,
+    "prose": 0,
+    "placed": 8,
+    "verifiedTitles": [
+      "terawatt-hours: China, Brazil, India and 1 other",
+      "Installed capacity MW vs Renewable installed capacity MW: 2015, 2016, 2017 and 7 others, 2",
+      "Generation GWh vs Renewable generation GWh: 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable percentage (%): 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Installed capacity MW vs Renewable installed capacity MW: 2015, 2016, 2017 and 7 others, 2",
+      "Generation GWh vs Renewable generation GWh: 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable percentage (%): 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable Energy Capacity (MW): 2015, 2016, 2017 and 7 others, 2015 to 2024"
+    ],
+    "placedTitles": [
+      "terawatt-hours: China, Brazil, India and 1 other",
+      "Installed capacity MW vs Renewable installed capacity MW: 2015, 2016, 2017 and 7 others, 2",
+      "Generation GWh vs Renewable generation GWh: 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable percentage (%): 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Installed capacity MW vs Renewable installed capacity MW: 2015, 2016, 2017 and 7 others, 2",
+      "Generation GWh vs Renewable generation GWh: 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable percentage (%): 2015, 2016, 2017 and 7 others, 2015 to 2024",
+      "Renewable Energy Capacity (MW): 2015, 2016, 2017 and 7 others, 2015 to 2024"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 4,
+      "verify: The quoted source line for this chart point is not present i": 2
+    }
+  },
+  {
+    "question": "Compare internet use (% of individuals using the internet) and mobile-cellular s",
+    "tier": "detailed",
+    "tablePassages": 80,
+    "built": 11,
+    "quality": 8,
+    "verified": 6,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 6,
+    "verifiedTitles": [
+      "Mobile cellular subscriptions (per 100 people): India, Kenya and Brazil, 2015 to 2024",
+      "Mobile cellular subscriptions (per 100 people): Kenya, Brazil and India",
+      "Mobile cellular subscriptions per 100 inhab.: Kenya, Brazil and India",
+      "Country, group of countries, region: India and Brazil, 2018 to 2024",
+      "Share of the population using the Internet: India, Kenya and Brazil, 2015 to 2024",
+      "Country, group of countries, region: Austria, Belgium, Bulgaria and 5 others, 2015 to 2024"
+    ],
+    "placedTitles": [
+      "Mobile cellular subscriptions (per 100 people): India, Kenya and Brazil, 2015 to 2024",
+      "Mobile cellular subscriptions (per 100 people): Kenya, Brazil and India",
+      "Mobile cellular subscriptions per 100 inhab.: Kenya, Brazil and India",
+      "Country, group of countries, region: India and Brazil, 2018 to 2024",
+      "Share of the population using the Internet: India, Kenya and Brazil, 2015 to 2024",
+      "Country, group of countries, region: Austria, Belgium, Bulgaria and 5 others, 2015 to 2024"
+    ],
+    "reasons": {
+      "quality: fewer than # distinct values (or all values equal)": 2,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1,
+      "verify: The quoted source row does not establish the chart's stated ": 1,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "How can you explain and analyse the sector rotation in Indian stock markets in t",
+    "tier": "in_depth",
+    "tablePassages": 112,
+    "built": 33,
+    "quality": 23,
+    "verified": 18,
+    "shippedInRun": 3,
+    "prose": 0,
+    "placed": null,
+    "verifiedTitles": [
+      "Quarter coverage: Q4 2024, Q1 2025, Q2 2025, Q3 2025, Q4 2025, Q1 2026, Q2 2026, Q3: NIFTY",
+      "Compounded return Q4 2024 to Q3 2026 (%): NIFTY AUTO, NIFTY FMCG, NIFTY METAL and 8 others",
+      "30-Jan-26: Nifty Consumer Durables, Nifty PSU Bank, Nifty Healthcare and 12 others, Februa",
+      "Return (%): Apar Industries Ltd, Amber Enterprises India Ltd, Hitachi Energy India Ltd and",
+      "Change %: Realty, Media, PSU Banks and 9 others",
+      "Strength: Nifty PSU Bank, Nifty Media, Nifty IT and 9 others",
+      "Quarters in Top 2: Technology, Healthcare, Energy and 8 others",
+      "1-Year Returns: Nifty PSU Bank, Nifty Metal, Nifty FS Ex-Bank and 12 others",
+      "1-Year Volatility: Nifty Bank, Nifty FMCG, Nifty Financial Services and 12 others",
+      "Price/Earnings (P/E Ratio): Nifty Consumer Durables, Nifty Media, Nifty FMCG and 12 others",
+      "ASSETS UNDER CUSTODY (crore): 15 Jul 2026, 31 Jul 2026, 15 Aug 2026 and 5 others, 15 Jul 2",
+      "Net FII Flow (Rs crore) (INR crore): January, February, March and 3 others",
+      "Net Flow (Rs crore) (INR crore): Financial Services, Information Technology, Automobile & ",
+      "Net FPI Flow ($ Million) (USD million): Financial Services (BFSI), Oil, Gas and Fuels, Fas",
+      "Qtr Change %: Media, Telecom Services, Hotels Restaurants & Tourism and 7 others",
+      "Qtr Change %: Data Processing Services, Distributors, Dyes & Pigments and 7 others",
+      "RS-Ratio (INR): IT, Media, Private Bank and 12 others",
+      "Mar-2026: Equity Capital, Preference Capital, Reserves and 1 other"
+    ],
+    "placedTitles": [],
+    "reasons": {
+      "quality: not about the question's topic or entities": 8,
+      "quality: the same values as an earlier chart": 2,
+      "verify: The quoted source row does not support the chart point's ent": 2,
+      "verify: The quoted source value cannot be tied to a local row or sta": 2,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "Analyze the attached Excel workbook “PMSPRFFEB2026”  and give an end-to end repo",
+    "tier": "detailed",
+    "tablePassages": 0,
+    "built": 0,
+    "quality": 0,
+    "verified": 0,
+    "shippedInRun": 8,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {}
+  },
+  {
+    "question": "How have electric vehicle sales and public charging infrastructure in India grow",
+    "tier": "in_depth",
+    "tablePassages": 108,
+    "built": 14,
+    "quality": 8,
+    "verified": 8,
+    "shippedInRun": 5,
+    "prose": 0,
+    "placed": 8,
+    "verifiedTitles": [
+      "Electric car sales (cars): India, 2021 to 2024",
+      "Share of new cars that are electric (%): India, 2021 to 2024",
+      "Electric car stocks (cars): India, 2021 to 2024",
+      "No. of: 2020-21 to 2024-25, 2020-21, 2021-22 and 3 others, to 2024-25",
+      "EV as a % of total vehicles registered: 2020-21 to 2024-25, 2020-21, 2021-22 and 3 others",
+      "Operational Charging stations Under FAME-I: Telangana, Jharkhand, Goa and 10 others",
+      "Operational Charging stations Under FAME-II: Delhi, Maharashtra, Tamil Nadu and 5 others",
+      "Values: Passenger Vehicles 1, Commercial Vehicles 2, Three-Wheelers 2 and 1 other, FY 2020"
+    ],
+    "placedTitles": [
+      "Electric car sales (cars): India, 2021 to 2024",
+      "Share of new cars that are electric (%): India, 2021 to 2024",
+      "Electric car stocks (cars): India, 2021 to 2024",
+      "No. of: 2020-21 to 2024-25, 2020-21, 2021-22 and 3 others, to 2024-25",
+      "EV as a % of total vehicles registered: 2020-21 to 2024-25, 2020-21, 2021-22 and 3 others",
+      "Operational Charging stations Under FAME-I: Telangana, Jharkhand, Goa and 10 others",
+      "Operational Charging stations Under FAME-II: Delhi, Maharashtra, Tamil Nadu and 5 others",
+      "Values: Passenger Vehicles 1, Commercial Vehicles 2, Three-Wheelers 2 and 1 other, FY 2020"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 2,
+      "quality: fewer than # distinct values (or all values equal)": 2,
+      "quality: the source table contains template placeholders (unreliable ": 1,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1
+    }
+  },
+  {
+    "question": "How did Indian scheduled commercial banks' asset quality (GNPA and NNPA ratios) ",
+    "tier": "detailed",
+    "tablePassages": 66,
+    "built": 30,
+    "quality": 18,
+    "verified": 11,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 10,
+    "verifiedTitles": [
+      "Domestic credit to private sector (% of GDP): India, 2021 to 2024",
+      "Mar-22: Growth rate of assets (y-o-y), Growth rate of credit (y-o-y), CRAR and 1 other",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): HFC 1, HFC 2, HFC",
+      "Public Sector Banks 2024: Capital, Reserve and Surplus, Deposits and 12 others",
+      "PSBs 2023-24: A. Income, i) Interest Income, ii) Other Income and 9 others",
+      "Public Sector Banks 2023: Capital, Reserve and Surplus, Deposits and 12 others",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): HFC 1, HFC 2, HFC",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): HFC 1, HFC 2, HFC"
+    ],
+    "placedTitles": [
+      "Domestic credit to private sector (% of GDP): India, 2021 to 2024",
+      "Mar-22: Growth rate of assets (y-o-y), Growth rate of credit (y-o-y), CRAR and 1 other",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): HFC 1, HFC 2, HFC",
+      "Public Sector Banks 2024: Capital, Reserve and Surplus, Deposits and 12 others",
+      "PSBs 2023-24: A. Income, i) Interest Income, ii) Other Income and 9 others",
+      "Public Sector Banks 2023: Capital, Reserve and Surplus, Deposits and 12 others",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): HFC 1, HFC 2, HFC",
+      "Solvency Losses as per cent of Tier 1 Capital of the Banking System (%): Bank 1, Bank 2, B"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 10,
+      "verify: The chart source period falls outside the time window reques": 3,
+      "quality: a Total row is plotted with its components": 2,
+      "verify: The quoted source line for this chart point is not present i": 2,
+      "verify: The quoted source row does not support the chart point's exa": 1,
+      "verify: The quoted source row does not establish the chart's stated ": 1
+    }
+  },
+  {
+    "question": "Which Nifty sectoral indices outperformed and underperformed over the last four ",
+    "tier": "detailed",
+    "tablePassages": 57,
+    "built": 16,
+    "quality": 10,
+    "verified": 6,
+    "shippedInRun": 6,
+    "prose": 0,
+    "placed": 6,
+    "verifiedTitles": [
+      "30-Jan-26: Nifty Consumer Durables, Nifty PSU Bank, Nifty Healthcare and 12 others, Februa",
+      "Return (%): Apar Industries Ltd, Amber Enterprises India Ltd, Hitachi Energy India Ltd and",
+      "1D (%): NIFTY 50, Nifty Bank, Nifty Private Bank and 12 others",
+      "1D Chg%: Nifty Realty, Nifty Capital Markets, Nifty PSU Bank and 12 others",
+      "Qtr Change %: Media, Telecom Services, Hotels Restaurants & Tourism and 7 others",
+      "Qtr Change %: Data Processing Services, Distributors, Dyes & Pigments and 7 others"
+    ],
+    "placedTitles": [
+      "30-Jan-26: Nifty Consumer Durables, Nifty PSU Bank, Nifty Healthcare and 12 others, Februa",
+      "Return (%): Apar Industries Ltd, Amber Enterprises India Ltd, Hitachi Energy India Ltd and",
+      "1D (%): NIFTY 50, Nifty Bank, Nifty Private Bank and 12 others",
+      "1D Chg%: Nifty Realty, Nifty Capital Markets, Nifty PSU Bank and 12 others",
+      "Qtr Change %: Media, Telecom Services, Hotels Restaurants & Tourism and 7 others",
+      "Qtr Change %: Data Processing Services, Distributors, Dyes & Pigments and 7 others"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 6,
+      "verify: The quoted source value cannot be tied to a local row or sta": 2,
+      "verify: The quoted source row does not support the chart point's ent": 1,
+      "verify: The heatmap cell is not supported by the cited source row an": 1
+    }
+  },
+  {
+    "question": "How has India's installed solar and wind power capacity grown from FY2020 to FY2",
+    "tier": "detailed",
+    "tablePassages": 10,
+    "built": 4,
+    "quality": 4,
+    "verified": 4,
+    "shippedInRun": 4,
+    "prose": 0,
+    "placed": 4,
+    "verifiedTitles": [
+      "Share of electricity from solar (%): India, 2020 to 2024",
+      "Share of electricity from wind (%): India, 2020 to 2024",
+      "Share of electricity from renewables (%): India, 2020 to 2024",
+      "Added Capacity vs Cumulative Capacity (MW): 2019-20 to 2024-25, 2019-20, 2020-21 and 4 oth"
+    ],
+    "placedTitles": [
+      "Share of electricity from solar (%): India, 2020 to 2024",
+      "Share of electricity from wind (%): India, 2020 to 2024",
+      "Share of electricity from renewables (%): India, 2020 to 2024",
+      "Added Capacity vs Cumulative Capacity (MW): 2019-20 to 2024-25, 2019-20, 2020-21 and 4 oth"
+    ],
+    "reasons": {}
+  },
+  {
+    "question": "How have life expectancy and current health expenditure per capita changed in In",
+    "tier": "detailed",
+    "tablePassages": 23,
+    "built": 7,
+    "quality": 4,
+    "verified": 4,
+    "shippedInRun": 3,
+    "prose": 0,
+    "placed": 4,
+    "verifiedTitles": [
+      "Life expectancy at birth (years): Indonesia, Philippines, Thailand and 1 other, 2015 to 20",
+      "Healthcare expenditure per capita (international $): Indonesia, Philippines, Thailand and ",
+      "Value (USD): 2015, 2016, 2017 and 6 others, 2015 to 2023",
+      "Life Expectancy (years): Thailand, Indonesia and Philippines"
+    ],
+    "placedTitles": [
+      "Life expectancy at birth (years): Indonesia, Philippines, Thailand and 1 other, 2015 to 20",
+      "Healthcare expenditure per capita (international $): Indonesia, Philippines, Thailand and ",
+      "Value (USD): 2015, 2016, 2017 and 6 others, 2015 to 2023",
+      "Life Expectancy (years): Thailand, Indonesia and Philippines"
+    ],
+    "reasons": {
+      "quality: the row labels are list numbers, not entities or periods": 2,
+      "quality: values up to # cannot be percentages (the column's unit is m": 1
+    }
+  },
+  {
+    "question": "How did global semiconductor sales by region (Americas, Europe, China, Japan, As",
+    "tier": "detailed",
+    "tablePassages": 3,
+    "built": 3,
+    "quality": 3,
+    "verified": 1,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "Semiconductor Sales: World Total, Americas, Europe and 2 others, 2020 to 2024"
+    ],
+    "placedTitles": [
+      "Semiconductor Sales: World Total, Americas, Europe and 2 others, 2020 to 2024"
+    ],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 2
+    }
+  },
+  {
+    "question": "Analyse this PMS performance workbook: which portfolio managers and strategies d",
+    "tier": "detailed",
+    "tablePassages": 0,
+    "built": 0,
+    "quality": 0,
+    "verified": 0,
+    "shippedInRun": 7,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {}
+  },
+  {
+    "question": "How have life and non-life insurance penetration and density in India changed fr",
+    "tier": "detailed",
+    "tablePassages": 19,
+    "built": 5,
+    "quality": 5,
+    "verified": 1,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "31, 31,: LIC, Private Sector and Total, 2021 to 2022"
+    ],
+    "placedTitles": [
+      "31, 31,: LIC, Private Sector and Total, 2021 to 2022"
+    ],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 3,
+      "verify: The quoted source row does not establish the chart's stated ": 1
+    }
+  },
+  {
+    "question": "How have India's mobile subscribers, data usage per user and 5G rollout progress",
+    "tier": "detailed",
+    "tablePassages": 8,
+    "built": 1,
+    "quality": 0,
+    "verified": 0,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {
+      "quality: not about the question's topic or entities": 1
+    }
+  },
+  {
+    "question": "How have India's pharmaceutical exports grown from FY2020 to FY2025, which desti",
+    "tier": "detailed",
+    "tablePassages": 13,
+    "built": 1,
+    "quality": 1,
+    "verified": 1,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "Investment Received (in Rs. Crore) (INR crore): Bulk Drugs, Medical Devices and Pharmaceut"
+    ],
+    "placedTitles": [
+      "Investment Received (in Rs. Crore) (INR crore): Bulk Drugs, Medical Devices and Pharmaceut"
+    ],
+    "reasons": {}
+  },
+  {
+    "question": "How did rural versus urban FMCG volume growth in India evolve over the last eigh",
+    "tier": "detailed",
+    "tablePassages": 5,
+    "built": 4,
+    "quality": 4,
+    "verified": 3,
+    "shippedInRun": 3,
+    "prose": 0,
+    "placed": 3,
+    "verifiedTitles": [
+      "Revenue (₹ crore) (INR crore): Hindustan Unilever, ITC and Nestlé India",
+      "Q4 FY26 vs Q4 FY25 (%): India revenue growth, Underlying volume growth (India) and Implied",
+      "FY26 (%): Revenue from operations, ₹ crore, EBITDA, ₹ crore and EBITDA margin"
+    ],
+    "placedTitles": [
+      "Revenue (₹ crore) (INR crore): Hindustan Unilever, ITC and Nestlé India",
+      "Q4 FY26 vs Q4 FY25 (%): India revenue growth, Underlying volume growth (India) and Implied",
+      "FY26 (%): Revenue from operations, ₹ crore, EBITDA, ₹ crore and EBITDA margin"
+    ],
+    "reasons": {
+      "verify: The quoted source value cannot be tied to a local row or sta": 1
+    }
+  },
+  {
+    "question": "How have housing sales, new launches and unsold inventory changed across India's",
+    "tier": "detailed",
+    "tablePassages": 5,
+    "built": 3,
+    "quality": 3,
+    "verified": 3,
+    "shippedInRun": 2,
+    "prose": 0,
+    "placed": 3,
+    "verifiedTitles": [
+      "Average Price Q1 2023: Ahmedabad, Bengaluru, Chennai and 5 others",
+      "City: NCR, Kolkata, MMR and 4 others, 2020 to 2022",
+      "Rental Yield (in %) in 2020: Gurgaon, Noida, Greater Noida and 6 others"
+    ],
+    "placedTitles": [
+      "Average Price Q1 2023: Ahmedabad, Bengaluru, Chennai and 5 others",
+      "City: NCR, Kolkata, MMR and 4 others, 2020 to 2022",
+      "Rental Yield (in %) in 2020: Gurgaon, Noida, Greater Noida and 6 others"
+    ],
+    "reasons": {}
+  },
+  {
+    "question": "How have India's foodgrain production and minimum support prices for wheat and p",
+    "tier": "detailed",
+    "tablePassages": 31,
+    "built": 7,
+    "quality": 6,
+    "verified": 2,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 2,
+    "verifiedTitles": [
+      "Cost 2021-22: Wheat, Barley, Gram and 3 others",
+      "Paddy common: 2018-19 to 2024-25, and 12 others, to"
+    ],
+    "placedTitles": [
+      "Cost 2021-22: Wheat, Barley, Gram and 3 others",
+      "Paddy common: 2018-19 to 2024-25, and 12 others, to"
+    ],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 4,
+      "quality: the row labels are list numbers, not entities or periods": 1
+    }
+  },
+  {
+    "question": "How did India's CPI inflation and the RBI repo rate move from January 2022 to De",
+    "tier": "detailed",
+    "tablePassages": 124,
+    "built": 25,
+    "quality": 24,
+    "verified": 9,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": null,
+    "verifiedTitles": [
+      "Base Rate: March 2023, March 2024 and December 2024, March 2023 to December 2024",
+      "NCAER Business Confidence Index (July 2024): Current level of the index, Index as per prev",
+      "2023-24 (Apr-Aug): Less than 2 per cent, Between 2 to 4 per cent, Between 4 to 6 per cent ",
+      "OIS 1M: WACR, MPC INF Easing, MPC INF Tightening and 2 others",
+      "Base Rate: March 2022, March 2023 and December 2023, March 2022 to December 2023",
+      "Rural 2023-24: Consumer Price Index (All India)+, Other Price Indices, All Commodities and",
+      "Repo rate (%): 2022-05-04, 2022-06-08, 2022-08-05 and 3 others, 2022-05-04 to 2023-02-08",
+      "April-March 2024-25: A. Non-Food Bank Credit, B. Non-Bank Sources (B1+B2), B1. Domestic So",
+      "Year-by-Year CPI Inflation Data: 2010 to (%): CPI, 2022 to 2024"
+    ],
+    "placedTitles": [],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 13,
+      "verify: The quoted source line for this chart point is not present i": 2,
+      "quality: fewer than # distinct values (or all values equal)": 1
+    }
+  },
+  {
+    "question": "How did the US unemployment rate, job openings and wage growth evolve from 2021 ",
+    "tier": "detailed",
+    "tablePassages": 4,
+    "built": 2,
+    "quality": 1,
+    "verified": 1,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "Unemployment rate (% of labor force): United States, 2021 to 2024"
+    ],
+    "placedTitles": [
+      "Unemployment rate (% of labor force): United States, 2021 to 2024"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 1
+    }
+  },
+  {
+    "question": "How did EU natural gas prices, storage levels and the share of Russian pipeline ",
+    "tier": "detailed",
+    "tablePassages": 1,
+    "built": 1,
+    "quality": 0,
+    "verified": 0,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {
+      "quality: not about the question's topic or entities": 1
+    }
+  },
+  {
+    "question": "How have China's exports to the United States, the EU and ASEAN changed from 201",
+    "tier": "detailed",
+    "tablePassages": 34,
+    "built": 10,
+    "quality": 7,
+    "verified": 0,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {
+      "verify: The quoted source line for this chart point is not present i": 3,
+      "verify: The chart source period falls outside the time window reques": 3,
+      "quality: the chart is about Vietnam, not the place the question asks ": 1,
+      "quality: the chart is about Switzerland, not the place the question a": 1,
+      "quality: not about the question's topic or entities": 1,
+      "verify: The quoted source row does not establish the chart's stated ": 1
+    }
+  },
+  {
+    "question": "How much private investment flowed into artificial intelligence by country from ",
+    "tier": "detailed",
+    "tablePassages": 10,
+    "built": 5,
+    "quality": 5,
+    "verified": 3,
+    "shippedInRun": 2,
+    "prose": 0,
+    "placed": 3,
+    "verifiedTitles": [
+      "Private investment in artificial intelligence (US$ billion): China, 2019 to 2024",
+      "Spending per Year, US$ Billions: Microsoft, 2019 to 2024",
+      "Capex Intensity: Capex / Revenue and Capex / Operating Cash Flow: Microsoft, Meta, Alphabe"
+    ],
+    "placedTitles": [
+      "Private investment in artificial intelligence (US$ billion): China, 2019 to 2024",
+      "Spending per Year, US$ Billions: Microsoft, 2019 to 2024",
+      "Capex Intensity: Capex / Revenue and Capex / Operating Cash Flow: Microsoft, Meta, Alphabe"
+    ],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 2
+    }
+  },
+  {
+    "question": "How did the number of IPOs and the amount raised on Indian exchanges (mainboard ",
+    "tier": "detailed",
+    "tablePassages": 37,
+    "built": 10,
+    "quality": 8,
+    "verified": 5,
+    "shippedInRun": 2,
+    "prose": 0,
+    "placed": 5,
+    "verifiedTitles": [
+      "Total No. of SME IPOs: Agriculture, Manufacturing and Services",
+      "XIRR Returns %: Aditya Vision, Sky Gold, KPI Green Energy and 7 others",
+      "While the SME IPO boom has projected the increasing penetration of India's capital markets",
+      "While the SME IPO boom has projected the increasing penetration of India's capital markets",
+      "Mainboard IPOs from 2016 to: Mainboard IPOs, 2021 to 2024"
+    ],
+    "placedTitles": [
+      "Total No. of SME IPOs: Agriculture, Manufacturing and Services",
+      "XIRR Returns %: Aditya Vision, Sky Gold, KPI Green Energy and 7 others",
+      "While the SME IPO boom has projected the increasing penetration of India's capital markets",
+      "While the SME IPO boom has projected the increasing penetration of India's capital markets",
+      "Mainboard IPOs from 2016 to: Mainboard IPOs, 2021 to 2024"
+    ],
+    "reasons": {
+      "verify: The chart source period falls outside the time window reques": 3,
+      "quality: the row labels are list numbers, not entities or periods": 1,
+      "quality: the same values as an earlier chart": 1
+    }
+  },
+  {
+    "question": "How have monthly SIP inflows and mutual fund industry AUM in India grown from FY",
+    "tier": "detailed",
+    "tablePassages": 58,
+    "built": 33,
+    "quality": 20,
+    "verified": 10,
+    "shippedInRun": 2,
+    "prose": 0,
+    "placed": 9,
+    "verifiedTitles": [
+      "Monthly flow trend of growth-/ equity-oriented schemes (Rs crore): Sectoral/thematic funds",
+      "Mar-20: Income/Debt Oriented Schemes, Growth/Equity Oriented Schemes, Hybrid Schemes and 3",
+      "Monthly flow trend of growth/equity oriented schemes (Rs crore): Sectoral/thematic funds, ",
+      "Source: AMFI, CRISIL MI&A Research: Sectoral/thematic funds, Flexi-cap funds, Mid-cap fund",
+      "Jul-25: Equity, Debt, Hybrid and 3 others",
+      "Jul-25: Equity, Debt, Hybrid and 2 others",
+      "Jul-25: Sectoral/thematic funds, Flexi-cap funds, Mid-cap funds and 8 others",
+      "Jul-25: Liquid funds, Money market funds, Corporate bond funds and 8 others",
+      "Total SIP (₹ Cr) (INR crore): FY 2024-25, FY 2023-24, FY 2022-23 and 3 others",
+      "Active SIP accounts (approx.) (crore): January 2021, January 2023 and December 2023, Janua"
+    ],
+    "placedTitles": [
+      "Monthly flow trend of growth-/ equity-oriented schemes (Rs crore): Sectoral/thematic funds",
+      "Mar-20: Income/Debt Oriented Schemes, Growth/Equity Oriented Schemes, Hybrid Schemes and 3",
+      "Monthly flow trend of growth/equity oriented schemes (Rs crore): Sectoral/thematic funds, ",
+      "Source: AMFI, CRISIL MI&A Research: Sectoral/thematic funds, Flexi-cap funds, Mid-cap fund",
+      "Jul-25: Equity, Debt, Hybrid and 3 others",
+      "Jul-25: Equity, Debt, Hybrid and 2 others",
+      "Jul-25: Sectoral/thematic funds, Flexi-cap funds, Mid-cap funds and 8 others",
+      "Total SIP (₹ Cr) (INR crore): FY 2024-25, FY 2023-24, FY 2022-23 and 3 others",
+      "Active SIP accounts (approx.) (crore): January 2021, January 2023 and December 2023, Janua"
+    ],
+    "reasons": {
+      "quality: values up to # cannot be percentages (the column's unit is m": 9,
+      "verify: The quoted source row does not support the chart point's exa": 5,
+      "quality: nearly the same values as an earlier chart (the same data fr": 4,
+      "verify: The chart source period falls outside the time window reques": 3,
+      "verify: The chart value does not match the quoted source row, period": 1,
+      "verify: The quoted source line for this chart point is not present i": 1
+    }
+  },
+  {
+    "question": "How has India's crude steel production and capacity grown from 2019 to 2024 comp",
+    "tier": "detailed",
+    "tablePassages": 35,
+    "built": 10,
+    "quality": 8,
+    "verified": 7,
+    "shippedInRun": 2,
+    "prose": 0,
+    "placed": 7,
+    "verifiedTitles": [
+      "April-September 2024-25 (MT) (Mt): Hot Metal, Pig Iron and Sponge Iron",
+      "Sector Unit: Public Sector MT, Private Sector MT and Total Production MT, 2019-20 to 2023-",
+      "Value: Export, Imports and Exports/Imports, 2019-20 to 2023-24",
+      "Capacity(in MnT) vs Production(in MnT): 2020-21, 2021-22, 2022-23 and 1 other, 2020-21 to ",
+      "State Crude Steel Production (in '000 tonnes): Andhra Pradesh, Arunachal Pradesh, Assam an",
+      "(in '000 tonnes): Andhra Pradesh, Arunachal Pradesh, Assam and 2 others, 2021-22 to 2023-2",
+      "Finished Steel production - State Wise (in 000't): Andhra Pradesh, Arunachal Pradesh, Assa"
+    ],
+    "placedTitles": [
+      "April-September 2024-25 (MT) (Mt): Hot Metal, Pig Iron and Sponge Iron",
+      "Sector Unit: Public Sector MT, Private Sector MT and Total Production MT, 2019-20 to 2023-",
+      "Value: Export, Imports and Exports/Imports, 2019-20 to 2023-24",
+      "Capacity(in MnT) vs Production(in MnT): 2020-21, 2021-22, 2022-23 and 1 other, 2020-21 to ",
+      "State Crude Steel Production (in '000 tonnes): Andhra Pradesh, Arunachal Pradesh, Assam an",
+      "(in '000 tonnes): Andhra Pradesh, Arunachal Pradesh, Assam and 2 others, 2021-22 to 2023-2",
+      "Finished Steel production - State Wise (in 000't): Andhra Pradesh, Arunachal Pradesh, Assa"
+    ],
+    "reasons": {
+      "quality: nearly the same values as an earlier chart (the same data fr": 1,
+      "quality: not about the question's topic or entities": 1,
+      "verify: The quoted source row does not establish the chart's stated ": 1
+    }
+  },
+  {
+    "question": "How did Brent crude prices and India's crude oil import bill change from FY2021 ",
+    "tier": "detailed",
+    "tablePassages": 59,
+    "built": 13,
+    "quality": 8,
+    "verified": 7,
+    "shippedInRun": 4,
+    "prose": 0,
+    "placed": 7,
+    "verifiedTitles": [
+      "The Rupee and India’s Oil Dependency – India’s Oil Bill: How Rupee Depreciation Amplifies ",
+      "Actual Cost vs Counterfactual Cost (INR): 2021, 2022 and 3 others, 2021 to 2024",
+      "The Rupee and India’s Oil Dependency – India’s Oil Bill: How Rupee Depreciation Amplifies ",
+      "Imports (TMT): and 7 others, FY 2021 to FY 2025",
+      "Cost per tonne (tonnes): and 7 others, FY 2021 to FY 2025",
+      "Correlation: Nifty 50, Gold (domestic, ₹) and USD/INR",
+      "Average (USD): 2021, 2022 and 3 others, 2021 to 2024"
+    ],
+    "placedTitles": [
+      "The Rupee and India’s Oil Dependency – India’s Oil Bill: How Rupee Depreciation Amplifies ",
+      "Actual Cost vs Counterfactual Cost (INR): 2021, 2022 and 3 others, 2021 to 2024",
+      "The Rupee and India’s Oil Dependency – India’s Oil Bill: How Rupee Depreciation Amplifies ",
+      "Imports (TMT): and 7 others, FY 2021 to FY 2025",
+      "Cost per tonne (tonnes): and 7 others, FY 2021 to FY 2025",
+      "Correlation: Nifty 50, Gold (domestic, ₹) and USD/INR",
+      "Average (USD): 2021, 2022 and 3 others, 2021 to 2024"
+    ],
+    "reasons": {
+      "quality: the chart is about United States, not the place the question": 2,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1,
+      "quality: not about the question's topic or entities": 1,
+      "quality: a Total row is plotted with its components": 1,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "How have India's defence exports and domestic defence production grown from FY20",
+    "tier": "detailed",
+    "tablePassages": 18,
+    "built": 3,
+    "quality": 2,
+    "verified": 1,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "Military expenditure (% of GDP): India, 2017 to 2024"
+    ],
+    "placedTitles": [
+      "Military expenditure (% of GDP): India, 2017 to 2024"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 1,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "How did foreign tourist arrivals and foreign exchange earnings from tourism in I",
+    "tier": "detailed",
+    "tablePassages": 52,
+    "built": 18,
+    "quality": 6,
+    "verified": 6,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 6,
+    "verifiedTitles": [
+      "FEEs from Tourism in India (in Rs. Crore) (INR crore): 2022, 2023 and 2024 #2",
+      "Country: Thailand and Vietnam, 2022 to 2024",
+      "FEEs from Tourism in India (INR crore): 2019, 2020, 2021 and 3 others, 2019 to 2024",
+      "Total Number of tourism jobs (in million): 2020-21, 2021-22, 2022-23 and 1 other",
+      "forex earnings INR: 2021, 2022, 2023 and 1 other, 2021 to 2024",
+      "forex earnings USD: 2021, 2022, 2023 and 1 other, 2021 to 2024"
+    ],
+    "placedTitles": [
+      "FEEs from Tourism in India (in Rs. Crore) (INR crore): 2022, 2023 and 2024 #2",
+      "Country: Thailand and Vietnam, 2022 to 2024",
+      "FEEs from Tourism in India (INR crore): 2019, 2020, 2021 and 3 others, 2019 to 2024",
+      "Total Number of tourism jobs (in million): 2020-21, 2021-22, 2022-23 and 1 other",
+      "forex earnings INR: 2021, 2022, 2023 and 1 other, 2021 to 2024",
+      "forex earnings USD: 2021, 2022, 2023 and 1 other, 2021 to 2024"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 10,
+      "quality: a Total row is plotted with its components": 1,
+      "quality: values up to # cannot be percentages (the column's unit is m": 1
+    }
+  },
+  {
+    "question": "How have gross enrolment ratios in higher education and learning outcomes in Ind",
+    "tier": "detailed",
+    "tablePassages": 20,
+    "built": 7,
+    "quality": 5,
+    "verified": 4,
+    "shippedInRun": 0,
+    "prose": 1,
+    "placed": 3,
+    "verifiedTitles": [
+      "other courses have shown an increase in enrolment levels: Ph.D, M.Phil, Post graduate and ",
+      "As indicated above, there has been an increase in enrolment across SC, ST and OBC groups o",
+      "Enrolment at various levels through regular mode during the last five years: Ph.D, M.Phil,",
+      "Proportion of Std V children in government schools (%)"
+    ],
+    "placedTitles": [
+      "other courses have shown an increase in enrolment levels: Ph.D, M.Phil, Post graduate and ",
+      "As indicated above, there has been an increase in enrolment across SC, ST and OBC groups o",
+      "Enrolment at various levels through regular mode during the last five years: Ph.D, M.Phil,"
+    ],
+    "reasons": {
+      "quality: a Total row is plotted with its components": 1,
+      "quality: the row labels are list numbers, not entities or periods": 1,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "How have UPI transaction volumes and values grown from FY2020 to FY2025, and wha",
+    "tier": "detailed",
+    "tablePassages": 119,
+    "built": 25,
+    "quality": 21,
+    "verified": 12,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 3,
+    "verifiedTitles": [
+      "UPI Transaction Volume (billion): April 2024, May 2024, June 2024 and 12 others, April 202",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Lakh) (lakh): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "Volume (in Crore) (crore): H1:2020 and 10 others: H1:2020 to H2:2024",
+      "UPI payments, volume (million): 2019-20 to 2024-25, 2019-20, 2020-21 and 4 others, to 2024",
+      "Volume (lakh) 2022-23: CCIL Operated Systems, Large Value Credit Transfers - RTGS, Credit "
+    ],
+    "placedTitles": [
+      "UPI Transaction Volume (billion): April 2024, May 2024, June 2024 and 12 others, April 202",
+      "UPI payments, volume (million): 2019-20 to 2024-25, 2019-20, 2020-21 and 4 others, to 2024",
+      "Volume (lakh) 2022-23: CCIL Operated Systems, Large Value Credit Transfers - RTGS, Credit "
+    ],
+    "reasons": {
+      "verify: The quoted source row does not establish the chart's stated ": 5,
+      "quality: not about the question's topic or entities": 3,
+      "verify: The chart source period falls outside the time window reques": 2,
+      "verify: The quoted source row does not support the chart point's ent": 2,
+      "quality: values up to # are implausible in billions (the column's uni": 1
+    }
+  },
+  {
+    "question": "How did India's passenger vehicle, two-wheeler and commercial vehicle domestic s",
+    "tier": "detailed",
+    "tablePassages": 36,
+    "built": 8,
+    "quality": 4,
+    "verified": 2,
+    "shippedInRun": 0,
+    "prose": 0,
+    "placed": 2,
+    "verifiedTitles": [
+      "Domestic Sales (MoRTH) 2019-20: Passenger Vehicles (e-4W), Three Wheelers (e-3W) and Two W",
+      "Values: No. of Petrol Vehicles, No. of Diesel Vehicles, No. of Electric Vehicles and 1 oth"
+    ],
+    "placedTitles": [
+      "Domestic Sales (MoRTH) 2019-20: Passenger Vehicles (e-4W), Three Wheelers (e-3W) and Two W",
+      "Values: No. of Petrol Vehicles, No. of Diesel Vehicles, No. of Electric Vehicles and 1 oth"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 3,
+      "quality: fewer than # distinct values (or all values equal)": 1,
+      "verify: The quoted source value cannot be tied to a local row or sta": 1,
+      "verify: The chart source period falls outside the time window reques": 1
+    }
+  },
+  {
+    "question": "How have CO2 emissions of China, the United States, India and the EU changed fro",
+    "tier": "detailed",
+    "tablePassages": 46,
+    "built": 8,
+    "quality": 4,
+    "verified": 1,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 1,
+    "verifiedTitles": [
+      "Annual CO2 emissions (tonnes, billion): China, European Union, India and 1 other, 2015 to "
+    ],
+    "placedTitles": [
+      "Annual CO2 emissions (tonnes, billion): China, European Union, India and 1 other, 2015 to "
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 3,
+      "verify: The quoted source line for this chart point is not present i": 3,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1
+    }
+  },
+  {
+    "question": "How can you explain & analyze the sector rotation in Indian stock markets in the",
+    "tier": "in_depth",
+    "tablePassages": 299,
+    "built": 95,
+    "quality": 36,
+    "verified": 22,
+    "shippedInRun": 5,
+    "prose": 0,
+    "placed": 18,
+    "verifiedTitles": [
+      "Quarter coverage: Q4 2024, Q1 2025, Q2 2025, Q3 2025, Q4 2025, Q1 2026, Q2 2026, Q3: NIFTY",
+      "Compounded return Q4 2024 to Q3 2026 (%): NIFTY AUTO, NIFTY FMCG, NIFTY METAL and 8 others",
+      "Net Amount: Jan-Mar 2026, Oct-Dec 2025, July-Sept 2025 and 1 other",
+      "Market: Indian Overseas Bank, Rail Vikas Nigam, Adani Total Gas and 5 others",
+      "March 2026: Indian Bank, Jindal Steel, Indus Towers and 4 others",
+      "PE Ratio: Nifty PSU Bank, Nifty Oil & Gas, Nifty Financial Services and 8 others",
+      "1-Year Return (%): Nifty Metal, Nifty Telecom, Nifty NBFC and 5 others",
+      "P/E Ratio: Nifty Consumer Durables, Nifty IT, Nifty Private Bank and 2 others",
+      "ASSETS UNDER CUSTODY (crore): 31 Jul 2026, 15 Aug 2026, 31 Aug 2026 and 5 others, 31 Jul 2",
+      "Net Flow (USD million): Oil, Gas & Fuels, Automobile and Components, Metals & Mining and 1",
+      "Equity Flows ($M) ($m): Services, Capital Goods, Metals and Mining and 9 others, May 2026",
+      "Net FII Flow (Rs crore) (INR crore): January, February, March and 3 others",
+      "Net Flow (Rs crore) (INR crore): Financial Services, Information Technology, Automobile & ",
+      "Net Sales: Automobile & Ancillaries, Aviation, Capital Goods and 12 others, Q1 FY26",
+      "1Yr Change %: Telecommunications Equipment, Hardware Technology & Equipment, Textiles Appa",
+      "1Yr Change %: Telecom Cables, IT Networking Equipment, Shipping and 7 others",
+      "Weight(%): TATASTEEL, HINDALCO, JSWSTEEL and 7 others",
+      "Median gap to 52w high (%): Bank, Financial Services, Media and 12 others",
+      "Month-by-month rotation — the last 13 months: PSU Bank, Private Bank, Bank and 5 others, N",
+      "Mar-2026: Equity Capital, Preference Capital, Reserves and 1 other",
+      "Aug’25: Auto & Anc., Chemicals, Cons. Durables and 7 others",
+      "12.57 12.01 11.22 10.20 8.68: Bank of Maharashtra, Bank of India, Central Bank of India an"
+    ],
+    "placedTitles": [
+      "Quarter coverage: Q4 2024, Q1 2025, Q2 2025, Q3 2025, Q4 2025, Q1 2026, Q2 2026, Q3: NIFTY",
+      "Compounded return Q4 2024 to Q3 2026 (%): NIFTY AUTO, NIFTY FMCG, NIFTY METAL and 8 others",
+      "Net Amount: Jan-Mar 2026, Oct-Dec 2025, July-Sept 2025 and 1 other",
+      "Market: Indian Overseas Bank, Rail Vikas Nigam, Adani Total Gas and 5 others",
+      "March 2026: Indian Bank, Jindal Steel, Indus Towers and 4 others",
+      "PE Ratio: Nifty PSU Bank, Nifty Oil & Gas, Nifty Financial Services and 8 others",
+      "1-Year Return (%): Nifty Metal, Nifty Telecom, Nifty NBFC and 5 others",
+      "P/E Ratio: Nifty Consumer Durables, Nifty IT, Nifty Private Bank and 2 others",
+      "Net Flow (USD million): Oil, Gas & Fuels, Automobile and Components, Metals & Mining and 1",
+      "Equity Flows ($M) ($m): Services, Capital Goods, Metals and Mining and 9 others, May 2026",
+      "Net Flow (Rs crore) (INR crore): Financial Services, Information Technology, Automobile & ",
+      "Net Sales: Automobile & Ancillaries, Aviation, Capital Goods and 12 others, Q1 FY26",
+      "1Yr Change %: Telecommunications Equipment, Hardware Technology & Equipment, Textiles Appa",
+      "1Yr Change %: Telecom Cables, IT Networking Equipment, Shipping and 7 others",
+      "Median gap to 52w high (%): Bank, Financial Services, Media and 12 others",
+      "Month-by-month rotation — the last 13 months: PSU Bank, Private Bank, Bank and 5 others, N",
+      "Aug’25: Auto & Anc., Chemicals, Cons. Durables and 7 others",
+      "12.57 12.01 11.22 10.20 8.68: Bank of Maharashtra, Bank of India, Central Bank of India an"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 52,
+      "verify: The chart value does not match the quoted source row, period": 6,
+      "quality: values up to # cannot be percentages (the column's unit is m": 3,
+      "quality: fewer than # distinct values (or all values equal)": 2,
+      "verify: The quoted source line for this chart point is not present i": 2,
+      "verify: The heatmap cell is not supported by the cited source row an": 2
+    }
+  },
+  {
+    "question": "Explain the proportion and reasons for stake sales by Indian business promoters ",
+    "tier": "in_depth",
+    "tablePassages": 23,
+    "built": 7,
+    "quality": 2,
+    "verified": 2,
+    "shippedInRun": 1,
+    "prose": 0,
+    "placed": 2,
+    "verifiedTitles": [
+      "Total nos. shares: Harsh Mohan Gupta, Rishab Mohan Gupta, Vinita Gupta and 7 others",
+      "Promoter/Family: Wipro Ltd., Godrej Industries Ltd., Sun Pharmaceutical Industries Ltd. an"
+    ],
+    "placedTitles": [
+      "Total nos. shares: Harsh Mohan Gupta, Rishab Mohan Gupta, Vinita Gupta and 7 others",
+      "Promoter/Family: Wipro Ltd., Godrej Industries Ltd., Sun Pharmaceutical Industries Ltd. an"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 3,
+      "quality: values up to # cannot be percentages (the column's unit is m": 2
+    }
+  },
+  {
+    "question": "List down the why, what, how of all the FTAs signed by India in the past 1 year,",
+    "tier": "in_depth",
+    "tablePassages": 239,
+    "built": 23,
+    "quality": 11,
+    "verified": 7,
+    "shippedInRun": 5,
+    "prose": 0,
+    "placed": 7,
+    "verifiedTitles": [
+      "Latest tariff-line coverage (2025-26): UAE, Australia, Mauritius and 1 other",
+      "Exports: ASEAN (grouping), UAE, SAFTA (grouping) and 12 others, FY 2025-26",
+      "ter of Com Knowle: A, 115, 116 and 7 others",
+      "C Tr: 310210, 390210, 290511 and 7 others",
+      "C Tr: 271012, 260112, 730511 and 7 others",
+      "Business count pre-EIF (000s): or more, to 249, to 49 and 3 others",
+      "5,522 (total for CARIFORUM trade bloc): Tunisia, Turkey and Ukraine"
+    ],
+    "placedTitles": [
+      "Latest tariff-line coverage (2025-26): UAE, Australia, Mauritius and 1 other",
+      "Exports: ASEAN (grouping), UAE, SAFTA (grouping) and 12 others, FY 2025-26",
+      "ter of Com Knowle: A, 115, 116 and 7 others",
+      "C Tr: 310210, 390210, 290511 and 7 others",
+      "C Tr: 271012, 260112, 730511 and 7 others",
+      "Business count pre-EIF (000s): or more, to 249, to 49 and 3 others",
+      "5,522 (total for CARIFORUM trade bloc): Tunisia, Turkey and Ukraine"
+    ],
+    "reasons": {
+      "quality: the row labels are list numbers, not entities or periods": 3,
+      "quality: the chart is about Brazil, not the place the question asks a": 2,
+      "verify: The chart source period falls outside the time window reques": 2,
+      "verify: The quoted source row does not support the chart point's ent": 2,
+      "quality: nearly the same values as an earlier chart (the same data fr": 1,
+      "quality: the chart is about United States, not the place the question": 1
+    }
+  },
+  {
+    "question": "Analyze electric vehicle adoption in India over the past 5 years: sales by segme",
+    "tier": "in_depth",
+    "tablePassages": 189,
+    "built": 83,
+    "quality": 67,
+    "verified": 53,
+    "shippedInRun": 16,
+    "prose": 1,
+    "placed": 18,
+    "verifiedTitles": [
+      "Electric car sales (cars): India, 2021 to 2025",
+      "Share of new cars that are electric (%): India, 2021 to 2025",
+      "Electric car stocks (cars): India, 2021 to 2025",
+      "Actual Registrations vs Policy-Driven Registrations: 2021 and 2 others, to 2023: 2021 to 2",
+      "Actual: 2021 and 2 others, to 2023: 2021 to 2023",
+      "Driving Range (Km) (km): Tata Motors, Mahindra Electric Automo- bile Ltd., JSW MG Motors a",
+      "Maximum Num- ber of Vehicles: e-Buses, e-4Ws, e-3Ws (including e-rickshaws) and 1 other",
+      "Sales in CY-2024: e-LMV, e-LMHGV, e-MHPV and 2 others",
+      "ZEVs: Hero MotoCorp Ltd, Honda Motorcycle and Scooter India (P) Ltd, TVS Motor Company Ltd",
+      "ZEVs: Mahindra, Tata Motors, Maruti Suzuki India Ltd and 7 others, FY 2024-25",
+      "Jan: Andaman & Nicobar Island, Andhra Pradesh, Arunachal Pradesh and 12 others",
+      "New: Extent of financial incentives for EV uptake, Extent of policy actions for EV uptake,",
+      "New Delhi: Capacity of electricity grid, Availability of diverse EV models, Average (x/2) ",
+      "New Delhi: Institutional/Policy Readiness (15.1% of total), Economic Readiness (15.1% of t",
+      "Total No. of Vehicle: 2 wheeler, 3 wheeler and 4 wheeler",
+      "BE 2023-24: Secretariat Economic Services (Salary), Grants to Scheme for Faster Adoption a",
+      "No. of: 2021-22 to 2024-25, 2021-22, 2022-23 and 2 others, to 2024-25",
+      "EV as a % of total vehicles registered: 2021-22 to 2024-25, 2021-22, 2022-23 and 2 others",
+      "Projected Sales (in Lakhs): 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "Annual Growth rate (%): 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "Sales(in Lakhs): 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "Annual Growth rate (%): 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "Two wheelers(in Lakhs) vs Electric: 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "Projected% of 2W-EV in total 2W sales (PDF page 13): Representation, 2023 to 2026",
+      "Total Demand Incentive Disbursed (In Rs. crore) (INR crore): 2 Wheeler, 3 Wheeler and 4 Wh",
+      "FY24 Vehicle registered: Two-wheelers, Three-wheelers, Passenger cars and 1 other",
+      "Achievement rate (%): Installed capacity, Investment, Jobs and 1 other, October 2025",
+      "Scheme Total: EVs supported, e-buses allocated and EV chargers allocated",
+      "EVs supported (Nos.): Maharashtra, Karnataka, Tamil Nadu and 12 others",
+      "Installed EV PCS: Tamil Nadu, Uttar Pradesh, Maharashtra and 12 others",
+      "Target Nos.: e-2W, e-rickshaw & e-cart, e-3W(L5) and 4 others",
+      "Total: Maharashtra, Uttar Pradesh, Karnataka and 12 others",
+      "Total: Dadra and Nagar Haveli and Daman and Diu, Andaman and Nicobar Islands, Arunachal Pr",
+      "Total: Bengaluru, Delhi, Hyderabad and 5 others",
+      "Views: Oct 20, 2026, Oct 21, 2026, Oct 22, 2026 and 12 others",
+      "Downloads: Oct 21, 2026, Oct 22, 2026, Oct 23, 2026 and 12 others",
+      "Cumulative till 31.03.2026: Investment (Rs. cr), Incremental Sales (Base Year Investment t",
+      "TWO WHEELERS: NO. OF VEHICLES INCENTIVIZED, OIL SAVINGS (MTOE), OIL SAVINGS (1000 CRORE IN",
+      "PAGE NO.: PREAMBLE, OBJECTIVES, TITLE and 12 others",
+      "Values: No. of Petrol Vehicles, No. of Diesel Vehicles, No. of Electric Vehicles and 1 oth",
+      "Base capital subsidy (%): Integrated EV Project, Ultra-Mega Battery Project, Mega EV Proje",
+      "Registrations: Electric two-wheelers, Electric three-wheelers, Electric cars & SUVs and 1 ",
+      "Registrations: Electric two-wheelers, Electric three-wheelers, Electric cars & SUVs and 1 ",
+      "Registrations: TVS Motor, Bajaj Auto, Ather Energy and 2 others",
+      "Registrations: Bajaj Auto, Mahindra, Atul Auto and 2 others",
+      "Registrations: Tata Motors, Mahindra, MG and 2 others",
+      "Registrations: Tata Motors, Euler Motors, Ashok Leyland and 2 others",
+      "How many electric vehicles does Andhra Pradesh register each month?: Electric registration",
+      "Electric share (%): November 2024, December 2024, January 2025 and 12 others, November 202",
+      "EVs 2025 EVs 2025: January, February, March and 9 others",
+      "January to October 2026 2026: Scooters and motorcycles, E-rickshaws, E-carts and 6 others",
+      "January to October 2026 EVs: Andhra Pradesh, India, Telangana and 4 others",
+      "EV adoption—the share of electric vehicles in total new-vehicle sales— (%)"
+    ],
+    "placedTitles": [
+      "Electric car sales (cars): India, 2021 to 2025",
+      "Share of new cars that are electric (%): India, 2021 to 2025",
+      "Electric car stocks (cars): India, 2021 to 2025",
+      "Sales in CY-2024: e-LMV, e-LMHGV, e-MHPV and 2 others",
+      "ZEVs: Hero MotoCorp Ltd, Honda Motorcycle and Scooter India (P) Ltd, TVS Motor Company Ltd",
+      "ZEVs: Mahindra, Tata Motors, Maruti Suzuki India Ltd and 7 others, FY 2024-25",
+      "Jan: Andaman & Nicobar Island, Andhra Pradesh, Arunachal Pradesh and 12 others",
+      "BE 2023-24: Secretariat Economic Services (Salary), Grants to Scheme for Faster Adoption a",
+      "Projected Sales (in Lakhs): 2023, 2024, 2025 and 1 other, 2023 to 2026",
+      "FY24 Vehicle registered: Two-wheelers, Three-wheelers, Passenger cars and 1 other",
+      "EVs supported (Nos.): Maharashtra, Karnataka, Tamil Nadu and 12 others",
+      "Installed EV PCS: Tamil Nadu, Uttar Pradesh, Maharashtra and 12 others",
+      "PAGE NO.: PREAMBLE, OBJECTIVES, TITLE and 12 others",
+      "Registrations: Electric two-wheelers, Electric three-wheelers, Electric cars & SUVs and 1 ",
+      "Registrations: Electric two-wheelers, Electric three-wheelers, Electric cars & SUVs and 1 ",
+      "Registrations: TVS Motor, Bajaj Auto, Ather Energy and 2 others",
+      "January to October 2026 2026: Scooters and motorcycles, E-rickshaws, E-carts and 6 others",
+      "EV adoption—the share of electric vehicles in total new-vehicle sales— (%)"
+    ],
+    "reasons": {
+      "quality: not about the question's topic or entities": 11,
+      "verify: The chart source period falls outside the time window reques": 5,
+      "verify: The quoted source row does not support the chart point's ent": 4,
+      "quality: fewer than # distinct values (or all values equal)": 2,
+      "quality: the same values as an earlier chart": 2,
+      "verify: The chart value does not match the quoted source row, period": 2
+    }
+  },
+  {
+    "question": "give me a report  with a graph with clean sections",
+    "tier": "detailed",
+    "tablePassages": 0,
+    "built": 0,
+    "quality": 0,
+    "verified": 0,
+    "shippedInRun": 7,
+    "prose": 0,
+    "placed": 0,
+    "verifiedTitles": [],
+    "placedTitles": [],
+    "reasons": {}
+  }
+]

@@ -22,6 +22,41 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 logging.disable(logging.CRITICAL)
 
 
+def place(charts: list, stages: dict, store, tier: str) -> list | None:
+    """Replay V2 placement: the run's outline sections get passages again, then assign_charts and the
+    report's chart budget decide which verified table charts are written into the report."""
+    from scripts.topic_scorecard import _stage
+    from utils.report_outline import TIER_RULES, Section, assign_passages
+    from utils.report_pipeline_v2 import CHART_TARGET, CHARTS_PER_SECTION, MAX_CHARTS
+    from utils.section_charts import assign_charts
+
+    outline = (_stage(stages, "pipeline_v2") or {}).get("outline") or {}
+    sections = []
+    for raw in outline.get("sections") or []:
+        if raw.get("kind") != "analysis" or raw.get("status", "keep") != "keep":
+            continue
+        sec = Section(section_id=str(raw.get("id")), title=str(raw.get("title") or ""), goal=str(raw.get("goal") or ""),
+                      queries=list(raw.get("queries") or []) or [str(raw.get("title") or "")],
+                      entities=list(raw.get("entities") or []), role=str(raw.get("role") or "cross_cutting"),
+                      entity=str(raw.get("entity") or ""))
+        for sub in raw.get("subsections") or []:
+            if sub.get("status", "keep") == "keep":
+                sec.subsections.append(Section(section_id=str(sub.get("id")), title=str(sub.get("title") or ""),
+                                               goal=str(sub.get("goal") or ""),
+                                               queries=list(sub.get("queries") or []) or [str(sub.get("title") or "")],
+                                               entities=list(sub.get("entities") or [])))
+        sections.append(sec)
+    if not sections:
+        return None
+    assign_passages(store, sections, TIER_RULES.get(tier, TIER_RULES["detailed"])["k_leaf"])
+    for chart in charts:
+        chart.section_id = ""
+    assign_charts(charts, sections, per_section=CHARTS_PER_SECTION.get(tier, 2), fill_to=CHART_TARGET.get(tier, 8))
+    placed = [c for c in charts if c.section_id]
+    placed.sort(key=lambda c: 0 if c.spec.get("storyPoint") else 1)
+    return placed[:MAX_CHARTS.get(tier, 10)]
+
+
 def funnel(raw: dict) -> dict | None:
     import routes.report as report
     import scripts.replay_capture as rc
@@ -52,6 +87,9 @@ def funnel(raw: dict) -> dict | None:
         min_year, max_year = None, None
     built, _drops = build_chart_candidates(store, max_charts=CANDIDATE_CAP.get(tier, 60), min_year=min_year,
                                            max_year=max_year, today=today, focus=focus_entities(question))
+    if os.getenv("GG_V2_PROSE_CHARTS", "1") != "0":
+        from utils.prose_charts import prose_charts
+        built = list(built) + prose_charts(store, question, start_index=500)
     built = [c for c in built if not clip_to_question_window(c, question)]
     earlier: list = []
     quality = []
@@ -78,12 +116,17 @@ def funnel(raw: dict) -> dict | None:
     for reason in bad.values():
         reasons["verify: " + reason[:60]] += 1
     verified = [s for i, s in enumerate(specs) if i not in bad]
+    verified_charts = [c for i, c in enumerate(quality) if i not in bad]
+    placed = place(verified_charts, stages, store, tier)
     return {
         "question": question[:80], "tier": tier,
         "tablePassages": sum(1 for p in store.passages if p.kind == "table"),
         "built": len(built), "quality": len(quality), "verified": len(verified),
         "shippedInRun": len(final.get("charts") or []),
+        "prose": sum(1 for c in verified_charts if c.spec.get("fromSourceSentence")),
+        "placed": len(placed) if placed is not None else None,
         "verifiedTitles": [str(s.get("title") or "")[:90] for s in verified],
+        "placedTitles": [str(c.spec.get("title") or "")[:90] for c in placed or []],
         "reasons": dict(reasons.most_common(6)),
     }
 
@@ -113,10 +156,11 @@ def main() -> int:
         old = before.get(row["question"])
         delta = f" (was {old['verified']})" if old else ""
         print(f"tables={row['tablePassages']:>4} built={row['built']:>3} quality={row['quality']:>3} "
-              f"verified={row['verified']:>3}{delta:9} shipped-in-run={row['shippedInRun']:>2} | {row['question'][:60]}")
+              f"verified={row['verified']:>3}{delta:9} placed={str(row['placed']):>4} prose={row['prose']:>2} shipped-in-run={row['shippedInRun']:>2} | {row['question'][:60]}")
     n = len(rows) or 1
     print(f"\nreports={len(rows)} verified total={sum(r['verified'] for r in rows)} avg={sum(r['verified'] for r in rows) / n:.1f} "
-          f"reports with <2 verified={sum(1 for r in rows if r['verified'] < 2)}")
+          f"reports with <2 verified={sum(1 for r in rows if r['verified'] < 2)} "
+          f"placed total={sum(r['placed'] or 0 for r in rows)} reports with <2 placed={sum(1 for r in rows if (r['placed'] or 0) < 2)}")
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=2, ensure_ascii=False)
