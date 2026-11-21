@@ -380,6 +380,14 @@ def merge_case_variants(entities: list[EntityEvidence]) -> list[EntityEvidence]:
     return merged
 
 
+MARKET_OVERVIEW_DEEP_DIVES = 4
+# The question asks for a breakdown by sector / industry / stock / company: every qualifying entity keeps its deep-dive.
+_ASKS_FOR_BREAKDOWN_RE = re.compile(
+    r"(?i)\b(?:sectors?|sectoral|industr(?:y|ies)|stocks?(?!\s+(?:markets?|exchanges?)\b)|shares of|compan(?:y|ies)|"
+    r"firms?|names|constituents|"
+    r"which\b.{0,60}\b(?:outperform|underperform|lead|lag|gain|fall|rose|fell)|by (?:sector|industry|company|stock))\b")
+
+
 def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
                  seeds: list[str] | None = None, scope: str = "") -> dict[str, list[EntityEvidence]]:
     # Every entity meeting the deep-dive evidence rule gets one, up to a configurable
@@ -396,6 +404,11 @@ def entity_tiers(store, *, tier: str = "in_depth", question: str = "",
         if is_multi_quarter_sector_rotation_request(question):
             from utils.report_outline import ROTATION_DEEP_DIVES
             max_deep = min(max_deep, ROTATION_DEEP_DIVES)  # the matrix covers the full sector universe; deep dives focus on standout evidence
+        elif is_market_topic(question) and not _ASKS_FOR_BREAKDOWN_RE.search(question):
+            # A market question that does not ask for a sector / stock breakdown ("how did the market perform over
+            # the last month and how much came from FPI and DII flows") got 9 sector deep-dives (17 sections, each
+            # ~1.5 min to write). Its sections are about the market itself; a few standout sectors are enough.
+            max_deep = min(max_deep, MARKET_OVERVIEW_DEEP_DIVES)
     entities = merge_case_variants(discover_entities(store, question=question, seeds=seeds, scope=scope))
     # a one-character name ('C' from a table's column letters) is not an entity: it got a deep-dive and headings
     # 'C: Evidence-Backed Rotation Deep Dive' in a live run

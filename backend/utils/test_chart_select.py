@@ -99,3 +99,13 @@ def test_a_buy_sell_net_flow_table_over_dates_is_charted_as_net_in_date_order():
     assert chart.spec["type"] == "line" and [s["name"] for s in chart.spec["series"]] == ["NET VALUE"]
     assert [label for _s, label, _v in chart.points][0] == "17 Nov, 2026"
     assert [value for _s, _l, value in chart.points] == [4195.38, 5149.9, 7411.41, 10308.42]
+
+
+def test_market_overview_questions_get_few_deep_dives_but_breakdown_questions_keep_them():
+    from utils.entity_tiers import _ASKS_FOR_BREAKDOWN_RE
+    assert not _ASKS_FOR_BREAKDOWN_RE.search(MONTH_Q)
+    assert not _ASKS_FOR_BREAKDOWN_RE.search("How did Indian stock markets perform in the past month?")
+    for q in ("Which Nifty sectoral indices outperformed over the last four quarters",
+              "How did the top Nifty stocks perform this month?",
+              "How can you explain & analyze the sector rotation in Indian stock markets in the past 8 quarters."):
+        assert _ASKS_FOR_BREAKDOWN_RE.search(q), q

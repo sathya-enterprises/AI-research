@@ -281,13 +281,13 @@ def _remedy_publication(text: str, charts: list, pub: dict, actions: list[dict],
 def _recite(snippet: str, store) -> str | None:
     """Every number of the claim is a fact in ONE other source: cite that source instead (rewrite)."""
     from utils.evidence_check import _fact_supported
-    from utils.fact_sheet import FactSheet
+    from utils.fact_sheet import FactSheet, fact_sheet_for
 
     if store is None or not snippet:
         return None
     sheet = getattr(store, "_gate_sheet", None)
     if sheet is None:
-        sheet = FactSheet(store.passages)
+        sheet = fact_sheet_for(store)
         store._gate_sheet = sheet
     current = {t.strip().split(".")[0].upper() for g in re.findall(r"\[(S[^\]]+)\]", snippet) for t in g.split(",")}
     for source in dict.fromkeys(p.source_id.upper() for p in store.passages):

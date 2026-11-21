@@ -599,9 +599,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         try:
             from utils.dataset_extractor import extract_dataset_charts
             extracted, extract_note = await extract_dataset_charts(
-                # Stage N: a 60-page live report got 3 charts; more data-dense passages are read (each call is
-                # small, ~2.5k tokens, and every proposed point is still verified against its passage)
-                store, gateway, question=question, today=today, limit=16 if tier == "in_depth" else 6,
+                # 6 passages for every tier (GG_V2_DATASET_EXTRACT_LIMIT): the last three in-depth runs read 16
+                # passages each and 13-15 answers were empty, with 0-1 accepted charts and none used in the report.
+                store, gateway, question=question, today=today,
+                limit=int(os.getenv("GG_V2_DATASET_EXTRACT_LIMIT", "6") or 6),
                 # the storyline's points first: each point's measure and entities pick the passages read
                 queries=[f"{pt.measure} {' '.join(pt.entities[:3])}".strip() for pt in story_points]
                 + [f"{s.title} {s.goal}" for s in analysis])

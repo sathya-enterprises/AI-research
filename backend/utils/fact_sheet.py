@@ -306,6 +306,23 @@ def _fact(pid: str, index: int, match: re.Match, unit: str, metric: str, entity:
 _SCALED_COUNT_RE = re.compile(r"(?<![\w.,])(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|crores?)\b(?!\s+crores?)", re.I)
 
 
+def fact_sheet_for(store) -> "FactSheet":
+    """The fact sheet of an evidence store, built once per store (it took 11 s for ~700 passages and was
+    rebuilt by four checks after writing). Kept on the store with the passage list it was built from, so a
+    store whose passages change gets a fresh sheet."""
+    passages = list(getattr(store, "passages", []) or [])
+    signature = tuple((str(getattr(p, "passage_id", "")), len(str(getattr(p, "text", "") or ""))) for p in passages)
+    cached = getattr(store, "_gg_fact_sheet", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    sheet = FactSheet(passages)
+    try:
+        store._gg_fact_sheet = (signature, sheet)
+    except Exception:  # a store that cannot carry attributes: no cache
+        pass
+    return sheet
+
+
 class FactSheet:
     def __init__(self, passages):
         self.facts: list[Fact] = []

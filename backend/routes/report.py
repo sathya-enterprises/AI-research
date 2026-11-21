@@ -121,6 +121,9 @@ import contextvars as _contextvars
 # carried in the public manifest for export-time chart audits.
 _CHART_EVIDENCE_LINES: "_contextvars.ContextVar[dict]" = _contextvars.ContextVar("gg_chart_evidence_lines", default={})
 _PUBLISHER_TABLE_CHART_EVIDENCE_IDS: "_contextvars.ContextVar[set]" = _contextvars.ContextVar("gg_publisher_table_chart_evidence_ids", default=set())
+# Set when the model reviewer came back "unavailable" in this report; later audits in the same report skip the
+# model call (the deterministic gates still run). Each report job runs in its own task context, so it starts False.
+_MODEL_AUDIT_UNAVAILABLE: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar("gg_model_audit_unavailable", default=False)
 _PUBLISHER_GALLERY_CHART_EVIDENCE_IDS: "_contextvars.ContextVar[set]" = _contextvars.ContextVar("gg_publisher_gallery_chart_evidence_ids", default=set())
 _SEARCH_GALLERY_CHART_EVIDENCE_IDS: "_contextvars.ContextVar[set]" = _contextvars.ContextVar("gg_search_gallery_chart_evidence_ids", default=set())
 _PUBLISHER_GALLERY_CHART_EVIDENCE_LINES: "_contextvars.ContextVar[dict]" = _contextvars.ContextVar("gg_publisher_gallery_chart_evidence_lines", default={})
@@ -13580,6 +13583,11 @@ async def _gemini_independent_report_audit(
             if response.status_code == 503:
                 mark_rate_limited(f"gemini:model:{model}", GEMINI_MODEL_COOLDOWN_MS)
                 return {"reason": "http_503", "model": model}
+            if response.status_code == 400:
+                # The model rejects the request itself (gemini-3.8-flash in live runs): skip it for 10 minutes,
+                # as the section writer's gateway does, instead of hedging onto it on every audit.
+                mark_rate_limited(f"gemini:model:{model}", int(os.getenv("GG_V2_MODEL_400_COOLDOWN_MS", "600000")))
+                return {"reason": "http_400", "model": model}
             if response.status_code == 429:
                 quota_cooldown_ms = max(
                     60_000, int(os.getenv("REPORT_PARALLEL_QUOTA_COOLDOWN_MS", "300000")),
@@ -16359,7 +16367,58 @@ def _merge_source_evidence_statuses(source_manifest: list, audited_sources: list
     return result
 
 
+_AUDIT_EVIDENCE_CACHE: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
+    "gg_audit_evidence_cache", default=None)
+
+
 def _attach_audit_source_evidence(
+    source_manifest: list, enriched_sources: list, report_text: str = "",
+) -> list:
+    """Cached :func:`_attach_audit_source_evidence_uncached` (same inputs, same result).
+
+    One report recomputed this 8 times at 5-7 s each, mostly on unchanged text. The key covers everything the
+    result depends on: the report text, the full manifest, the fetched source rows and the registered chart
+    evidence. The cache lives in the report's own context (never shared between reports) and callers get a copy.
+    """
+    import copy as _copy
+    import hashlib as _hashlib
+    try:
+        digest = _hashlib.sha1()
+        for part in (
+            str(report_text or ""),
+            json.dumps(source_manifest, sort_keys=True, default=str, ensure_ascii=False),
+            # every field of every row: relevance flags and provenance change the result too
+            json.dumps(enriched_sources, sort_keys=True, default=str, ensure_ascii=False),
+            # every context input the computation reads (chart evidence registries, uploaded files, the
+            # search-extract setting): a hidden input missing from the key would serve a stale result
+            json.dumps(_CHART_EVIDENCE_LINES.get() or {}, sort_keys=True, default=str, ensure_ascii=False),
+            json.dumps(_PUBLISHER_GALLERY_CHART_EVIDENCE_LINES.get() or {}, sort_keys=True, default=str, ensure_ascii=False),
+            json.dumps(_SEARCH_GALLERY_CHART_EVIDENCE_LINES.get() or {}, sort_keys=True, default=str, ensure_ascii=False),
+            json.dumps(sorted(_PUBLISHER_TABLE_CHART_EVIDENCE_IDS.get() or set()), default=str),
+            json.dumps(sorted(_PUBLISHER_GALLERY_CHART_EVIDENCE_IDS.get() or set()), default=str),
+            json.dumps(sorted(_SEARCH_GALLERY_CHART_EVIDENCE_IDS.get() or set()), default=str),
+            json.dumps(_UPLOADED_FILE_EVIDENCE_TEXTS.get() or {}, sort_keys=True, default=str, ensure_ascii=False),
+            str(_search_extract_evidence_allowed()),
+        ):
+            digest.update(part.encode("utf-8", "replace"))
+            digest.update(b"\x00")
+        key = digest.hexdigest()
+    except Exception:  # an unhashable input: compute as before
+        return _attach_audit_source_evidence_uncached(source_manifest, enriched_sources, report_text)
+    cache = _AUDIT_EVIDENCE_CACHE.get()
+    if cache is None:
+        cache = {}
+        _AUDIT_EVIDENCE_CACHE.set(cache)
+    if key in cache:
+        return _copy.deepcopy(cache[key])
+    result = _attach_audit_source_evidence_uncached(source_manifest, enriched_sources, report_text)
+    if len(cache) >= 6:
+        cache.pop(next(iter(cache)))
+    cache[key] = _copy.deepcopy(result)
+    return result
+
+
+def _attach_audit_source_evidence_uncached(
     source_manifest: list, enriched_sources: list, report_text: str = "",
 ) -> list:
     """Attach evidence excerpts aligned to the claims that cite each source ID.
@@ -17764,9 +17823,16 @@ async def _run_independent_report_audit(
         "sources": sources, "deterministic_audits": deterministic,
     }
     try:
-        audit = await asyncio.wait_for(
-            _gemini_independent_report_audit(**audit_args), timeout=timeout_seconds,
-        )
+        if _MODEL_AUDIT_UNAVAILABLE.get():
+            # Earlier in this report the model reviewer was unavailable (live run: three audits, each 24 s,
+            # all "unavailable"). The deterministic gates below still run on every call; only the model
+            # call, which would wait out the same busy reviewers, is skipped.
+            audit = {"status": "unavailable", "reason": "model_audit_unavailable_earlier_in_this_report",
+                     "blocking": False, "findings": [], "provider": "Gemini API"}
+        else:
+            audit = await asyncio.wait_for(
+                _gemini_independent_report_audit(**audit_args), timeout=timeout_seconds,
+            )
     except asyncio.TimeoutError:
         # Reserve a separate, bounded window for the compact Groq fallback.
         # Gemini can consume the full report-audit deadline while cycling through
@@ -17794,6 +17860,8 @@ async def _run_independent_report_audit(
     except Exception as exc:
         log.warning("Gemini independent audit failed: %s", type(exc).__name__)
         audit = {"status": "unavailable", "reason": type(exc).__name__, "blocking": False, "findings": [], "provider": "Gemini API"}
+    if str(audit.get("status") or "") == "unavailable":
+        _MODEL_AUDIT_UNAVAILABLE.set(True)
     audit = _drop_auditor_artifacts(audit, report_text, charts)
     audit = _apply_deterministic_audit_gate(audit, deterministic)
     log.info("Gemini independent report audit finished — status=%s blocking=%s findings=%d elapsed_ms=%d",

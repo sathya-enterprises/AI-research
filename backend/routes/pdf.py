@@ -4806,7 +4806,31 @@ def _trim_trailing_blank_pages(pdf_bytes: bytes) -> bytes:
         log.debug("PDF: trailing blank-page check unavailable: %s", type(exc).__name__)
         return pdf_bytes
 
+_PDF_RENDER_CACHE: "dict[str, bytes]" = {}
+_PDF_RENDER_CACHE_MAX = 6
+_PDF_RENDER_CACHE_MIN_CHARS = 50_000
+
+
 def _pdf_with_chromium(html_doc: str) -> bytes:
+    """Chromium render, reused for an identical full report (a report was rendered 6 times after writing, twice
+    from identical HTML). Keyed by the exact HTML, so any change renders again; small documents always render."""
+    import hashlib
+    if len(html_doc or "") < _PDF_RENDER_CACHE_MIN_CHARS:
+        return _pdf_with_chromium_uncached(html_doc)
+    key = hashlib.sha256(html_doc.encode("utf-8", "replace")).hexdigest()
+    cached = _PDF_RENDER_CACHE.get(key)
+    if cached is not None:
+        log.info("PDF: reused the render of identical HTML (%d KB)", len(cached) // 1024)
+        return cached
+    pdf_bytes = _pdf_with_chromium_uncached(html_doc)
+    if pdf_bytes:
+        if len(_PDF_RENDER_CACHE) >= _PDF_RENDER_CACHE_MAX:
+            _PDF_RENDER_CACHE.pop(next(iter(_PDF_RENDER_CACHE)))
+        _PDF_RENDER_CACHE[key] = pdf_bytes
+    return pdf_bytes
+
+
+def _pdf_with_chromium_uncached(html_doc: str) -> bytes:
     import shutil
     import subprocess
     import tempfile

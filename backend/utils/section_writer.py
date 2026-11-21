@@ -116,7 +116,7 @@ def unsupported_numbers(body: str, allowed: set[str], passage_texts: dict[str, s
     if passage_texts:
         from types import SimpleNamespace
 
-        from utils.fact_sheet import FactSheet
+        from utils.fact_sheet import FactSheet, fact_sheet_for
         sheet = FactSheet([SimpleNamespace(passage_id=k, text=v) for k, v in passage_texts.items()])
     out = []
     for token in statistic_tokens(text):
@@ -264,7 +264,7 @@ def numbered_facts(passages, limit: int = 60, prose_limit: int = 60) -> list:
 
     Built once per prompt and handed to postprocess, so an id means the same value in both."""
     try:
-        from utils.fact_sheet import FactSheet
+        from utils.fact_sheet import FactSheet, fact_sheet_for
         all_facts = FactSheet(passages).facts
     except Exception:  # the block is an aid; the section still has its passages
         return []
@@ -776,8 +776,8 @@ def _store_fact_sheet(store):
     """One fact sheet over the whole evidence store, built once and reused by every section."""
     sheet = getattr(store, "_gg_fact_sheet", None)
     if sheet is None and store is not None and getattr(store, "passages", None):
-        from utils.fact_sheet import FactSheet
-        sheet = FactSheet(store.passages)
+        from utils.fact_sheet import FactSheet, fact_sheet_for
+        sheet = fact_sheet_for(store)
         try:
             store._gg_fact_sheet = sheet
         except Exception:  # a store without attribute assignment still works, rebuilt per call

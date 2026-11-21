@@ -71,9 +71,9 @@ def agreeing_auditor(auditor, store, overrides: list[dict] | None = None):
     neighbouring sentence. A flag it raises is cleared ONLY when every statistic in the flagged claim
     is a fact in the claim's own cited sources (value + compatible unit + sign + metric); each
     cleared flag is recorded in ``overrides`` for the publication report. Anything else stays flagged."""
-    from utils.fact_sheet import FactSheet
+    from utils.fact_sheet import FactSheet, fact_sheet_for
 
-    sheet = FactSheet(store.passages)
+    sheet = fact_sheet_for(store)
     sink = overrides if overrides is not None else []
 
     def audit(report_text: str) -> list[dict]:
@@ -200,14 +200,14 @@ def reconcile_final_audit(audits: dict, report_text: str, store) -> list[dict]:
     Clears a mismatched citation group only when the fact sheet holds every statistic of the claim
     in its cited sources; recomputes ``blocking``; records each override (returned, and stored on
     the audit as ``factSheetOverrides``) so the publication report lists them."""
-    from utils.fact_sheet import FactSheet
+    from utils.fact_sheet import FactSheet, fact_sheet_for
 
     evidence = audits.get("sourceEvidenceAudit") if isinstance(audits, dict) else None
     if not isinstance(evidence, dict) or not evidence.get("mismatchedCitationGroups"):
         return []
     overrides: list[dict] = []
     kept = _reconcile_groups(list(evidence.get("mismatchedCitationGroups") or []), report_text,
-                             FactSheet(store.passages), store, overrides)
+                             fact_sheet_for(store), store, overrides)
     if overrides:
         cleared = {_norm(o["claim"])[:60] for o in overrides}
         evidence["mismatchedCitationGroups"] = kept
@@ -277,9 +277,9 @@ def fact_rewriter(store):
     """Rewrite a flagged claim to what the evidence supports, when it can be done without guessing:
     the claimed value IS in a cited source, on a row/sentence whose entity the claim does not name
     ("ES5: -8.5%" -> "ES5: -8.5% for Realty"). Returns None when no such rewrite exists."""
-    from utils.fact_sheet import FactSheet
+    from utils.fact_sheet import FactSheet, fact_sheet_for
 
-    sheet = FactSheet(store.passages)
+    sheet = fact_sheet_for(store)
 
     def rewrite(snippet: str, group: dict) -> str | None:
         if not _is_prose(snippet):
