@@ -936,6 +936,9 @@ def _period_end_year(label: str) -> int | None:
         year_text = quarter_fy.group(2)
         fy_end = int(year_text) if len(year_text) == 4 else 2000 + int(year_text)
         return fy_end if quarter == 4 else fy_end - 1
+    year_quarter = re.search(r"(?i)\b((?:19|20)\d{2})\s*-?\s*Q[1-4]\b", text)  # "2024Q4", "2024-Q4"
+    if year_quarter:
+        return int(year_quarter.group(1))
     iso = re.search(r"\b((?:19|20)\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", text)
     if iso:
         return int(iso.group(1))  # "2013-01-29" is a date in 2013, not the fiscal year "2013-01" (read as 2101)
@@ -947,6 +950,11 @@ def _period_end_year(label: str) -> int | None:
     if years:
         return int(years[-1])
     m = re.search(r"(?i)\bFY\s*'?(\d{2})\b", text)
+    if m:
+        return 2000 + int(m.group(1))
+    # "Aug'25", "Aug’25", "Sep-25": a month with a two-digit year (live run: an "Aug'25" FPI flow chart passed
+    # the window check of a one-month 2026 question as undated). "Mar 25" with a space can be a day: not read.
+    m = re.search(r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*['’\-]\s*(\d{2})\b", text)
     return 2000 + int(m.group(1)) if m else None
 
 

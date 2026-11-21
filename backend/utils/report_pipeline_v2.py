@@ -790,6 +790,16 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         candidates = sorted(candidates, key=lambda c: 0 if c.spec.get("storyPoint") else 1)
     except Exception as exc:
         log.warning("V2 storyline matching skipped: %s", type(exc).__name__)
+    # Which verified charts are worth a slot: no cross-index level comparisons, no third copy of one view from
+    # one publisher (live market run: five "Change (%): 5 stock names" charts from one site).
+    try:
+        from utils.chart_select import domains_from_manifest, select_charts
+        candidates, _select_drops = select_charts(candidates, domains_from_manifest(manifest), question, today)
+        for _drop in _select_drops:
+            chart_drops.append({"chart": "", "title": _drop["title"], "passage": "",
+                                "reason": f"chart selection: {_drop['reason']}"})
+    except Exception as exc:
+        log.warning("V2 chart selection skipped: %s", type(exc).__name__)
     # Chart minimum (CHART_TARGET): below it, labelled context charts (data outside the question's window)
     # fill the gap; they pass the same quality and evidence checks, except the window.
     context_added: list[str] = []

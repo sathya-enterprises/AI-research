@@ -724,7 +724,32 @@ def _question_chart_topic_tokens(question: str, entities: list[str] | None = Non
             pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized.split()) + r"(?![a-z0-9])"
             topic_question = re.sub(pattern, " ", topic_question)
     acronyms = {t.casefold() for t in re.findall(r"(?<![A-Za-z])[A-Z]{2}(?![A-Za-z])", str(question or ""))}
-    return _expand_topic_terms(_topic_terms(topic_question) | {t for t in acronyms if t not in _CHART_SCOPE_STOPWORDS})
+    tokens = _expand_topic_terms(_topic_terms(topic_question) | {t for t in acronyms if t not in _CHART_SCOPE_STOPWORDS})
+    if _STOCK_MARKET_QUESTION_RE.search(str(question or "")):
+        tokens |= _STOCK_MARKET_TERMS
+    if _INVESTOR_FLOW_QUESTION_RE.search(str(question or "")):
+        tokens |= _INVESTOR_FLOW_TERMS
+    return tokens
+
+
+# A stock-market question is answered with the market's own measures: index levels and moves, stock returns,
+# valuations, institutional buying and selling. A live one-month market run rejected "Day change (%): Nifty 50,
+# Sensex, Nifty Bank" and the FII/DII "BUY VALUE (Cr)" by day as off-topic because none of its words
+# ("share market", "investor flows") appear in those titles. Phrase-level, so "EV market share" is unaffected.
+_STOCK_MARKET_QUESTION_RE = re.compile(
+    r"(?i)\b(?:share|stock|equity|equities)\s+markets?\b|\bequities\b|\bsensex\b|\bnifty\b|\bstock exchanges?\b|"
+    r"\bbourses?\b|\bdalal street\b|\bmarket (?:rally|crash|correction|sell-?off|breadth|performance)\b")
+_STOCK_MARKET_TERMS = {
+    "nifty", "sensex", "index", "indices", "bse", "nse", "stock", "stocks", "share", "shares", "equity", "equities",
+    "close", "closing", "change", "return", "returns", "gain", "gains", "valuation", "pe", "pb", "ratio",
+    # not "vix"/"volatility": a VIX statistics table (mean, median, maximum) is not a market-performance view
+    "sector", "sectoral", "bank", "midcap", "smallcap", "largecap", "breadth", "advance", "decline",
+}
+_INVESTOR_FLOW_QUESTION_RE = re.compile(
+    r"(?i)\b(?:fpi|fii|dii)s?\b|\b(?:foreign|domestic|institutional)\b.{0,40}\binvestors?\b|\binvestor flows?\b|"
+    r"\b(?:in|out)flows?\b")
+_INVESTOR_FLOW_TERMS = {"fpi", "fii", "dii", "buy", "sell", "net", "inflow", "inflows", "outflow", "outflows",
+                        "flow", "flows", "purchase", "purchases", "sales", "investment", "holding", "weight"}
 
 
 def _normalized_entity_text(text: object) -> str:

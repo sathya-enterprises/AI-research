@@ -593,8 +593,14 @@ def _sub_about(sub: Section, entity) -> bool:
 
 def _headline_entities(section: Section, entities: list) -> list:
     """Qualifying entities a section is ABOUT (its title and entity field), most specific match wins:
-    "PSU Bank: ..." is about PSU Bank, not also about Bank."""
-    hay = f"{section.title} {section.entity}".casefold()
+    "PSU Bank: ..." is about PSU Bank, not also about Bank.
+
+    In a "Sector: description" title only the part before the colon names the subject: "Cement: Pricing Power
+    and Volume Trends" is about Cement (live run: "Power", an Energy alias, made it a merged Cement/Energy
+    deep-dive, and the repair then added a second Cement section)."""
+    title = str(section.title or "")
+    headline = title.split(":", 1)[0] if ":" in title else title
+    hay = f"{headline} {section.entity}".casefold()
     spans = {}
     for entity in entities:
         names = {entity.name.casefold(), *[a.casefold() for a in getattr(entity, "aliases", [])]}

@@ -117,6 +117,9 @@ def funnel(raw: dict) -> dict | None:
         reasons["verify: " + reason[:60]] += 1
     verified = [s for i, s in enumerate(specs) if i not in bad]
     verified_charts = [c for i, c in enumerate(quality) if i not in bad]
+    from utils.chart_select import domains_from_manifest, select_charts
+    verified_charts, _sel = select_charts(verified_charts, domains_from_manifest(manifest), question, today)
+    verified = [dict(c.spec) for c in verified_charts]
     placed = place(verified_charts, stages, store, tier)
     return {
         "question": question[:80], "tier": tier,
