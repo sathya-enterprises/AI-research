@@ -773,16 +773,13 @@ def _chunks(subsections: list, max_words: int = 2600) -> list[list]:
 
 
 def _store_fact_sheet(store):
-    """One fact sheet over the whole evidence store, built once and reused by every section."""
-    sheet = getattr(store, "_gg_fact_sheet", None)
-    if sheet is None and store is not None and getattr(store, "passages", None):
-        from utils.fact_sheet import FactSheet, fact_sheet_for
-        sheet = fact_sheet_for(store)
-        try:
-            store._gg_fact_sheet = sheet
-        except Exception:  # a store without attribute assignment still works, rebuilt per call
-            pass
-    return sheet
+    """One fact sheet over the whole evidence store, built once and reused by every section and by the checks
+    after writing (utils.fact_sheet.fact_sheet_for keeps the single cache; a second cache here under the same
+    attribute name crashed the checks with "'FactSheet' object is not subscriptable")."""
+    if store is None or not getattr(store, "passages", None):
+        return None
+    from utils.fact_sheet import fact_sheet_for
+    return fact_sheet_for(store)
 
 
 async def write_section(gateway, store, section, figures: list, *, question: str, thesis: str,

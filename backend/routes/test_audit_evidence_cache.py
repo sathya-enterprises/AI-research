@@ -64,3 +64,16 @@ def test_identical_report_html_is_rendered_once_and_any_change_renders_again(mon
     small = "<html><body>short</body></html>"
     P._pdf_with_chromium(small); P._pdf_with_chromium(small)
     assert len(calls) == 4  # small documents always render
+
+
+def test_section_writer_and_checks_share_one_fact_sheet_without_crashing():
+    # live run: the section writer's own cache and the checks' cache used one attribute name with different
+    # shapes; the first check after writing failed with "'FactSheet' object is not subscriptable"
+    from types import SimpleNamespace
+    from utils.fact_sheet import fact_sheet_for
+    from utils.section_writer import _store_fact_sheet
+    store = SimpleNamespace(passages=[SimpleNamespace(passage_id="S1.1", kind="narrative",
+                                                      text="Gold imports rose to 58.0 billion in FY25.")])
+    writer_sheet = _store_fact_sheet(store)
+    assert fact_sheet_for(store) is writer_sheet
+    assert _store_fact_sheet(store) is writer_sheet

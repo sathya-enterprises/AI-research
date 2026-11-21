@@ -312,12 +312,12 @@ def fact_sheet_for(store) -> "FactSheet":
     store whose passages change gets a fresh sheet."""
     passages = list(getattr(store, "passages", []) or [])
     signature = tuple((str(getattr(p, "passage_id", "")), len(str(getattr(p, "text", "") or ""))) for p in passages)
-    cached = getattr(store, "_gg_fact_sheet", None)
+    cached = getattr(store, "_gg_fact_sheet_cache", None)
     if cached is not None and cached[0] == signature:
         return cached[1]
     sheet = FactSheet(passages)
     try:
-        store._gg_fact_sheet = (signature, sheet)
+        store._gg_fact_sheet_cache = (signature, sheet)
     except Exception:  # a store that cannot carry attributes: no cache
         pass
     return sheet
