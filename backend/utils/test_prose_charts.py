@@ -49,3 +49,25 @@ def test_off_topic_sentences_and_search_snippets_are_ignored():
     snippet = SimpleNamespace(passages=[SimpleNamespace(kind="search_excerpt", reliability=0.9, text=sentence,
                                                         source_id="S1", passage_id="S1.1")])
     assert prose_charts(snippet, "How have gross enrolment ratios (GER) in Indian schools changed") == []
+
+
+def test_a_data_table_shown_in_the_report_gets_a_chart_of_its_source_table():
+    from utils.chart_minimum import report_table_charts
+
+    source = SimpleNamespace(kind="table", reliability=0.9, source_id="S3", passage_id="S3.1", title="", url="",
+                             parent_source_id="", parent_data_context="",
+                             text=("TABLE 1 — Index quotes snapshot\nIndex | Close | Change (%)\n"
+                                   "Nifty Bank | 64,635.20 | 2.49\nNifty IT | 31,322.65 | 1.30\n"
+                                   "Nifty Realty | 938.90 | 1.71\nNifty Media | 1,755.75 | -1.68"))
+    store = SimpleNamespace(passages=[source])
+    body = ("Banks led the rally.\n\n| Index | Close | Change (%) |\n| --- | --- | --- |\n"
+            "| Nifty Bank | 64,635.20 | +2.49% |\n| Nifty IT | 31,322.65 | +1.30% |\n"
+            "| Nifty Realty | 938.90 | +1.71% |\n| Nifty Media | 1,755.75 | -1.68% |\n\nMedia lagged.")
+    charts = report_table_charts([SimpleNamespace(section_id="sec-2", body=body)], store, start_index=1, limit=3)
+    assert len(charts) == 1
+    chart = charts[0]
+    assert chart.section_id == "sec-2" and chart.passage_ids == ["S3.1"] and chart.spec["fromReportTable"]
+    assert {label for _s, label, _v in chart.points} >= {"Nifty Bank", "Nifty IT", "Nifty Realty"}
+    # a table that is not a copy of a source table gets no chart
+    other = SimpleNamespace(section_id="sec-3", body="| A | B |\n| --- | --- |\n| x | 1 |\n| y | 7 |\n| z | 9 |\n| w | 11 |")
+    assert report_table_charts([other], store, start_index=1, limit=3) == []

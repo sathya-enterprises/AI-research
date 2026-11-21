@@ -152,6 +152,97 @@ def report_number_charts(drafts: list, store, *, start_index: int, limit: int) -
     return out
 
 
+_TABLE_NUMBER_RE = re.compile(r"(?<![\w.])[-+−]?\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers(text: str) -> set[float]:
+    out: set[float] = set()
+    for token in _TABLE_NUMBER_RE.findall(str(text or "")):
+        try:
+            value = float(token.replace(",", "").replace("−", "-"))
+        except ValueError:
+            continue
+        if not (1900 <= value <= 2100 and float(value).is_integer()):  # years are labels, not data
+            out.add(round(abs(value), 4))
+    return out
+
+
+def _report_tables(body: str) -> list[list[str]]:
+    """Markdown tables in a section body (header + rows), separator rows dropped."""
+    tables, current = [], []
+    for line in str(body or "").splitlines() + [""]:
+        if line.strip().startswith("|"):
+            if not re.fullmatch(r"\s*\|[\s:|-]+\|?\s*", line):
+                current.append(line.strip())
+        elif current:
+            tables.append(current)
+            current = []
+    return tables
+
+
+def report_table_charts(drafts: list, store, *, start_index: int, limit: int,
+                        existing_values: list[set] | None = None, question: str = "",
+                        today: str | None = None) -> list:
+    """Charts of the data tables a report shows, built from the SOURCE table each was copied from.
+
+    A colleague's market report showed "Table 1: close, change (%) and points change, by index" (10 indices)
+    and shipped no chart. The section's table is matched to the store table passage holding most of its
+    numbers; that passage is charted by the same builder as every table chart, so the chart passes the same
+    checks and plots what the reader sees in the text. Placed directly after the table.
+    """
+    if limit <= 0 or store is None:
+        return []
+    from utils.section_charts import _focused_charts, clip_to_question_window
+    min_year = max_year = None
+    focus = None
+    if question:
+        try:  # the question's window and entities, exactly as for the writer's own table charts
+            from datetime import date
+            from utils.data_angles import requested_year_bounds
+            from utils.table_focus import focus_entities
+            min_year, max_year = requested_year_bounds(question, date.fromisoformat((today or date.today().isoformat())[:10]))
+            focus = focus_entities(question)
+        except Exception:
+            min_year = max_year = None
+    table_passages = [p for p in getattr(store, "passages", []) or [] if p.kind in {"table", "calculated"}]
+    seen = [set(v) for v in (existing_values or [])]
+    out = []
+    for draft in drafts:
+        for table in _report_tables(getattr(draft, "body", "")):
+            body_rows = table[1:]
+            numeric_rows = [r for r in body_rows if _numbers("|".join(r.strip("|").split("|")[1:]))]
+            if len(numeric_rows) < 3:
+                continue
+            wanted = _numbers("\n".join(body_rows))
+            if len(wanted) < 4:
+                continue
+            best, best_share = None, 0.0
+            for passage in table_passages:
+                share = len(wanted & _numbers(passage.text)) / len(wanted)
+                if share > best_share:
+                    best, best_share = passage, share
+            if best is None or best_share < 0.7:
+                continue  # the table is not a copy of one source table: no chart is claimed for it
+            for chart in _focused_charts(best, start_index + len(out), None, focus, min_year, max_year):
+                if question and clip_to_question_window(chart, question):
+                    continue  # its data lies outside the period asked about
+                values = {round(abs(v), 4) for _s, _l, v in chart.points}
+                if len(values) < 3 or len(values & wanted) < 0.8 * len(values):
+                    continue  # a view of the source table that the report's table does not show
+                if any(len(values & other) >= 0.8 * len(values) for other in seen):
+                    continue  # already charted
+                chart.chart_id = f"t{start_index + len(out)}"
+                chart.section_id = draft.section_id
+                chart.spec["fromReportTable"] = True
+                chart.claim = body_rows[-1][:400]  # placed after the table's last row
+                seen.append(values)
+                out.append(chart)
+                break
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def place_after_sentence(body: str, sentence: str, figure_number: int, reading: str) -> str:
     """Put "[[FIGURE n]]" and its reading after the paragraph that holds ``sentence`` (end of section if not
     found)."""

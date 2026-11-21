@@ -991,6 +991,33 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 report_number_added.append(str(chart.spec.get("title")))
         except Exception as exc:
             log.warning("V2 report-number charts skipped: %s", type(exc).__name__)
+    # Still below the chart target: every data table the report shows gets a chart of the source table it
+    # was copied from (a market report showed a 10-index table and shipped no chart), placed after the table.
+    _have = len([c for c in planned if c.status == "referenced"])
+    if _have < _target:
+        try:
+            from utils.chart_minimum import place_after_sentence, report_table_charts
+            from utils.chart_story import interpret_chart
+            _existing = [{round(abs(v), 4) for _s, _l, v in c.points} for c in planned if c.status == "referenced"]
+            _rt = report_table_charts(good, store, start_index=950, limit=(_target - _have) * 2,
+                                      existing_values=_existing, question=question, today=today)
+            _rt = _verify_pass(_quality_pass(_rt))[: _target - _have]
+            for chart in _rt:
+                draft = next((d for d in good if d.section_id == chart.section_id), None)
+                if draft is None:
+                    continue
+                n = 300 + len(report_number_added) + 1
+                chart.figure_number = n
+                chart.reading = interpret_chart(chart.spec, chart.passage_ids) or f"{chart.spec.get('title')}."
+                draft.body = place_after_sentence(draft.body, chart.claim, n, chart.reading)
+                chart.claim = re.sub(r"\s+", " ", CITE_RE.sub("", f"As Figure {n} shows, {chart.reading}")).strip()[:400]
+                chart.status = "referenced"
+                planned.append(chart)
+                report_number_added.append(str(chart.spec.get("title")))
+            if _rt:
+                log.info("V2: %d chart(s) added from the report's own data tables", len(_rt))
+        except Exception as exc:
+            log.warning("V2 report-table charts skipped: %s", type(exc).__name__)
 
     # Executive summary from section summaries.
     exec_section = next(s for s in outline.sections if s.kind == "executive_summary")
