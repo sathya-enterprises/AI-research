@@ -1240,7 +1240,13 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     except Exception as exc:
         disagreements = []
         log.warning("V2 disagreement check skipped: %s", type(exc).__name__)
-    parts.append(f"## Methodology and Evidence Base\n\n{method}")
+    # The client report is about the topic, not about how it was researched: the methodology (sources kept,
+    # passages, scoring, claims removed) stays in the run's record (meta["methodologyText"]) and the publication
+    # report. GG_REPORT_METHODOLOGY_SECTION=1 puts it back in the report.
+    methodology_text = method
+    if os.getenv("GG_REPORT_METHODOLOGY_SECTION", "0") == "1":
+        parts.append(f"## Methodology and Evidence Base\n\n{method}")
+    data_appendix_text = ""
     if tier == "in_depth":
         # Sources and their reliability are listed once, by the renderer ("Appendix B — Data Sources").
         # Tables placed in the text that discusses them are not repeated in the appendix.
@@ -1251,7 +1257,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         except Exception:
             _appendix_window = None
         data_md = appendix_data_markdown(store, set(data_passages) - layout["placedTables"], window_start=_appendix_window)
-        if data_md:
+        # Raw source tables copied in at the end: tables that matter are already in the sections that discuss
+        # them. Kept in the run's record; GG_REPORT_DATA_APPENDIX=1 puts the appendix back in the report.
+        data_appendix_text = data_md or ""
+        if data_md and os.getenv("GG_REPORT_DATA_APPENDIX", "0") == "1":
             parts.append(f"## Appendix A — Data Tables\n\n{data_md}")
     report_md = STRAY_LABEL_RE.sub("", "\n\n".join(parts))
     # A table cell that is only a dash means "no value"; the chart checks read an em dash as
@@ -1384,6 +1393,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "deadline": {**deadline_log, "target": round(deadline[0] - time.monotonic()) if deadline else None,
                      "hardStop": round(deadline[1] - time.monotonic()) if deadline else None},
         # Question asks (Stage F): each ask, the section answering it, and the methodology coverage note.
+        # The methodology and the raw data appendix are kept here (and in the capture/publication report)
+        # rather than in the client report.
+        "methodologyText": methodology_text,
+        "dataAppendixText": data_appendix_text[:60000],
         "leakGate": leak_actions,
         "regime": regime_log,
         "repetition": repetition_log,

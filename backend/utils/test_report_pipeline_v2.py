@@ -217,13 +217,16 @@ def test_end_to_end_assembly_with_fake_llm(tier):
     assert set(out) >= {"title", "report", "charts", "keyStats", "summary", "images"}
     report = out["report"]
     assert report.startswith("## Executive Summary")
-    assert "## Methodology and Evidence Base" in report and "Weather patterns" not in report.split("## Methodology")[0]
+    # The report is about the topic; how it was researched is kept in the run's record, not in the report.
+    assert "## Methodology and Evidence Base" not in report and "Weather patterns" not in report
+    assert "Appendix A" not in report
     assert not re.search(r"\[S\d+\.\d+\]", report)  # passage ids converted to source-level for the renderer
     assert re.search(r"\[S\d+\]", report)
     assert out["charts"] and all(c["title"].startswith(f"Figure {i}:") for i, c in enumerate(out["charts"], 1))
     for i in range(1, len(out["charts"]) + 1):
         assert f"[CHART_{i}]" in report and f"Figure {i} shows" in report
     meta = result["meta"]
+    assert "Evidence base" in meta["methodologyText"] or meta["methodologyText"].strip()
     assert meta["llm"]["calls"] == gateway.stats.calls
     assert any("Weather patterns" in d for d in meta["outline"]["decisions"])
     coverage = {r["entity"]: r for r in meta["outline"]["entityCoverage"]}
