@@ -4810,6 +4810,95 @@ def _trim_trailing_blank_pages(pdf_bytes: bytes) -> bytes:
         log.debug("PDF: trailing blank-page check unavailable: %s", type(exc).__name__)
         return pdf_bytes
 
+# "S E C T I O N  0 7": the house-style kicker is letter-spaced, so the PDF text has spaces between letters.
+_PDF_SECTION_MARK_RE = re.compile(r"S\s?E\s?C\s?T\s?I\s?O\s?N\s+(\d)\s?(\d)")
+_SECTION_FLOW_FILL_LIMIT = 0.4
+
+
+def _sparse_section_starts(pdf_bytes: bytes, fill_limit: float = _SECTION_FLOW_FILL_LIMIT) -> list[str]:
+    """Numbers of sections that start on a new page right after a mostly empty page.
+
+    Every house-style section starts on a new page, so a section whose last few lines spill over leaves a page
+    that is mostly empty (gold live run: pages 28 and 33 held 3-6 lines). The next section can start on that page.
+    """
+    try:
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            import fitz
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return []
+    numbers: list[str] = []
+    for index in range(1, len(document) - 1):
+        following = document[index + 1]
+        fr = following.rect
+        mark = _PDF_SECTION_MARK_RE.search(following.get_text("text", clip=fitz.Rect(fr.x0, fr.y0, fr.x1, fr.y0 + fr.height * 0.3)) or "")
+        if not mark:
+            continue
+        page = document[index]
+        r = page.rect
+        content = fitz.Rect(r.x0 + 20, r.y0 + 30, r.x1 - 20, r.y1 - 60)
+        bottoms = [b[3] for b in page.get_text("blocks", clip=content) if str(b[4]).strip()]
+        for image in page.get_images(full=True):
+            bottoms += [rect.y1 for rect in page.get_image_rects(image[0]) if rect.intersects(content)]
+        page_area = max(1.0, r.width * r.height)
+        for drawing in page.get_drawings():
+            box = fitz.Rect(drawing.get("rect", r))
+            # the page's paper-coloured background is drawn as a page-sized rectangle: not content
+            if box.intersects(content) and box.width * box.height < 0.5 * page_area:
+                bottoms.append(box.y1)
+        if not bottoms:
+            continue  # a furniture-only page: removed by the blank-page trim
+        fill = (min(max(bottoms), content.y1) - content.y0) / max(1.0, content.height)
+        if fill < fill_limit:
+            numbers.append(mark.group(1) + mark.group(2))
+    return numbers
+
+
+def _with_flowing_sections(html_doc: str, numbers: list[str]) -> str:
+    """Let the named sections start on the current page instead of forcing a new one."""
+    changed = 0
+    for number in numbers:
+        heading_at = html_doc.find(f'data-section-number="{number}"')
+        if heading_at < 0:
+            continue
+        start = html_doc.rfind("<section ", 0, heading_at)
+        tag_end = html_doc.find(">", start)
+        if start < 0 or tag_end < 0 or tag_end > heading_at:
+            continue
+        tag = html_doc[start:tag_end]
+        if "gg-section--flow" in tag or 'class="gg-section ' not in tag:
+            continue
+        html_doc = html_doc[:start] + tag.replace('class="gg-section ', 'class="gg-section gg-section--flow ', 1) + html_doc[tag_end:]
+        changed += 1
+    if not changed:
+        return html_doc
+    style = ('<style id="gg-pdf-section-flow">html body[class] .gg-report-sections > .gg-section.gg-section--flow '
+             '{ break-before: auto !important; page-break-before: auto !important; margin-top: 30px !important; }</style>')
+    return html_doc.replace("</head>", style + "</head>", 1)
+
+
+def _render_with_flowing_sections(render, html_doc: str) -> bytes:
+    """Render; if a section ends on a mostly empty page, render once more with the next section starting there."""
+    data = render(html_doc)
+    try:
+        numbers = _sparse_section_starts(data)
+        if not numbers:
+            return data
+        flowed_html = _with_flowing_sections(html_doc, numbers)
+        if flowed_html == html_doc:
+            return data
+        flowed = render(flowed_html)
+        if flowed:
+            log.info("PDF: %d section(s) start on the page left mostly empty by the section before (%s)",
+                     len(numbers), ", ".join(numbers))
+            return flowed
+    except Exception as exc:
+        log.warning("PDF: section-flow pass skipped: %s", type(exc).__name__)
+    return data
+
+
 _PDF_RENDER_CACHE: "dict[str, bytes]" = {}
 _PDF_RENDER_CACHE_MAX = 6
 _PDF_RENDER_CACHE_MIN_CHARS = 50_000
@@ -5010,28 +5099,28 @@ def build_pdf(report: str, title: str, question: str, summary: str,
     chrome_exc: Exception | None = None
     if os.name == "nt":
         try:
-            return _finalize(_pdf_with_chromium(html_doc), "system Chromium (Windows-first)")
+            return _finalize(_render_with_flowing_sections(_pdf_with_chromium, html_doc), "system Chromium (Windows-first)")
         except Exception as exc:
             chrome_exc = exc
             log.warning("PDF: system Chromium unavailable/failed on Windows; trying Playwright: %s", exc)
         try:
-            return _finalize(_pdf_with_playwright(html_doc), "Playwright Chromium")
+            return _finalize(_render_with_flowing_sections(_pdf_with_playwright, html_doc), "Playwright Chromium")
         except Exception as exc:
             pw_exc = exc
             log.warning("PDF: Playwright Chromium unavailable/failed; trying WeasyPrint: %s", exc)
     else:
         try:
-            return _finalize(_pdf_with_playwright(html_doc), "Playwright Chromium")
+            return _finalize(_render_with_flowing_sections(_pdf_with_playwright, html_doc), "Playwright Chromium")
         except Exception as exc:
             pw_exc = exc
             log.warning("PDF: Playwright Chromium unavailable/failed; trying system Chromium: %s", exc)
         try:
-            return _finalize(_pdf_with_chromium(html_doc), "system Chromium")
+            return _finalize(_render_with_flowing_sections(_pdf_with_chromium, html_doc), "system Chromium")
         except Exception as exc:
             chrome_exc = exc
             log.warning("PDF: system Chromium unavailable/failed; trying WeasyPrint: %s", exc)
     try:
-        return _finalize(_pdf_with_weasyprint(html_doc), "WeasyPrint")
+        return _finalize(_render_with_flowing_sections(_pdf_with_weasyprint, html_doc), "WeasyPrint")
     except Exception as exc:
         log.error("PDF: dynamic HTML-to-PDF failed: playwright=%s chromium=%s weasyprint=%s", pw_exc, chrome_exc, exc)
         raise RuntimeError(
