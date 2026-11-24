@@ -319,7 +319,7 @@ export function ReportPanel({ msg, question, hasPriorContext, onGenerate, onExpe
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ report: rd.report, title: rd.title, charts: rd.charts, images: rd.images ?? [], question, keyStats: rd.keyStats, summary: rd.summary, fileImages: rd.fileImages ?? [], sources: rd.sources ?? [], theme: rd.theme ?? null, presentation: rd.presentation ?? null, reportTier: rd.reportTier ?? selectedTier,
-          reportStyle: rd.reportStyle ?? 'market_currents', kicker: rd.kicker ?? '',
+          reportStyle: rd.reportStyle ?? 'market_currents', styleVariant: rd.styleVariant ?? null, kicker: rd.kicker ?? '',
           // A draft (generated but not approved) is exported as a labelled
           // draft with the same charts as the preview; approved reports keep
           // the strict export gate.

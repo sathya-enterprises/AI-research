@@ -26,6 +26,7 @@ from urllib.parse import urlparse, unquote
 from routes.report import _sanitize_theme
 from utils.presentation_schema import ReportPresentationSpec
 from utils.report_document import build_report_document, ReportSectionModel
+from routes.style_variants import current_style_variant, variant_css, variant_theme
 from routes.house_styles import (
     DEFAULT_REPORT_STYLE, house_closing, house_css, house_theme, normalize_report_style, render_house_cover, running_title,
     transform_section_html,
@@ -5022,6 +5023,9 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     # editorial look for stored reports and older callers.
     house_style = normalize_report_style(report_style)
     render_theme.update(house_theme(house_style))
+    # Per-report design variant (palette, type, headings, cover, tables); None keeps the plain house style.
+    style_variant = current_style_variant() if house_style else None
+    render_theme.update(variant_theme(house_style, style_variant))
     if house_style == "feature_article" and images and isinstance(images[0], dict) and images[0].get("url"):
         # The first image is placed prominently as the hero image on Page 1; do not repeat it in the article body.
         report = re.sub(r"\[(?:WEB_IMG|IMAGE)_1\]", "", report, count=1, flags=re.IGNORECASE)
@@ -5179,7 +5183,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     css = _build_css(render_theme, report_tier)
     # v93: bundled Lora/Inter (embedded, offline) + editorial layer, appended
     # after the legacy primitives so it composes rather than replaces them.
-    css = css + "\n" + _editorial_font_faces() + "\n" + _editorial_css() + house_css(house_style)
+    css = css + "\n" + _editorial_font_faces() + "\n" + _editorial_css() + house_css(house_style) + variant_css(house_style, style_variant)
     # Do not emit arbitrary theme.customCss from the LLM; only validated theme tokens are consumed.
     # Keep PDF rendering deterministic/offline. A model-selected fontFamily can still
     # be used when installed locally, while the dynamic renderer does not require
@@ -5548,7 +5552,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
 {font_link}
 <style>{css}</style>
 </head>
-<body data-report-tier="{html.escape(report_tier, quote=True)}"{f' data-report-style="{house_style}" data-running-title="{html.escape(running_title(house_style, title_text, question), quote=True)}"' if house_style else ''} class="{f'gg-house gg-house--{house_style} ' if house_style else ''}{_EDITORIAL_BODY_CLASS} gg-style--{html.escape(str((theme or {}).get("designMode") or "editorial"), quote=True)} gg-cards--{html.escape(str((theme or {}).get("cardMode") or "outlined"), quote=True)} gg-section-treatment--{html.escape(str((theme or {}).get("sectionTreatment") or "rule"), quote=True)} gg-chart-style--{html.escape(str((theme or {}).get("chartStyle") or "annotated"), quote=True)} {visual_classes} {tier_class}{' gg-has-cover' if cover_html else ''}{' gg-cover-bold-banner' if cover_html and str(cover_spec.get("cover", {}).get("treatment") or "minimal").lower() == "bold_banner" else ''}">
+<body data-report-tier="{html.escape(report_tier, quote=True)}"{f' data-report-style="{house_style}" data-running-title="{html.escape(running_title(house_style, title_text, question), quote=True)}"' if house_style else ''}{f' data-style-variant="{style_variant}"' if style_variant else ''} class="{f'gg-house gg-house--{house_style} ' if house_style else ''}{_EDITORIAL_BODY_CLASS} gg-style--{html.escape(str((theme or {}).get("designMode") or "editorial"), quote=True)} gg-cards--{html.escape(str((theme or {}).get("cardMode") or "outlined"), quote=True)} gg-section-treatment--{html.escape(str((theme or {}).get("sectionTreatment") or "rule"), quote=True)} gg-chart-style--{html.escape(str((theme or {}).get("chartStyle") or "annotated"), quote=True)} {visual_classes} {tier_class}{' gg-has-cover' if cover_html else ''}{' gg-cover-bold-banner' if cover_html and str(cover_spec.get("cover", {}).get("treatment") or "minimal").lower() == "bold_banner" else ''}">
 {cover_html}
 {navigation_html}
 <main class="{composition_class}" data-report-tier="{html.escape(report_tier, quote=True)}">

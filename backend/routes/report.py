@@ -52,6 +52,7 @@ from utils.screener_kb import (
 )
 from utils.intent import resolve_request_intent, RequestIntent, is_search_audit_request, _extract_research_topic
 from routes.house_styles import DEFAULT_REPORT_STYLE, normalize_report_style, writer_style_contract
+from routes.style_variants import pick_style_variant as _pick_style_variant, set_current_style_variant as _set_style_variant
 from routes import report_llm
 from utils.report_tiers import (
     get_report_tier_spec, report_tier_contract, report_tier_error,
@@ -21372,6 +21373,8 @@ async def _edit_report_section_impl(request: Request):
     instruction = (body.get("editInstruction") or body.get("instruction") or "").strip()
     if not instruction:
         return JSONResponse({"error": "No edit instruction provided."}, status_code=400)
+    # An edit re-renders the same report: keep its design variant.
+    _set_style_variant(body.get("styleVariant"))
 
     await _attach_action_okf_evidence(body, instruction)
 
@@ -22565,7 +22568,7 @@ async def report_job_status(job_id: str):
         # envelope but loses the nested `result` object must not turn a real
         # completed report into the misleading "HTTP 200" empty-report error.
         if isinstance(result, dict):
-            for key in ("report", "summary", "title", "reportId", "revision", "reportTier", "reportStyle", "kicker", "pageTarget", "charts", "images", "keyStats", "sources", "theme", "presentation", "recommendedFormat", "publicationStatus", "qualityReview", "geminiAudit",
+            for key in ("report", "summary", "title", "reportId", "revision", "reportTier", "reportStyle", "styleVariant", "kicker", "pageTarget", "charts", "images", "keyStats", "sources", "theme", "presentation", "recommendedFormat", "publicationStatus", "qualityReview", "geminiAudit",
                         "publicationOutcome", "failedStage", "blockingCategories", "failureSummary", "draftAvailable", "chartPipeline", "researchCoverage", "renderedPages", "pageBudget"):
                 if key in result:
                     response[key] = result[key]
@@ -22746,6 +22749,12 @@ async def generate_report(request: Request):
     tier_spec = get_report_tier_spec(report_tier)
     # Client house style (Market Currents by default, or Feature Article).
     report_style = normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE)
+    # Each new report draws its own design variant (palette, type, headings, cover, tables) unless the request
+    # carries one; GG_REPORT_STYLE_VARIANTS=0 keeps the plain house style.
+    if os.getenv("GG_REPORT_STYLE_VARIANTS", "1").strip().casefold() in {"0", "false", "no", "off"}:
+        style_variant = _set_style_variant(None)
+    else:
+        style_variant = _set_style_variant(body.get("styleVariant")) or _set_style_variant(_pick_style_variant())
     _report_progress("prepare", "Preparing report settings and source context…", 5)
     # Diagnostic capture is completely opt-in (GG_RESEARCH_CAPTURE=1). It saves
     # the real web-search query payloads, article fetch statuses/text, writer evidence,
@@ -28269,6 +28278,7 @@ async def generate_report(request: Request):
             "fileImages": embedded_file_images,  # extracted charts/images only — never full pages
             "recommendedFormat": final_format,
             "reportStyle": report_style,
+            "styleVariant": style_variant,
             "kicker": str(parsed.get("kicker") or "")[:60],
             "reportTier": report_tier,
             "pageTarget": _workbook_page_target,
@@ -28739,6 +28749,7 @@ async def generate_report(request: Request):
                 "presentation": report_presentation,
                 "sources":    source_manifest,
                 "reportStyle": report_style,
+                "styleVariant": style_variant,
                 "kicker": str(salvaged.get("kicker") or "")[:60],
                 "reportTier": report_tier,
                 "pageTarget": _salvage_page_target,
@@ -28850,6 +28861,7 @@ async def generate_report(request: Request):
                 "presentation": report_presentation,
                 "sources":    source_manifest,
                 "reportStyle": report_style,
+                "styleVariant": style_variant,
                 "kicker": str(repaired_parsed.get("kicker") or "")[:60],
                 "reportTier": report_tier,
                 "researchCoverage": (

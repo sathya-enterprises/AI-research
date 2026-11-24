@@ -23,6 +23,7 @@ import re
 import time
 import threading
 import unicodedata
+from routes.style_variants import set_current_style_variant, variant_css, variant_from_html, variant_print_css, variant_theme
 from routes.house_styles import (
     DEFAULT_REPORT_STYLE, house_css, house_print_css, house_style_from_html, house_theme, normalize_report_style,
 )
@@ -4717,8 +4718,11 @@ body .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {
         running = html.unescape(running_match.group(1)) if running_match else short_title
         # The editorial layer above is re-injected here, so repeat the house
         # CSS after it before the print furniture.
+        _variant = variant_from_html(html_doc)
         premium_print_overrides += ('<style id="gg-pdf-house-style">' + house_css(house_style)
-                                    + house_print_css(house_style, running) + "</style>")
+                                    + variant_css(house_style, _variant)
+                                    + house_print_css(house_style, running)
+                                    + variant_print_css(house_style, _variant) + "</style>")
     return html_doc.replace(
         "</head>",
         print_css.replace("{short_title}", short_title) + final_print_overrides + premium_print_overrides + "</head>",
@@ -4978,6 +4982,7 @@ def build_pdf(report: str, title: str, question: str, summary: str,
     theme = dict(theme or {}) if isinstance(theme, dict) else {}
     theme.update(_editorial_render_theme())
     theme.update(house_theme(house_style_from_html(html_doc)))
+    theme.update(variant_theme(house_style_from_html(html_doc), variant_from_html(html_doc)))
     html_doc = _replace_chart_runtime_with_svg(html_doc, theme=theme)
     html_doc = _strip_non_printing_runtime(html_doc)
 
@@ -5396,6 +5401,8 @@ async def generate_pdf(request: Request):
     sources = normalise_source_manifest(body.get("sources", []))
     # Exports use the client house style unless the request names another.
     report_style = normalize_report_style(body.get("reportStyle"), DEFAULT_REPORT_STYLE)
+    # Keep the report's own design variant in the export (None: plain house style).
+    set_current_style_variant(body.get("styleVariant"))
     kicker = str(body.get("kicker") or "")[:60]
     # Normalize the legacy image alias before fallback placement decides
     # whether selected source images already have explicit report positions.
