@@ -19,6 +19,8 @@ import asyncio
 import csv
 import io
 import json
+import os
+from pathlib import Path
 
 import httpx
 import logging
@@ -290,6 +292,103 @@ def fits_measure(entry: "CatalogEntry", measure_text: str) -> bool:
     return bool(subject_words(f"{entry.title} {entry.keywords}") & subject_words(measure_text))
 
 
+# The whole World Development Indicators database (about 1,500 series: id, title, unit, topics), stored with the code
+# so no request is made to list it. The curated catalog above holds 27 World Bank series; topics such as arms exports,
+# military spending, cereal production, tertiary enrolment and tourist arrivals had none and came out without charts.
+_WDI_FILE = Path(__file__).with_name("data") / "wdi_indicators.json"
+_WDI_CACHE: list | None = None
+_DISAGGREGATED_RE = re.compile(r"(?i)\b(?:female|male|gender|girls|boys|rural|urban|ages? \d|aged \d|poorest|richest|"
+                               r"quintile|modeled|lcu|constant lcu)\b")
+
+
+# Everyday words and the words statistical series use for them (general vocabulary, not a topic rule).
+_WDI_SYNONYMS = {
+    "defence": {"military", "arms"}, "defense": {"military", "arms"}, "weapon": {"arms", "military"},
+    "foodgrain": {"cereal"}, "grain": {"cereal"}, "wheat": {"cereal"}, "rice": {"cereal"}, "paddy": {"cereal"},
+    "higher": {"tertiary"}, "university": {"tertiary"}, "college": {"tertiary"}, "school": {"enrollment", "primary", "secondary"},
+    "tourist": {"tourism"}, "visitor": {"tourism"}, "arrival": {"tourism"},
+    "solar": {"renewable"}, "wind": {"renewable"}, "hydro": {"renewable", "hydroelectric"}, "clean": {"renewable"},
+    "mobile": {"cellular"}, "telecom": {"cellular", "telephone"}, "phone": {"cellular", "telephone"},
+    "car": {"vehicle", "motor"}, "automobile": {"vehicle", "motor"}, "carbon": {"co2"}, "emission": {"co2", "ghg"},
+    "job": {"employment", "unemployment"}, "worker": {"labor", "employment"}, "wage": {"wage", "salaried"},
+    "hospital": {"health"}, "doctor": {"physician"}, "medicine": {"pharmaceutical"}, "drug": {"pharmaceutical"},
+    "remittance": {"remittance"}, "migrant": {"migrant", "remittance"}, "farm": {"agricultural", "agriculture"},
+    "crop": {"crop", "cereal"}, "fertiliser": {"fertilizer"}, "internet": {"internet", "broadband"},
+    "electricity": {"electric", "power"}, "oil": {"petroleum", "fuel"}, "gas": {"natural", "fuel"},
+    "inflation": {"consumer", "deflator"}, "debt": {"debt"}, "aid": {"oda", "assistance"},
+}
+_WDI_IDF_CACHE: dict[str, float] | None = None
+
+
+def _wdi_idf() -> dict[str, float]:
+    global _WDI_IDF_CACHE
+    if _WDI_IDF_CACHE is None:
+        import math
+        rows = _wdi_rows()
+        counts: dict[str, int] = {}
+        for row in rows:
+            if isinstance(row, list) and len(row) >= 2:
+                for word in subject_words(str(row[1])):
+                    counts[word] = counts.get(word, 0) + 1
+        total = max(1, len(rows))
+        _WDI_IDF_CACHE = {word: math.log(total / (1 + n)) for word, n in counts.items()}
+    return _WDI_IDF_CACHE
+
+
+def _wdi_rows() -> list:
+    global _WDI_CACHE
+    if _WDI_CACHE is None:
+        try:
+            _WDI_CACHE = json.loads(_WDI_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:  # the curated catalog still works
+            log.warning("WDI indicator list unavailable: %s", type(exc).__name__)
+            _WDI_CACHE = []
+    return _WDI_CACHE
+
+
+def wdi_shortlist(question: str, measures: str = "", limit: int = 25) -> list[str]:
+    """Catalog ids of the WDI series whose titles share subject words with the question (registered on first use).
+
+    Titles are matched on subject words only (subject_words drops "total", "rate", "growth" ...); the share of the
+    title's own subject words that the question covers ranks them, and gender / age / rural-urban breakdowns come
+    after the headline series unless the question asks for them."""
+    asked = subject_words(f"{question} {measures}")
+    if not asked:
+        return []
+    for word in list(asked):  # the statistical name of an everyday word ("defence" -> military, arms)
+        asked |= _WDI_SYNONYMS.get(word, set())
+    wants_breakdown = bool(_DISAGGREGATED_RE.search(f"{question} {measures}"))
+    # only the hand-curated series: WDI series registered by earlier reports must stay eligible for this one
+    curated_codes = {entry.code for entry in CATALOG.values() if entry.connector == "wb" and not entry.id.startswith("wdi.")}
+    idf = _wdi_idf()
+    scored = []
+    for row in _wdi_rows():
+        if not isinstance(row, list) or len(row) < 3:
+            continue
+        code, title, unit = str(row[0]), str(row[1]), str(row[2])
+        if code in curated_codes or not re.fullmatch(r"[A-Z0-9_.]+", code):
+            continue
+        own = subject_words(title)
+        hit_words = asked & own
+        if not hit_words:
+            continue
+        # rare words decide ("arrival", "cereal"); words in hundreds of titles ("export", "price") barely count
+        score = sum(idf.get(w, 1.0) for w in hit_words) + len(hit_words) / max(1, len(own))
+        if not wants_breakdown and _DISAGGREGATED_RE.search(f"{title} {unit}"):
+            score *= 0.4
+        scored.append((score, code, title, unit))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    ids = []
+    for score, code, title, unit in scored[:limit]:
+        if score < 2.5:  # a single common word is not a match
+            break
+        entry_id = f"wdi.{code.lower()}"
+        if entry_id not in CATALOG:
+            CATALOG[entry_id] = CatalogEntry(entry_id, "wb", code, title, unit or "as reported", title.casefold())
+        ids.append(entry_id)
+    return ids
+
+
 def keyword_plan(question: str, limit: int) -> list[dict]:
     words = {_stem(w) for w in re.findall(r"[a-z0-9&.]+", str(question or "").casefold())}
     scored = []
@@ -309,7 +408,11 @@ def keyword_plan(question: str, limit: int) -> list[dict]:
 async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, measures: str = "") -> tuple[list[dict], dict]:
     """[{id, entities}] validated against the catalog; (plan, note)."""
     note = {"method": "llm", "rejected": []}
-    catalog = "\n".join(f"{e.id} | {e.title} | {e.unit}" for e in CATALOG.values())
+    # the curated series plus the WDI series that match this question (not all 1,500: the prompt stays small)
+    shortlist = wdi_shortlist(question, measures)
+    note["wdiShortlist"] = len(shortlist)
+    shown = [e for e in CATALOG.values() if not e.id.startswith("wdi.")] + [CATALOG[i] for i in shortlist]
+    catalog = "\n".join(f"{e.id} | {e.title} | {e.unit}" for e in shown)
     plan: list[dict] = []
     data = None
     if gateway is not None:
@@ -584,7 +687,9 @@ def as_source(ds: Dataset) -> dict:
 async def official_sources(question: str, gateway, *, today: date, tier: str, measures: str = "") -> tuple[list[dict], dict]:
     """Plan, fetch and format; never raises. (source rows, capture note)."""
     import httpx
-    limit = 5 if tier == "in_depth" else 3
+    # more official series per report (Deep Research 8, was 5; Detailed 5, was 3): each is a year-by-year chart
+    limit = int(os.getenv("GG_OFFICIAL_DATASETS_IN_DEPTH" if tier == "in_depth" else "GG_OFFICIAL_DATASETS_DETAILED",
+                          "8" if tier == "in_depth" else "5"))
     note: dict = {"plan": [], "fetched": [], "skipped": [], "fallbacks": []}
     try:
         from utils.data_angles import requested_year_bounds
