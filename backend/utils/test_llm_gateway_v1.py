@@ -316,6 +316,7 @@ def _slow_model_a(delay_a):
 
 
 def test_a_slow_section_call_is_hedged_on_another_model_and_the_first_answer_wins(monkeypatch):
+    monkeypatch.setenv("GG_V2_HEDGE", "1")
     _patch_http(monkeypatch, _slow_model_a(5.0))
     monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.2)
     monkeypatch.delenv("GG_V2_HEDGE_AFTER_S", raising=False)
@@ -334,6 +335,7 @@ def test_a_slow_section_call_is_hedged_on_another_model_and_the_first_answer_win
 
 
 def test_a_fast_call_is_not_hedged_and_hedging_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv("GG_V2_HEDGE", "1")
     _patch_http(monkeypatch, _slow_model_a(0.0))
     monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.5)
     gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
@@ -348,15 +350,25 @@ def test_a_fast_call_is_not_hedged_and_hedging_can_be_turned_off(monkeypatch):
 
 
 def test_claim_checks_are_never_hedged(monkeypatch):
+    monkeypatch.setenv("GG_V2_HEDGE", "1")
     _patch_http(monkeypatch, _slow_model_a(0.4))
     gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
     result = asyncio.run(gw.generate(purpose="claim_check", prompt="p"))
     assert result.ok and gw.stats_hedges == 0
 
 
-def test_deep_research_runs_more_calls_at_once_than_detailed(monkeypatch):
+def test_calls_at_once_default_and_override(monkeypatch):
     monkeypatch.delenv("GG_V2_SECTION_CONCURRENCY", raising=False)
-    assert G.LLMGateway(_runtime(), "in_depth", capture=False).semaphore._value == 8
+    assert G.LLMGateway(_runtime(), "in_depth", capture=False).semaphore._value == 5
     assert G.LLMGateway(_runtime(), "detailed", capture=False).semaphore._value == 5
     monkeypatch.setenv("GG_V2_SECTION_CONCURRENCY", "3")
     assert G.LLMGateway(_runtime(), "in_depth", capture=False).semaphore._value == 3
+
+
+def test_hedging_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("GG_V2_HEDGE", raising=False)
+    _patch_http(monkeypatch, _slow_model_a(0.5))
+    monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.1)
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
+    result = asyncio.run(gw.generate(purpose="section", prompt="p"))
+    assert result.ok and result.text == "slow answer" and gw.stats_hedges == 0

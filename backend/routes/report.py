@@ -10719,6 +10719,12 @@ def _extract_company_candidates_core(question: str, intent=None) -> list[str]:
         "bank", "banks", "finance", "financing", "financials", "economy", "economic",
         "forecast", "forecasts", "projection", "projections", "growth", "development",
         "2025", "2026", "2027", "2028", "2029", "2030", "2031",
+        # instruction verbs that open a request ("Produce a deep research report ..." made "Produce" a company
+        # and steered the publisher-fetch order towards it)
+        "produce", "draft", "build", "make", "provide", "conduct", "perform", "compile", "comparing", "examine",
+        "study", "review", "investigate", "summarize", "summarise", "present", "deliver", "craft", "develop",
+        "design", "find", "identify", "describe", "discuss", "outline", "elaborate", "help", "please", "could",
+        "would", "do", "put", "get", "need", "want", "assemble", "detailing", "explore",
     }
     _AMBIGUOUS_SECTOR_SUFFIXES = {"bank", "power", "energy", "finance", "financial services"}
 
@@ -23774,9 +23780,12 @@ async def generate_report(request: Request):
     try:
         # Source-page network I/O dominates this stage. Bound the fan-out but
         # overlap more independent pages to reduce time-to-evidence.
-        _source_fetch_concurrency = max(4, min(12, int(_os.getenv("GG_REPORT_SOURCE_CONCURRENCY", "10"))))
+        # Deep Research fetches up to 140 pages: 10 at a time took 6 min in a live run (25 pages timing out at
+        # ~20 s each held their slots). Page fetches are network I/O, outside the model quota.
+        _default_fetch = "24" if report_tier == "in_depth" else "12"
+        _source_fetch_concurrency = max(4, min(32, int(_os.getenv("GG_REPORT_SOURCE_CONCURRENCY", _default_fetch))))
     except (TypeError, ValueError):
-        _source_fetch_concurrency = 10
+        _source_fetch_concurrency = 24 if report_tier == "in_depth" else 12
     _source_fetch_semaphore = asyncio.Semaphore(_source_fetch_concurrency)
     _report_data_entities: list[str] = []
     _report_data_years: list[int] = []

@@ -4723,6 +4723,19 @@ body .gg-chart-canvas-box--static .gg-pdf-chart-fallback svg {
                                     + variant_css(house_style, _variant)
                                     + house_print_css(house_style, running)
                                     + variant_print_css(house_style, _variant) + "</style>")
+    # No table may be wider than the printable page: one 4-column table with unwrappable number cells (761 px on a
+    # 718 px page) made Chrome shrink the whole PDF to fit it, cover included (live run 2026-11-24). Cells wrap.
+    premium_print_overrides += (
+        '<style id="gg-pdf-fit-tables">'
+        'html body .gg-table-wrap, html body table.gg-table { max-width: 100% !important; }'
+        'html body table.gg-table { width: 100% !important; }'
+        'html body table.gg-table th, html body table.gg-table td { white-space: normal !important; '
+        'overflow-wrap: anywhere !important; word-break: normal !important; min-width: 0 !important; }'
+        # number cells were held on one line by a more specific editorial rule; they wrap at spaces only, so a
+        # cell listing several values can wrap while a single number never splits
+        'html body[class] .gg-table.gg-table th.gg-cell-numeric, html body[class] .gg-table.gg-table td.gg-cell-numeric '
+        '{ white-space: normal !important; overflow-wrap: break-word !important; }'
+        '</style>')
     return html_doc.replace(
         "</head>",
         print_css.replace("{short_title}", short_title) + final_print_overrides + premium_print_overrides + "</head>",

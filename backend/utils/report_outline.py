@@ -62,7 +62,9 @@ GENERIC_DEEP_DIVE_SUBSECTIONS = (
     ("Comparisons", "how it compares with peers, regions or benchmarks"),
     ("Risks and outlook", "the main risks, open questions and what to watch"),
 )
-_MARKET_TOPIC_RE = re.compile(r"(?i)\b(?:stock|equit|shares?\b|share market|nifty|sensex|s&p|nasdaq|dow jones|indices|index funds?|"
+# "share" alone is not a market word: "generation share", "share of exports" and "market share" are proportions
+# (a renewables question was planned as a stock-market one and searched "sector valuation P/E" for states).
+_MARKET_TOPIC_RE = re.compile(r"(?i)\b(?:stock|equit|shares\b|share (?:market|price|holding|buyback)s?\b|shareholding|promoters?\b|nifty|sensex|s&p|nasdaq|dow jones|indices|index funds?|"
                               r"sector rotation|portfolio|fund flows|fpi|fii|dii|ipo|valuation|earnings season|bond yields?|"
                               r"mutual funds?|investors?)")
 

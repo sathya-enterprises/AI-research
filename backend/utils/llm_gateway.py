@@ -45,12 +45,13 @@ LITE_FIRST_PURPOSES = {"claim_check", "dataset_extract"}
 GROQ_BEFORE_WAIT_PURPOSES = {"section", "section_extend", "executive_summary"}
 
 DEFAULT_BUDGETS = {"detailed": 30, "in_depth": 90}
-# Model calls in flight at once per report. Deep Research has twice the sections and 16 keys across several models;
-# at 5 the sixth section of each wave queued behind the others (gold live run: waves of 260 s and 332 s).
-DEFAULT_CONCURRENCY = {"detailed": 5, "in_depth": 8}
+# Model calls in flight at once per report. The keys share one Gemini project quota: 8 at once (live run
+# 2026-11-24) raised HTTP 429s from 9 to 25 and 503s from 16 to 31, and every call ran ~3x slower, so 5 stays.
+DEFAULT_CONCURRENCY = {"detailed": 5, "in_depth": 5}
 # Hedged calls: a call still unanswered after this many seconds gets a second attempt on another model, and the
 # first answer wins. Section calls had a median of 38 s but a slow tail of 160-206 s (gold live run), and every
-# wave waited for its slowest section. GG_V2_HEDGE=0 turns it off; GG_V2_HEDGE_AFTER_S sets the prose delay.
+# wave waited for its slowest section. Off by default: under the shared quota the second attempts added load
+# (9 hedges, 1 win in a live run). GG_V2_HEDGE=1 turns it on; GG_V2_HEDGE_AFTER_S sets the prose delay.
 HEDGE_AFTER_SECONDS = {"section": 75.0, "section_extend": 75.0, "executive_summary": 75.0,
                        "measure_plan": 40.0, "dataset_extract": 40.0}
 
@@ -254,7 +255,7 @@ class LLMGateway:
 
     # ── providers ─────────────────────────────────────────────────────────────
     def _hedge_delay(self, purpose: str) -> float | None:
-        if os.getenv("GG_V2_HEDGE", "1").strip().casefold() in {"0", "false", "no", "off"}:
+        if os.getenv("GG_V2_HEDGE", "0").strip().casefold() in {"0", "false", "no", "off", ""}:
             return None
         delay = HEDGE_AFTER_SECONDS.get(purpose)
         if delay is None:
