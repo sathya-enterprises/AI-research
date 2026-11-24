@@ -687,19 +687,35 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
             if ctype=="funnel": poly=f"{center-w/2:.1f},{y:.1f} {center+w/2:.1f},{y:.1f} {center+narrow/2:.1f},{y+h:.1f} {center-narrow/2:.1f},{y+h:.1f}"
             else: poly=f"{center-narrow/2:.1f},{y:.1f} {center+narrow/2:.1f},{y:.1f} {center+w/2:.1f},{y+h:.1f} {center-w/2:.1f},{y+h:.1f}"
             parts.append(f'<polygon points="{poly}" fill="{pal[i%len(pal)]}" opacity=".92"/>')
-            parts.append(_svg_text(center,y+h/2+4,f"{lbl} · {v:g}{unit}",size=10,anchor="middle",weight=700,fill="#ffffff"))
+            _shown = f"{v:,.0f}" if abs(v) >= 1000 else f"{v:g}"
+            _u = "" if re.fullmatch(r"(?i)\s*(?:number|numbers|count|nos?\.?|units?)?\s*", unit) else (unit if unit.startswith(("%", " ")) else f" {unit}")
+            parts.append(_svg_text(center,y+h/2+4,f"{lbl} · {_shown}{_u}",size=10,anchor="middle",weight=700,fill="#ffffff"))
         return done()
 
     if ctype=="population_pyramid":
         rows=[p for p in data if isinstance(p,dict)][:89]
         if not rows:return ""
-        mx=max([abs(_to_num(p.get("left",p.get("value",0)))) for p in rows]+[abs(_to_num(p.get("right",0))) for p in rows]+[1]); row=(H-top-bottom)/len(rows); cx=W/2
+        mx=max([abs(_to_num(p.get("left",p.get("value",0)))) for p in rows]+[abs(_to_num(p.get("right",0))) for p in rows]+[1])
+        # Names in their own column on the left, the two sides mirrored around the centre, a legend for the sides
+        # and each bar's value at its end (the names used to sit on top of the left-hand bars).
+        name_w=min(220,max(90,8+6.2*max(len(str(p.get("label",""))) for p in rows)))
+        plot_l=left+name_w; plot_r=W-right; cx=(plot_l+plot_r)/2; half=(plot_r-plot_l)/2*.86
+        row=(H-top-bottom-18)/len(rows)
+        lname=str(chart.get("leftName") or "Left"); rname=str(chart.get("rightName") or "Right")
+        parts.append(f'<rect x="{cx-120:.1f}" y="{top-8}" width="10" height="10" fill="{accent}"/>')
+        parts.append(_svg_text(cx-105,top+1,lname,size=10,weight=600,fill=ink))
+        parts.append(f'<rect x="{cx+20:.1f}" y="{top-8}" width="10" height="10" fill="{accent2}"/>')
+        parts.append(_svg_text(cx+35,top+1,rname,size=10,weight=600,fill=ink))
         for i,p in enumerate(rows):
-            y=top+i*row+5; lv=abs(_to_num(p.get("left",p.get("value",0))))/mx; rv=abs(_to_num(p.get("right",0)))/mx
-            lw=(W-left-right)/2*.82*lv; rw=(W-left-right)/2*.82*rv
-            parts.append(f'<rect x="{cx-lw:.1f}" y="{y:.1f}" width="{lw:.1f}" height="{row-9:.1f}" fill="{accent}" opacity=".78"/>')
-            parts.append(f'<rect x="{cx:.1f}" y="{y:.1f}" width="{rw:.1f}" height="{row-9:.1f}" fill="{accent2}" opacity=".78"/>')
-            parts.append(_svg_text(cx-6,y+row/2+3,p.get("label",""),size=9,anchor="end",fill=muted))
+            y=top+14+i*row; lval=abs(_to_num(p.get("left",p.get("value",0)))); rval=abs(_to_num(p.get("right",0)))
+            lw=half*lval/mx; rw=half*rval/mx; bh=max(4,row-8)
+            parts.append(f'<rect x="{cx-lw:.1f}" y="{y:.1f}" width="{lw:.1f}" height="{bh:.1f}" fill="{accent}" opacity=".85"/>')
+            parts.append(f'<rect x="{cx:.1f}" y="{y:.1f}" width="{rw:.1f}" height="{bh:.1f}" fill="{accent2}" opacity=".85"/>')
+            parts.append(_svg_text(plot_l-8,y+bh/2+3,p.get("label",""),size=9.5,anchor="end",fill=ink))
+            fmt=lambda v: f"{v:,.0f}" if v>=100 else f"{v:,.1f}".rstrip("0").rstrip(".")
+            parts.append(_svg_text(cx-lw-4,y+bh/2+3,fmt(lval),size=8.5,anchor="end",fill=muted))
+            parts.append(_svg_text(cx+rw+4,y+bh/2+3,fmt(rval),size=8.5,fill=muted))
+        parts.append(f'<line x1="{cx:.1f}" y1="{top+10}" x2="{cx:.1f}" y2="{top+14+len(rows)*row:.1f}" stroke="#9aa3b2" stroke-width="1"/>')
         return done()
 
     if ctype in {"candlestick","ohlc"}:
@@ -867,10 +883,55 @@ def _render_extended_svg_chart(chart: dict, idx: int, theme: dict | None = None)
 
     return ""
 
+def _prepare_chart_form(chart: dict) -> dict:
+    """Render-time layout for forms chosen by utils.chart_forms; the chart's verified series stay as they are.
+
+    histogram: the values are counted into bins; population pyramid: the two series become each row's left and
+    right; gauge: the achieved point and the target (``target`` / ``max``) are read from the chart."""
+    ctype = chart.get("type")
+    series = [s for s in chart.get("series") or [] if isinstance(s, dict)]
+    try:
+        if ctype == "histogram" and len(series) == 1:
+            values = sorted(float(p.get("value")) for p in series[0].get("data") or []
+                            if isinstance(p, dict) and isinstance(p.get("value"), (int, float)))
+            if len(values) >= 10:
+                bins = max(5, min(12, math.ceil(math.log2(len(values)) + 1)))
+                lo, hi = values[0], values[-1]
+                width = (hi - lo) / bins or 1.0
+                counts = [0] * bins
+                for v in values:
+                    counts[min(bins - 1, int((v - lo) / width))] += 1
+
+                def fmt(x: float) -> str:
+                    return f"{x:,.0f}" if abs(width) >= 1 else f"{x:,.2f}"
+                unit = str(chart.get("unit") or "").strip()
+                data = [{"label": f"{fmt(lo + i * width)}–{fmt(lo + (i + 1) * width)}", "value": c} for i, c in enumerate(counts)]
+                chart = dict(chart, series=[{"name": f"Number of {str(series[0].get('name') or 'items').strip()}", "data": data}],
+                             unit="", xLabel=f"Value{f' ({unit})' if unit else ''}", yLabel="Count")
+        elif ctype == "population_pyramid" and len(series) == 2 and not any(
+                isinstance(p, dict) and ("left" in p or "right" in p) for p in series[0].get("data") or []):
+            right = {str(p.get("label")): p.get("value") for p in series[1].get("data") or [] if isinstance(p, dict)}
+            rows = [{"label": p.get("label"), "left": p.get("value"), "right": right.get(str(p.get("label")))}
+                    for p in series[0].get("data") or [] if isinstance(p, dict)]
+            chart = dict(chart, series=[{"name": f"{series[0].get('name')} | {series[1].get('name')}", "data": rows}],
+                         leftName=chart.get("leftName") or series[0].get("name"),
+                         rightName=chart.get("rightName") or series[1].get("name"))
+        elif ctype == "gauge" and series:
+            points = [p for p in series[0].get("data") or [] if isinstance(p, dict)]
+            index = int(chart.get("gaugeIndex") or 0)
+            if points and 0 <= index < len(points):
+                point = dict(points[index], target=chart.get("target", points[index].get("target")))
+                chart = dict(chart, series=[dict(series[0], data=[point])])
+    except Exception:  # the plain form still renders
+        return chart
+    return chart
+
+
 def _render_chart_block_inner(chart: dict, idx: int, theme: dict | None = None) -> str:
     ctype = normalize_chart_type(chart.get("type") or "bar")
     chart = dict(chart); chart["type"] = ctype
     chart = fold_slice_tail_for_display(chart)
+    chart = _prepare_chart_form(chart)
     series = chart.get("series") or []
 
     def _category_label(point: object) -> str:

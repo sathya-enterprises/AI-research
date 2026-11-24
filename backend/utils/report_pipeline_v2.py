@@ -1167,6 +1167,14 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         spec["takeaway"] = data_takeaway(spec)
         spec["rationale"] = ""
         spec["evidencePassages"] = c.passage_ids
+        # The form that shows the data best (stacked, area, step, donut, Pareto, funnel, gauge, pyramid ...);
+        # the plotted values are unchanged. GG_V2_CHART_FORMS=0 keeps the builders' line / bar forms.
+        if os.getenv("GG_V2_CHART_FORMS", "1") != "0":
+            try:
+                from utils.chart_forms import apply_form
+                spec = apply_form(spec)
+            except Exception as exc:
+                log.warning("V2 chart form skipped: %s", type(exc).__name__)
         charts_out.append(spec)
     unique_titles(charts_out)
 

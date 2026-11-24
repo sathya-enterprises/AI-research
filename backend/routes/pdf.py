@@ -3631,6 +3631,25 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
             else:
                 try: all_values.append(float(v))
                 except Exception: pass
+    # Stacked bars / areas (html_report sets scales.x/y.stacked): the axis must reach each label's stack total.
+    _stacked = bool(isinstance(scales, dict) and any(isinstance(scales.get(k), dict) and scales.get(k).get("stacked")
+                                                     for k in ("x", "y")))
+    if _stacked and ctype in ("bar", "line") and not horizontal_bar:
+        _pos_tot = [0.0] * len(labels)
+        _neg_tot = [0.0] * len(labels)
+        for ds in datasets:
+            for i, v in enumerate((ds.get("data") or [])[:len(labels)]):
+                try:
+                    val = float(v.get("y", v.get("value")) if isinstance(v, dict) else v)
+                except Exception:
+                    continue
+                if not math.isfinite(val):
+                    continue
+                if val >= 0:
+                    _pos_tot[i] += val
+                else:
+                    _neg_tot[i] += val
+        all_values = _pos_tot + _neg_tot + [0.0]
     vmax = max(all_values) if all_values else 1.0
     vmin = min(all_values) if all_values else 0.0
     _nice_tick_count = 5
@@ -3832,6 +3851,48 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
             d=' '.join(("M" if j==0 else "L")+f" {x:.1f} {y:.1f}" for j,(x,y) in enumerate(vals))+' Z'
             col=colors[ds_i%len(colors)]
             marks.append(f'<path d="{d}" fill="{col}" fill-opacity="0.12" stroke="{col}" stroke-width="2"/>')
+    elif ctype == "line" and (_stacked or any(isinstance(ds, dict) and (ds.get("fill") or ds.get("stepped")) for ds in datasets)):
+        # Area, stacked area and step line: filled to the baseline (area), each series stacked on the ones before
+        # it (stacked area), or drawn in horizontal-then-vertical steps (step line). Plain lines use the block below.
+        _n_labels = max(1, len(labels))
+        _cum = [0.0] * len(labels)
+        _base_y = y_of(max(vmin, 0.0)) if vmin <= 0 <= vmax or vmin > 0 else y_of(vmin)
+        for ds_i, ds in enumerate(datasets[:8]):
+            col = colors[ds_i % len(colors)]
+            pts = []
+            lower = []
+            for i, raw_value in enumerate((ds.get("data") or [])[:len(labels)]):
+                try:
+                    val = float(raw_value.get("y", raw_value.get("value")) if isinstance(raw_value, dict) else raw_value)
+                except Exception:
+                    continue
+                if not math.isfinite(val):
+                    continue
+                x = margin_l + (i + 0.5) * plot_w / _n_labels
+                below = _cum[i] if _stacked else 0.0
+                top_val = below + val if _stacked else val
+                if _stacked:
+                    _cum[i] = top_val
+                pts.append((x, y_of(top_val), val))
+                lower.append((x, y_of(below) if _stacked else _base_y))
+            if len(pts) < 2:
+                continue
+            stepped = bool(ds.get("stepped"))
+
+            def _path(points):
+                out = [f"M {points[0][0]:.1f} {points[0][1]:.1f}"]
+                for (x0, y0), (x1, y1) in zip([(p[0], p[1]) for p in points[:-1]], [(p[0], p[1]) for p in points[1:]]):
+                    out.append(f"L {x1:.1f} {y0:.1f} L {x1:.1f} {y1:.1f}" if stepped else f"L {x1:.1f} {y1:.1f}")
+                return " ".join(out)
+            if ds.get("fill") or _stacked:
+                area = _path(pts) + " " + " ".join(f"L {x:.1f} {y:.1f}" for x, y in reversed(lower)) + " Z"
+                marks.append(f'<path d="{area}" fill="{col}" fill-opacity="{0.55 if _stacked else 0.18}" stroke="none"/>')
+            marks.append(f'<path d="{_path(pts)}" fill="none" stroke="{col}" stroke-width="2.2"/>')
+            for pi, (x, y, val) in enumerate(pts):
+                if not _stacked:
+                    marks.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.6" fill="{col}"/>')
+                if len(datasets) == 1 and (len(pts) <= 12 or pi in (0, len(pts) - 1)):
+                    text.append(f'<text x="{x:.1f}" y="{y-7:.1f}" text-anchor="middle" font-size="8.5" fill="{_SVG_VALUE_INK}">{val:,.1f}</text>')
     elif ctype == "line":
         _line_many_series = len(datasets) > 4
         _line_marker_radius = 2.1 if _line_many_series else 3
@@ -3963,6 +4024,30 @@ def _svg_chart_from_config(config: dict, width: int = 720, height: int = 320, th
                         continue
                 xa, xb = x_of(a), x_of(b)
                 marks.append(f'<rect x="{min(xa,xb):.1f}" y="{y:.1f}" width="{max(1,abs(xb-xa)):.1f}" height="{max(2,bar_h-2):.1f}" rx="2" fill="{_svg_point_fill(ds, i, colors[ds_i%len(colors)])}"/>')
+    elif _stacked and ctype == "bar":  # stacked columns: one column per label, a segment per series
+        n = max(1, len(labels)); group_w = plot_w / n; bar_w = max(6, group_w * 0.6)
+        _pos = [0.0] * len(labels); _neg = [0.0] * len(labels)
+        for ds_i, ds in enumerate(datasets[:8]):
+            for i, v in enumerate((ds.get("data") or [])[:len(labels)]):
+                try:
+                    val = float(v.get("y", v.get("value")) if isinstance(v, dict) else v)
+                except Exception:
+                    continue
+                if not math.isfinite(val) or val == 0:
+                    continue
+                start = _pos[i] if val > 0 else _neg[i]
+                end = start + val
+                if val > 0:
+                    _pos[i] = end
+                else:
+                    _neg[i] = end
+                y_a, y_b = y_of(start), y_of(end)
+                top, bh = min(y_a, y_b), max(1.0, abs(y_b - y_a))
+                x = margin_l + i * group_w + (group_w - bar_w) / 2
+                marks.append(f'<rect x="{x:.1f}" y="{top:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" fill="{_svg_point_fill(ds, i, colors[ds_i%len(colors)])}"/>')
+                if bh >= 13 and len(labels) <= 14:
+                    txt = f"{val:,.1f}".rstrip('0').rstrip('.')
+                    text.append(f'<text x="{x+bar_w/2:.1f}" y="{top+bh/2+3:.1f}" text-anchor="middle" font-size="8" fill="#ffffff">{txt}</text>')
     else:  # vertical bar, including floating/bar-like fallback
         n = max(1, len(labels)); series_count=max(1, len(datasets)); group_w=plot_w/n; bar_w=max(4, group_w*0.72/series_count)
         for ds_i, ds in enumerate(datasets[:8]):
