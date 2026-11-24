@@ -1928,3 +1928,46 @@ def test_a_dash_in_a_report_table_does_not_remove_a_chart_of_that_entity():
     conflicts = " ".join(str(x.get("entity")) for x in out.get("chartTableVerificationConflicts") or [])
     assert "METAL" not in conflicts.upper()
     assert "FMCG" in conflicts.upper()
+
+
+def test_an_unavailable_cell_blocks_only_charts_of_the_same_measure_and_the_whole_entity():
+    """Live run 2026-11-24: 'N/A' under 'Investment Amount (USD)' for 'Oil and Gas' and 'High Net Worth Individuals'
+    removed 28 capacity and generation charts (any chart with 'gas', 'net' or 'high' in it matched)."""
+    from utils.chart_evidence_audit import audit_chart_evidence_consistency
+    report = ("| Investor | Investment Amount* (USD) |\n| --- | --- |\n"
+              "| Oil and Gas | N/A |\n| High Net Worth Individuals | N/A |\n")
+    capacity = {"title": "Installed Capacity (MW)", "type": "bar",
+                "series": [{"name": "Capacity", "data": [{"label": "Gas", "value": 24800},
+                                                          {"label": "Lignite", "value": 6620}]}]}
+    net_gen = {"title": "Net generation by high-voltage grid (TWh)", "type": "line",
+               "series": [{"name": "Net generation", "data": [{"label": "2023", "value": 1700}]}]}
+    investment = {"title": "Investment amount by investor (USD)", "type": "bar",
+                  "series": [{"name": "Investment", "data": [{"label": "Oil and Gas", "value": 5.0}]}]}
+    out = audit_chart_evidence_consistency(report, [capacity, net_gen, investment], [])
+    titles = {x.get("chartTitle") for x in out.get("chartTableVerificationConflicts") or []}
+    assert titles == {"Investment amount by investor (USD)"}
+
+
+def test_national_dataset_charts_go_to_the_sections_about_them_in_a_non_market_report():
+    """Live run 2026-11-24: the sector-rotation overview fallback sent five national renewables charts to
+    'Southern Hubs: Tamil Nadu and Karnataka', whose writer did not discuss them."""
+    import types
+    from utils.dataset_charts import preassign
+    from utils.dataset_extractor import assign_to_sections
+
+    def sec(i, title, role="compact", goal=""):
+        return types.SimpleNamespace(section_id=i, title=title, goal=goal, queries=[], role=role, entity="")
+
+    def chart(title, metric):
+        return types.SimpleNamespace(section_id="", match_text=f"{metric} India 2021-2025", spec={"title": title},
+                                     points=[("India", "2021", 1.0), ("India", "2025", 2.0)], chart_id="o", interpretation="x")
+    sections = [sec("s1", "Solar Power: Rapid Expansion", goal="solar capacity and share of electricity"),
+                sec("s2", "Wind Power: Growth Trajectory", goal="wind capacity and share of electricity"),
+                sec("s3", "Southern Hubs: Tamil Nadu and Karnataka", goal="state performance and share across sectors"),
+                sec("s4", "Energy: National Capacity and Generation", role="cross_cutting", goal="total generation in India")]
+    charts = [chart("Share of electricity from solar (%)", "Share of electricity from solar"),
+              chart("Share of electricity from wind (%)", "Share of electricity from wind"),
+              chart("Electricity generation (TWh)", "Electricity generation")]
+    preassign(charts, sections, side_charts=4, market=False)
+    assign_to_sections(charts, sections)
+    assert [c.section_id for c in charts] == ["s1", "s2", "s4"]

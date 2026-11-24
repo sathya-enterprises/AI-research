@@ -842,7 +842,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     # top of the per-section limit for table charts; they are numbered from 101 until the final
     # renumbering in document order, so table charts keep the numbers the writer is given.
     data_first = [c for c in candidates if c.interpretation]
-    preassign(data_first, analysis, side_charts=DATASET_SIDE_CHARTS.get(tier, 4))
+    try:
+        from utils.report_outline import is_market_topic as _is_market_topic
+        _market_charts = _is_market_topic(question)
+    except Exception:
+        _market_charts = True
+    preassign(data_first, analysis, side_charts=DATASET_SIDE_CHARTS.get(tier, 4), market=_market_charts)
     if extracted_ids:
         from utils.dataset_extractor import assign_to_sections
         assign_to_sections([c for c in data_first if c.chart_id in extracted_ids], analysis)

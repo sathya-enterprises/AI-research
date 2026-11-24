@@ -387,8 +387,13 @@ def build_dataset_charts(store, *, question: str = "") -> tuple[list[PlannedChar
     return charts, note
 
 
-def preassign(charts: list[PlannedChart], sections: list, *, side_charts: int = 4) -> None:
-    """Deep-dives take the chart of their own sector; cross-sector charts go to the rotation overview."""
+def preassign(charts: list[PlannedChart], sections: list, *, side_charts: int = 4, market: bool = True) -> None:
+    """Deep-dives take the chart of their own sector; cross-sector charts go to the rotation overview.
+
+    ``market=False`` (any non-market topic): only the own-entity deep-dive match applies. The overview fallback
+    picks its section by sector-rotation words, so in a renewables report it sent the national solar, wind,
+    renewables-share and generation charts to "Southern Hubs: Tamil Nadu and Karnataka", whose writer did not
+    discuss them; content-based placement (dataset_extractor.assign_to_sections) places them instead."""
     from utils.chart_titles import canonical, clean_label, label_entities
 
     deep = [s for s in sections if getattr(s, "role", "") == "deep_dive" and getattr(s, "entity", "")]
@@ -405,6 +410,8 @@ def preassign(charts: list[PlannedChart], sections: list, *, side_charts: int = 
         if match:
             chart.section_id = match.section_id
             taken.add(match.section_id)
+    if not market:
+        return
     # The cross-sector charts go to the section about rotation across sectors (any section without a
     # sector of its own: a detailed report's "leaders and laggards" deep-dive has no single entity).
     overview = [s for s in sections if getattr(s, "role", "") != "deep_dive" or not getattr(s, "entity", "")]

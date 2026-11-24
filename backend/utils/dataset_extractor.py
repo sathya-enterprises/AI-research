@@ -645,12 +645,18 @@ def assign_to_sections(charts: list[PlannedChart], sections: list) -> None:
         if chart.section_id:
             continue
         words = set(re.findall(r"[a-z]{4,}", (chart.match_text + " " + str(chart.spec.get("title"))).casefold()))
-        best, best_score = None, 0
+        best, best_score, best_load = None, 0, 0
         for s in sections:
             text = " ".join([s.title, getattr(s, "goal", ""), *getattr(s, "queries", [])]).casefold()
-            score = len(words & set(re.findall(r"[a-z]{4,}", text)))
-            if score > best_score:
-                best, best_score = s, score
+            # a word in the section's title counts double: the title says what the section is about, while its
+            # goal and search queries mention many measures in passing
+            score = (len(words & set(re.findall(r"[a-z]{4,}", text)))
+                     + len(words & set(re.findall(r"[a-z]{4,}", str(s.title).casefold()))))
+            # an equally good match goes to the section with fewer charts, so charts spread over the sections
+            # that discuss them instead of piling up in one
+            load = sum(1 for c in charts if c.section_id == s.section_id)
+            if score > best_score or (score == best_score and best is not None and load < best_load):
+                best, best_score, best_load = s, score, load
         if best is not None and best_score >= 2:
             chart.section_id = best.section_id
         elif sections:

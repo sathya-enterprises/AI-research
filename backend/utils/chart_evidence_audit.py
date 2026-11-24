@@ -2310,6 +2310,25 @@ def _unit_is_in(chart: dict, evidence: str) -> bool:
     return bool(re.search(phrase, evidence, re.I))
 
 
+_GENERIC_COLUMN_WORDS = {
+    "amount", "value", "values", "total", "data", "number", "figure", "figures", "level", "status", "verification",
+    "verified", "remark", "remarks", "note", "notes", "source", "sources", "period", "year", "years", "fiscal",
+    "quarter", "month", "date", "latest", "current", "previous", "change", "estimate", "estimated", "actual",
+    "january", "february", "march", "april", "june", "july", "august", "september", "october", "november",
+    "december",
+}
+
+
+def _stems(text: str) -> set[str]:
+    return {w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w
+            for w in re.findall(r"[a-z]{4,}", str(text or "").casefold())}
+
+
+def _column_measure_terms(header: str) -> set[str]:
+    """What a table column measures, from its header; empty for a period or generic column."""
+    return {w for w in _stems(header) if w not in _GENERIC_COLUMN_WORDS and not re.fullmatch(r"fy\d*", w)}
+
+
 def audit_chart_evidence_consistency(report: str, charts: list | None, sources: list | None,
                                      require_publisher_verification: bool = False,
                                      question: str = "") -> dict:
@@ -2367,9 +2386,19 @@ def audit_chart_evidence_consistency(report: str, charts: list | None, sources: 
                     years = set(re.findall(r"20\d{2}", period))
                     if is_dash and not years:
                         continue  # a dash under a non-period column ("Flow signal") says nothing about the chart's period
+                    # The cell's column must measure what the chart measures: an "N/A" under "Investment Amount
+                    # (USD)" for "Oil and Gas" removed 28 capacity and generation charts in a live run (any chart
+                    # with "gas", "net" or "high" in it matched). A column named only by a period or by generic
+                    # words still applies to every measure.
+                    measure_terms = _column_measure_terms(period)
+                    chart_measure = _stems(f"{title} {' '.join(str(s) for s, _l, _v in _points(chart))}")
+                    if measure_terms and not measure_terms & chart_measure:
+                        continue
                     for series, label, value in _points(chart):
                         identity = f"{series} {label} {title}".casefold()
-                        if not entity_terms.intersection(re.findall(r"[a-z]{3,}", identity)):
+                        # every significant word of the row's name, not any one of them ("High Net Worth
+                        # Individuals" matched a chart through "net")
+                        if not entity_terms.issubset(set(re.findall(r"[a-z]{3,}", identity))):
                             continue
                         chart_years = set(re.findall(r"20\d{2}", f"{series} {label}"))
                         if years and chart_years and not years.intersection(chart_years):
