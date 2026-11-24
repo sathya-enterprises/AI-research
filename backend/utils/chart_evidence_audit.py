@@ -29,6 +29,10 @@ _GENERIC = {
     "research", "report", "reports", "analysis", "analytical", "overview", "outlook",
 }
 
+# Generic measure words that become the topic when the question names them ("capacity additions", "generation
+# share"). Not "year", "period", "data", "change" and the like: those name no measure.
+_NAMEABLE_MEASURES = {"capacity", "installed", "power", "share", "rate", "growth", "index", "size", "amount"}
+
 _CHART_SCOPE_STOPWORDS = _GENERIC | {
     "the", "and", "for", "with", "from", "into", "through", "among", "across", "between",
     "in", "on", "at", "to", "by", "of", "as", "is", "are", "was", "were", "be", "been",
@@ -676,6 +680,18 @@ def _requested_chart_entities(question: str) -> list[str]:
         names = [str(item).strip() for item in extract_requested_entities(question) if str(item).strip()]
     except Exception:
         names = []
+    # Only names count: a comma list of measures ("How have India's mobile subscribers, data usage per user and
+    # 5G rollout progressed") came back as entities, and every chart then had to name "5G rollout progressed".
+    def _looks_like_name(name: str) -> bool:
+        words = re.findall(r"[A-Za-z0-9&.'’-]+", name)
+        if not words or len(words) > 5:
+            return False
+        if re.search(r"(?i)\b(?:how|what|why|when|which|have|has|had|did|does|do|is|are|was|were|will|can|could|"
+                     r"changed?|grown|grew|progressed|evolved?|risen|fallen|performed)\b", name):
+            return False
+        named = sum(1 for w in words if w[0].isupper() or w[0].isdigit() or (len(w) <= 5 and w.isupper()))
+        return named * 2 > len(words)
+    names = [name for name in names if _looks_like_name(name)]
     if len(names) >= 2:
         # Recover the first member when a request says "outcomes in India,
         # China, Brazil and Nigeria"; the shared entity parser currently starts
@@ -771,8 +787,27 @@ _SHORT_HORIZON_CHART_RE = re.compile(
 )
 
 
+def _report_domain_terms(question: str, sources: list | dict | None) -> set[str]:
+    """Words of the report's subject area, from its own sources: words that occur in at least three source
+    titles that also name one of the question's topic words. For a solar and wind question that gives
+    "renewable", "energy", "electricity"...; "mutual fund" is not among them. Empty without sources."""
+    entries = list(sources.values()) if isinstance(sources, dict) else list(sources or [])
+    if not entries:
+        return set()
+    topic = _question_chart_topic_tokens(question) - {_singular(w) for w in _GENERIC}
+    counts: dict[str, int] = {}
+    for source in entries:
+        if not isinstance(source, dict):
+            continue
+        title_terms = _topic_terms(" ".join(str(source.get(k) or "") for k in ("title", "sourceTitle", "publisherTitle")))
+        if title_terms & topic:
+            for term in title_terms:
+                counts[term] = counts.get(term, 0) + 1
+    return {term for term, n in counts.items() if n >= 3} | topic
+
+
 def _chart_is_relevant(chart: dict, report: str, question: str, index: int,
-                       source_context: str = "") -> bool:
+                       source_context: str = "", domain_terms: set[str] | None = None) -> bool:
     """Require charts to match the requested topic and any explicit entity list."""
     title = str(chart.get("title") or "").strip()
     if not title or re.search(r"(?i)\b(?:file size|document size|source count|spread of reported observations|reported observations by metric)\b", title):
@@ -832,6 +867,36 @@ def _chart_is_relevant(chart: dict, report: str, question: str, index: int,
         requested_entities = _requested_chart_entities(question)
         question_terms = _question_chart_topic_tokens(question, requested_entities)
         chart_terms = _chart_metric_tokens(chart, source_context)
+        # A measure word that is generic in general ("capacity", "share", "installed", "power") is the topic
+        # when the question names it, and a chart's categories ("Solar", "Wind") say what it is about: a
+        # renewables run removed "Renewable energy installed capacity: Solar, Wind, ..." and capacity charts
+        # as off-topic for a question about solar and wind capacity additions and generation share.
+        # The measure word counts only for a chart whose subject belongs to the report's subject area (from its
+        # sources): "Share of RE" counts for a solar/wind question, "Share of individuals in mutual fund AUM" not.
+        # Both rules read only the chart's own words (title, series names, category labels), never its source
+        # titles or URLs: through those a company's "Outstanding Shares and M-cap" table passed as a "share" chart.
+        label_text = " ".join(
+            str(point.get("label") or point.get("name") or point.get("category") or "")
+            for series in chart.get("series", []) if isinstance(series, dict)
+            for point in (series.get("data") if isinstance(series.get("data"), list) else series.get("values") or [])
+            if isinstance(point, dict))
+        own_text = " ".join([title, *[str(s.get("name") or s.get("label") or "")
+                                      for s in chart.get("series", []) if isinstance(s, dict)]]).casefold()
+        own_terms = _topic_terms(own_text) | _topic_terms(label_text)
+        core_question = question_terms - {_singular(w) for w in _GENERIC}
+        try:  # a place says where, not what is measured: "India" among country labels is not the topic
+            from utils.official_data import COUNTRIES, mentioned_entities
+            places = {t for code in mentioned_entities(question) for t in _topic_terms(COUNTRIES.get(code, ""))}
+        except Exception:
+            places = set()
+        places |= {p + "n" for p in places} | {"india", "indian"} & core_question
+        extra_terms = _topic_terms(label_text) & (core_question - places)
+        named_measures = {_singular(w) for w in re.findall(r"[a-z]{3,}", q)} & _NAMEABLE_MEASURES
+        own_measures = {_singular(w) for w in re.findall(r"[a-z]{3,}", own_text)} & named_measures
+        if own_measures and domain_terms and (own_terms & domain_terms - {_singular(w) for w in _GENERIC}):
+            question_terms = question_terms | own_measures
+            extra_terms |= own_measures
+        chart_terms = chart_terms | extra_terms
         # A value/title such as "Value: World" is not a topical anchor. V2's
         # exact-value validation proves provenance, not that a source measures
         # the subject the user asked about.
@@ -940,6 +1005,19 @@ def _source_metric_title(source_titles: list[str], question: str) -> str:
     return ""
 
 
+_DOMAIN_TERMS_CACHE: dict[tuple, set[str]] = {}
+
+
+def _report_domain_terms_cached(question: str, sources: list | dict | None) -> set[str]:
+    entries = list(sources.values()) if isinstance(sources, dict) else list(sources or [])
+    key = (str(question or ""), len(entries), id(sources))
+    if key not in _DOMAIN_TERMS_CACHE:
+        if len(_DOMAIN_TERMS_CACHE) > 16:
+            _DOMAIN_TERMS_CACHE.clear()
+        _DOMAIN_TERMS_CACHE[key] = _report_domain_terms(question, sources)
+    return _DOMAIN_TERMS_CACHE[key]
+
+
 def chart_meaning_reason(chart: dict, question: str, sources: list | dict | None = None) -> str:
     """"" when the publication gate would keep the chart for its MEANING (about the question's topic and
     entities, a title that names a measure); otherwise the reason.
@@ -950,7 +1028,8 @@ def chart_meaning_reason(chart: dict, question: str, sources: list | dict | None
     if not isinstance(chart, dict):
         return "not a chart"
     source_context, source_titles = _source_details_for_chart(chart, sources)
-    if not _chart_is_relevant(chart, "", question, 1, source_context=source_context):
+    if not _chart_is_relevant(chart, "", question, 1, source_context=source_context,
+                              domain_terms=_report_domain_terms_cached(question, sources)):
         return "not about the question's topic or entities"
     generic = re.match(r"(?is)^(\s*(?:figure\s+\d+\s*:\s*)?)value\s*:\s*(.*)$", str(chart.get("title") or ""))
     if generic:

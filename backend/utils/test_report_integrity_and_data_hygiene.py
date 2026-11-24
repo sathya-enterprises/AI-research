@@ -1971,3 +1971,39 @@ def test_national_dataset_charts_go_to_the_sections_about_them_in_a_non_market_r
     preassign(charts, sections, side_charts=4, market=False)
     assign_to_sections(charts, sections)
     assert [c.section_id for c in charts] == ["s1", "s2", "s4"]
+
+
+def test_a_question_named_measure_and_the_reports_subject_area_keep_on_topic_charts():
+    """Renewables live run: 'Renewable energy installed capacity: Solar, Wind ...' was removed as off-topic for a
+    question about solar and wind capacity additions; a mutual-fund 'Share of individuals' chart must stay out."""
+    from utils.chart_evidence_audit import chart_meaning_reason
+    q = "How have India's solar and wind power capacity additions and generation share changed over five years?"
+    sources = [{"id": f"S{i}", "title": t} for i, t in enumerate([
+        "India renewable energy solar wind capacity report", "Solar and wind energy renewable progress",
+        "Renewable energy: solar parks and wind farms", "Wind and solar renewable energy tariffs",
+        "Mutual fund industry report"], 1)]
+
+    def chart(title, labels, series, unit):
+        return {"title": title, "type": "bar", "unit": unit,
+                "series": [{"name": series, "data": [{"label": l, "value": i + 1} for i, l in enumerate(labels)]}]}
+    assert chart_meaning_reason(chart("Renewable energy installed capacity", ["Solar", "Wind", "Bio", "Small Hydro"],
+                                      "Capacity", "GW"), q, sources) == ""
+    assert chart_meaning_reason(chart("Share of individuals in mutual fund AUM", ["2021", "2022", "2023"], "Share", "%"),
+                                q, sources) != ""
+    assert chart_meaning_reason(chart("CY25: Brazil, Canada, China", ["Brazil", "Canada", "China", "India"], "CY25", "GW"),
+                                q, sources) != ""  # a place among the labels is not the topic
+
+
+def test_a_serial_number_column_is_never_plotted():
+    from utils.chart_lint import quality_reason
+    spec = {"title": "Sl. No.: NTPC LTD., SJVNL, NHPC", "series": [{"name": "Sl. No.", "data": [
+        {"label": "NTPC", "value": 1}, {"label": "SJVNL", "value": 2}, {"label": "NHPC", "value": 3}]}]}
+    assert "serial" in quality_reason(spec)
+
+
+def test_only_names_count_as_requested_chart_entities():
+    from utils.chart_evidence_audit import _requested_chart_entities
+    assert _requested_chart_entities(
+        "How have India's mobile subscribers, data usage per user and 5G rollout progressed from 2021 to 2025?") == []
+    assert _requested_chart_entities("Compare SBI, HDFC Bank, ICICI Bank and Axis Bank") == [
+        "SBI", "HDFC Bank", "ICICI Bank", "Axis Bank"]

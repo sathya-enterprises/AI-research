@@ -348,6 +348,10 @@ def _mixed_unit_reason(spec: dict) -> str:
     return ""
 
 
+_SERIAL_COLUMN_RE = re.compile(r"(?i)(?:#|s\.?\s?no\.?|sl\.?\s?no\.?|sr\.?\s?no\.?|serial(?:\s+(?:no\.?|number))?|"
+                               r"row(?:\s+no\.?)?|item\s+no\.?)")
+
+
 def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]] | None = None) -> str:
     mixed_units = _mixed_unit_reason(spec)
     if mixed_units:
@@ -362,6 +366,10 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
         return "the values are years (an attribute such as a founding year, not data)"
     if sum(1 for l in labels if re.fullmatch(r"\s*\d{1,2}[.)]?\s*", l)) >= max(2, len(labels) // 2):
         return "the row labels are list numbers, not entities or periods"
+    # The plotted values are a table's serial / row-number column ("Sl. No.: NTPC, SJVNL, NHPC ..."), not a measure
+    measure_names = [str(s.get("name") or "") for s in _series(spec)] + [str(spec.get("title") or "").split(":", 1)[0]]
+    if any(_SERIAL_COLUMN_RE.fullmatch(n.strip()) for n in measure_names if n.strip()):
+        return "the plotted values are a serial-number column, not a measure"
     heading = str(passage_text or "")[:400]
     quotes = " ".join(str(p.get("evidenceQuote") or "") for s in _series(spec) for p in _pts(s))
     if EXAMPLE_RE.search(heading) or EXAMPLE_RE.search(quotes):

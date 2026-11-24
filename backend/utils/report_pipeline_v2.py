@@ -38,18 +38,18 @@ def blank_dash_cells(markdown: str) -> str:
     return re.sub(r"(?m)(?<=\|)[ \t]*[—–-][ \t]*(?=\|)", " ", markdown)
 
 
-MAX_CHARTS = {"detailed": 10, "in_depth": 36}
+MAX_CHARTS = {"detailed": 18, "in_depth": 50}
 # Table charts built before the quality and evidence checks. Candidates are built in source order, not by
 # relevance, and the checks remove about half: a cap of 2x MAX_CHARTS stopped at 20 candidates in reports
 # holding 60-120 table passages (UPI, banks, SIP) before their best tables were read.
-CANDIDATE_CAP = {"detailed": 60, "in_depth": 120}
-CHARTS_PER_SECTION = {"detailed": 2, "in_depth": 3}
+CANDIDATE_CAP = {"detailed": 90, "in_depth": 200}
+CHARTS_PER_SECTION = {"detailed": 3, "in_depth": 4}
 # All charts in the report (fetched-dataset + table charts): a detailed report has a 32-page cap,
 # and its layout fills ~28 pages without charts, so it carries at most 6 (Stage F target >= 5).
-MAX_TOTAL_CHARTS = {"detailed": 10, "in_depth": 36}  # Stage L: detailed raised from 6 (reports read text-heavy)
+MAX_TOTAL_CHARTS = {"detailed": 18, "in_depth": 50}  # a 25-30 page report carries at least 15 charts, a 100-page one about 50
 # Stage L: the chart count a report should reach (recorded per run; deep-dives without a chart are listed
 # as data gaps - the input of the topic connectors / gap agent).
-CHART_TARGET = {"detailed": 8, "in_depth": 18}
+CHART_TARGET = {"detailed": 15, "in_depth": 40}
 DATASET_SIDE_CHARTS = {"detailed": 2, "in_depth": 4}
 
 
