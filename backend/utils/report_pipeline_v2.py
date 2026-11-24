@@ -1078,6 +1078,34 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 log.info("V2: %d chart(s) added from the report's own data tables", len(_rt))
         except Exception as exc:
             log.warning("V2 report-table charts skipped: %s", type(exc).__name__)
+    # Still below the chart target: a paragraph that states a series ("17.9% in June 2023 ... 17.7% in March
+    # 2026"; "In Industrials ... 17.1% ... 15.4%") gets a chart of those figures, each found next to its date in a
+    # cited source, placed after that paragraph with the change, % change and compound annual growth stated.
+    _have = len([c for c in planned if c.status == "referenced"])
+    if _have < _target and os.getenv("GG_V2_REPORT_PROSE_CHARTS", "1") != "0":
+        try:
+            from utils.chart_minimum import place_after_sentence
+            from utils.report_prose_charts import report_prose_charts
+            _existing = [{round(abs(v), 4) for _s, _l, v in c.points} for c in planned if c.status == "referenced"]
+            _rp = report_prose_charts(good, store, start_index=970, limit=(_target - _have) * 2,
+                                      existing_values=_existing)
+            _rp = _verify_pass(_quality_pass(_rp))[: _target - _have]
+            for chart in _rp:
+                draft = next((d for d in good if d.section_id == chart.section_id), None)
+                if draft is None:
+                    continue
+                n = 300 + len(report_number_added) + 1
+                chart.figure_number = n
+                chart.reading = chart.reading or f"{chart.spec.get('title')}."
+                draft.body = place_after_sentence(draft.body, chart.claim, n, chart.reading)
+                chart.claim = re.sub(r"\s+", " ", CITE_RE.sub("", f"As Figure {n} shows, {chart.reading}")).strip()[:400]
+                chart.status = "referenced"
+                planned.append(chart)
+                report_number_added.append(str(chart.spec.get("title")))
+            if _rp:
+                log.info("V2: %d chart(s) added from series stated in the report's paragraphs", len(_rp))
+        except Exception as exc:
+            log.warning("V2 report-prose charts skipped: %s", type(exc).__name__)
 
     # Executive summary from section summaries.
     exec_section = next(s for s in outline.sections if s.kind == "executive_summary")
