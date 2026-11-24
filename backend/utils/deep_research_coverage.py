@@ -791,7 +791,7 @@ def audit_research_coverage(
     source_count = len(unique)
     norm_tier = str(tier or "detailed").casefold()
     if norm_tier == "in_depth":
-        min_sources, min_domains, min_fetched, min_queries = 35, 10, 20, 8
+        min_sources, min_domains, min_fetched, min_queries = 100, 20, 40, 10
     elif norm_tier == "detailed":
         min_sources, min_domains, min_fetched, min_queries = 20, 8, 10, 5
     else:
@@ -848,7 +848,7 @@ def audit_research_coverage(
     return {
         "tier": norm_tier,
         "status": "adequate" if not gaps else "thin",
-        "targetSources": {"minimum": min_sources, "preferredMaximum": 50 if norm_tier == "in_depth" else min_sources},
+        "targetSources": {"minimum": min_sources, "preferredMaximum": 150 if norm_tier == "in_depth" else min_sources},
         "queryAngleCount": int(query_count or 0),
         "uniqueSourceCount": source_count,
         "distinctPublisherDomains": len(domains),

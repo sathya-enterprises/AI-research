@@ -35,12 +35,12 @@ TIER_RULES = {
     "detailed": {"sections": "6-8", "subsections": False, "leaf_cap": 1150, "leaf_floor": 380,
                  "total_cap": _page_policy("detailed").words_cap,
                  "k_leaf": 12, "exec_words": 450},
-    "in_depth": {"sections": "12-26", "subsections": True, "leaf_cap": 950, "leaf_floor": 330,
+    "in_depth": {"sections": "12-26", "subsections": True, "leaf_cap": 1250, "leaf_floor": 420,
                  "total_cap": _page_policy("in_depth").words_cap,
                  "k_leaf": 14, "exec_words": 900},
 }
 MIN_ANALYSIS_SECTIONS = {"detailed": 5, "in_depth": 12}
-DEEP_DIVE_WORDS = 1900      # ~5 pages; a deep-dive is 3-5 pages
+DEEP_DIVE_WORDS = 2400      # ~6 pages; a deep-dive is 4-6 pages
 COMPACT_WORDS_PER_ENTITY = 220
 # Long-window sector rotation (6+ quarters): six whole-universe core chapters plus evidence-ranked sector deep-dives.
 # Each core chapter is one leaf covering every sector, so the generic 950-word leaf cap cut them to ~2.5 pages

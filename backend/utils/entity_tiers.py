@@ -380,7 +380,7 @@ def merge_case_variants(entities: list[EntityEvidence]) -> list[EntityEvidence]:
     return merged
 
 
-MARKET_OVERVIEW_DEEP_DIVES = 4
+MARKET_OVERVIEW_DEEP_DIVES = 6
 # The question asks for a breakdown by sector / industry / stock / company: every qualifying entity keeps its deep-dive.
 _ASKS_FOR_BREAKDOWN_RE = re.compile(
     r"(?i)\b(?:sectors?|sectoral|industr(?:y|ies)|stocks?(?!\s+(?:markets?|exchanges?)\b)|shares of|compan(?:y|ies)|"

@@ -5903,8 +5903,8 @@ def _tier_limits(env_name: str, defaults: dict[str, int]) -> dict[str, int]:
 
 # Exa returns at most 100 results per query, so 100 is the useful search ceiling.
 _TIER_SEARCH_LIMITS = _tier_limits("REPORT_TIER_SEARCH_LIMITS", {"detailed": 60, "in_depth": 100})
-_TIER_ENRICH_LIMITS = _tier_limits("REPORT_TIER_ENRICH_LIMITS", {"detailed": 50, "in_depth": 80})
-_TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"detailed": 24, "in_depth": 48})
+_TIER_ENRICH_LIMITS = _tier_limits("REPORT_TIER_ENRICH_LIMITS", {"detailed": 50, "in_depth": 140})
+_TIER_CRAWL_PAGES = _tier_limits("REPORT_TIER_CRAWL_PAGES", {"detailed": 24, "in_depth": 72})
 # Numeric observations (with provenance) handed to the writer, and the character
 # budget for that evidence block; the budget must grow with the count or the
 # block is truncated before the extra observations reach the model.
@@ -5915,11 +5915,11 @@ _TIER_EVIDENCE_CONTEXT_CHARS = _tier_limits("REPORT_TIER_EVIDENCE_CONTEXT_CHARS"
 def _report_search_results_per_query(report_tier: str) -> int:
     """Bound search fan-out while retaining enough candidates for evidence diversity."""
     tier = str(report_tier or "detailed").casefold()
-    tier_cap = {"detailed": 12, "in_depth": 18}.get(tier, 12)
+    tier_cap = {"detailed": 12, "in_depth": 25}.get(tier, 12)
     try:
-        configured_cap = max(4, int(os.getenv("GG_REPORT_PER_QUERY_SEARCH_CAP", "18")))
+        configured_cap = max(4, int(os.getenv("GG_REPORT_PER_QUERY_SEARCH_CAP", "25")))
     except (TypeError, ValueError):
-        configured_cap = 18
+        configured_cap = 25
     configured_tier_limit = max(4, int(_TIER_SEARCH_LIMITS.get(tier, tier_cap)))
     return max(4, min(tier_cap, configured_cap, configured_tier_limit))
 
@@ -8899,7 +8899,11 @@ def _filter_relevant_sources(
         if score > 0 and (not require_context or _term_hits(src, terms) > 0)
     ]
     if relevant:
-        return internal + relevant[:25]
+        # The cap follows the tier's page-fetch budget: a fixed 25 held Deep Research to ~25 web sources
+        # (gold-imports live run: 155 found, 25 kept, on-topic WGC and trade-statistics pages dropped).
+        tier_key = str(report_tier or "").casefold()
+        keep = int(_TIER_ENRICH_LIMITS.get(tier_key, 25)) if tier_key in _TIER_ENRICH_LIMITS else 25
+        return internal + relevant[:max(25, keep)]
     return internal
 
 

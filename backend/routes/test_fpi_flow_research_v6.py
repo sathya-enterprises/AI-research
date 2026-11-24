@@ -82,7 +82,7 @@ def test_research_coverage_is_transparent_about_thin_sources():
 
 def test_research_coverage_counts_distinct_hosts_and_fetched_pages():
     sources = []
-    for index in range(36):
+    for index in range(98):
         host = f"publisher{index}.example.org"
         sources.append({"title": f"Research source {index}", "url": f"https://{host}/report/{index}",
                         "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page", "pageContent": "Fetched full publisher page."})
@@ -93,8 +93,8 @@ def test_research_coverage_counts_distinct_hosts_and_fetched_pages():
          "pageFetchStatus": "ok", "evidenceOrigin": "publisher_page", "pageContent": "Official data."},
     ])
     result = audit_research_coverage(sources, tier="in_depth", query_count=12, requested_pages=100, rendered_pages=100)
-    assert result["uniqueSourceCount"] == 38
-    assert result["publisherPagesVerified"] == 38
+    assert result["uniqueSourceCount"] == 100
+    assert result["publisherPagesVerified"] == 100
     assert result["officialSourceCount"] == 2
     assert result["status"] == "adequate"
 
@@ -106,8 +106,8 @@ def test_explicit_100_page_target_is_resolved_without_mistaking_years_for_pages(
 
 def test_deep_search_fanout_is_bounded_per_angle(monkeypatch):
     assert _report_search_results_per_query("detailed") == 12
-    assert _report_search_results_per_query("in_depth") == 18
-    assert _report_search_min_results(18) <= 6
+    assert _report_search_results_per_query("in_depth") == 25
+    assert _report_search_min_results(25) <= 6
     monkeypatch.setenv("GG_REPORT_PER_QUERY_SEARCH_CAP", "7")
     assert _report_search_results_per_query("in_depth") == 7
 
