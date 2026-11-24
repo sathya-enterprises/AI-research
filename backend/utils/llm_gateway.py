@@ -45,6 +45,14 @@ LITE_FIRST_PURPOSES = {"claim_check", "dataset_extract"}
 GROQ_BEFORE_WAIT_PURPOSES = {"section", "section_extend", "executive_summary"}
 
 DEFAULT_BUDGETS = {"detailed": 30, "in_depth": 90}
+# Model calls in flight at once per report. Deep Research has twice the sections and 16 keys across several models;
+# at 5 the sixth section of each wave queued behind the others (gold live run: waves of 260 s and 332 s).
+DEFAULT_CONCURRENCY = {"detailed": 5, "in_depth": 8}
+# Hedged calls: a call still unanswered after this many seconds gets a second attempt on another model, and the
+# first answer wins. Section calls had a median of 38 s but a slow tail of 160-206 s (gold live run), and every
+# wave waited for its slowest section. GG_V2_HEDGE=0 turns it off; GG_V2_HEDGE_AFTER_S sets the prose delay.
+HEDGE_AFTER_SECONDS = {"section": 75.0, "section_extend": 75.0, "executive_summary": 75.0,
+                       "measure_plan": 40.0, "dataset_extract": 40.0}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -110,7 +118,7 @@ class LLMGateway:
         # first and released their slot while waiting; with 16 keys, the last runs at 3 had no rate-limit waits.
         # Set GG_V2_SECTION_CONCURRENCY=3 to go back if a run shows rate-limit cooldowns again.
         self.semaphore = asyncio.Semaphore(max(1, concurrency or _env_int(
-            "GG_V2_SECTION_CONCURRENCY", 5)))
+            "GG_V2_SECTION_CONCURRENCY", DEFAULT_CONCURRENCY.get(self.tier, 5))))
         self.capture = capture
         self.stats = GatewayStats()
         self._key_cursor = 0  # rotates keys across calls so one key's rate limit is not hit by a long run
@@ -120,6 +128,8 @@ class LLMGateway:
         self._model_429: dict[str, dict[str, float]] = {}
         self.stats_rate_limited_models = 0
         self.stats_rejected_models: set[str] = set()  # models that answered HTTP 400 (skipped for 10 min)
+        self.stats_hedges = 0       # second attempts started for slow calls
+        self.stats_hedge_wins = 0   # ... that answered first
 
     @property
     def remaining(self) -> int:
@@ -164,8 +174,9 @@ class LLMGateway:
             attempt = 0
             while True:
                 attempt += 1
-                result = await self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout, tried,
-                                                 allow_lite, prefer_lite=purpose in LITE_FIRST_PURPOSES)
+                result = await self._gemini_once_hedged(purpose, section_id, prompt, system, max_tokens, temperature,
+                                                        json_mode, timeout, tried, allow_lite,
+                                                        prefer_lite=purpose in LITE_FIRST_PURPOSES)
                 result.attempts = attempt
                 if result.ok:
                     break
@@ -242,7 +253,60 @@ class LLMGateway:
             return result
 
     # ── providers ─────────────────────────────────────────────────────────────
-    def _attempt_plan(self, tried: set, allow_lite: bool = True, prefer_lite: bool = False) -> list[tuple[str, str]]:
+    def _hedge_delay(self, purpose: str) -> float | None:
+        if os.getenv("GG_V2_HEDGE", "1").strip().casefold() in {"0", "false", "no", "off"}:
+            return None
+        delay = HEDGE_AFTER_SECONDS.get(purpose)
+        if delay is None:
+            return None
+        if purpose in {"section", "section_extend", "executive_summary"}:
+            try:
+                delay = float(os.getenv("GG_V2_HEDGE_AFTER_S", "") or delay)
+            except ValueError:
+                pass
+        return max(0.05, delay)
+
+    async def _gemini_once_hedged(self, purpose, section_id, prompt, system, max_tokens, temperature, json_mode,
+                                  timeout, tried, allow_lite: bool = True, prefer_lite: bool = False) -> LLMResult:
+        """One attempt, plus a second one on a different model if the first is still running after the delay."""
+        delay = self._hedge_delay(purpose)
+        first = asyncio.ensure_future(self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout,
+                                                        tried, allow_lite, prefer_lite))
+        if delay is None:
+            return await first
+        done, _ = await asyncio.wait({first}, timeout=delay)
+        if done:
+            return first.result()
+        busy_models = {model for model, _key in tried}
+        if not self._attempt_plan(tried, allow_lite, prefer_lite, avoid_models=busy_models, advance=False):
+            return await first  # no other model free: keep waiting on the first
+        self.stats_hedges += 1
+        log.info("V2 gateway: %s/%s still running after %.0fs; started a second attempt on another model",
+                 purpose, section_id or "-", delay)
+        second = asyncio.ensure_future(self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout,
+                                                         tried, allow_lite, prefer_lite, avoid_models=busy_models))
+        pending = {first, second}
+        failure: LLMResult | None = None
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    result = task.result() if not task.cancelled() and task.exception() is None else LLMResult(
+                        ok=False, error=f"hedge {type(task.exception()).__name__ if not task.cancelled() else 'cancelled'}")
+                    if result.ok:
+                        if task is second:
+                            self.stats_hedge_wins += 1
+                        return result
+                    failure = result
+            return failure or LLMResult(ok=False, error="no_response")
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    def _attempt_plan(self, tried: set, allow_lite: bool = True, prefer_lite: bool = False,
+                      avoid_models: set | None = None, advance: bool = True) -> list[tuple[str, str]]:
         rt = self.runtime
         keys = [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k)]
         if not keys:
@@ -252,19 +316,23 @@ class LLMGateway:
         for model in rt.GEMINI_MODELS:
             if rt._gemini_model_cooling(model) or (not allow_lite and "lite" in str(model).casefold()):
                 continue
+            if avoid_models and model in avoid_models:
+                continue
             healthy = [k for k in rt._gemini_candidate_keys(ring, model, len(ring))
                        if not rt.is_rate_limited(k) and (model, k) not in tried]
             if healthy:
                 plan.append((model, healthy[self._key_cursor % len(healthy)]))
-        self._key_cursor += 1
+        if advance:
+            self._key_cursor += 1
         if prefer_lite:
             plan.sort(key=lambda item: "lite" not in str(item[0]).casefold())
         return plan
 
     async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried,
-                           allow_lite: bool = True, prefer_lite: bool = False) -> LLMResult:
+                           allow_lite: bool = True, prefer_lite: bool = False,
+                           avoid_models: set | None = None) -> LLMResult:
         rt = self.runtime
-        plan = self._attempt_plan(tried, allow_lite, prefer_lite)
+        plan = self._attempt_plan(tried, allow_lite, prefer_lite, avoid_models=avoid_models)
         if not plan:
             return LLMResult(ok=False, error="no_gemini_key_or_model_available")
         last_error = "no_response"

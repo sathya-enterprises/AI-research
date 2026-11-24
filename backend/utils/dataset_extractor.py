@@ -552,7 +552,8 @@ async def extract_dataset_charts(store, gateway, *, question: str, today: str, l
         for passage in passages]
     # The whole step has a time budget: under rate limits it took 9 minutes before any section was written.
     # Calls still waiting at the budget are cancelled and recorded; whatever finished is used.
-    budget = float(os.getenv("GG_V2_DATASET_EXTRACT_SECONDS", "180"))
+    # 100 s: the gold live run's six calls had a median of 25 s and one of 99 s, and writing waited for all of them.
+    budget = float(os.getenv("GG_V2_DATASET_EXTRACT_SECONDS", "100"))
     done, pending = await asyncio.wait(tasks, timeout=budget) if tasks else (set(), set())
     for task in pending:
         task.cancel()

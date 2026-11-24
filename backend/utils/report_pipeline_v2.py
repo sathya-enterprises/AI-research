@@ -871,8 +871,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     planned = planned_table[:table_quota] + planned_data
 
     # Sections in waves: each wave sees summaries of completed sections.
-    # In-depth: waves of 6 (fewer barriers; each wave still sees summaries of all earlier waves).
-    wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "6" if tier == "in_depth" else "3") or 3))
+    # In-depth: waves of up to 7 (fewer barriers; each wave still sees summaries of all earlier waves).
+    wave_size = max(1, int(os.getenv("GG_V2_WAVE_SIZE", "7" if tier == "in_depth" else "3") or 3))
+    # Balance the waves: 13 sections in waves of 6 ran as 6+6+1, and the lone last section was a 71 s wave of its own.
+    if analysis:
+        _waves = -(-len(analysis) // wave_size)
+        wave_size = -(-len(analysis) // _waves)
     drafts = []
     goals = {s.section_id: f"{s.title}: {s.goal}" for s in analysis}
     import asyncio
@@ -1376,7 +1380,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                len([p for p in data_passages if (store.get(p) or None) and store.get(p).kind in {"table", "calculated"}]) if tier == "in_depth" else 0)
     meta = {
         "pipeline": "v2", "elapsedSeconds": round(time.perf_counter() - started, 1),
-        "outline": outline.to_dict(), "llm": gateway.stats.to_dict(),
+        "outline": outline.to_dict(), "llm": {**gateway.stats.to_dict(), "hedges": getattr(gateway, "stats_hedges", 0),
+                                             "hedgeWins": getattr(gateway, "stats_hedge_wins", 0)},
         "sections": [{"id": d.section_id, "title": d.title, "ok": d.ok, "error": d.error, "words": d.words, "calls": d.calls,
                       "citedPassages": len(d.cited_passages), "invalidCitations": d.invalid_citations,
                       "repairedCitations": d.repaired_citations,

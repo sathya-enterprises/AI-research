@@ -1249,6 +1249,17 @@ async def _search_secondary_providers(
 
 
 _WEB_PERSIST_TASKS: set[asyncio.Task] = set()
+# Library writes get their own two threads: on the shared default pool, 24 entity-search writes at once (seconds
+# each) held the threads that page fetching and parsing use while a report was being researched.
+_WEB_PERSIST_EXECUTOR = None
+
+
+def _web_persist_executor():
+    global _WEB_PERSIST_EXECUTOR
+    if _WEB_PERSIST_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _WEB_PERSIST_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gg-web-persist")
+    return _WEB_PERSIST_EXECUTOR
 
 
 def _schedule_web_research_persistence(query: str, results: list[dict] | None, provider: str = "exa") -> None:
@@ -1259,7 +1270,8 @@ def _schedule_web_research_persistence(query: str, results: list[dict] | None, p
     async def _worker():
         try:
             from utils.research_store import persist_web_search_results
-            stats = await asyncio.to_thread(persist_web_search_results, query, rows, provider=provider)
+            stats = await asyncio.get_running_loop().run_in_executor(
+                _web_persist_executor(), lambda: persist_web_search_results(query, rows, provider=provider))
             log.info("Web research library: stored %d sources / %d new versions for query=%r", stats.get("sources", 0), stats.get("versions", 0), str(query or "")[:80])
         except Exception as exc:
             # The research cache is intentionally non-blocking: a Supabase outage,

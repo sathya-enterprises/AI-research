@@ -303,3 +303,60 @@ def test_a_model_cooled_while_a_call_was_running_is_not_tried_by_that_call(monke
     gw = G.LLMGateway(rt, "detailed", budget=5, concurrency=1, capture=False)
     result = asyncio.run(gw.generate(purpose="section", section_id="sec-1", prompt="p", system="s"))
     assert result.ok and result.model == "model-b" and "model-c" not in seen
+
+
+def _slow_model_a(delay_a):
+    async def handler(request):
+        model = request.url.path.split("/")[-1].split(":")[0]
+        if model == "model-a":
+            await asyncio.sleep(delay_a)
+            return _ok("slow answer")
+        return _ok("fast answer")
+    return handler
+
+
+def test_a_slow_section_call_is_hedged_on_another_model_and_the_first_answer_wins(monkeypatch):
+    _patch_http(monkeypatch, _slow_model_a(5.0))
+    monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.2)
+    monkeypatch.delenv("GG_V2_HEDGE_AFTER_S", raising=False)
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
+    started = asyncio.get_event_loop_policy().new_event_loop()
+    try:
+        import time
+        t0 = time.perf_counter()
+        result = started.run_until_complete(gw.generate(purpose="section", section_id="sec-1", prompt="p"))
+        elapsed = time.perf_counter() - t0
+    finally:
+        started.close()
+    assert result.ok and result.text == "fast answer" and result.model == "model-b"
+    assert elapsed < 3 and gw.stats_hedges == 1 and gw.stats_hedge_wins == 1
+    assert gw.stats.calls == 1  # the hedge is the same logical call: the report's call budget is not spent twice
+
+
+def test_a_fast_call_is_not_hedged_and_hedging_can_be_turned_off(monkeypatch):
+    _patch_http(monkeypatch, _slow_model_a(0.0))
+    monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.5)
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
+    result = asyncio.run(gw.generate(purpose="section", prompt="p"))
+    assert result.ok and result.text == "slow answer" and gw.stats_hedges == 0
+    _patch_http(monkeypatch, _slow_model_a(0.6))
+    monkeypatch.setitem(G.HEDGE_AFTER_SECONDS, "section", 0.1)
+    monkeypatch.setenv("GG_V2_HEDGE", "0")
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
+    result = asyncio.run(gw.generate(purpose="section", prompt="p"))
+    assert result.ok and result.text == "slow answer" and gw.stats_hedges == 0
+
+
+def test_claim_checks_are_never_hedged(monkeypatch):
+    _patch_http(monkeypatch, _slow_model_a(0.4))
+    gw = G.LLMGateway(_runtime(), "in_depth", budget=5, capture=False)
+    result = asyncio.run(gw.generate(purpose="claim_check", prompt="p"))
+    assert result.ok and gw.stats_hedges == 0
+
+
+def test_deep_research_runs_more_calls_at_once_than_detailed(monkeypatch):
+    monkeypatch.delenv("GG_V2_SECTION_CONCURRENCY", raising=False)
+    assert G.LLMGateway(_runtime(), "in_depth", capture=False).semaphore._value == 8
+    assert G.LLMGateway(_runtime(), "detailed", capture=False).semaphore._value == 5
+    monkeypatch.setenv("GG_V2_SECTION_CONCURRENCY", "3")
+    assert G.LLMGateway(_runtime(), "in_depth", capture=False).semaphore._value == 3
