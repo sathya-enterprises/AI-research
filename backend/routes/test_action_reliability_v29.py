@@ -133,10 +133,11 @@ def test_active_frontends_keep_icon_image_aspect_ratio_without_auto_dimension_wa
     # style so Next.js keeps its aspect ratio without the auto-dimension warning.
     from routes._chat_source import read_chat_source
     src = read_chat_source()
-    logos = re.findall(r'<Image src="/growth-gradual-logo\.jpg"[^>]*/>', src)
-    assert logos, "the chat still shows the logo on assistant messages"
+    # The assistant avatar is the square "G" mark cut from the wide logo (growth-gradual-mark.png).
+    logos = re.findall(r'<Image src="/growth-gradual-mark\.png"[^>]*/>', src)
+    assert logos, "the chat still shows the logo mark on assistant messages"
     for tag in logos:
-        m = re.search(r"width=\{(\d+)\} height=\{(\d+)\} style=\{\{ objectFit:'cover', objectPosition:'3% 50%', width:(\d+), height:(\d+) \}\}", tag)
+        m = re.search(r"width=\{(\d+)\} height=\{(\d+)\} style=\{\{ objectFit:'contain', width:(\d+), height:(\d+) \}\}", tag)
         assert m and len(set(m.groups())) == 1, tag
 
 

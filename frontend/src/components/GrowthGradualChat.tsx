@@ -2021,7 +2021,7 @@ export default function GrowthGradualChat() {
                   <div key={msg.id} className="msg-row msg-row--bot">
                     <div className="msg-inner">
                       <div className="msg-avatar msg-avatar--bot">
-                        <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'cover', objectPosition:'3% 50%', width:28, height:28 }}/>
+                        <Image src="/growth-gradual-mark.png" alt="" width={28} height={28} style={{ objectFit:'contain', width:28, height:28 }}/>
                       </div>
                       <div className="msg-bubble">
                         <div className="searching">
@@ -2046,7 +2046,7 @@ export default function GrowthGradualChat() {
                         {isUser ? (
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4b5680" strokeWidth="2" strokeLinecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                         ) : (
-                          <Image src="/growth-gradual-logo.jpg" alt="" width={28} height={28} style={{ objectFit:'cover', objectPosition:'3% 50%', width:28, height:28 }}/>
+                          <Image src="/growth-gradual-mark.png" alt="" width={28} height={28} style={{ objectFit:'contain', width:28, height:28 }}/>
                         )}
                       </div>
                       {/* Bubble */}

@@ -401,7 +401,7 @@ body.gg-house--market_currents .gg-house-cover {
   background-size: 4px 4px !important; color: #fff !important; display: flex !important; flex-direction: column !important;
   min-height: 96vh; padding: 56px 52px 60px !important; margin: 0 !important; border: 0 !important; box-shadow: none !important;
 }
-body.gg-house--market_currents .gg-house-cover__logo { background: #fff; width: 270px; padding: 22px 20px; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+body.gg-house--market_currents .gg-house-cover__logo { background: #fff; width: 380px; padding: 16px 20px; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
 body.gg-house--market_currents .gg-house-cover__logo img { display: block; width: 100%; height: auto; }
 body.gg-house--market_currents .gg-house-cover__kicker { margin: 72px 0 0 !important; font: 500 9px var(--mc-sans) !important; letter-spacing: .34em !important; text-transform: uppercase; color: var(--mc-gold) !important; }
 body.gg-house--market_currents .gg-house-cover__title { margin: 30px 0 4px !important; font: 600 26px/1.15 var(--mc-serif) !important; letter-spacing: 0 !important; color: var(--mc-gold-soft) !important; max-width: 100% !important; }
@@ -562,7 +562,7 @@ html:has(body[data-report-style="market_currents"]), body.gg-house--market_curre
 body.gg-house--market_currents { font-size: 10pt !important; }
 body.gg-house--market_currents main { padding: 0 !important; max-width: none !important; }
 body.gg-house--market_currents .gg-house-cover { width: 210mm !important; height: 297mm !important; min-height: 297mm !important; padding: 15mm 13mm 18mm !important; break-after: page !important; page-break-after: always !important; }
-body.gg-house--market_currents .gg-house-cover__logo { width: 64mm; padding: 6mm 5mm; }
+body.gg-house--market_currents .gg-house-cover__logo { width: 92mm; padding: 4mm 5mm; }
 body.gg-house--market_currents .gg-house-cover__kicker { margin-top: 20mm !important; font-size: 7pt !important; }
 body.gg-house--market_currents .gg-house-cover__title { font-size: 17pt !important; margin-top: 9mm !important; }
 body.gg-house--market_currents .gg-house-cover__period { font-size: 16pt !important; }
