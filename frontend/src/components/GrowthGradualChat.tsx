@@ -11,7 +11,7 @@ import { loadPdfJs } from '@/lib/pdfjs-browser';
 import { REPORT_TIER_OPTIONS, REPORT_STYLE_OPTIONS } from './chat/types';
 import type { Source, ChartSpec, ReportTier, ReportStyle, ReportRevision, ReportData, Message, Conversation, StreamMeta } from './chat/types';
 import { isReportReferenceQuestion, buildReportChatContext, reportStageLabel } from './chat/reportContext';
-import { _EDIT_INTENT_RE, uid, fmtTime, fmtDate, growthGradualAiTransport, getOrCreateSessionId, loadConversations, saveConversations } from './chat/storage';
+import { isReportEditRequest, reportSectionTitles, uid, fmtTime, fmtDate, growthGradualAiTransport, getOrCreateSessionId, loadConversations, saveConversations } from './chat/storage';
 import { renderMd, splitTextAndCharts } from './chat/markdown';
 import { ChartBlock } from './chat/charts';
 import { ReportPanel } from './chat/ReportPanel';
@@ -965,7 +965,9 @@ export default function GrowthGradualChat() {
     // The backend queues the Action and returns a job ID; this client polls
     // status until every targeted section is validated and committed atomically.
     const lastReportMsg = [...messages].reverse().find(m => m.reportData?.report);
-    if (reportModeEnabled && lastReportMsg?.reportData && _EDIT_INTENT_RE.test(q)) {
+    // Whether or not the Report toggle is on: an edit of the report in this conversation must never start a
+    // full new report run ("make the outlook section shorter" used to rerun the whole report).
+    if (lastReportMsg?.reportData && isReportEditRequest(q, reportSectionTitles(lastReportMsg.reportData.report))) {
       setReportModeEnabled(false);
       setReportTierMenuOpen(false);
       setInput('');

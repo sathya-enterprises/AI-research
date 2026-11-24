@@ -3,6 +3,38 @@ import { DefaultChatTransport } from 'ai';
 import type { ReportRevision, Conversation } from './types';
 export const _EDIT_INTENT_RE = /\b(edit|update|modify|change|revise|rewrite|redo|rephrase|elaborate|expand|shorten|condense|add\s+more|add\s+detail|go\s+deeper|more\s+detail|more\s+depth|fix|correct|improve|rework|tweak)\b/i;
 
+// Verbs that ask for a change to existing content ("make the outlook section shorter", "remove the second chart").
+const _EDIT_VERB_RE = /\b(edit|update|modify|change|revise|rewrite|redo|rephrase|elaborate|expand|extend|shorten|shorter|longer|condense|reduce|trim|cut|remove|delete|drop|replace|swap|add|include|insert|make|turn|convert|fix|correct|improve|rework|tweak|simplify|clarify|summari[sz]e|reword|restructure|reorder|merge|split|go\s+deeper|more\s+detail|more\s+depth)\b/i;
+// What the change applies to: a part of the report (or "it"/"this" when a report was just produced).
+const _EDIT_TARGET_RE = /\b(sections?|sub-?sections?|paragraphs?|charts?|graphs?|tables?|figures?|headings?|titles?|summary|conclusion|introduction|intro|outlook|bullet\s+points?|points|wording|tone|report|it|this|that)\b/i;
+// Asking for a different report is not an edit of this one.
+const _NEW_REPORT_RE = /\b(new|another|fresh|separate|second)\s+report\b|\breport\s+(on|about|for|covering)\b|\b(create|generate|produce|prepare|write|make)\s+(me\s+)?(a|an)\s+(\w+\s+)?report\b/i;
+
+/** Whether a chat message asks to change the report already in this conversation (not to write a new one).
+ *  A message that names one of the report's section headings, or pairs an edit verb with a part of the
+ *  report, is an edit; "make a new report on X" / "report on X" is not. Used whether or not the Report
+ *  toggle is on, so an edit request never starts a full new report run. */
+export function isReportEditRequest(text: string, sectionTitles: string[] = []): boolean {
+  const q = String(text || '').trim();
+  if (!q || _NEW_REPORT_RE.test(q)) return false;
+  const folded = q.toLowerCase();
+  const namesSection = sectionTitles.some(title => {
+    const t = String(title || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (t.length < 6) return false;
+    const plain = folded.replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ');
+    if (plain.includes(t)) return true;
+    // "the outlook section" names "Market Outlook and Risk Scenarios": a distinctive heading word plus "section"
+    const words = t.split(' ').filter(w => w.length >= 5 && !['market', 'analysis', 'overview', 'sector', 'india', 'indian'].includes(w));
+    return /\bsection\b/.test(plain) && words.some(w => new RegExp(`\\b${w}\\b`).test(plain));
+  });
+  return _EDIT_VERB_RE.test(q) && (namesSection || _EDIT_TARGET_RE.test(q));
+}
+
+/** The "## " headings of a report body (section titles the user can name in an edit request). */
+export function reportSectionTitles(report: string): string[] {
+  return Array.from(String(report || '').matchAll(/^#{2,3}\s+(.+?)\s*$/gm)).map(m => m[1].replace(/[*_`]/g, '').trim());
+}
+
 
 export function uid() { return Math.random().toString(36).slice(2, 10); }
 export function fmtTime(ts: number) {
