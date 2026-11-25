@@ -386,7 +386,37 @@ def wdi_shortlist(question: str, measures: str = "", limit: int = 25) -> list[st
         if entry_id not in CATALOG:
             CATALOG[entry_id] = CatalogEntry(entry_id, "wb", code, title, unit or "as reported", title.casefold())
         ids.append(entry_id)
+        _WDI_LAST_SCORES[entry_id] = score
     return ids
+
+
+_WDI_LAST_SCORES: dict[str, float] = {}
+# A WDI series is planned without the model only when its title shares rare subject words with the question
+# (two specific words, e.g. "air" + "passengers"), not one common word ("power" in "Methane emissions from Power").
+DETERMINISTIC_WDI_MIN_SCORE = 8.0
+
+
+def deterministic_plan(question: str, measures: str, limit: int) -> list[dict]:
+    """Datasets chosen by code: curated catalog keyword matches, then strong WDI title matches; each must measure
+    the subject of the question (fits_measure). Same item shape as the model's plan."""
+    subject = measures or question
+    entities = mentioned_entities(question)[:4] or ["WLD"]
+    plan: list[dict] = []
+    seen_codes: set[str] = set()
+    for item in keyword_plan(f"{question} {measures}", limit * 2):
+        entry = CATALOG[item["id"]]
+        if fits_measure(entry, subject) and entry.code not in seen_codes:
+            seen_codes.add(entry.code)
+            plan.append({"id": entry.id, "entities": item.get("entities") or entities, "fit": "direct",
+                         "measure": "", "why": "curated series of the question's subject"})
+    for entry_id in wdi_shortlist(question, measures, limit=limit * 3):
+        entry = CATALOG[entry_id]
+        if (_WDI_LAST_SCORES.get(entry_id, 0) >= DETERMINISTIC_WDI_MIN_SCORE and fits_measure(entry, subject)
+                and entry.code not in seen_codes):
+            seen_codes.add(entry.code)
+            plan.append({"id": entry_id, "entities": entities, "fit": "direct", "measure": "",
+                         "why": "World Development Indicators series named by the question's own words"})
+    return plan[:limit]
 
 
 def keyword_plan(question: str, limit: int) -> list[dict]:
@@ -408,6 +438,13 @@ def keyword_plan(question: str, limit: int) -> list[dict]:
 async def plan_datasets(question: str, gateway, *, today: date, limit: int = 3, measures: str = "") -> tuple[list[dict], dict]:
     """[{id, entities}] validated against the catalog; (plan, note)."""
     note = {"method": "llm", "rejected": []}
+    # The model plans (one ~20 s call): compared on 43 saved questions, planning by code alone picked series such
+    # as "Merchandise exports to low- and middle-income economies" for defence, pharma and gold questions where the
+    # model picked military expenditure, the right EV series or Brent. GG_OFFICIAL_DATA_PLANNER=code skips the call.
+    if os.getenv("GG_OFFICIAL_DATA_PLANNER", "llm").strip().casefold() == "code":
+        coded = deterministic_plan(question, measures, limit)
+        if coded:
+            return coded, {"method": "code (curated keywords + WDI title match)", "rejected": []}
     # the curated series plus the WDI series that match this question (not all 1,500: the prompt stays small)
     shortlist = wdi_shortlist(question, measures)
     note["wdiShortlist"] = len(shortlist)

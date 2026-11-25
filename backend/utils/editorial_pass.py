@@ -196,7 +196,8 @@ def detect_contradictions(sections: list[EditedSection], report: EditorialReport
 
 
 TRANSITION_SYSTEM = """You are the editor of a research report. For each section after the first, write ONE bridging
-sentence (at most 30 words) that links it to the section before it, using the section summaries provided. Rules: no
+sentence (at most 30 words) that links it to the section before it AND says what it adds to answering the report's
+question, so the sections read as one argument towards the thesis, using the section summaries provided. Rules: no
 numbers, no citations, no new facts, no hype. Return JSON only: {"<section_id>": "<sentence>", ...}."""
 
 
@@ -205,13 +206,22 @@ def _valid_bridge(text: str) -> bool:
     return bool(text) and not re.search(r"\d|\[|\]", text) and len(text.split()) <= 40 and text.endswith(".")
 
 
-async def add_transitions(sections: list[EditedSection], gateway, report: EditorialReport) -> None:
+async def add_transitions(sections: list[EditedSection], gateway, report: EditorialReport,
+                          question: str = "", thesis: str = "") -> None:
     if gateway is None or len(sections) < 3:
         return
     listing = "\n".join(f"{s.section_id} | {s.title} | {CITE_RE.sub('', s.summary)[:400]}" for s in sections)
+    # the question and thesis give every bridge the report's argument to tie into, not just its neighbour
+    frame = ""
+    if question:
+        frame += f"REPORT QUESTION: {question.strip()[:400]}\n"
+    if thesis:
+        frame += f"THESIS: {CITE_RE.sub('', thesis).strip()[:500]}\n"
+    if frame:
+        frame += "\n"
     try:
         result = await gateway.generate(purpose="editorial_transitions", section_id="editorial", system=TRANSITION_SYSTEM,
-                                        prompt=f"SECTIONS IN ORDER (id | title | summary):\n{listing}", max_tokens=2048,
+                                        prompt=f"{frame}SECTIONS IN ORDER (id | title | summary):\n{listing}", max_tokens=2048,
                                         temperature=0.2, timeout=90)
     except Exception as exc:  # the editorial pass must never fail the report
         log.warning("V2 editorial transitions failed: %s", type(exc).__name__)
@@ -234,7 +244,8 @@ async def add_transitions(sections: list[EditedSection], gateway, report: Editor
             report.transitions_rejected += 1
 
 
-async def editorial_pass(sections: list[EditedSection], *, gateway=None) -> tuple[list[EditedSection], EditorialReport]:
+async def editorial_pass(sections: list[EditedSection], *, gateway=None, question: str = "",
+                         thesis: str = "") -> tuple[list[EditedSection], EditorialReport]:
     report = EditorialReport()
     for sec in sections:
         before = len(STRAY_LABEL_RE.findall(sec.body))
@@ -245,7 +256,7 @@ async def editorial_pass(sections: list[EditedSection], *, gateway=None) -> tupl
     disambiguate_headings(sections, report)
     remove_repetition(sections, report)
     detect_contradictions(sections, report)
-    await add_transitions(sections, gateway, report)
+    await add_transitions(sections, gateway, report, question=question, thesis=thesis)
     if report.repeated_sentences_removed:
         log.info("V2 editorial pass removed %d repeated sentence(s)", len(report.repeated_sentences_removed))
     if report.contradictions:

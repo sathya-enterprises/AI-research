@@ -595,7 +595,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             dataset_note = {**(dataset_note if isinstance(dataset_note, dict) else {}), "official": len(_official)}
     except Exception as exc:
         log.warning("V2 official-data charts skipped: %s: %s", type(exc).__name__, str(exc)[:160])
-    if os.getenv("GG_V2_DATASET_EXTRACT", "1") != "0":
+    # Off by default: the model read 6 passages per report for datasets and, across the saved runs, almost always
+    # accepted none (0 in the aviation run; 1-2 at best) while the step waited up to 100 s and spent 5-16 calls of
+    # the writing quota. Charts come from the deterministic builders (tables, sentences, paragraphs, official data).
+    # GG_V2_DATASET_EXTRACT=1 turns it back on.
+    if os.getenv("GG_V2_DATASET_EXTRACT", "0") == "1":
         try:
             from utils.dataset_extractor import extract_dataset_charts
             extracted, extract_note = await extract_dataset_charts(
@@ -1232,7 +1236,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if skip_transitions:
         deadline_log["transitionsSkipped"] = True
         log.warning("V2 deadline: editorial transitions call skipped")
-    edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway)
+    edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway,
+                                             question=question, thesis=str(getattr(outline, "thesis", "") or ""))
     try:
         from utils.source_quality import window_start as _window_start
         layout_window = _window_start(question, _asks_date.fromisoformat(today[:10]))
