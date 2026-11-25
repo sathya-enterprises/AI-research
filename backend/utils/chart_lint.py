@@ -366,6 +366,11 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
         return "the values are years (an attribute such as a founding year, not data)"
     if sum(1 for l in labels if re.fullmatch(r"\s*\d{1,2}[.)]?\s*", l)) >= max(2, len(labels) // 2):
         return "the row labels are list numbers, not entities or periods"
+    # A label that carries several bare numbers ("7 1 5 0 Apple", "200 0.7 0.3 0.3 Samsung") is a table row flattened
+    # into one line by the page extractor, not a category name (smartphone live run: such a donut passed every check)
+    junk_labels = sum(1 for l in labels if len([t for t in str(l).split() if re.fullmatch(r"[-+$₹]?\d[\d.,]*%?", t)]) >= 3)
+    if labels and junk_labels >= max(1, len(labels) // 3):  # even one such label means the rows were misread
+        return "the labels mix several numbers (a table row flattened into one line), not names"
     # The plotted values are a table's serial / row-number column ("Sl. No.: NTPC, SJVNL, NHPC ..."), not a measure
     measure_names = [str(s.get("name") or "") for s in _series(spec)] + [str(spec.get("title") or "").split(":", 1)[0]]
     if any(_SERIAL_COLUMN_RE.fullmatch(n.strip()) for n in measure_names if n.strip()):

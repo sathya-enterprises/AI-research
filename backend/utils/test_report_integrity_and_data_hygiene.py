@@ -2016,3 +2016,14 @@ def test_market_share_questions_are_not_stock_market_questions():
     assert not is_market_topic("India's solar and wind generation share")
     assert is_market_topic("How did shares of Tata Motors move?") and is_market_topic("Indian share market in October")
     assert is_market_topic("promoter shareholding changes")
+
+
+def test_labels_made_of_a_flattened_table_row_are_rejected():
+    from utils.chart_lint import quality_reason
+    spec = {"title": "Quarterly return (%)", "type": "doughnut", "unit": "%", "series": [{"name": "Q1 2025", "data": [
+        {"label": "7 1 5 0 Apple", "value": 57}, {"label": "200 0.7 0.3 0.3 Samsung", "value": 25},
+        {"label": "Lenovo", "value": 11}, {"label": "Band 75-$100 25-$75 rise $25 Others", "value": 7}]}]}
+    assert "flattened" in quality_reason(spec)
+    fine = {"title": "Market share (%)", "series": [{"name": "Q1 2025", "data": [
+        {"label": "Apple", "value": 57}, {"label": "Samsung", "value": 25}, {"label": "FY 2023 24", "value": 11}]}]}
+    assert "flattened" not in quality_reason(fine)
