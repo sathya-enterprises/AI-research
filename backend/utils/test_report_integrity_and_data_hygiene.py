@@ -2007,3 +2007,12 @@ def test_only_names_count_as_requested_chart_entities():
         "How have India's mobile subscribers, data usage per user and 5G rollout progressed from 2021 to 2025?") == []
     assert _requested_chart_entities("Compare SBI, HDFC Bank, ICICI Bank and Axis Bank") == [
         "SBI", "HDFC Bank", "ICICI Bank", "Axis Bank"]
+
+
+def test_market_share_questions_are_not_stock_market_questions():
+    """Aviation live run: 'airline market shares' planned 'Akasa Air sector FPI DII flows' entity searches."""
+    from utils.report_outline import is_market_topic
+    assert not is_market_topic("India's domestic air passenger traffic, airline market shares and airport capacity")
+    assert not is_market_topic("India's solar and wind generation share")
+    assert is_market_topic("How did shares of Tata Motors move?") and is_market_topic("Indian share market in October")
+    assert is_market_topic("promoter shareholding changes")

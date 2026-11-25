@@ -64,7 +64,7 @@ GENERIC_DEEP_DIVE_SUBSECTIONS = (
 )
 # "share" alone is not a market word: "generation share", "share of exports" and "market share" are proportions
 # (a renewables question was planned as a stock-market one and searched "sector valuation P/E" for states).
-_MARKET_TOPIC_RE = re.compile(r"(?i)\b(?:stock|equit|shares\b|share (?:market|price|holding|buyback)s?\b|shareholding|promoters?\b|nifty|sensex|s&p|nasdaq|dow jones|indices|index funds?|"
+_MARKET_TOPIC_RE = re.compile(r"(?i)\b(?:stock|equit|(?<!market )(?<!market-)shares\b|share (?:market|price|holding|buyback)s?\b|shareholding|promoters?\b|nifty|sensex|s&p|nasdaq|dow jones|indices|index funds?|"
                               r"sector rotation|portfolio|fund flows|fpi|fii|dii|ipo|valuation|earnings season|bond yields?|"
                               r"mutual funds?|investors?)")
 

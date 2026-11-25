@@ -50,7 +50,9 @@ _VERB_RE = re.compile(
 _LEAD_RE = re.compile(r"(?i)^(?:in|for|among|within|across|meanwhile|similarly|by contrast|in contrast|however|"
                       r"while|whereas|and|but|the|a|an|correspondingly|consequently|overall|notably)\b[\s,]*")
 _STOP_CAPS = {"The", "In", "For", "By", "From", "Meanwhile", "Similarly", "However", "While", "And", "But", "This",
-              "These", "Its", "Their", "Public", "Private", "Total", "Overall", "Gross", "Net", "Share"}
+              "These", "Its", "Their", "Public", "Private", "Total", "Overall", "Gross", "Net", "Share",
+              # a figure reference or a nationality adjective is not whose figures these are (aviation live run)
+              "Figure", "Figures", "Table", "Chart", "As", "Indian", "India's", "Global", "World", "Positioned"}
 _NAME_BAD = re.compile(r"[\d₹$€%|•:;,()\[\]]|(?i:\b(?:recorded|suffered|falling|rising|losses|gains|which|that|"
                        r"when|where|while|after|before|during|late|early|result|trend|years?|this|these|it|they|"
                        r"instance|example|fluctuated|concurrently|terms|whole)\b)")

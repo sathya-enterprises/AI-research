@@ -4980,18 +4980,25 @@ def _with_flowing_sections(html_doc: str, numbers: list[str]) -> str:
 def _render_with_flowing_sections(render, html_doc: str) -> bytes:
     """Render; if a section ends on a mostly empty page, render once more with the next section starting there."""
     data = render(html_doc)
+    # Moving a section up re-paginates everything after it, so a later section can end on a mostly empty page
+    # only in the new render (aviation live run: section 10 after 02, 07, 09 and 12 moved): repeat, at most 3 times.
+    moved: list[str] = []
     try:
-        numbers = _sparse_section_starts(data)
-        if not numbers:
-            return data
-        flowed_html = _with_flowing_sections(html_doc, numbers)
-        if flowed_html == html_doc:
-            return data
-        flowed = render(flowed_html)
-        if flowed:
+        for _pass in range(3):
+            numbers = [n for n in _sparse_section_starts(data) if n not in moved]
+            if not numbers:
+                break
+            flowed_html = _with_flowing_sections(html_doc, numbers)
+            if flowed_html == html_doc:
+                break
+            flowed = render(flowed_html)
+            if not flowed:
+                break
+            html_doc, data = flowed_html, flowed
+            moved += numbers
+        if moved:
             log.info("PDF: %d section(s) start on the page left mostly empty by the section before (%s)",
-                     len(numbers), ", ".join(numbers))
-            return flowed
+                     len(moved), ", ".join(moved))
     except Exception as exc:
         log.warning("PDF: section-flow pass skipped: %s", type(exc).__name__)
     return data
