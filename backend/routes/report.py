@@ -11373,33 +11373,46 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
     layout rather than reportable quantities.
     """
     text = str(value or "")
-    text = re.sub(
-        r"\b(?:FY|fiscal\s+year|financial\s+year)\s*(?:20)?\d{2}"
-        r"(?:\s*[-/\u2010-\u2015]\s*(?:20)?\d{2}|\s+\d{2})?\b",
-        " ", text, flags=re.I,
-    )
+    # Every pattern below needs a digit, and most a word ("FY", a month, "table" ...): a text without it cannot
+    # change, so the pattern is skipped (about 37 substitutions per text, ~25,000 texts per report).
+    if not _ANY_DIGIT_RE.search(text):
+        return text
+    low = text.casefold()
+    has_month = bool(_ANY_MONTH_RE.search(low))
+    if "fy" in low or "fiscal" in low or "financial" in low:
+        text = re.sub(
+            r"\b(?:FY|fiscal\s+year|financial\s+year)\s*(?:20)?\d{2}"
+            r"(?:\s*[-/\u2010-\u2015]\s*(?:20)?\d{2}|\s+\d{2})?\b",
+            " ", text, flags=re.I,
+        )
     # A range can also be followed by its descriptor ("2023-24 fiscal year").
-    text = re.sub(
-        r"\b(?:19|20)\d{2}\s*[-/\u2010-\u2015]\s*(?:20)?\d{2}\s+(?:fiscal|financial)\s+year\b",
-        " ", text, flags=re.I,
-    )
+    if "fiscal" in low or "financial" in low:
+        text = re.sub(
+            r"\b(?:19|20)\d{2}\s*[-/\u2010-\u2015]\s*(?:20)?\d{2}\s+(?:fiscal|financial)\s+year\b",
+            " ", text, flags=re.I,
+        )
     month_names = r"January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
-    text = re.sub(rf"\b(?:{month_names})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
-    text = re.sub(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{month_names})\.?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
-    text = re.sub(rf"\b(?:{month_names})\.?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
-    text = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-](?:19|20)\d{2}\b", " ", text)
+    if has_month:
+        text = re.sub(rf"\b(?:{month_names})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
+        text = re.sub(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{month_names})\.?[,]?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
+        text = re.sub(rf"\b(?:{month_names})\.?\s+(?:19|20)\d{{2}}\b", " ", text, flags=re.I)
+    if "/" in text or "-" in text:
+        text = re.sub(r"\b\d{1,2}[/-]\d{1,2}[/-](?:19|20)\d{2}\b", " ", text)
     # Clock times are schedule labels. The duration around them remains a claim.
-    text = re.sub(r"(?i)\b(?:0?[1-9]|1[0-2]):[0-5]\d\s*(?:a\.?m\.?|p\.?m\.?)\b", " ", text)
-    text = re.sub(r"\b(?:table|chart|figure|fig\.?|page)\s*(?:no\.?\s*)?#?\s*\d+\b", " ", text, flags=re.I)
+    if ":" in text:
+        text = re.sub(r"(?i)\b(?:0?[1-9]|1[0-2]):[0-5]\d\s*(?:a\.?m\.?|p\.?m\.?)\b", " ", text)
+    if "table" in low or "chart" in low or "fig" in low or "page" in low:
+        text = re.sub(r"\b(?:table|chart|figure|fig\.?|page)\s*(?:no\.?\s*)?#?\s*\d+\b", " ", text, flags=re.I)
     # Ordered-list ordinals are layout, not numeric evidence claims. Require a
     # line-start marker followed by whitespace so values such as 1.25% remain.
     text = re.sub(r"(?m)^[ \t]*(?:\(?\d{1,3}[.)]|\(\d{1,3}\))[ \t]+(?=\S)", " ", text)
     # e-CoO 2.0 is the name/version of India's electronic Certificate of Origin
     # platform, not a quantitative claim. Do not strip a percentage adjacent to it.
-    text = re.sub(
-        r"(?i)\be[\-‐‑–—]?\s*coo\s+\d+(?:\.\d+)*(?!\s*(?:%|percent|per\s+cent))\b",
-        " ", text,
-    )
+    if "coo" in low:
+        text = re.sub(
+            r"(?i)\be[\-‐‑–—]?\s*coo\s+\d+(?:\.\d+)*(?!\s*(?:%|percent|per\s+cent))\b",
+            " ", text,
+        )
     # Ordinal/identifier labels are not reportable quantities: "tier-2 and
     # tier-3 cities", "Basel III", "Phase 2", "Section 7", "Pillar 2",
     # "Covid-19", "G20", "Annex 4". These previously became scalar:2 / scalar:3
@@ -11411,11 +11424,12 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
         " ", text,
     )
     text = re.sub(r"(?i)\b(?:covid|sars[- ]cov)[- ]?\d+\b|\bG\s?-?(?:7|8|20)\b|\b[2345]G\b|\bIndustry\s+\d\.0\b|\bWeb\s?\d(?:\.0)?\b", " ", text)
-    text = re.sub(
-        r"(?i)\bNifty\s+(?:50|100|200|500|Next\s+50|Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b|"
-        r"\b(?:Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b",
-        " ", text,
-    )
+    if "nifty" in low or "cap" in low:
+        text = re.sub(
+            r"(?i)\bNifty\s+(?:50|100|200|500|Next\s+50|Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b|"
+            r"\b(?:Smallcap\s+250|Midcap\s+150|Microcap\s+250)\b",
+            " ", text,
+        )
     # Forecast horizons and fiscal-year ranges are reporting periods, not
     # quantities: "12-month outlook", "next 12 months", "2023-24", "H1:2025-26".
     text = re.sub(r"(?i)\b\d{1,3}[- ](?:month|year|week|day|quarter)(?:s)?(?=[- ](?:outlook|horizon|forecast|view|period|window|plan|target|cagr|average|high|low|tenor|bond|yield|g-?sec|deposit|loan|returns?|change|growth|performance)\b)", " ", text)
@@ -11435,7 +11449,8 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
         r"(?i)\b(?:over|across|for|from|of|in)\s+(?:the\s+|all\s+)?\d{1,3}\s+(?:reported\s+|distinct\s+|dated\s+)?(?:periods?|entit(?:y|ies)|series|observations?|data\s+points?|categories|chart\s+types?|sources?)(?:\s+shown)?\b",
         " ", text,
     )
-    text = re.sub(r"(?i)\b\d{1,3}\s+smaller\s+peers?\s+omitted\b", " ", text)
+    if "smaller" in low:
+        text = re.sub(r"(?i)\b\d{1,3}\s+smaller\s+peers?\s+omitted\b", " ", text)
     # More generated-caption descriptors and month-year labels ("Sep-24").
     # Two-digit month/year forms also appear with a space before the apostrophe.
     text = re.sub(
@@ -11450,6 +11465,10 @@ def _strip_nonclaim_numeric_labels(value: object) -> str:
     text = re.sub(r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-'’]\s?\d{2}\b", " ", text)
     text = re.sub(r"(?i)\b(?:profile\s+of\s+)?\d{1,3}\s+entit(?:y|ies)\s+on\s+\d{1,3}\s+metrics?\b|\bscaled\s+0\s*[–-]\s*100\b|\b\d{1,3}\s+(?:metrics|chart\s+types)\b", " ", text)
     return text
+
+
+_ANY_DIGIT_RE = re.compile(r"\d")
+_ANY_MONTH_RE = re.compile(r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec")
 
 _SUBJECT_STOP_WORDS = frozenset({
     "january", "february", "march", "april", "june", "july", "august", "september", "october",
@@ -16553,7 +16572,19 @@ def _attach_audit_source_evidence_uncached(
                 lines.append(f"{entity} — {measure}, {year}: {displayed_value}.")
         return "\n".join(lines)
 
+    # numbers() is called ~25,000 times per report on the same claim sentences and source excerpts (a third of
+    # this step's time): memoised per call of this function, so the memo is freed with it.
+    _numbers_memo: dict = {}
+
     def numbers(value: str, evidence: bool = False) -> set[str]:
+        key = (str(value or ""), bool(evidence))
+        hit = _numbers_memo.get(key)
+        if hit is None:
+            hit = frozenset(_numbers_uncached(value, evidence))
+            _numbers_memo[key] = hit
+        return set(hit)
+
+    def _numbers_uncached(value: str, evidence: bool = False) -> set[str]:
         """Extract comparable numeric quantities with conservative unit normalization.
 
         Equivalent units such as 283.46 GW and 283,460 MW should match. A raw

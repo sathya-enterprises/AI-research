@@ -20,6 +20,7 @@ names ("[[calc: 47,955 + 21,745 + 14,116]]"), never by the LLM.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from dataclasses import dataclass, field
 
 # A sign sits against its number or currency ("-3.2%", "−₹40"); a dash followed by a space separates a label
@@ -62,6 +63,18 @@ _WHEELER_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(?:e-?)?([234])\s*-?\s*w(?:s|heel
 
 
 def _stems(text: str) -> set[str]:
+    """Word stems of a text (a fresh set: callers combine and subtract them)."""
+    return set(_stems_cached(text or ""))
+
+
+# Facts of one sentence or table row share their context, so the same text is stemmed many times in a row
+# (fact sheet build: 43,814 calls, about a third of its 20 s). A small bounded cache keeps memory flat.
+@lru_cache(maxsize=8192)
+def _stems_cached(text: str) -> frozenset:
+    return frozenset(_stems_uncached(text))
+
+
+def _stems_uncached(text: str) -> set[str]:
     out = set()
     # Vehicle segments are written "e-2W", "E3W", "3Ws", "2-wheelers" or "two wheelers".
     if _WHEELER_RE.search(text or "") or re.search(r"(?i)\b(?:two|three|four)[\s-]*wheelers?\b", text or ""):
@@ -101,7 +114,7 @@ _FAMILIES = {
 }
 
 
-@dataclass
+@dataclass(slots=True)  # 40,000+ facts per report: no per-object __dict__
 class Fact:
     fid: str
     raw: str
@@ -117,14 +130,38 @@ class Fact:
     label: str = ""         # a table row's own label ("Nifty PSU Bank")
     unit_text: str = ""     # the column's unit as written ("MnT", "Rs per quintal") when it is not a scale unit
     context: str = ""       # the sentence (prose) or row text the value was read from
+    dated_from_article: bool = False  # period taken from the article date (utils.section_writer)
 
     def to_dict(self) -> dict:
         return {"id": self.fid, "value": self.raw, "unit": self.unit, "metric": self.metric[:60], "entity": self.entity[:40],
                 "period": self.period, "passage": self.passage_id}
 
 
+_LETTER_RUN_RE = re.compile(r"[a-z]+")
+
+
+@lru_cache(maxsize=1)
+def _sector_first_words() -> frozenset:
+    """The first word of every sector name and alias: a text naming a sector contains that word as a whole
+    letter-run (the alias patterns require a non-letter on both sides), so a text with none of them names none."""
+    from utils.chart_titles import SYNONYMS
+
+    words = set()
+    for canon, aliases in SYNONYMS.items():
+        for name in {canon, *aliases}:
+            first = re.match(r"[^A-Za-z]*([A-Za-z]+)", name)
+            if first:
+                words.add(first.group(1).casefold())
+    return frozenset(words)
+
+
+@lru_cache(maxsize=8192)
 def _entity_in(text: str) -> str:
+    """The sector named in a text (cached: every fact of a row or sentence asks about the same text)."""
     from utils.chart_titles import _SECTOR_ALIAS_RE
+
+    if not text or not (set(_LETTER_RUN_RE.findall(text.casefold())) & _sector_first_words()):
+        return ""  # most texts name no sector: a word-set check instead of 21 alias searches
 
     best = ""
     best_pos = -1
@@ -300,7 +337,8 @@ def _fact(pid: str, index: int, match: re.Match, unit: str, metric: str, entity:
     value = _plain(match.group(2))
     return Fact(fid=f"{pid}#{index + 1}", raw=match.group(0).strip(), value=("-" if sign == "-" else "") + value, sign=sign,
                 unit=unit, metric=metric.strip(), entity=entity.strip(), period=period, passage_id=pid,
-                stems=_stems(f"{metric} {entity} {context}"), context=context)
+                # the cached, shared frozenset (only ever read): 43,814 facts held a private set each
+                stems=_stems_cached(f"{metric} {entity} {context}"), context=context)
 
 
 _SCALED_COUNT_RE = re.compile(r"(?<![\w.,])(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|crores?)\b(?!\s+crores?)", re.I)

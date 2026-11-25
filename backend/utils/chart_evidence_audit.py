@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import re
+from bisect import bisect_left, bisect_right
+from functools import lru_cache
 import logging
 import datetime as _dt
 
@@ -1186,6 +1188,21 @@ def _is_header_row(line: str) -> bool:
     return is_header_row(line)
 
 
+@lru_cache(maxsize=64)
+def _value_token_index(evidence: str) -> tuple[list[str], list[tuple], list[float]]:
+    """(lines, [(value, line_no, order_in_line, match)] sorted by value, the values) of one evidence text."""
+    lines = evidence.splitlines() or [evidence]
+    entries = []
+    for line_no, line in enumerate(lines):
+        for order, match in enumerate(_VALUE_TOKEN.finditer(line)):
+            try:
+                entries.append((float(match.group(0).replace(",", "")), line_no, order, match))
+            except ValueError:
+                continue
+    entries.sort(key=lambda entry: entry[0])
+    return lines, entries, [entry[0] for entry in entries]
+
+
 def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
     """Return the local evidence context around each occurrence of a chart value.
 
@@ -1202,19 +1219,20 @@ def _value_windows(value: object, evidence: str) -> list[tuple[str, str]]:
         target = float(parsed.group(1).replace(",", ""))
     except ValueError:
         return []
-    lines = str(evidence).splitlines() or [str(evidence)]
+    # The source's numbers are indexed once per evidence text (sorted by value): each lookup is a binary search
+    # instead of re-reading every number on every line (944 lookups re-scanned the same pages per audit).
+    lines, entries, values = _value_token_index(str(evidence))
+    tolerance = max(0.001, abs(target) * 0.002)
+    slack = tolerance * 1e-6 + 1e-12  # widen the search; the exact test below decides
+    hits_by_line: dict[int, list[tuple[int, re.Match]]] = {}
+    for observed, line_no, order, match in entries[bisect_left(values, target - tolerance - slack):
+                                                   bisect_right(values, target + tolerance + slack)]:
+        if abs(observed - target) <= tolerance:
+            hits_by_line.setdefault(line_no, []).append((order, match))
     windows: list[str] = []
-    for index, line in enumerate(lines):
-        hits = []
-        for match in _VALUE_TOKEN.finditer(line):
-            try:
-                observed = float(match.group(0).replace(",", ""))
-            except ValueError:
-                continue
-            if abs(observed - target) <= max(0.001, abs(target) * 0.002):
-                hits.append(match)
-        if not hits:
-            continue
+    for index in sorted(hits_by_line):
+        line = lines[index]
+        hits = [match for _order, match in sorted(hits_by_line[index], key=lambda item: item[0])]
         # A two-column row ("2021 | 12,050") has one pipe; it is still a table
         # row when it sits in a block of pipe rows, and its measure is in the
         # caption above the header, not in the line before it.
