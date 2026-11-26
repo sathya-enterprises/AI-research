@@ -4674,6 +4674,15 @@ h1, h2, h3, h4, .gg-section-heading, .gg-section-heading-copy,
 .gg-table-wrap[data-row-count="3"], .gg-table-wrap[data-row-count="4"] {
   break-inside: avoid-page !important; page-break-inside: avoid !important;
 }
+/* The keep-together rules for blocks (".gg-block") and for a heading with its table (".gg-keep-with-next") come
+   later in the document and won: a 1,081px appendix table jumped whole to the next page and left its section
+   heading and intro alone on a page (gold report, page 45). Tables of 5+ rows break between rows (rows whole,
+   header repeated, the heading kept with the first rows by its break-after: avoid). */
+.gg-section-body .gg-table-wrap.gg-block:not([data-row-count="1"]):not([data-row-count="2"]):not([data-row-count="3"]):not([data-row-count="4"]),
+.gg-section-body .gg-table-wrap.gg-block:not([data-row-count="1"]):not([data-row-count="2"]):not([data-row-count="3"]):not([data-row-count="4"]) > .gg-table-scroll,
+.gg-section-body .gg-keep-with-next:has(> .gg-table-wrap:not([data-row-count="1"]):not([data-row-count="2"]):not([data-row-count="3"]):not([data-row-count="4"])) {
+  break-inside: auto !important; page-break-inside: auto !important;
+}
 .gg-table-wrap .gg-source-note { break-before: avoid-page !important; page-break-before: avoid !important; }
 .gg-table { break-inside: auto !important; page-break-inside: auto !important; }
 .gg-table thead { display: table-header-group !important; }
