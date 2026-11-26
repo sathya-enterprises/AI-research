@@ -39,7 +39,7 @@ def test_a_date_headed_column_is_named_by_the_row_header_or_dropped():
 
 
 def test_document_and_regression_metadata_is_not_charted():
-    for name in ("Page no.", "Rows", "Coefficient", "Obs", "Std. error", "p-value"):
+    for name in ("Page no.", "Rows", "Coefficient", "Obs", "Std. error", "p-value", "Pearson's r", "Correlation"):
         spec = {"type": "bar", "title": "x", "xLabel": "Variable", "yLabel": name,
                 "series": [{"name": name, "data": [{"label": f"v{i}", "value": float(i * 3 + 1)} for i in range(4)]}]}
         assert "metadata" in quality_reason(spec, ""), name

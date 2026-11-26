@@ -365,7 +365,8 @@ _PERIODISH_RE = re.compile(rf"(?i)^\s*(?:{_MONTHS}[\s'’-]*\d{{2,4}}|Q[1-4][\s'
 _META_MEASURE_RE = re.compile(r"(?i)^\s*(?:page\.?\s*(?:no\.?|number)?|pages?|rows?|no\.?\s+of\s+rows|obs\.?|observations|"
                               r"coefficients?|coef\.?|std\.?\s*errors?|standard\s+errors?|t[- ]?stat(?:istic)?s?|"
                               r"z[- ]?stat|p[- ]?values?|prob\.?|r[- ]?squared|adj\.?\s*r[- ]?squared|f[- ]?stat(?:istic)?|"
-                              r"df|lags?|remarks?|notes?|details?|descriptions?|comments?)\s*(?:\([^)]*\))?\s*:?\s*$")
+                              r"df|lags?|remarks?|notes?|details?|descriptions?|comments?|pearson'?s?\s*r|"
+                              r"correlation(?:\s+coefficient)?|spearman'?s?\s*(?:rho|r))\s*(?:\([^)]*\))?\s*:?\s*$")
 
 
 _SENTENCE_MEASURE_RE = re.compile(r"(?i)\b(?:is|are|was|were)\s+(?:given|shown|listed|presented|as follows|an?\b|the\b)|"
