@@ -27,6 +27,7 @@ from utils.figure_refs import rewrite_removed_figure_refs  # noqa: F401  (re-exp
 from utils.llm_gateway import LLMGateway
 from utils.number_policy import apply_number_policy
 from utils.report_outline import WORDS_PER_PAGE, OutlineError, build_outline, estimate_pages
+from utils.page_policy import length_report as _length_report
 from utils.section_charts import assign_charts, build_chart_candidates
 from utils.section_writer import CITE_RE, FIGURE_MARKER_RE, FIGURE_REF_RE, SUMMARY_MARKER, _number_set, unsupported_numbers, write_section
 
@@ -1434,6 +1435,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                              "hedgeWins": getattr(gateway, "stats_hedge_wins", 0),
                                              "quotaPools": _quota_snapshot()},
         "sections": [{"id": d.section_id, "title": d.title, "ok": d.ok, "error": d.error, "words": d.words, "calls": d.calls,
+                      "budget": getattr(d, "budget", 0), "models": list(getattr(d, "models", []) or []),
+                      "extended": bool(getattr(d, "extended", False)),
+                      "short": bool(getattr(d, "budget", 0) and d.ok and d.words < 0.6 * d.budget),
                       "citedPassages": len(d.cited_passages), "invalidCitations": d.invalid_citations,
                       "repairedCitations": d.repaired_citations,
                       "unsupportedNumbers": d.unsupported_numbers[:30], "figuresReferenced": d.figures_referenced,
@@ -1497,9 +1501,15 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "layout": {k: (sorted(v) if isinstance(v, set) else v) for k, v in layout.items() if k != "scorecard"},
         "chartTextMismatches": chart_text_mismatches,
         "failedSections": failed, "words": words, "estimatedPages": est_pages,
+        "length": _length_report(tier, est_pages, outline.meta.get("evidenceSupportedWords", 0),
+                                 [{"id": d.section_id, "ok": d.ok, "words": d.words, "budget": getattr(d, "budget", 0),
+                                   "models": list(getattr(d, "models", []) or [])} for d in drafts]),
         "entitySearch": entity_search_stats or {},
         "evidenceSupportedPages": round(outline.meta.get("evidenceSupportedWords", 0) / WORDS_PER_PAGE, 1),
     }
+    log.info("V2 length: %s (%.1f pages, band %s, evidence %.1f pages; short sections %s; parts by model %s)",
+             meta["length"]["status"], est_pages, meta["length"]["band"], meta["length"]["evidencePages"],
+             meta["length"]["shortSections"] or "none", meta["length"]["partsByModel"])
     log.info("V2 pipeline: sections=%d/%d words=%d charts=%d calls=%d tokens_in=%d tokens_out=%d est_pages=%.1f in %.1fs",
              len(good), len(drafts), words, len(charts_out), gateway.stats.calls, gateway.stats.tokens_in,
              gateway.stats.tokens_out, est_pages, meta["elapsedSeconds"])

@@ -84,6 +84,9 @@ class SectionDraft:
     figures_dropped: list[int] = field(default_factory=list)
     calls: int = 0
     words: int = 0
+    budget: int = 0                                          # words planned for the section
+    models: list[str] = field(default_factory=list)          # model that wrote each part (fallback visibility)
+    extended: bool = False                                   # an evidence-driven extension was added
 
 
 def _normalize_number(token: str) -> str:
@@ -813,6 +816,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     own_figures = {f.figure_number for f in figures}
     subs = [s for s in section.subsections if s.status == "keep"]
     groups = _chunks(subs) if subs else [[]]
+    draft.budget = max(150, int(section.word_budget * budget_scale))
     bodies, summaries = [], []
     for gi, group in enumerate(groups):
         group_passage_ids = set(pid for s in group for pid in s.passage_ids) or allowed_passages
@@ -833,6 +837,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                                         # a fallback answer under half the budget waits for Gemini (fallback consistency)
                                         min_words=int(budget * 0.5))
         draft.calls += 1
+        if result.ok:
+            draft.models.append(getattr(result, "model", "") or "?")
         if not result.ok:
             draft.error = f"{draft.error}; " if draft.error else ""
             draft.error += f"part {gi + 1}: {result.error}"
@@ -887,6 +893,8 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                         passage_texts=passage_texts, own_figures=own_figures, context_entity=getattr(section, "entity", ""),
                     fallback_sheet=_store_fact_sheet(store))
             if extra.ok:
+                draft.extended = True
+                draft.models.append(getattr(result, "model", "") or "?")
                 # The extension continues the section: a heading it repeats (the section already has
                 # it) is dropped and its text joins the section, so no heading appears twice.
                 seen = {re.sub(r"\W+", " ", h).strip().casefold()
