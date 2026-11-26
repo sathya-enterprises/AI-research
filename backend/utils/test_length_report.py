@@ -59,4 +59,4 @@ def test_sections_are_written_in_calls_gemini_can_fill(monkeypatch):
     monkeypatch.delenv("GG_V2_SECTION_CALL_WORDS", raising=False)
     assert [len(g) for g in _chunks(subs)] == [1, 2]          # 1,250 | 900 + 400 (no call asks for 2,550)
     monkeypatch.setenv("GG_V2_SECTION_CALL_WORDS", "2600")
-    assert [len(g) for g in _chunks(subs)] == [2, 1]          # the previous behaviour
+    assert [len(g) for g in _chunks(subs)] == [3]             # the previous behaviour: one 2,550-word call
