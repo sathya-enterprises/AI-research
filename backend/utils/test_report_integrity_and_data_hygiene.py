@@ -1680,7 +1680,7 @@ def test_claim_check_judges_weak_sentences_and_removes_unsupported_ones():
     body = ("## Inflation\nRetail inflation eased to 4.3 percent in March as vegetable prices fell [S1.1]. "
             "The decline was caused mainly by a collapse in global crude oil demand and shipping costs [S1.1].\n\n"
             "The central bank kept the repo rate unchanged at 6.5 percent in April [S2.1].\n\n| Year | Rate |\n| 2024 | 6.5 |")
-    items, checked = candidates(body, passages)
+    items, checked, _records = candidates(body, passages)
     assert checked == 3 and [i["sentence"][:16] for i in items] == ["The decline was "]
 
     class Gateway:

@@ -904,8 +904,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         from utils.claim_check import check_section
         cited_sources = {t.strip().upper().split(".")[0] for g in CITE_RE.findall(draft.body)
                          for t in re.split(r"\s*[,;]\s*", g)}
-        texts = {p.passage_id: p.text for p in store.passages if p.source_id.upper() in cited_sources}
-        return await check_section(gateway, draft, texts)
+        cited_passages = [p for p in store.passages if p.source_id.upper() in cited_sources]
+        texts = {p.passage_id: p.text for p in cited_passages}
+        dates = {p.passage_id: " ".join(x for x in (str(p.published or "")[:10], p.title or "") if x)
+                 for p in cited_passages}
+        return await check_section(gateway, draft, texts, dates)
 
     for start in range(0, len(analysis), wave_size):
         wave = analysis[start:start + wave_size]
