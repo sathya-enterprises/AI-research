@@ -48,7 +48,7 @@ def test_document_and_regression_metadata_is_not_charted():
 def test_a_chart_whose_points_are_all_in_another_chart_is_dropped_whichever_comes_first():
     alone = _line("Market Share", [("2021", 27.31), ("2022", 25.98), ("2023", 22.81)])
     shorter = _line("Market Share", [("2021", 27.31), ("2022", 25.98), ("2023", 22.81)])
-    brands = {"type": "line", "title": "Brands", "xLabel": "Period", "yLabel": "Value",
+    brands = {"type": "line", "title": "Brands", "xLabel": "Period", "yLabel": "Value", "metric": "Market Share",
               "series": [{"name": "Xiaomi", "data": alone["series"][0]["data"]},
                          {"name": "Vivo", "data": [{"label": "2021", "value": 14.33}, {"label": "2022", "value": 15.73},
                                                    {"label": "2023", "value": 17.15}]}]}
@@ -74,3 +74,28 @@ def test_page_text_headers_are_not_measures_but_long_measure_names_are():
             ("Share", "Share within agriculture and allied, current prices, 2025-26")]
     for name, x in fine:
         assert "page text" not in quality_reason(_bar(name, x), ""), name
+
+
+def test_sentences_cut_cells_remarks_and_unnamed_measures_are_rejected():
+    sentence = _bar("Coking", "Period")
+    sentence["metric"] = "The details of coking coal imports during the last three years is given below: (PDF page 1)"
+    assert "page text" in quality_reason(sentence, "")
+    assert "page text" in quality_reason(_bar("d (NLCIL) is an integra", "Company"), "")
+    assert "page text" in quality_reason(_bar("Biomass & Others)", "Source-wise"), "")
+    assert "metadata" in quality_reason(_bar("Remarks", "Cost Components"), "")
+    two = {"type": "line", "title": "x", "xLabel": "Period", "yLabel": "Value",
+           "series": [{"name": n, "data": [{"label": f"FY 202{i}-2{i + 1}", "value": v + i} for i in range(4)]}
+                      for n, v in (("Thermal", 1.0), ("Nuclear", 5.0))]}
+    assert "nothing names" in quality_reason(two, "")
+    assert quality_reason(two, "TABLE 3 — Growth in generation by source (%)\nYear | Thermal | Nuclear") == ""
+
+
+def test_fiscal_spans_and_provisional_marks_are_periods_and_a_non_return_heatmap_keeps_its_measure():
+    from utils.chart_lint import is_time_axis
+    assert is_time_axis(["Fy 2020-21", "Fy 2021-22", "2025-26 (prov.)"])
+    heat = {"type": "heatmap", "title": "Generation by source (GWh): 3 sources, 2020-21 to 2022-23 (PDF page 9)",
+            "xLabel": "Period", "yLabel": "Source", "rows": ["Lignite", "Natural gas", "Solar"],
+            "columns": ["2020-21", "2021-22", "2022-23"], "values": [[1, 2, 3], [4, 5, 6], [7, 8, 9]]}
+    fixed, _ = fix_chart(heat)
+    assert fixed["title"].startswith("Generation by source (GWh): 3 sources") and "Quarterly return" not in fixed["title"]
+    assert "PDF page" not in fixed["title"] and fixed["yLabel"] == "Source"

@@ -38,7 +38,8 @@ FORECAST_ROW_RE = re.compile(r"(?i)\b(?:forecast|projected|projection|estimated?
 EXAMPLE_RE = re.compile(r"(?i)\b(?:example|examples|illustrative|illustration|sample|hypothetical|for instance|e\.g\.)\b")
 _MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*"
 _TIME_RE = re.compile(rf"(?i)^\s*(?:\d{{1,2}}\s+{_MONTHS},?\s+\d{{4}}|{_MONTHS}\s+\d{{2,4}}|Q[1-4]\s*(?:FY)?\s*'?\d{{2,4}}|"
-                      rf"FY\s*'?\d{{2,4}}E?|H[12]\s*FY\d{{2,4}}|\d{{4}}(?:-\d{{2}})?|\d{{4}}-\d{{2}}-\d{{2}}|Week\s+\d+)\s*$")
+                      rf"FY\s*'?\d{{2,4}}(?:\s*-\s*\d{{2,4}})?E?|H[12]\s*FY\d{{2,4}}|\d{{4}}(?:-\d{{2}})?|\d{{4}}-\d{{2}}-\d{{2}}|Week\s+\d+)"
+                      r"(?:\s*\((?:prov\.?|provisional|p|e|est\.?|estimated?|tentative)\))?\s*$")
 _SEASONAL_RE = re.compile(rf"(?i)^\s*(?:{_MONTHS}|Q[1-4]|H[12])\s*$")
 _ACRONYMS = {"FII", "DII", "FPI", "RS", "NIM", "PE", "P/E", "IT", "QTD", "YTD", "YOY", "MOM", "PSU", "FMCG", "GDP", "CPI",
              "WPI", "LDR", "AUM", "SIP", "MF", "MFS", "NSE", "BSE", "US", "INR", "OI", "EPS", "ROE", "PAT", "NPA", "GNPA", "DIIS", "FIIS"}
@@ -364,7 +365,27 @@ _PERIODISH_RE = re.compile(rf"(?i)^\s*(?:{_MONTHS}[\s'’-]*\d{{2,4}}|Q[1-4][\s'
 _META_MEASURE_RE = re.compile(r"(?i)^\s*(?:page\.?\s*(?:no\.?|number)?|pages?|rows?|no\.?\s+of\s+rows|obs\.?|observations|"
                               r"coefficients?|coef\.?|std\.?\s*errors?|standard\s+errors?|t[- ]?stat(?:istic)?s?|"
                               r"z[- ]?stat|p[- ]?values?|prob\.?|r[- ]?squared|adj\.?\s*r[- ]?squared|f[- ]?stat(?:istic)?|"
-                              r"df|lags?)\s*(?:\([^)]*\))?\s*:?\s*$")
+                              r"df|lags?|remarks?|notes?|details?|descriptions?|comments?)\s*(?:\([^)]*\))?\s*:?\s*$")
+
+
+_SENTENCE_MEASURE_RE = re.compile(r"(?i)\b(?:is|are|was|were)\s+(?:given|shown|listed|presented|as follows|an?\b|the\b)|"
+                                  r"\bgiven below\b|\bas follows\b|\bas under\b")
+
+
+_MEASURE_NOUN_RE = re.compile(r"(?i)\b(?:production|exports?|imports?|trade|sales|revenues?|capacity|generation|"
+                              r"consumption|demand|output|prices?|investments?|inflows?|outflows?|share|growth|"
+                              r"deficit|surplus|spending|expenditure|income|profits?|employment|population|emissions|"
+                              r"shipments|deliveries|volumes?|costs?|tariffs?|rates?|ratio|index|yield|holdings?|"
+                              r"assets|loans|deposits|credit|subscribers|users|arrivals|passengers|registrations|turnover|"
+                              r"capex|ebitda|pbt|pat|eps|aum|nav|margins?|returns?|change|flows?)\b")
+_TITLE_UNIT_RE = re.compile(r"(?i)%|\((?:[^)]*(?:rs\b|₹|inr|usd|us\$|crore|lakh|mn\b|million|bn\b|billion|mw\b|gw\b|"
+                            r"mt\b|tonnes|twh|gwh|units))[^)]*\)")
+
+
+def _title_names_measure(spec: dict) -> bool:
+    """The chart's own title head names a measure ("Capex incurred", "YOY % Change", "Monthly flow trend ... (Rs crore)")."""
+    head = strip_figure(str(spec.get("title") or ""))[1].split(":", 1)[0]
+    return bool(_MEASURE_NOUN_RE.search(head) or _TITLE_UNIT_RE.search(head))
 
 
 def table_caption(passage_text: str) -> str:
@@ -453,6 +474,22 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
         if re.search(r"(?i)\b[a-z0-9-]+\.(?:com|in|org|net|gov|co)\b", name) or (numbers >= 3 and numbers >= len(name.split()) - 1) \
                 or (name is x_label and (len(name.split()) >= 12 or len(name.split()) >= 9 and re.search(r"\w\.\s+[A-Z]", name))) or (re.match(r"\s*[-+]\d", name) and len(name.split()) > 3):
             return "a column header is page text (a sentence, a run of numbers or a web address), not a measure name"
+    # the measure is a sentence of the page ("The details of coking coal imports ... is given below:",
+    # "d (NLCIL) is an integra") or a cell cut in two ("Biomass & Others)") - coal run, 2026-11-26
+    for name in [str(spec.get("metric") or ""), str(spec.get("yLabel") or "")] + [str(s.get("name") or "") for s in _series(spec)]:
+        name = re.sub(r"(?i)\s*\(PDF page\s*\d*\)?", "", name)  # a page reference cut short is not a cut cell
+        if _SENTENCE_MEASURE_RE.search(name) or (name.count("(") != name.count(")") and not _MEASURE_NOUN_RE.search(name)):
+            return "the measure name is page text (a sentence or a cut cell), not a column header"
+    # Several entity series (Thermal, Nuclear) on an axis labelled only "Value", with no caption or header naming the
+    # measure: the reader cannot tell what is plotted (coal run: "Value: 5 periods"). One series names it itself.
+    y_measure = re.sub(r"\s*\([^)]*\)", "", str(spec.get("yLabel") or "")).strip(" :").casefold()
+    if spec.get("type") != "heatmap" and len(_series(spec)) >= 2 and y_measure in {"value", "values"} \
+            and not str(spec.get("metric") or "").strip() and not spec.get("unitLabel") \
+            and not table_caption(passage_text) and not _axis_measure(spec) \
+            and not any(_MEASURE_NOUN_RE.search(str(s.get("name") or "")) for s in _series(spec)) \
+            and not _title_names_measure(spec):
+        # series named "Production of Coking Coal", "India's exports" name the measure themselves
+        return "nothing names what the values measure (the axis is only 'Value')"
     single = [str(s.get("name") or "") for s in _series(spec)] if len(_series(spec)) == 1 else []
     if any(_META_MEASURE_RE.match(n) for n in single + [str(spec.get("yLabel") or "")] if n.strip()):
         return "the plotted values are document or regression metadata (page numbers, row counts, coefficients)"
@@ -584,9 +621,18 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         n = len(rows) - len(bench)
         cols = spec.get("columns") or []
         span = f"{cols[0]} to {cols[-1]}" if cols else period
-        noun = "NSE sector indices" if any(r.casefold().startswith("nifty") for r in rows) else entity_noun(spec, n)
-        title = f"Quarterly return{unit_txt}: {n} {noun}" + (" and the Nifty 50 benchmark" if bench else "") + (f", {span}" if span else "")
-        spec["xLabel"], spec["yLabel"] = "Fiscal quarter", "Sector index"
+        returns = any(r.casefold().startswith(("nifty", "bse", "sensex", "s&p")) for r in rows) or bool(
+            re.search(r"(?i)\breturns?\b", old_rest))
+        if returns:
+            noun = "NSE sector indices" if any(r.casefold().startswith("nifty") for r in rows) else entity_noun(spec, n)
+            title = f"Quarterly return{unit_txt}: {n} {noun}" + (" and the Nifty 50 benchmark" if bench else "") + (f", {span}" if span else "")
+            spec["xLabel"], spec["yLabel"] = "Fiscal quarter", "Sector index"
+        else:
+            # any other matrix keeps its own measure and row noun: a generation-by-source table is not a sector
+            # return heatmap (coal run: "Quarterly return: 14 periods" over lignite, gas, nuclear, solar ...)
+            head = re.split(r"\s*[:,]\s*", re.sub(r"\s*\(PDF page \d+\)", "", old_rest), 1)[0].strip() or metric
+            noun = entity_noun({"xLabel": spec.get("yLabel") or "category"}, n)
+            title = f"{head}: {n} {noun}" + (f", {span}" if span else "")
     elif len(series) == 2 and any(str(s.get("name") or "").casefold() in BENCHMARKS for s in series):
         a, b = series[0].get("name"), series[1].get("name")
         span = period or (f"{labels[0]} to {labels[-1]}" if labels else "")
@@ -611,6 +657,7 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         noun = "NSE sector indices" if is_sector_index else (noun_override or entity_noun(spec, n))
         span = column_date or period  # the plotted column's own date is the data's period, not the retrieval date
         title = f"{metric}{unit_txt}: {n} {noun}" + (" and the Nifty 50 benchmark" if bench else "") + (f", {span}" if span else "") + (qtd if qtd and qtd not in span else "")
+    title = re.sub(r"\s*\(PDF page \d+\)", "", title)
     title = re.sub(r"\s+", " ", title).strip().replace(" ,", ",")
     if title != old_rest:
         fixes.append(f"title: '{old_rest[:70]}' -> '{title[:90]}'")

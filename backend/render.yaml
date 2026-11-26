@@ -17,5 +17,15 @@ services:
         value: exa
       - key: GEMINI_API_KEY
         sync: false
+      # Gemini quotas are per Google Cloud project (docs/CONFIGURATION.md section 1); optional
+      - key: GG_GEMINI_KEY_PROJECTS
+        sync: false
+      - key: GG_GEMINI_QUOTAS
+        sync: false
+      # data.gov.in connector: off unless both are set (docs/CONFIGURATION.md section 6)
+      - key: DATA_GOV_IN_API_KEY
+        sync: false
+      - key: GG_DATAGOV_RESOURCES
+        sync: false
       - key: LOGO_B64
         sync: false   # optional: base64-encoded logo image bytes
