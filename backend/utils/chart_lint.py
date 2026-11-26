@@ -269,7 +269,9 @@ def metric_name(spec: dict) -> str:
 
 
 def entity_noun(spec: dict, n: int) -> str:
-    x = case_label(str(spec.get("xLabel") or "")).casefold().strip()
+    x = case_label(str(spec.get("xLabel") or "")).casefold().strip().rstrip(":").strip()
+    if re.search(r"[()%\d]", x):  # a header with units or numbers is not a noun to pluralise ("int'l market share (%)s")
+        x = "category"
     table = {"sector": "sectors", "sector index": "NSE sector indices", "index": "indices", "index / sector": "indices and sectors",
              "nse sector index": "NSE sector indices", "type of dii": "DII categories", "company": "companies", "company name": "companies",
              "stock": "stocks", "defence stock": "defence stocks", "group": "groups", "sector / segment": "sectors and segments",
@@ -348,6 +350,71 @@ def _mixed_unit_reason(spec: dict) -> str:
     return ""
 
 
+# A source table's own caption ("TABLE 93 — Xiaomi's Market Share in India by Year (2014-2024)") names what a
+# chart built from it shows. Titles are rebuilt from metric + entities + period, and a single-series table
+# ("Year | Market Share") loses its subject: "Market Share (%), 2021 to 2024" (smartphone run). The caption
+# gives it back, and gives a measure to charts whose column header is a date ("Jan-26") or a bare "Value".
+_TABLE_CAPTION_RE = re.compile(r"^\s*TABLE\s+\d+\s*[—–-]+\s*(?P<caption>[^\n]{4,160})")
+_CAPTION_TAIL_RE = re.compile(r"(?i)\s*(?:\([^()]*\)|\bby\s+(?:year|quarter|month|fiscal\s+year|period|fy)\b|"
+                              r"\b(?:19|20)\d{2}\s*(?:[-–to]+\s*(?:19|20)?\d{2,4})?)\s*")
+_PERIODISH_RE = re.compile(rf"(?i)^\s*(?:{_MONTHS}[\s'’-]*\d{{2,4}}|Q[1-4][\s'’-]*(?:FY)?\d{{2,4}}|FY\s*'?\d{{2,4}}|"
+                           rf"\d{{1,2}}\s+{_MONTHS}(?:\s+\d{{2,4}})?|\d{{4}}(?:-\d{{2}})?|\d+(?:\.\d+)?)\s*$")
+# Document furniture and regression output are not data to chart ("Page no.: 15 contents", "Rows: 9 sources",
+# "Coefficient (US$ billion): 5 variables", "Obs: 6 null hypotheses" all shipped in saved runs).
+_META_MEASURE_RE = re.compile(r"(?i)^\s*(?:page\.?\s*(?:no\.?|number)?|pages?|rows?|no\.?\s+of\s+rows|obs\.?|observations|"
+                              r"coefficients?|coef\.?|std\.?\s*errors?|standard\s+errors?|t[- ]?stat(?:istic)?s?|"
+                              r"z[- ]?stat|p[- ]?values?|prob\.?|r[- ]?squared|adj\.?\s*r[- ]?squared|f[- ]?stat(?:istic)?|"
+                              r"df|lags?)\s*(?:\([^)]*\))?\s*:?\s*$")
+
+
+def table_caption(passage_text: str) -> str:
+    """The caption of the source table the chart was read from, cleaned of its period and notes ('' if none)."""
+    m = _TABLE_CAPTION_RE.match(str(passage_text or ""))
+    if not m or "?" in m.group("caption"):
+        return ""  # a question heading ("What is the gold import duty in India right now?") is not a caption
+    caption = re.sub(r"(?i)^\s*(?:table|figure|exhibit|chart|fig\.)\s*[\w.]*\d[\w.]*\s*[:.—–-]?\s*", "", m.group("caption"))
+    caption = _CAPTION_TAIL_RE.sub(" ", caption)
+    caption = re.sub(r"\s+", " ", caption).strip(" ,:;-–—|")
+    words = re.findall(r"[A-Za-z][\w&'’-]*", caption)
+    if len(words) < 2 or len(caption.split()) > 12 or "|" in caption:
+        return ""
+    if re.fullmatch(r"(?i)[a-z]+ed", words[0]):
+        return ""  # a sentence fragment ("Witnessed the bulk of Aug'26 inflows"), not a caption
+    return caption
+
+
+def caption_subject(caption: str, metric: str) -> str:
+    """What the caption says the metric is OF: 'Xiaomi's Market Share in India' + 'Market Share' -> 'Xiaomi in India'."""
+    if not caption or not metric or metric.casefold() not in caption.casefold():
+        return ""
+    at = caption.casefold().index(metric.casefold())
+    rest = (caption[:at] + " " + caption[at + len(metric):])
+    rest = re.sub(r"(?i)['’]s\b", "", rest)
+    rest = re.sub(r"(?i)^\s*(?:of|for|the|in)\s+", "", re.sub(r"\s+", " ", rest).strip(" ,:;-–—"))
+    words = re.findall(r"[A-Za-z][\w&.'’-]*", rest)
+    if not words or len(words) > 8 or all(w.casefold() in {"of", "in", "the", "and", "by", "for", "total", "share"} for w in words):
+        return ""
+    return rest.strip(" ,:;-–—")
+
+
+def _axis_measure(spec: dict) -> str:
+    """The row-label column's header when it names a measure on its own ("Sectoral flows", "Int'l market share (%)"
+    -> "Int'l market share"); '' when it is a date, a number or empty."""
+    raw = str(spec.get("xLabel") or "")
+    x = re.sub(r"\s*\([^)]*\)", "", raw).strip(" :")
+    # one word names a measure only when the header gives it a unit ("ASSETS (Rs. Crs)"); "Category", "Sector"
+    # or "Country" alone name the rows, not the values
+    with_unit = bool(re.search(r"(?i)\((?:[^)]*(?:rs|₹|inr|usd|us\$|\$|crore|crs?|mn|million|bn|billion|lakh|%|tonnes?|gw|mw))[^)]*\)", raw))
+    if not x or re.search(r"\d", x) or len(re.findall(r"[A-Za-z]{3,}", x)) < (1 if with_unit else 2):
+        return ""
+    return case_label(x)
+
+
+def _measure_is_heading_only(name: str) -> bool:
+    """The plotted column's header is a date or a bare number, not a named measure ('Jan-26', 'Mar-24', '24')."""
+    return bool(_PERIODISH_RE.match(re.sub(r"\s*\([^)]*\)\s*$", "", str(name or ""))))
+
+
 _SERIAL_COLUMN_RE = re.compile(r"(?i)(?:#|s\.?\s?no\.?|sl\.?\s?no\.?|sr\.?\s?no\.?|serial(?:\s+(?:no\.?|number))?|"
                                r"row(?:\s+no\.?)?|item\s+no\.?)")
 
@@ -375,6 +442,13 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
     measure_names = [str(s.get("name") or "") for s in _series(spec)] + [str(spec.get("title") or "").split(":", 1)[0]]
     if any(_SERIAL_COLUMN_RE.fullmatch(n.strip()) for n in measure_names if n.strip()):
         return "the plotted values are a serial-number column, not a measure"
+    single = [str(s.get("name") or "") for s in _series(spec)] if len(_series(spec)) == 1 else []
+    if any(_META_MEASURE_RE.match(n) for n in single + [str(spec.get("yLabel") or "")] if n.strip()):
+        return "the plotted values are document or regression metadata (page numbers, row counts, coefficients)"
+    if single and not spec.get("metric") and _measure_is_heading_only(single[0]) \
+            and _measure_is_heading_only(re.sub(r"\s*\([^)]*\)\s*$", "", str(spec.get("yLabel") or single[0]))) \
+            and not table_caption(passage_text) and not _axis_measure(spec):
+        return "the plotted column is headed only by a date or number and nothing names the measure"
     heading = str(passage_text or "")[:400]
     quotes = " ".join(str(p.get("evidenceQuote") or "") for s in _series(spec) for p in _pts(s))
     if EXAMPLE_RE.search(heading) or EXAMPLE_RE.search(quotes):
@@ -432,6 +506,26 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
     if unit and metric.casefold().endswith(f"({unit.casefold()})"):
         metric = metric[: -len(unit) - 2].rstrip()  # "High-technology exports (current US$)" + "(current US$)"
     source_titles = " ".join(str((manifest or {}).get(sid, {}).get("title") or "") for sid in _ids(spec))
+    caption = table_caption(passage_text)
+    if caption and _measure_is_heading_only(metric):
+        # a caption naming another period describes another column or table, not this one
+        own = re.sub(r"[\s'’-]+", "", metric).casefold()
+        other = [re.sub(r"[\s'’-]+", "", t).casefold() for t in re.findall(rf"(?i){_MONTHS}[\s'’-]*\d{{2,4}}", caption)]
+        if any(t != own for t in other):
+            caption = ""
+    column_date, noun_override = "", ""
+    if not caption and _measure_is_heading_only(metric) and not re.fullmatch(r"Q[1-4] 20\d{2}", metric) \
+            and _axis_measure(spec) and len(series) == 1 and not time_axis:
+        # "Jan-26: 10 sectoral flows" -> "Sectoral flows, Jan-26: 10 categories" (the header names the measure)
+        column_date, metric, noun_override = metric, _axis_measure(spec), "categories"
+        fixes.append("measure named from the row-label header")
+    if caption and (metric.casefold() in {"value", "values"} or _measure_is_heading_only(metric)) \
+            and not re.fullmatch(r"Q[1-4] 20\d{2}", metric):
+        # the column header is a date or "Value": the table's caption names the measure, the header its date
+        if _measure_is_heading_only(metric) and not re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", metric):
+            column_date = metric
+        metric = caption[0].upper() + caption[1:]
+        fixes.append(f"measure named from the source table's caption: '{caption[:60]}'")
     if re.fullmatch(r"Q[1-4] 20\d{2}", metric):  # a period used as the metric name
         period_label = fy_label(metric)
         metric = "Quarterly return"
@@ -490,6 +584,12 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         names = [str(x.get("name") or "") for x in series if x.get("name")]
         # the plotted entities are named (one or many), unless the single series just repeats the metric
         names = [n for n in names if n.casefold() not in metric.casefold() and metric.casefold() not in n.casefold()]
+        if not names:
+            # nothing names whose series it is: the source table's caption does ("Xiaomi's Market Share in India")
+            subject = caption_subject(caption, metric)
+            if subject and subject.casefold() not in metric.casefold():
+                names = [subject]
+                fixes.append(f"subject from the source table's caption: '{subject}'")
         who = (": " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0])) if names else ""
         title = f"{metric}{unit_txt}{who}, {_short_range(labels[0], labels[-1])}{qtd}"
     else:
@@ -497,8 +597,8 @@ def fix_chart(spec: dict, *, passage_text: str = "", manifest: dict | None = Non
         bench = [l for l in names if l.casefold() in BENCHMARKS]
         n = len(names) - len(bench)
         is_sector_index = sum(1 for l in names if l.casefold().startswith("nifty")) >= 0.6 * max(1, len(names))
-        noun = "NSE sector indices" if is_sector_index else entity_noun(spec, n)
-        span = period
+        noun = "NSE sector indices" if is_sector_index else (noun_override or entity_noun(spec, n))
+        span = column_date or period  # the plotted column's own date is the data's period, not the retrieval date
         title = f"{metric}{unit_txt}: {n} {noun}" + (" and the Nifty 50 benchmark" if bench else "") + (f", {span}" if span else "") + (qtd if qtd and qtd not in span else "")
     title = re.sub(r"\s+", " ", title).strip().replace(" ,", ",")
     if title != old_rest:
@@ -676,18 +776,42 @@ def unique_titles(charts: list[dict]) -> list[str]:
     return fixes
 
 
+def _point_keys(spec: dict) -> frozenset:
+    return frozenset((re.sub(r"\s+", " ", str(p.get("label") or "")).strip().casefold(), round(float(p["value"]), 4))
+                     for s in _series(spec) for p in _pts(s))
+
+
+def contained_charts(charts: list) -> dict[int, str]:
+    """{1-based index: reason} for charts every point of which (label and value) another chart already plots.
+    Xiaomi's yearly share was shipped three times in one report - alone (2021-2024), alone again (2021-2023)
+    and as one line of the all-brands chart; the larger chart is kept, whichever comes first."""
+    keys = [(_point_keys(c) if isinstance(c, dict) and c.get("type") != "heatmap" else frozenset()) for c in charts]
+    out: dict[int, str] = {}
+    for i, mine in enumerate(keys):
+        if len(mine) < 3:
+            continue
+        for j, other in enumerate(keys):
+            if i == j or (j + 1) in out or not mine <= other:
+                continue
+            if len(other) > len(mine) or j < i:  # a strict subset, or an identical chart that comes later
+                out[i + 1] = f"every point is already plotted in another chart ('{str(charts[j].get('title') or '')[:60]}')"
+                break
+    return out
+
+
 def run_chart_lint(charts: list[dict], *, passage_text=lambda spec: "", manifest: dict | None = None,
                    today: str = "") -> tuple[list[dict], list[dict], dict]:
     """Quality gate + auto-fix + lint. Returns (kept charts, dropped [{index, title, reason}], log)."""
     _TODAY["value"] = today
     kept, dropped, fixes = [], [], []
     earlier: list[list[float]] = []
+    contained = contained_charts(charts or [])
     for i, spec in enumerate(charts or [], 1):
         if not isinstance(spec, dict):
             kept.append(spec)
             continue
         text = passage_text(spec) or ""
-        reason = quality_reason(spec, text, earlier)
+        reason = contained.get(i) or quality_reason(spec, text, earlier)
         if reason:
             dropped.append({"index": i, "title": spec.get("title"), "reason": reason})
             log.warning("Chart quality gate: dropped %s - %s", str(spec.get("title"))[:80], reason)
