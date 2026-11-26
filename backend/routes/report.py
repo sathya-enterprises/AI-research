@@ -25357,6 +25357,7 @@ async def generate_report(request: Request):
                     )
                     return cleaned[len(prefix):].strip() if cleaned.startswith(prefix) else cleaned
 
+            _v2_research_seconds = round(time.monotonic() - _job_started_at, 1)  # search, fetch, evidence store
             _v2_result = await run_pipeline_v2(
                 runtime=_sys.modules[__name__], question=question, tier=report_tier, store=evidence_store,
                 manifest=source_manifest, today=_v2_today.isoformat(),
@@ -25374,6 +25375,14 @@ async def generate_report(request: Request):
             )
             raw, model_used = _v2_result["raw"], _v2_result["model"]
             _v2_used = True
+            _v2_summary = _v2_result["meta"].get("runSummary")
+            if isinstance(_v2_summary, dict):  # the research phase before the writing pipeline, and its sources
+                _v2_summary["stageSeconds"] = {"research_and_evidence": _v2_research_seconds,
+                                               **(_v2_summary.get("stageSeconds") or {})}
+                _v2_summary.setdefault("sources", {})["gathered"] = len(enriched or [])
+                _v2_summary["sources"]["passages"] = len(getattr(evidence_store, "passages", []) or [])
+                log.info("Report: research phase %.0fs, %d sources gathered, %d evidence passages",
+                         _v2_research_seconds, len(enriched or []), _v2_summary["sources"]["passages"])
             _v2_unsupported_after_policy = list((_v2_result["meta"].get("numberPolicy") or {}).get("unresolvedTableValues") or [])
             _v2_unsupported_after_policy += [", ".join(map(str, g.get("values") or [])) or "flagged claim"
                                              for g in (_v2_result["meta"].get("evidenceCheck") or {}).get("stillFlagged") or []]

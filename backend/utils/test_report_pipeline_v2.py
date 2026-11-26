@@ -228,6 +228,10 @@ def test_end_to_end_assembly_with_fake_llm(tier):
     meta = result["meta"]
     assert "Evidence base" in meta["methodologyText"] or meta["methodologyText"].strip()
     assert meta["llm"]["calls"] == gateway.stats.calls
+    summary = meta["runSummary"]  # Phase 8: one block with stage timings, telemetry, claims, charts and length
+    assert {"outline", "section_writing", "executive_summary", "editorial", "assembly_and_lint"} <= set(summary["stageSeconds"])
+    assert summary["llm"]["calls"] == gateway.stats.calls and summary["charts"]["used"] == len(out["charts"])
+    assert meta["length"]["status"] in {"within", "above_cap", "below_band_evidence", "below_band_writing"}
     assert any("Weather patterns" in d for d in meta["outline"]["decisions"])
     coverage = {r["entity"]: r for r in meta["outline"]["entityCoverage"]}
     assert coverage["NIFTY BANK"]["status"] == "covered" and coverage["NIFTY OIL"]["status"] == "insufficient_evidence"

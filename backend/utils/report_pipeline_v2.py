@@ -510,6 +510,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     ``deadline``: (target, hard stop) as time.monotonic() values for the whole report job (in-depth:
     40 / 50 minutes). V2 keeps ~6 minutes for report.py's checks and the render after it."""
     started = time.perf_counter()
+    from utils.run_summary import StageClock
+    clock = StageClock()  # per-stage seconds for the run summary (meta.runSummary)
     deadline_log: dict = {"target": None, "hardStop": None, "waves": [], "extensionsSkipped": 0, "concise": []}
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
@@ -543,6 +545,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                                       window_note=(window_note + storyline_note(story_points)).strip(),
                                       asks=asks,
                                       tiers=tiers)
+        clock.mark("outline")
     except OutlineError as exc:
         raise PipelineV2Error(str(exc)) from exc
     if regime is not None:
@@ -911,6 +914,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                  for p in cited_passages}
         return await check_section(gateway, draft, texts, dates)
 
+    clock.mark("datasets_and_charts")
     for start in range(0, len(analysis), wave_size):
         wave = analysis[start:start + wave_size]
         covered = [_covered_line(d) for d in drafts if d.ok]
@@ -984,10 +988,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                 if draft.ok and draft.section_id not in _claim_tasks:
                     _claim_tasks[draft.section_id] = asyncio.ensure_future(_claim_check(draft))
     # Every claim check finishes before the coherence pass below edits section text.
+    clock.mark("section_writing")
     _claim_results: dict[str, object] = {}
     if _claim_tasks:
         _done = await asyncio.gather(*_claim_tasks.values(), return_exceptions=True)
         _claim_results = dict(zip(_claim_tasks.keys(), _done))
+    clock.mark("claim_checks_tail")  # claim checks run during writing; this is only the wait after the last wave
     # Chart/text coherence: the paragraph that interprets a figure must be about the
     # chart's own entities and values; otherwise the chart is dropped and the text's
     # figure framing is removed at assembly (the sentence keeps its own citation).
@@ -1121,9 +1127,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     exec_prompt = (f"QUESTION: {question}\nTHESIS: {outline.thesis}\nLENGTH: about {exec_section.word_budget} words.\n\n"
                    + (f"{regime.facts_block()}\n\n" if regime is not None else "")
                    + f"SECTION SUMMARIES:\n{summaries}")
+    clock.mark("section_checks")
     exec_result = await gateway.generate(purpose="executive_summary", section_id="exec", system=EXEC_SYSTEM,
                                          prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120,
                                          min_words=int((exec_section.word_budget or 0) * 0.5))
+    clock.mark("executive_summary")
     exec_body = (exec_result.text.split(SUMMARY_MARKER)[0].strip() if exec_result.ok else "")
     exec_body = re.sub(r"(?m)^\s*#{1,6}\s+.*$", "", exec_body).strip()
     from utils.section_writer import _CURRENCY_AFTER_RE, _RS_DOT_RE, normalize_citation_brackets
@@ -1241,8 +1249,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if skip_transitions:
         deadline_log["transitionsSkipped"] = True
         log.warning("V2 deadline: editorial transitions call skipped")
+    clock.mark("charts_from_report")
     edited, editorial = await editorial_pass(edited, gateway=None if skip_transitions else gateway,
                                              question=question, thesis=str(getattr(outline, "thesis", "") or ""))
+    clock.mark("editorial")
     try:
         from utils.source_quality import window_start as _window_start
         layout_window = _window_start(question, _asks_date.fromisoformat(today[:10]))
@@ -1514,6 +1524,10 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "entitySearch": entity_search_stats or {},
         "evidenceSupportedPages": round(outline.meta.get("evidenceSupportedWords", 0) / WORDS_PER_PAGE, 1),
     }
+    clock.mark("assembly_and_lint")
+    from utils.run_summary import build_run_summary, summary_line
+    meta["runSummary"] = build_run_summary(meta, tier=tier, stages=clock.to_dict())
+    log.info("V2 %s", summary_line(meta["runSummary"]))
     log.info("V2 length: %s (%.1f pages, band %s, evidence %.1f pages; short sections %s; parts by model %s)",
              meta["length"]["status"], est_pages, meta["length"]["band"], meta["length"]["evidencePages"],
              meta["length"]["shortSections"] or "none", meta["length"]["partsByModel"])
