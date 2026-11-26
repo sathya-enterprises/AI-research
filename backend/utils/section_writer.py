@@ -17,6 +17,7 @@ Rules enforced in the prompt and checked afterwards:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -762,7 +763,18 @@ def postprocess(draft: SectionDraft, raw: str, *, allowed_passages: set[str], al
     return draft
 
 
-def _chunks(subsections: list, max_words: int = 2600) -> list[list]:
+def section_call_words() -> int:
+    """Words asked of one writing call. Gemini answers ~1,100-1,300 words per call whatever it is asked: in the
+    coal live run (2026-11-26) every section asked for 2,520 words in one call came back at ~45% even with the
+    extension, while calls asked for 720-1,320 words delivered 83-110%. Sections are split into calls of this size."""
+    try:
+        return max(600, int(os.getenv("GG_V2_SECTION_CALL_WORDS", "1400")))
+    except ValueError:
+        return 1400
+
+
+def _chunks(subsections: list, max_words: int | None = None) -> list[list]:
+    max_words = max_words or section_call_words()
     groups, current, words = [], [], 0
     for sub in subsections:
         if current and words + sub.word_budget > max_words:

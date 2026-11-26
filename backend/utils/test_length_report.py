@@ -51,3 +51,12 @@ def test_writer_records_budget_models_and_extension(monkeypatch):
                                         already_covered=[], other_sections=[]))
     assert draft.budget == 1000 and draft.models[0] == "gemini-x"
     assert calls == ["section", "section_extend"] and draft.extended and draft.models == ["gemini-x", "gemini-y"]
+
+
+def test_sections_are_written_in_calls_gemini_can_fill(monkeypatch):
+    from utils.section_writer import _chunks
+    subs = [SimpleNamespace(word_budget=1250), SimpleNamespace(word_budget=900), SimpleNamespace(word_budget=400)]
+    monkeypatch.delenv("GG_V2_SECTION_CALL_WORDS", raising=False)
+    assert [len(g) for g in _chunks(subs)] == [1, 2]          # 1,250 | 900 + 400 (no call asks for 2,550)
+    monkeypatch.setenv("GG_V2_SECTION_CALL_WORDS", "2600")
+    assert [len(g) for g in _chunks(subs)] == [2, 1]          # the previous behaviour
