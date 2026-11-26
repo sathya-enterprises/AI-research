@@ -1272,6 +1272,18 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
             ledger_meta["section"] = target.title
     if layout["scorecard"]:
         parts.append(layout["scorecard"])
+    # Stage M: figures that different sources give differently for the same measure and period. Both figures
+    # stay; a note is placed where the reader meets the second one (and the methodology lists them all).
+    disagreements, disagreement_placed = [], []
+    try:
+        from utils.disagreements import find_disagreements, place_notes
+        draft_text = "\n\n".join(parts + [f"## {e.title}\n\n{e.body}" for e in edited])
+        disagreements = find_disagreements(draft_text)
+        if os.getenv("GG_V2_DISAGREEMENT_NOTES", "1") != "0":
+            # only the strict pairs are shown in the sections (a wrong "sources differ" is worse than none)
+            disagreement_placed = place_notes(edited, find_disagreements(draft_text, strict=True))
+    except Exception as exc:
+        log.warning("V2 disagreement check skipped: %s", type(exc).__name__)
     parts += [f"## {e.title}\n\n{e.body}" for e in edited]
     method = methodology_markdown(store=store, manifest=manifest, outline=outline, charts=candidates, drafts=good,
                                   gateway_stats=gateway.stats.to_dict(), question=question, window_note=window_note, failed=failed)
@@ -1287,14 +1299,9 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     note = coverage_note(asks)
     if note:
         method = f"**{note.split(':', 1)[0]}.** {note.split(':', 1)[1].strip()}\n\n{method}"
-    try:  # Stage M: figures that different sources give differently for the same measure and period
-        from utils.disagreements import disagreement_note, find_disagreements
-        disagreements = find_disagreements("\n\n".join(parts))
-        if disagreements:
-            method = f"{method}\n\n{disagreement_note(disagreements)}"
-    except Exception as exc:
-        disagreements = []
-        log.warning("V2 disagreement check skipped: %s", type(exc).__name__)
+    if disagreements:
+        from utils.disagreements import disagreement_note
+        method = f"{method}\n\n{disagreement_note(disagreements)}"
     # The client report is about the topic, not about how it was researched: the methodology (sources kept,
     # passages, scoring, claims removed) stays in the run's record (meta["methodologyText"]) and the publication
     # report. GG_REPORT_METHODOLOGY_SECTION=1 puts it back in the report.
@@ -1467,7 +1474,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "claimCheck": claim_log,
         "storyline": [pt.to_dict() for pt in story_points],
         "seriesWarnings": series_warnings,
-        "sourceDisagreements": disagreements,
+        "sourceDisagreements": disagreements, "sourceDisagreementNotes": disagreement_placed,
         # Chart funnel (Stage F): every chart from candidate to PDF, with the stage and reason it left.
         "chartFunnel": {
             "fromFetchedDatasets": len(dataset_charts), "fromTables": table_chart_count, "dataset": dataset_note,

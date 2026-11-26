@@ -23,7 +23,11 @@ _PERIOD_RE = re.compile(
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?:19|20)\d{2}|(?:19|20)\d{2})\b")
 _AMOUNT_RE = re.compile(
     r"(?P<cur>₹|Rs\.?\s?|INR\s?|US\$|\$|€|£)?\s?(?P<num>[-+−]?\d[\d,]*(?:\.\d+)?)\s?"
-    r"(?P<unit>lakh crore|crore|cr\b|trillion|tn\b|billion|bn\b|million|mn\b|%|per cent)?", re.I)
+    r"(?P<unit>lakh crore|crore|cr\b|trillion|tn\b|billion|bn\b|million tonnes|million|mn\b|%|per cent|"
+    r"gwh\b|twh\b|mwh\b|gw\b|mw\b|tonnes\b|mtpa\b)?", re.I)
+# Physical measures compare within their own family, in one base unit (116 GW vs 118,000 MW is a comparison).
+_PHYSICAL = {"gw": ("power", 1.0), "mw": ("power", 1e-3), "gwh": ("energy", 1.0), "twh": ("energy", 1e3),
+             "mwh": ("energy", 1e-3), "tonnes": ("mass", 1.0), "million tonnes": ("mass", 1e6), "mtpa": ("mass", 1e6)}
 _PARTIAL_RE = re.compile(r"(?i)\b(?:first|last|months?|half|quarter|fortnight|weeks?|so far|ytd|year-to-date|till|until|"
                          r"through|by (?:end|mid)|since)\b")
 _STOP = {"the", "and", "with", "from", "that", "this", "were", "was", "are", "into", "over", "during", "which", "while",
@@ -137,10 +141,11 @@ def statements(report: str) -> list[dict]:
                     value = float(m.group("num").replace(",", "").replace("−", "-"))
                 except ValueError:
                     continue
-                family = "%" if unit in {"%", "per cent"} else _FAMILY.get(cur, "")
+                family = "%" if unit in {"%", "per cent"} else (_PHYSICAL[unit][0] if unit in _PHYSICAL else _FAMILY.get(cur, ""))
                 if not family:
                     continue
-                base = value if family == "%" else value * _SCALE.get(unit, 1.0)
+                base = value if family == "%" else (value * _PHYSICAL[unit][1] if unit in _PHYSICAL
+                                                    else value * _SCALE.get(unit, 1.0))
                 before = re.findall(r"[A-Za-z][A-Za-z-]{3,}", plain[max(0, m.start() - 70):m.start()])[-6:]
                 words = {_stem(w) for w in before if w.casefold() not in _STOP}
                 if len(words) < 2:
@@ -153,12 +158,46 @@ def statements(report: str) -> list[dict]:
     return out
 
 
-def find_disagreements(report: str, *, max_items: int = 6) -> list[dict]:
+def _numbered_names(sentence: str) -> dict[str, str]:
+    """Names carrying a number of their own: {'nifty': '50'} from 'Nifty 50', {'nifty': '500'} from 'Nifty 500'."""
+    return {m.group(1).casefold(): m.group(2)
+            for m in re.finditer(r"\b([A-Z][A-Za-z&.-]+)\s+(\d{1,4})\b(?!\s*(?:%|per|crore|lakh|billion|million|trillion|GW|MW))",
+                                 str(sentence or ""))
+            if not re.fullmatch(r"(?:19|20)\d{2}", m.group(2))}
+
+
+def find_disagreements(report: str, *, max_items: int = 6, strict: bool = False) -> list[dict]:
+    """``strict``: only pairs safe to show the reader inside a section - the same named subjects exactly, two
+    different sentences, mostly the same measure words, and a gap of 1-33% (116 GW vs 118 GW is a disagreement;
+    exports to the UK vs exports to all FTA partners, or a sector's slice of a total, are different measures)."""
     items = statements(report)
     found, seen = [], set()
     for i, a in enumerate(items):
         for b in items[i + 1:]:
             if a["period"] != b["period"] or a["family"] != b["family"] or not a["value"] or not b["value"]:
+                continue
+            if strict:
+                if a["sentence"] == b["sentence"] or not a["entities"] or a["entities"] != b["entities"]:
+                    continue
+                na, nb = _numbered_names(a["sentence"]), _numbered_names(b["sentence"])
+                if any(na[k] != nb[k] for k in set(na) & set(nb)):
+                    continue  # "Nifty 50" and "Nifty 500" are different subjects
+                common = a["words"] & b["words"]
+                if len(common) < 2 or len(common) < 0.7 * max(len(a["words"]), len(b["words"])):
+                    continue
+                if a["cites"] and b["cites"] and set(a["cites"]) & set(b["cites"]):
+                    continue
+                hi, lo = max(abs(a["value"]), abs(b["value"])), min(abs(a["value"]), abs(b["value"]))
+                if not hi or not 0.01 <= (hi - lo) / hi <= 0.33 or (a["value"] > 0) != (b["value"] > 0):
+                    continue
+                key = (a["period"], round(lo, 4), round(hi, 4))
+                if key not in seen:
+                    seen.add(key)
+                    found.append({"period": a["period"], "measure": " ".join(sorted(common))[:60],
+                                  "a": {"shown": a["shown"], "cites": a["cites"], "section": a["section"], "sentence": a["sentence"]},
+                                  "b": {"shown": b["shown"], "cites": b["cites"], "section": b["section"], "sentence": b["sentence"]}})
+                    if len(found) >= max_items:
+                        return found
                 continue
             if not a["entities"] or not b["entities"]:
                 continue  # without a named subject, the same entity cannot be established
@@ -183,8 +222,8 @@ def find_disagreements(report: str, *, max_items: int = 6) -> list[dict]:
                 continue
             seen.add(key)
             found.append({"period": a["period"], "measure": " ".join(sorted(shared))[:60],
-                          "a": {"shown": a["shown"], "cites": a["cites"], "section": a["section"]},
-                          "b": {"shown": b["shown"], "cites": b["cites"], "section": b["section"]}})
+                          "a": {"shown": a["shown"], "cites": a["cites"], "section": a["section"], "sentence": a["sentence"]},
+                          "b": {"shown": b["shown"], "cites": b["cites"], "section": b["section"], "sentence": b["sentence"]}})
             if len(found) >= max_items:
                 return found
     return found
@@ -202,3 +241,48 @@ def disagreement_note(items: list[dict]) -> str:
         period = d["period"].upper() if re.match(r"(?i)(?:fy|cy|q|h)", d["period"]) else d["period"].title()
         lines.append(f"- {period}, {d['measure']}: {d['a']['shown']}{ca} vs {d['b']['shown']}{cb}.")
     return "\n".join(lines)
+
+
+def _period_text(period: str) -> str:
+    return period.upper() if re.match(r"(?i)(?:fy|cy|q|h)", period) else period.title()
+
+
+def section_note(item: dict) -> str:
+    """One line placed where the reader meets the second figure: both values, both citations, no verdict."""
+    ca = f" [{', '.join(item['a']['cites'])}]" if item["a"]["cites"] else ""
+    cb = f" [{', '.join(item['b']['cites'])}]" if item["b"]["cites"] else ""
+    # rendered as a labelled note box (utils.layout_blocks NOTE admonition), not a decorative pull-quote
+    return (f"> [!NOTE:Sources differ] For {_period_text(item['period'])}, one source gives {item['a']['shown']}{ca} and "
+            f"another {item['b']['shown']}{cb}; the gap may reflect different definitions, coverage or dates.")
+
+
+def _paragraph_with(body: str, sentence: str) -> int:
+    """Index of the paragraph of ``body`` holding ``sentence`` (citations ignored), or -1."""
+    probe = re.sub(r"\s+", " ", sentence).strip()[:70]
+    if len(probe) < 25:
+        return -1
+    for i, para in enumerate(body.split("\n\n")):
+        if probe in re.sub(r"\s+", " ", _CITE_RE.sub("", para)):
+            return i
+    return -1
+
+
+def place_notes(sections: list, items: list[dict]) -> list[dict]:
+    """Put each disagreement's note in the section where its second figure is stated, after that paragraph
+    (both figures are kept: the reader sees 116 GW [S3] and 118 GW [S9] side by side). ``sections`` have a
+    mutable ``body``. Returns [{"section", "period"}] for the notes placed."""
+    placed = []
+    for item in items:
+        for side in ("b", "a"):
+            target = next((sec for sec in sections if _paragraph_with(sec.body, item[side].get("sentence", "")) >= 0), None)
+            if target is None:
+                continue
+            paras = target.body.split("\n\n")
+            at = _paragraph_with(target.body, item[side]["sentence"])
+            note = section_note(item)
+            if note not in target.body:
+                paras.insert(at + 1, note)
+                target.body = re.sub(r"\n{3,}", "\n\n", "\n\n".join(p.strip("\n") for p in paras)).strip("\n") + "\n"
+                placed.append({"section": getattr(target, "title", ""), "period": item["period"]})
+            break
+    return placed
