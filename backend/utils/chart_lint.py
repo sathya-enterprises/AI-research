@@ -442,6 +442,17 @@ def quality_reason(spec: dict, passage_text: str = "", earlier: list[list[float]
     measure_names = [str(s.get("name") or "") for s in _series(spec)] + [str(spec.get("title") or "").split(":", 1)[0]]
     if any(_SERIAL_COLUMN_RE.fullmatch(n.strip()) for n in measure_names if n.strip()):
         return "the plotted values are a serial-number column, not a measure"
+    # A header cell that is really page text ("-24 along with the Not nfra.com. Total No. of flights considered
+    # for analysis", with labels like "Thanking you, Air India Express") is a mis-read table (aviation run).
+    # A long measure name is fine ("Solvency Losses as per cent of Tier 1 Capital of the Banking System"); a
+    # row-label header that is a sentence (12+ words, or 9+ with a sentence break), a run of bare numbers or a web
+    # address is not ("Share within agriculture and allied, current prices, 2025-26" is a header).
+    x_label = str(spec.get("xLabel") or "")
+    for name in [str(s.get("name") or "") for s in _series(spec)] + [x_label]:
+        numbers = len(re.findall(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?%?(?![\w.])", name))
+        if re.search(r"(?i)\b[a-z0-9-]+\.(?:com|in|org|net|gov|co)\b", name) or (numbers >= 3 and numbers >= len(name.split()) - 1) \
+                or (name is x_label and (len(name.split()) >= 12 or len(name.split()) >= 9 and re.search(r"\w\.\s+[A-Z]", name))) or (re.match(r"\s*[-+]\d", name) and len(name.split()) > 3):
+            return "a column header is page text (a sentence, a run of numbers or a web address), not a measure name"
     single = [str(s.get("name") or "") for s in _series(spec)] if len(_series(spec)) == 1 else []
     if any(_META_MEASURE_RE.match(n) for n in single + [str(spec.get("yLabel") or "")] if n.strip()):
         return "the plotted values are document or regression metadata (page numbers, row counts, coefficients)"

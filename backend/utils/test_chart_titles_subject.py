@@ -57,3 +57,20 @@ def test_a_chart_whose_points_are_all_in_another_chart_is_dropped_whichever_come
     assert len(kept) == 1 and {d["index"] for d in dropped} == {1, 3}
     other_values = _line("Market Share", [("2021", 1.0), ("2022", 2.0), ("2023", 3.0)])
     assert contained_charts([alone, other_values]) == {}
+
+
+def _bar(name, x_label):
+    return {"type": "bar", "title": "x", "xLabel": x_label, "yLabel": name,
+            "series": [{"name": name, "data": [{"label": f"Item {c}", "value": v} for c, v in zip("ABCD", (4.0, 9.0, 2.0, 7.0))]}]}
+
+
+def test_page_text_headers_are_not_measures_but_long_measure_names_are():
+    junk = [("-24 along with the Not nfra.com. Total No. of flights considered", "Airline"),
+            ("12.57 12.01 11.22 10.20 8.68", "Bank"),
+            ("NA", "e relatively lower isolation due to higher rainfall dity. In the south")]
+    for name, x in junk:
+        assert "page text" in quality_reason(_bar(name, x), ""), name
+    fine = [("Solvency Losses as per cent of Tier 1 Capital of the Banking System", "HFC Name"),
+            ("Share", "Share within agriculture and allied, current prices, 2025-26")]
+    for name, x in fine:
+        assert "page text" not in quality_reason(_bar(name, x), ""), name
