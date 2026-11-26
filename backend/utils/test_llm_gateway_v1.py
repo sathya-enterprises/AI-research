@@ -37,6 +37,11 @@ def _patch_http(monkeypatch, handler):
     monkeypatch.setattr(G.httpx, "AsyncClient", factory)
 
 
+def _jittered(waits, expected):
+    """Waits carry up to 20% jitter (so waiting calls do not retry in the same second)."""
+    return len(waits) == len(expected) and all(e <= w <= e * 1.2 + 1e-9 for w, e in zip(waits, expected))
+
+
 def _ok(text, tin=120, tout=40):
     return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}],
                                      "usageMetadata": {"promptTokenCount": tin, "candidatesTokenCount": tout}})
@@ -172,7 +177,7 @@ def test_waits_out_cooldowns_when_every_model_is_cooling(monkeypatch):
     gw = G.LLMGateway(runtime, "detailed", budget=5, capture=False)
     res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
     assert res.ok and res.text == "section text"
-    assert waits == [20]
+    assert _jittered(waits, [20])
 
 
 def test_section_prose_waits_for_a_full_model_and_uses_lite_only_as_last_resort(monkeypatch):
@@ -196,7 +201,7 @@ def test_section_prose_waits_for_a_full_model_and_uses_lite_only_as_last_resort(
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     gw = G.LLMGateway(runtime, "detailed", budget=5, capture=False)
     res = asyncio.run(gw.generate(purpose="section", prompt="p", retries=1))
-    assert res.ok and seen_models == ["model-a"] and waits == [20]
+    assert res.ok and seen_models == ["model-a"] and _jittered(waits, [20])
 
     # a planning call may use the lite model straight away
     seen_models.clear(); waits.clear()
@@ -223,7 +228,7 @@ def test_section_prose_falls_back_to_lite_after_the_cooldown_waits(monkeypatch):
 
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     res = asyncio.run(G.LLMGateway(runtime, "detailed", budget=5, capture=False).generate(purpose="section", prompt="p"))
-    assert res.ok and seen_models == ["model-a-lite"] and waits == [20, 45]
+    assert res.ok and seen_models == ["model-a-lite"] and _jittered(waits, [20, 45])
 
 
 def test_section_prose_goes_to_groq_before_sleeping_when_gemini_is_rate_limited(monkeypatch):

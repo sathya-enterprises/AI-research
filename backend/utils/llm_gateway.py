@@ -22,12 +22,15 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 
 import httpx
+
+from utils.llm_quota import QUOTAS, SHARED_PROJECT, estimate_tokens, is_daily_quota, parse_retry_delay
 
 log = logging.getLogger("llm_gateway")
 
@@ -101,11 +104,25 @@ class GatewayStats:
     tokens_out: int = 0
     by_purpose: Counter = field(default_factory=Counter)
     models: Counter = field(default_factory=Counter)
+    # telemetry: every HTTP answer by status and by model+status, seconds per purpose / model, waits and fallbacks
+    http_status: Counter = field(default_factory=Counter)
+    model_status: Counter = field(default_factory=Counter)
+    seconds_by_purpose: Counter = field(default_factory=Counter)
+    seconds_by_model: Counter = field(default_factory=Counter)
+    quota_waits: int = 0
+    quota_wait_seconds: float = 0.0
+    fallbacks: int = 0
+    short_fallbacks_retried: int = 0
 
     def to_dict(self) -> dict:
         return {"calls": self.calls, "succeeded": self.succeeded, "failed": self.failed,
                 "budgetRefusals": self.budget_refusals, "networkRetries": self.network_retries, "groqBeforeWait": self.groq_before_wait, "tokensIn": self.tokens_in, "tokensOut": self.tokens_out,
-                "byPurpose": dict(self.by_purpose), "models": dict(self.models)}
+                "byPurpose": dict(self.by_purpose), "models": dict(self.models),
+                "httpStatus": dict(self.http_status), "modelStatus": dict(self.model_status),
+                "secondsByPurpose": {k: round(v, 1) for k, v in self.seconds_by_purpose.items()},
+                "secondsByModel": {k: round(v, 1) for k, v in self.seconds_by_model.items()},
+                "quotaWaits": self.quota_waits, "quotaWaitSeconds": round(self.quota_wait_seconds, 1),
+                "fallbacks": self.fallbacks, "shortFallbacksRetried": self.short_fallbacks_retried}
 
 
 class LLMGateway:
@@ -143,13 +160,15 @@ class LLMGateway:
         other sections queued behind calls that were only waiting for a rate limit to clear."""
         self.semaphore.release()
         try:
-            await asyncio.sleep(delay)
+            await asyncio.sleep(delay * (1.0 + random.random() * 0.2))  # jitter: waiting calls do not retry together
         finally:
             await self.semaphore.acquire()
 
     async def generate(self, *, purpose: str, prompt: str, system: str = "", section_id: str = "",
                        max_tokens: int = 4096, temperature: float = 0.2, json_mode: bool = False,
-                       timeout: float = 90.0, retries: int = 1) -> LLMResult:
+                       timeout: float = 90.0, retries: int = 1, min_words: int = 0) -> LLMResult:
+        """One logical model call. ``min_words``: a fallback (Groq) answer shorter than this is kept only as a last
+        resort - the call keeps waiting for Gemini, so a busy minute does not shorten a section."""
         async with self.semaphore:
             # Reserve a logical call only after entering the semaphore. Checking
             # before awaiting allowed many queued coroutines to all pass the
@@ -173,11 +192,14 @@ class LLMGateway:
             allow_lite = purpose not in LITE_AVOIDING_PURPOSES
             groq_tried = False
             attempt = 0
+            tokens_est = estimate_tokens(system, prompt)
+            quota_waits_left = 3
+            short_fallback: LLMResult | None = None
             while True:
                 attempt += 1
                 result = await self._gemini_once_hedged(purpose, section_id, prompt, system, max_tokens, temperature,
                                                         json_mode, timeout, tried, allow_lite,
-                                                        prefer_lite=purpose in LITE_FIRST_PURPOSES)
+                                                        prefer_lite=purpose in LITE_FIRST_PURPOSES, tokens=tokens_est)
                 result.attempts = attempt
                 if result.ok:
                     break
@@ -201,12 +223,29 @@ class LLMGateway:
                         and os.getenv("GG_V2_GROQ_BEFORE_WAIT", "1") != "0"):
                     groq_tried = True
                     fallback = await self._groq_fallback(prompt, system, result)
-                    if fallback.ok:
+                    if fallback.ok and (min_words <= 0 or len(fallback.text.split()) >= min_words):
                         result = fallback
                         self.stats.groq_before_wait += 1
                         break
+                    if fallback.ok:
+                        # substantially shorter than the section needs: kept only if Gemini never answers
+                        short_fallback = fallback
+                        self.stats.short_fallbacks_retried += 1
+                        log.info("V2 LLM %s/%s: fallback answer too short (%d < %d words); waiting for Gemini",
+                                 purpose, section_id or "-", len(fallback.text.split()), min_words)
                 # Stage K: every key/model rate-limited (HTTP 429) - per-minute limits clear quickly, so wait and
                 # retry twice (20 s, 40 s) before giving up; a daily-quota failure still fails (and is labelled)
+                # Blocked only by configured quota (no cooldown): wait exactly until a pool has room, with jitter
+                quota_wait = self._min_quota_wait(tokens_est, allow_lite) if str(result.error or "") ==                     "no_gemini_key_or_model_available" else 0.0
+                if quota_wait > 0 and quota_waits_left:
+                    quota_waits_left -= 1
+                    delay = min(120.0, quota_wait) * (1.0 + random.random() * 0.2)
+                    self.stats.quota_waits += 1
+                    self.stats.quota_wait_seconds += delay
+                    log.info("V2 LLM %s/%s: quota full on every project; waiting %.0fs", purpose, section_id or "-", delay)
+                    await self._sleep_without_slot(delay)
+                    tried.clear()
+                    continue
                 if str(result.error or "") == "no_gemini_key_or_model_available" and not cooldown_backoff and not allow_lite:
                     allow_lite = True  # every full model still cooling after the waits: the lite model before Groq
                     log.warning("V2 LLM %s/%s: full models still unavailable; using the lite model", purpose, section_id or "-")
@@ -227,9 +266,16 @@ class LLMGateway:
                     tried.clear()
                     continue
                 break
+            if not result.ok and short_fallback is not None:
+                result = short_fallback  # Gemini never answered: the shorter fallback is better than nothing
             if not result.ok and not json_mode and not groq_tried:
                 result = await self._groq_fallback(prompt, system, result)
             result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+            self.stats.seconds_by_purpose[purpose] += result.elapsed_ms / 1000
+            if result.ok:
+                self.stats.seconds_by_model[result.model or "?"] += result.elapsed_ms / 1000
+                if str(result.model or "").startswith("groq"):
+                    self.stats.fallbacks += 1
             if not result.tokens_in:
                 result.tokens_in = max(1, (len(system) + len(prompt)) // 4)
             if result.ok and not result.tokens_out:
@@ -268,11 +314,12 @@ class LLMGateway:
         return max(0.05, delay)
 
     async def _gemini_once_hedged(self, purpose, section_id, prompt, system, max_tokens, temperature, json_mode,
-                                  timeout, tried, allow_lite: bool = True, prefer_lite: bool = False) -> LLMResult:
+                                  timeout, tried, allow_lite: bool = True, prefer_lite: bool = False,
+                                  tokens: int = 0) -> LLMResult:
         """One attempt, plus a second one on a different model if the first is still running after the delay."""
         delay = self._hedge_delay(purpose)
         first = asyncio.ensure_future(self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout,
-                                                        tried, allow_lite, prefer_lite))
+                                                        tried, allow_lite, prefer_lite, tokens=tokens))
         if delay is None:
             return await first
         done, _ = await asyncio.wait({first}, timeout=delay)
@@ -285,7 +332,8 @@ class LLMGateway:
         log.info("V2 gateway: %s/%s still running after %.0fs; started a second attempt on another model",
                  purpose, section_id or "-", delay)
         second = asyncio.ensure_future(self._gemini_once(prompt, system, max_tokens, temperature, json_mode, timeout,
-                                                         tried, allow_lite, prefer_lite, avoid_models=busy_models))
+                                                         tried, allow_lite, prefer_lite, avoid_models=busy_models,
+                                                         tokens=tokens))
         pending = {first, second}
         failure: LLMResult | None = None
         try:
@@ -306,8 +354,21 @@ class LLMGateway:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
+    def _min_quota_wait(self, tokens: int, allow_lite: bool = True) -> float:
+        """Seconds until some (project, model) pool can take a request of ``tokens``; 0 when one can now or when
+        the block is not a quota one (cooldowns, bans)."""
+        rt = self.runtime
+        keys = [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k) and not rt.is_rate_limited(k)]
+        waits = []
+        for model in rt.GEMINI_MODELS:
+            if rt._gemini_model_cooling(model) or (not allow_lite and "lite" in str(model).casefold()):
+                continue
+            for project in {QUOTAS.project_of(k, keys) for k in keys}:
+                waits.append(QUOTAS.wait_seconds(project, model, tokens))
+        return min(waits) if waits and min(waits) > 0 else 0.0
+
     def _attempt_plan(self, tried: set, allow_lite: bool = True, prefer_lite: bool = False,
-                      avoid_models: set | None = None, advance: bool = True) -> list[tuple[str, str]]:
+                      avoid_models: set | None = None, advance: bool = True, tokens: int = 0) -> list[tuple[str, str]]:
         rt = self.runtime
         keys = [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k)]
         if not keys:
@@ -319,8 +380,10 @@ class LLMGateway:
                 continue
             if avoid_models and model in avoid_models:
                 continue
+            # only keys whose PROJECT has room for this request's tokens (limits shared by all its keys)
             healthy = [k for k in rt._gemini_candidate_keys(ring, model, len(ring))
-                       if not rt.is_rate_limited(k) and (model, k) not in tried]
+                       if not rt.is_rate_limited(k) and (model, k) not in tried
+                       and QUOTAS.wait_seconds(QUOTAS.project_of(k, keys), model, tokens) <= 0]
             if healthy:
                 plan.append((model, healthy[self._key_cursor % len(healthy)]))
         if advance:
@@ -331,9 +394,9 @@ class LLMGateway:
 
     async def _gemini_once(self, prompt, system, max_tokens, temperature, json_mode, timeout, tried,
                            allow_lite: bool = True, prefer_lite: bool = False,
-                           avoid_models: set | None = None) -> LLMResult:
+                           avoid_models: set | None = None, tokens: int = 0) -> LLMResult:
         rt = self.runtime
-        plan = self._attempt_plan(tried, allow_lite, prefer_lite, avoid_models=avoid_models)
+        plan = self._attempt_plan(tried, allow_lite, prefer_lite, avoid_models=avoid_models, tokens=tokens)
         if not plan:
             return LLMResult(ok=False, error="no_gemini_key_or_model_available")
         last_error = "no_response"
@@ -344,6 +407,11 @@ class LLMGateway:
                 last_error = f"model_cooling model={model}"
                 continue
             tried.add((model, key))
+            project = QUOTAS.project_of(key, [k for k in rt.get_gemini_keys() if rt._is_rest_api_key(k)])
+            if QUOTAS.wait_seconds(project, model, tokens) > 0:
+                last_error = f"quota_full model={model}"  # another call used this project's room meanwhile
+                continue
+            QUOTAS.record(project, model, tokens)
             config = {"maxOutputTokens": int(max_tokens), "temperature": float(temperature)}
             if json_mode:
                 config["responseMimeType"] = "application/json"
@@ -371,6 +439,8 @@ class LLMGateway:
                 last_error = f"{type(exc).__name__} model={model}"
                 continue
             status = response.status_code
+            self.stats.http_status[str(status)] += 1
+            self.stats.model_status[f"{model}:{status}"] += 1
             if status in (401, 403):
                 rt.mark_rate_limited(key, 24 * 60 * 60_000)
                 last_error = f"http_{status}"
@@ -380,8 +450,19 @@ class LLMGateway:
                 last_error = f"http_404 model={model}"
                 continue
             if status == 429:
+                error_body = _safe_body(response)
+                if project != SHARED_PROJECT:
+                    # the project's allowance for this model is used up: every key of the project is cooled for
+                    # as long as Google says (Retry-After / RetryInfo), until tomorrow for a per-day quota
+                    QUOTAS.on_429(project, model, response.headers, error_body)
+                delay = parse_retry_delay(response.headers, error_body)
+                key_ms = rt.GEMINI_KEY_COOLDOWN_MS
+                if is_daily_quota(error_body):
+                    key_ms = max(key_ms, int(float(os.getenv("GG_GEMINI_DAILY_RESET_HOURS", "6") or 6) * 3_600_000))
+                elif delay:
+                    key_ms = max(key_ms, int(delay * 1000))
                 rt.mark_rate_limited(key, rt.GEMINI_KEY_COOLDOWN_MS)
-                rt.mark_rate_limited(f"report:gemini:{key}:{model}", rt.GEMINI_KEY_COOLDOWN_MS)
+                rt.mark_rate_limited(f"report:gemini:{key}:{model}", key_ms)
                 now = time.monotonic()
                 recent = {k: t for k, t in self._model_429.get(model, {}).items() if now - t < 60}
                 recent[key] = now
@@ -393,7 +474,9 @@ class LLMGateway:
                 last_error = f"http_429 model={model}"
                 continue
             if status == 503:
-                rt.mark_rate_limited(f"gemini:model:{model}", rt.GEMINI_MODEL_COOLDOWN_MS)
+                # upstream overload: the model cools for Google's suggested delay when it gives one
+                delay = parse_retry_delay(response.headers, _safe_body(response))
+                rt.mark_rate_limited(f"gemini:model:{model}", max(rt.GEMINI_MODEL_COOLDOWN_MS, int((delay or 0) * 1000)))
                 last_error = f"http_503 model={model}"
                 continue
             if status == 400:
@@ -439,3 +522,14 @@ class LLMGateway:
         if not text or text == "NO_ADDITIONAL_EVIDENCE":
             return LLMResult(ok=False, error=f"{previous.error}; groq empty")
         return LLMResult(ok=True, text=text, model=str(model or "groq"))
+
+
+def _safe_body(response) -> object:
+    """An error response's body for reading quota details (never logged: it can echo request metadata)."""
+    try:
+        return response.json()
+    except Exception:
+        try:
+            return response.text[:4000]
+        except Exception:
+            return ""

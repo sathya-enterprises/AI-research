@@ -829,7 +829,9 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         )
         max_tokens = min(16384, max(3072, int(budget * 2.2) + 800))
         result = await gateway.generate(purpose="section", section_id=f"{section.section_id}#{gi + 1}", system=SYSTEM,
-                                        prompt=prompt, max_tokens=max_tokens, temperature=0.25, timeout=150, retries=1)
+                                        prompt=prompt, max_tokens=max_tokens, temperature=0.25, timeout=150, retries=1,
+                                        # a fallback answer under half the budget waits for Gemini (fallback consistency)
+                                        min_words=int(budget * 0.5))
         draft.calls += 1
         if not result.ok:
             draft.error = f"{draft.error}; " if draft.error else ""
@@ -876,7 +878,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
         )
         result = await gateway.generate(purpose="section_extend", section_id=f"{section.section_id}#ext", system=SYSTEM,
                                         prompt=prompt, max_tokens=min(12288, int(remaining * 2.2) + 800),
-                                        temperature=0.25, timeout=150, retries=1)
+                                        temperature=0.25, timeout=150, retries=1, min_words=int(remaining * 0.5))
         draft.calls += 1
         if result.ok and not re.match(r"^\s*<<<SUMMARY>>>\s*NONE", result.text.strip()):
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)

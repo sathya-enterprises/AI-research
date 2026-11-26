@@ -1118,7 +1118,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
                    + (f"{regime.facts_block()}\n\n" if regime is not None else "")
                    + f"SECTION SUMMARIES:\n{summaries}")
     exec_result = await gateway.generate(purpose="executive_summary", section_id="exec", system=EXEC_SYSTEM,
-                                         prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120)
+                                         prompt=exec_prompt, max_tokens=4096, temperature=0.2, timeout=120,
+                                         min_words=int((exec_section.word_budget or 0) * 0.5))
     exec_body = (exec_result.text.split(SUMMARY_MARKER)[0].strip() if exec_result.ok else "")
     exec_body = re.sub(r"(?m)^\s*#{1,6}\s+.*$", "", exec_body).strip()
     from utils.section_writer import _CURRENCY_AFTER_RE, _RS_DOT_RE, normalize_citation_brackets
@@ -1427,7 +1428,8 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     meta = {
         "pipeline": "v2", "elapsedSeconds": round(time.perf_counter() - started, 1),
         "outline": outline.to_dict(), "llm": {**gateway.stats.to_dict(), "hedges": getattr(gateway, "stats_hedges", 0),
-                                             "hedgeWins": getattr(gateway, "stats_hedge_wins", 0)},
+                                             "hedgeWins": getattr(gateway, "stats_hedge_wins", 0),
+                                             "quotaPools": _quota_snapshot()},
         "sections": [{"id": d.section_id, "title": d.title, "ok": d.ok, "error": d.error, "words": d.words, "calls": d.calls,
                       "citedPassages": len(d.cited_passages), "invalidCitations": d.invalid_citations,
                       "repairedCitations": d.repaired_citations,
@@ -1507,3 +1509,12 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "summary": re.sub(r"\[[^\]]*\]", "", exec_body.split("\n\n")[0])[:600] if exec_body else outline.thesis,
     }, ensure_ascii=False)
     return {"raw": raw, "model": "v2:" + ",".join(sorted(gateway.stats.models)) if gateway.stats.models else "v2", "meta": meta}
+
+
+def _quota_snapshot() -> dict:
+    """Per (project, model) pool: requests and tokens in the last minute, requests today, cooldown left."""
+    try:
+        from utils.llm_quota import QUOTAS
+        return QUOTAS.snapshot()
+    except Exception:
+        return {}

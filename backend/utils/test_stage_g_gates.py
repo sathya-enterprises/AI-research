@@ -252,7 +252,7 @@ def test_gateway_retries_network_failures_with_backoff_without_cooling_keys(monk
     monkeypatch.setattr(gw, "_gemini_once", fake_once)
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     result = asyncio.run(gw.generate(purpose="outline", prompt="p", retries=1))
-    assert result.ok and calls["n"] == 3 and slept == [4] and gw.stats.network_retries == 1
+    assert result.ok and calls["n"] == 3 and _jitter_ok(slept, [4]) and gw.stats.network_retries == 1
 
 
 def test_a_stranded_number_fragment_is_removed_and_a_one_character_claim_is_found():
@@ -335,7 +335,7 @@ def test_gateway_retries_http_5xx_with_exponential_backoff(monkeypatch):
     monkeypatch.setattr(gw, "_gemini_once", fake_once)
     monkeypatch.setattr(G.asyncio, "sleep", fake_sleep)
     result = asyncio.run(gw.generate(purpose="section", prompt="p", retries=0))
-    assert result.ok and slept == [4, 8, 16]
+    assert result.ok and _jitter_ok(slept, [4, 8, 16])
 
 
 def test_write_section_budget_scale_and_no_extension_under_the_deadline():
@@ -366,3 +366,8 @@ def test_export_drops_a_later_table_repeating_flagged_rows_only():
                  "text": "Top 3 by Past 1-Month Return"}]
     healed, _, actions = heal_rendered_duplicates(report, [], findings)
     assert healed.count("1.59%") == 1 and "| Auto | 25.1 |" in healed and actions
+
+
+def _jitter_ok(waits, expected):
+    """Backoff sleeps carry up to 20% jitter so waiting calls do not retry in the same second."""
+    return len(waits) == len(expected) and all(e <= w <= e * 1.2 + 1e-9 for w, e in zip(waits, expected))
