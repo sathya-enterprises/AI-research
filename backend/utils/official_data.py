@@ -766,7 +766,8 @@ async def official_sources(question: str, gateway, *, today: date, tier: str, me
 
 
 # ── data-first charts from official datasets in the evidence store ───────────────────────────────
-OFFICIAL_PUBLISHERS = ("World Bank", "International Monetary Fund", "Our World in Data", "FRED (Federal Reserve Bank of St. Louis)")
+OFFICIAL_PUBLISHERS = ("World Bank", "International Monetary Fund", "Our World in Data", "FRED (Federal Reserve Bank of St. Louis)",
+                       "data.gov.in")
 
 
 def is_official_passage(passage) -> bool:

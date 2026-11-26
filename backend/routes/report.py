@@ -24355,6 +24355,20 @@ async def generate_report(request: Request):
                 for r in _od_rows]})
         except Exception as _od_exc:  # official data must never abort a report
             log.warning("Report: official data skipped: %s: %s", type(_od_exc).__name__, str(_od_exc)[:160])
+        # data.gov.in (Government of India open data): off unless DATA_GOV_IN_API_KEY and GG_DATAGOV_RESOURCES
+        # are configured; the same kind of source row as the datasets above.
+        try:
+            from utils.datagov_in import datagov_sources as _datagov_sources
+            _dg_rows, _dg_note = await _datagov_sources(question, tier=report_tier)
+            if _dg_rows:
+                _dg_urls = {str(r.get("url") or "").rstrip("/") for r in _dg_rows}
+                enriched = list(_dg_rows) + [r for r in (enriched or [])
+                                             if str((r or {}).get("url") or "").rstrip("/") not in _dg_urls]
+            if _dg_note.get("enabled"):
+                record_research_stage("datagov_in", {**_dg_note, "rows": [
+                    {k: v for k, v in r.items() if k in ("title", "url", "officialDataset")} for r in _dg_rows]})
+        except Exception as _dg_exc:  # never abort a report; the type only (a message could hold the request URL)
+            log.warning("Report: data.gov.in skipped: %s", type(_dg_exc).__name__)
 
     # Rescue and crawler additions can reintroduce URL aliases after the first
     # deduplication pass. Collapse them again immediately before assigning IDs,

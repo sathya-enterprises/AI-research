@@ -66,3 +66,6 @@ desktop.ini
 
 # Local eval run artefacts (captures, PDFs, logs) for scripts/eval_report.py
 backend/diagnostics/eval_runs/
+
+# data.gov.in API response cache (utils/datagov_in.py)
+backend/.cache/
