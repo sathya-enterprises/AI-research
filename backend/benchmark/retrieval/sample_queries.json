@@ -1,0 +1,173 @@
+{
+ "exportDir": "<export dir from scripts/retrieval_bench_export.py>",
+ "queries": [
+  {
+   "qid": "o00",
+   "capture": "research_capture_20261126_171531_fde4fea8",
+   "leafId": "sec-1.2",
+   "need": "Coking vs Non-Coking Output: Break down production by coal grade."
+  },
+  {
+   "qid": "o01",
+   "capture": "research_capture_20261126_171531_fde4fea8",
+   "leafId": "sec-10.1",
+   "need": "Stock Monitoring and Shortages: Analyze periods of deficit and stock recovery."
+  },
+  {
+   "qid": "o02",
+   "capture": "research_capture_20261126_181516_430affd5",
+   "leafId": "sec-4.1",
+   "need": "ANDA Approvals and Competitive Outlook: Track USFDA approvals as a leading indicator for market competitiveness."
+  },
+  {
+   "qid": "o03",
+   "capture": "research_capture_20261126_181516_430affd5",
+   "leafId": "sec-12.1",
+   "need": "Transitioning Beyond Generics: Discuss the move toward value-added products and innovation."
+  },
+  {
+   "qid": "o04",
+   "capture": "research_capture_20261127_135134_c8c38fe8",
+   "leafId": "sec-7.1",
+   "need": "Subsidy Allocation and Beneficiary Targets: Establish the financial scale and vehicle targets of the scheme."
+  },
+  {
+   "qid": "o05",
+   "capture": "research_capture_20261127_135134_c8c38fe8",
+   "leafId": "sec-11.1",
+   "need": "Comparative Market Share Analysis: Provide a side-by-side comparison of registration shares."
+  },
+  {
+   "qid": "o06",
+   "capture": "research_capture_20261125_191948_09f7fbf5",
+   "leafId": "sec-13.1",
+   "need": "Daily Flight Departures and Network Intensity Trends: Provide monthly and annual trends in average daily scheduled domestic departures over the 60-month window."
+  },
+  {
+   "qid": "o07",
+   "capture": "research_capture_20261125_191948_09f7fbf5",
+   "leafId": "sec-2.3",
+   "need": "Unit Economics, Depreciation, and Yield Trends: Examine IndiGo's unit revenue (RASK), CASK, depreciation costs, and load factors under changing passenger demand."
+  },
+  {
+   "qid": "o08",
+   "capture": "research_capture_20261121_215950_523b694b",
+   "leafId": "sec-3.2",
+   "need": "Consumer Sentiment Shifts: Analyze survey data regarding consumer intent to purchase gold."
+  },
+  {
+   "qid": "o09",
+   "capture": "research_capture_20261121_215950_523b694b",
+   "leafId": "sec-7.1",
+   "need": "Taxation Policy Evolution: Describe how GST interacts with import duties to form the final price."
+  },
+  {
+   "qid": "o10",
+   "capture": "research_capture_20261119_005315_1750867b",
+   "leafId": "sec-9.1",
+   "need": "Australia and New Zealand: The Oceanic Pivot: Review the ECTA and ongoing NZ negotiations."
+  },
+  {
+   "qid": "o11",
+   "capture": "research_capture_20261119_005315_1750867b",
+   "leafId": "sec-5.1",
+   "need": "Digital Trade and Financial Services Integration: Detail the specific focus on modern services."
+  },
+  {
+   "qid": "o12",
+   "capture": "research_capture_20261117_111121_04323b9c",
+   "leafId": "sec-2.2",
+   "need": "Industrial and Agricultural Credit Trajectory: Examine the relative stability or fluctuations in credit to the productive sectors."
+  },
+  {
+   "qid": "o13",
+   "capture": "research_capture_20261117_111121_04323b9c",
+   "leafId": "sec-1.1",
+   "need": "Public vs Private Sector Bank Asset Quality: Compare the recovery and NPA reduction rates between PSBs and private banks using S4 and S7 data."
+  },
+  {
+   "qid": "o14",
+   "capture": "research_capture_20261117_140125_16d69f99",
+   "leafId": "sec-6",
+   "need": "Data Limitations and Measurement Nuances: Identify potential limitations in the primary data sources used to measure the labor market."
+  },
+  {
+   "qid": "o15",
+   "capture": "research_capture_20261117_140125_16d69f99",
+   "leafId": "sec-1.2",
+   "need": "Job Openings and Vacancy Rates: Track the volume of job openings and the job opening rate from the peak in 2022 through 2024."
+  },
+  {
+   "qid": "p00",
+   "capture": "research_capture_20261126_171531_fde4fea8",
+   "leafId": "sec-1.2",
+   "queries": [
+    "how much metallurgical fuel versus steam-grade fuel is mined domestically"
+   ],
+   "need": "Coking vs Non-Coking Output: Break down production by coal grade."
+  },
+  {
+   "qid": "p01",
+   "capture": "research_capture_20261126_171531_fde4fea8",
+   "leafId": "sec-10.1",
+   "queries": [
+    "generating stations running low on fuel inventories and measures taken to fix the deficit"
+   ],
+   "need": "Stock Monitoring and Shortages: Analyze periods of deficit and stock recovery."
+  },
+  {
+   "qid": "p02",
+   "capture": "research_capture_20261126_181516_430affd5",
+   "leafId": "sec-4.1",
+   "queries": [
+    "US regulator clearances of generic medicines filed by Indian drug makers"
+   ],
+   "need": "ANDA Approvals and Competitive Outlook: Track USFDA approvals as a leading indicator for market competitiveness."
+  },
+  {
+   "qid": "p04",
+   "capture": "research_capture_20261127_135134_c8c38fe8",
+   "leafId": "sec-7.1",
+   "queries": [
+    "per-unit incentive amount and how many scooters the central scheme will support"
+   ],
+   "need": "Subsidy Allocation and Beneficiary Targets: Establish the financial scale and vehicle targets of the scheme."
+  },
+  {
+   "qid": "p05",
+   "capture": "research_capture_20261127_135134_c8c38fe8",
+   "leafId": "sec-11.1",
+   "queries": [
+    "which battery scooter makers lead registrations and how their shares compare"
+   ],
+   "need": "Comparative Market Share Analysis: Provide a side-by-side comparison of registration shares."
+  },
+  {
+   "qid": "p06",
+   "capture": "research_capture_20261125_191948_09f7fbf5",
+   "leafId": "sec-13.1",
+   "queries": [
+    "number of flights operated per day within the country by local airlines"
+   ],
+   "need": "Daily Flight Departures and Network Intensity Trends: Provide monthly and annual trends in average daily scheduled domestic departures over the 60-month window."
+  },
+  {
+   "qid": "p09",
+   "capture": "research_capture_20261121_215950_523b694b",
+   "leafId": "sec-7.1",
+   "queries": [
+    "levies and customs charges on bullion and how they changed over time"
+   ],
+   "need": "Taxation Policy Evolution: Describe how GST interacts with import duties to form the final price."
+  },
+  {
+   "qid": "p13",
+   "capture": "research_capture_20261117_111121_04323b9c",
+   "leafId": "sec-1.1",
+   "queries": [
+    "bad loan ratios at state-owned lenders compared with privately owned lenders"
+   ],
+   "need": "Public vs Private Sector Bank Asset Quality: Compare the recovery and NPA reduction rates between PSBs and private banks using S4 and S7 data."
+  }
+ ]
+}

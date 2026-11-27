@@ -10,6 +10,13 @@ from utils import llm_gateway as G
 from utils import research_capture as RC
 
 
+@pytest.fixture(autouse=True)
+def _shared_pool(monkeypatch):
+    """These tests describe the shared-pool behaviour. Other suites import modules that load backend/.env, which may
+    set GG_GEMINI_KEY_PROJECTS (per-project behaviour is tested in test_llm_scheduler.py)."""
+    monkeypatch.delenv("GG_GEMINI_KEY_PROJECTS", raising=False)
+
+
 def _runtime(groq_text="groq answer"):
     limited = set()
 

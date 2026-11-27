@@ -4600,6 +4600,12 @@ table.gg-table { width: 100% !important; max-width: 100% !important; table-layou
 .gg-sources-grid { display: block !important; width: 100% !important; }
 .gg-source-card--url-only { display: block !important; width: 100% !important; padding: 6pt 0 !important; margin: 0 !important; border: 0 !important; border-bottom: .5pt solid #E3EAE5 !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; break-inside: avoid !important; }
 .gg-source-url-only, .gg-source-link.gg-source-url-only { display: block !important; width: 100% !important; font-size: 8.6pt !important; line-height: 1.35 !important; color: #286849 !important; text-decoration: underline !important; overflow-wrap: anywhere !important; word-break: normal !important; }
+/* Compact Data Sources (PDF): one entry per source - [S#] title, then the URL on the same line, wrapping. */
+.gg-source-line.gg-source-line--compact { margin: 0 0 1.8pt !important; font-size: 7.8pt !important; line-height: 1.22 !important; }
+.gg-source-line--compact .gg-source-title-text { font-weight: 600 !important; }
+.gg-source-line--compact .gg-source-link.gg-source-url-only, .gg-source-line--compact .gg-source-link { display: inline !important; width: auto !important; margin-left: 3pt !important; font-size: 7.4pt !important; line-height: 1.22 !important; white-space: normal !important; overflow-wrap: anywhere !important; word-break: normal !important; }
+.gg-source-line--compact .gg-source-unavailable { margin-left: 3pt !important; font-size: 7.8pt !important; color: #66767C !important; }
+.gg-source-alias { display: inline !important; }
 .gg-source-note { margin-top: 5pt !important; padding-top: 5pt !important; font-size: 7.6pt !important; line-height: 1.32 !important; border-top: .5pt solid #E3EAE5 !important; }
 .gg-source-identity { display: block !important; margin: 0 0 3pt !important; font-size: 8.3pt !important; line-height: 1.3 !important; }
 .gg-source-id { display: inline-block !important; margin-right: 4pt !important; color: #2F7354 !important; font-weight: 700 !important; white-space: nowrap !important; }
@@ -5178,6 +5184,8 @@ def build_pdf(report: str, title: str, question: str, summary: str,
         report or "", title or "", question or "Research Report", summary or "",
         key_stats or [], charts or [], images, safe_theme, sources, presentation, report_tier,
         report_style=report_style, kicker=kicker,
+        # Data Sources as id, title and URL only (GG_PDF_COMPACT_SOURCES=0 restores the full entries)
+        compact_sources=os.getenv("GG_PDF_COMPACT_SOURCES", "1").strip() != "0",
     )
     # v93: static SVG charts use the same validated editorial palette as the
     # browser charts so preview and PDF match.

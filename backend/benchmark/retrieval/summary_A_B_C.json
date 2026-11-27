@@ -1,0 +1,74 @@
+{
+ "runs": 44,
+ "leaves": 572,
+ "passages": 21029,
+ "bm25ReimplementationCheck": {
+  "same": 132
+ },
+ "modelLoadSeconds": 0.5,
+ "memoryMB": {
+  "start_mb": 318,
+  "after_embedder_mb": 338,
+  "after_reranker_mb": 343,
+  "peak_mb": 696
+ },
+ "embedding": {
+  "passages": 3149,
+  "seconds": 137.1,
+  "msPerPassage": 43.54
+ },
+ "latencyMsPerLeaf": {
+  "A": 6.5,
+  "B_extra": 48.1,
+  "C_rerank_extra": 2089.0
+ },
+ "timing": {
+  "query_embed_s": 26.55,
+  "vector_search_s": 0.5,
+  "fusion_s": 1.33,
+  "rerank_s": 1194.92,
+  "reranked_pairs": 15184
+ },
+ "configs": {
+  "A": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.67,
+   "duplicateRate@10": 0.0727,
+   "duplicatesWithDifferentFigures@10": 364,
+   "duplicateRate@5": 0.065,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": 0.0546,
+   "writerCitedFound": 0.235
+  },
+  "B": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.658,
+   "duplicateRate@10": 0.0832,
+   "duplicatesWithDifferentFigures@10": 420,
+   "duplicateRate@5": 0.0622,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": 0.07,
+   "writerCitedFound": 0.294
+  },
+  "C": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.667,
+   "duplicateRate@10": 0.06,
+   "duplicatesWithDifferentFigures@10": 343,
+   "duplicateRate@5": 0.0503,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": 0.0547,
+   "writerCitedFound": 0.176
+  },
+  "C_nodedup": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.664,
+   "duplicateRate@10": 0.0663,
+   "duplicatesWithDifferentFigures@10": 340,
+   "duplicateRate@5": 0.057,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": null,
+   "writerCitedFound": null
+  }
+ }
+}

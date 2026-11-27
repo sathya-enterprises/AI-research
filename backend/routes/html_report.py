@@ -4639,8 +4639,14 @@ def _render_sources_appendix(
     report_tier: str = "detailed",
     cited_source_ids: set[str] | None = None,
     heading_override: str | None = None,
+    compact: bool = False,
 ) -> str:
     """Render canonical sources as a compact, numbered, one-line list.
+
+    ``compact`` (the PDF export): each entry shows only its source id(s), title and URL - no publisher, date,
+    tier or reliability line - and sources whose URLs normalise to the same page are one entry listing every id
+    ("[S12, S40]"), with an anchor per id so each citation still resolves. Only the display changes: the
+    manifest, the evidence store and the citation mappings keep all their metadata.
 
     Keep stable source IDs in the DOM so inline [S#] citations still jump to the
     correct source. Client-facing appendix rows show only a sequence number,
@@ -4666,6 +4672,22 @@ def _render_sources_appendix(
     if not display_manifest:
         return ""
 
+    aliases: dict[int, list[str]] = {}
+    if compact:
+        from utils.source_identity import canonical_http_url
+        first_by_url: dict[str, int] = {}
+        grouped: list[dict] = []
+        for source in display_manifest:
+            raw_url = _safe_plain_url(source.get("publisher_page_url") or source.get("url"))
+            key = canonical_http_url(raw_url) if raw_url else ""
+            if key and key in first_by_url:
+                aliases.setdefault(first_by_url[key], []).append(str(source.get("id") or "").strip().upper())
+                continue
+            if key:
+                first_by_url[key] = len(grouped)
+            grouped.append(source)
+        display_manifest = grouped
+
     lines: list[str] = []
     for index, source in enumerate(display_manifest, start=1):
         # When a direct publisher fetch established a canonical page, make that
@@ -4673,8 +4695,10 @@ def _render_sources_appendix(
         # requested URL in the manifest for audit traceability.
         url = _safe_plain_url(source.get("publisher_page_url") or source.get("url"))
         source_id = str(source.get("id") or f"S{index}").strip().upper()
+        extra_ids = [x for x in aliases.get(index - 1, []) if x and x != source_id]
         # The [S#] id is printed with the title (list markers are hidden in some house styles).
-        title = f"[{str(source.get('id') or '').strip().upper()}] " + (clean_title(source) or url or "Untitled source")
+        title = (f"[{', '.join([str(source.get('id') or '').strip().upper(), *extra_ids])}] "
+                 + (clean_title(source) or url or "Untitled source"))
         safe_id = html.escape(source_id, quote=True)
         safe_title = html.escape(title, quote=True)
         publication_date = str(source.get("publication_date") or "").strip()
@@ -4706,21 +4730,28 @@ def _render_sources_appendix(
         # repeated verbatim beside every citation in the exported report.
         # Publisher, date, authority tier, reliability score and a one-line reason
         # (formerly a separate "Source Reliability" appendix).
-        meta_text = [html.escape(part, quote=True) for part in _source_metadata(source)]
-        metadata_markup = (f'<span class="gg-source-metadata">{" · ".join(meta_text)}</span>' if meta_text
-                           else (f'<span class="gg-source-metadata">{date_markup}</span>' if date_markup else ""))
+        if compact:
+            metadata_markup = ""  # PDF: id, title and URL only (metadata stays in the manifest)
+        else:
+            meta_text = [html.escape(part, quote=True) for part in _source_metadata(source)]
+            metadata_markup = (f'<span class="gg-source-metadata">{" · ".join(meta_text)}</span>' if meta_text
+                               else (f'<span class="gg-source-metadata">{date_markup}</span>' if date_markup else ""))
         # The list number is the source id, so "[S12]" in the text is entry 12 here.
         number = source_number(source_id)
         value_attr = f' value="{number}"' if number else ""
+        # every id of a merged entry keeps its own anchor, so href="#source-S40" still lands on this entry
+        alias_anchors = "".join(f'<span id="source-{html.escape(x, quote=True)}" class="gg-source-alias"></span>'
+                                for x in extra_ids)
         lines.append(
-            f'<li id="source-{safe_id}" class="gg-source-line"{value_attr}>'
+            f'<li id="source-{safe_id}" class="gg-source-line{" gg-source-line--compact" if compact else ""}"{value_attr}>'
+            f'{alias_anchors}'
             f'<span class="gg-source-id">[{safe_id}]</span> '
             f'<span class="gg-source-title-text">{safe_title}</span> '
             f'{link_markup} '
             f'{metadata_markup}'
             f'</li>'
         )
-    count = len(display_manifest)
+    count = len(display_manifest) + sum(len(v) for v in aliases.values())
     heading = heading_override or ("Appendix — Data Sources" if placement == "appendix" or include_appendix else "Data Sources")
     print_break = ""
     return (
@@ -5027,7 +5058,9 @@ def build_html_report(report: str, title: str, question: str, summary: str,
                        presentation: object = None, report_tier: str = "detailed",
                        evidence_assets: list | None = None,
                        asset_uses: list | None = None,
-                       report_style: str | None = None, kicker: str = "") -> str:
+                       report_style: str | None = None, kicker: str = "",
+                       compact_sources: bool = False) -> str:
+    # ``compact_sources``: the PDF export lists each source as id, title and URL only (see _render_sources_appendix).
     # Older report writers use [IMAGE_n] while the presentation layer's
     # canonical web-image token is [WEB_IMG_n]. Normalize at the shared HTML
     # boundary so browser and PDF resolve the same selected image item.
@@ -5521,6 +5554,7 @@ def build_html_report(report: str, title: str, question: str, summary: str,
     sources_html = _render_sources_appendix(
         sources, placement, bool(source_spec.get("include_appendix")), source_registry,
         report_tier=report_tier, cited_source_ids=cited_source_ids, heading_override=sources_heading,
+        compact=compact_sources,
     )
     inline_sources_html = ""
     if placement == "none":

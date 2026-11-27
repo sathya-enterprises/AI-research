@@ -1,0 +1,51 @@
+{
+ "runs": 44,
+ "leaves": 572,
+ "passages": 21029,
+ "bm25ReimplementationCheck": {
+  "same": 132
+ },
+ "modelLoadSeconds": 0.4,
+ "memoryMB": {
+  "start_mb": 319,
+  "after_embedder_mb": 339,
+  "after_reranker_mb": 344,
+  "peak_mb": 563
+ },
+ "embedding": {
+  "passages": 0,
+  "seconds": 0,
+  "msPerPassage": null
+ },
+ "latencyMsPerLeaf": {
+  "A": 6.5,
+  "B_extra": 0.0,
+  "C_rerank_extra": 0.0,
+  "D_rerank_extra": 3385.7
+ },
+ "timing": {
+  "rerank_d_s": 1936.6
+ },
+ "configs": {
+  "A": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.67,
+   "duplicateRate@10": 0.0727,
+   "duplicatesWithDifferentFigures@10": 364,
+   "duplicateRate@5": 0.065,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": 0.0546,
+   "writerCitedFound": 0.235
+  },
+  "D": {
+   "emptyLeaves": 0,
+   "sourceDiversity@10": 0.677,
+   "duplicateRate@10": 0.0524,
+   "duplicatesWithDifferentFigures@10": 295,
+   "duplicateRate@5": 0.0476,
+   "missingProvenance@10": 0,
+   "meanLeafOverlap@10": 0.052,
+   "writerCitedFound": 0.176
+  }
+ }
+}
