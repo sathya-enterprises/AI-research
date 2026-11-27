@@ -71,6 +71,32 @@ no part of a key is logged. Every HTTP attempt is logged as `V2 LLM request <id>
 <model> <alias> status=… <category> <seconds> tokens=in/out attempt=n`. Per-project and per-model totals (requests,
 429/503, p50/p95/p99 latency, peak requests and tokens per minute, Groq share) are in `runSummary.llm.requests`.
 
+## Evidence retrieval and reranking (`utils/evidence_rerank.py`)
+
+Each section's evidence is the BM25 candidate set reranked by the RAG service's cross-encoder
+(`cross-encoder/ms-marco-MiniLM-L6-v2`). Web passages are not embedded. The benchmark behind this choice is in
+`backend/benchmark/retrieval/README.md`.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `GG_V2_RERANK` | `0` turns reranking off: every section uses the BM25 ranking, exactly as before. | `1` |
+| `GG_V2_RERANK_DEPTH` | BM25 candidates reranked per subsection. | `40` |
+| `GG_V2_RERANK_TIMEOUT_S` | Per-subsection timeout. That subsection stays on BM25 if it is exceeded. | `20` |
+| `GG_V2_RERANK_BUDGET_S` | Time budget for all reranking in one report. Later subsections stay on BM25 once it is used up. | `150` |
+| `GG_V2_RERANK_CONCURRENCY` | Rerank requests in flight at once. | `2` |
+| `GG_V2_SECTION_EVIDENCE_TOKENS` | Evidence tokens per section call. Whole passages are dropped, least relevant first, and passages behind the section's figures are always kept. | `16000` |
+| `RAG_SERVICE_TOKEN` | Shared secret between the backend and the RAG service, sent as `X-RAG-Service-Token`. Set the same value on both. When it is set, the service refuses requests without it. | unset |
+
+How retrieval behaves:
+
+- Reliability weighting (0.5 + reliability), the limit of 3 passages per source and the table boost are kept.
+- A near-duplicate passage is dropped only when it states exactly the same numbers. A similar passage with a
+  different value, period or unit is kept, so conflicting figures reach the writer and the disagreement check.
+- If the service is unreachable, refuses, errors or times out, that subsection keeps its BM25 ranking. After a
+  refusal or connection error, the rest of the report uses BM25 without waiting on the service again.
+- `runSummary.retrieval` reports the subsections reranked and the reasons for any BM25 fallback, the seconds
+  spent, and the section calls whose evidence was trimmed by the budget.
+
 ## 2. Claim verification (`utils/claim_check.py`)
 
 | Variable | Meaning | Default |

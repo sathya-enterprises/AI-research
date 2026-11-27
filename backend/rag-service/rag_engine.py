@@ -184,6 +184,21 @@ class RAGEngine:
         log.info(f"✅ RAG Engine ready — model={MODEL_NAME} dim={self._dim}")
 
     @property
+    def reranker_ready(self) -> bool:
+        return self._reranker is not None
+
+    def rerank_scores(self, query: str, texts: List[str]) -> List[float]:
+        """Cross-encoder relevance of each text to ``query`` (raw logits, in input order). Stateless: nothing is
+        stored. Used by report generation to rerank its own BM25 evidence candidates (no embeddings)."""
+        if self._reranker is None:
+            raise RuntimeError("reranker unavailable")
+        if not texts:
+            return []
+        scores = self._reranker.predict([(query, t) for t in texts], batch_size=HF_RERANK_BATCH_SIZE,
+                                        show_progress_bar=False)
+        return [float(s) for s in scores]
+
+    @property
     def model_name(self) -> str:
         return MODEL_NAME
 

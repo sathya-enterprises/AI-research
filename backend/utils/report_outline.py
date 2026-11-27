@@ -195,6 +195,9 @@ class Section:
     word_budget: int = 0
     status: str = "keep"
     note: str = ""
+    # retrieval score of each assigned passage (relative to the leaf's best when reranking ran), used to keep the
+    # most relevant evidence when a section call's evidence exceeds its token budget
+    passage_scores: dict = field(default_factory=dict)
 
     def leaves(self) -> list["Section"]:
         return [s for s in self.subsections if s.status == "keep"] or [self]
@@ -422,11 +425,21 @@ def _leaf_hits(store, leaf: Section, k: int) -> list[tuple[str, float]]:
     return [(pid, s) for rank, (pid, s) in enumerate(ranked) if rank < 6 or s >= 0.2 * top]
 
 
-def assign_passages(store, sections: list[Section], k_leaf: int) -> None:
+def assign_passages(store, sections: list[Section], k_leaf: int,
+                    leaf_hits: dict[str, list[tuple[str, float]]] | None = None) -> None:
+    """``leaf_hits``: reranked hits per leaf id (utils.evidence_rerank); other leaves use BM25. When any leaf was
+    reranked every leaf's scores are taken relative to its own best, so reranked and BM25 leaves compete on one
+    scale; without reranking the scores (and the assignment) are exactly as before."""
     candidates = []
+    relative = bool(leaf_hits)
     for sec in sections:
         for leaf in sec.leaves():
-            for pid, score in _leaf_hits(store, leaf, k_leaf * 2):
+            hits = (leaf_hits or {}).get(leaf.section_id) or _leaf_hits(store, leaf, k_leaf * 2)
+            if relative and hits:
+                best = hits[0][1] or 1.0
+                hits = [(pid, score / best) for pid, score in hits]
+            leaf.passage_scores = dict(hits)
+            for pid, score in hits:
                 candidates.append((score, leaf, pid))
     uses: dict[str, int] = {}
     for score, leaf, pid in sorted(candidates, key=lambda x: -x[0]):
@@ -960,10 +973,16 @@ async def build_outline(store, gateway, *, question: str, tier: str, today: str,
         # off: replayed writer text was written for the recorded subsections.)
         from utils.subsection_planner import diversify_deep_dives
         diversify_deep_dives(store, sections, decisions)
-    assign_passages(store, sections, rules["k_leaf"])
+    # Configuration D (backend/benchmark/retrieval): BM25 candidates reranked by the RAG service's cross-encoder;
+    # every leaf the reranker cannot serve keeps its BM25 ranking.
+    from utils.evidence_rerank import rerank_leaves
+    leaf_hits, rerank_stats = await rerank_leaves(store, [leaf for sec in sections for leaf in sec.leaves()],
+                                                  k=rules["k_leaf"] * 2)
+    assign_passages(store, sections, rules["k_leaf"], leaf_hits=leaf_hits)
     seed_entity_evidence(store, sections, tiers, question=question)
     resolve_thin_evidence(store, sections, decisions)
-    meta: dict = {"tier": tier, "outlineModel": result.model if result else "", "outlineAttempts": attempts}
+    meta: dict = {"tier": tier, "outlineModel": result.model if result else "", "outlineAttempts": attempts,
+                  "evidenceRerank": rerank_stats}
     if asks is not None:
         meta["questionAsks"] = asks.to_dict()
     if tiers:

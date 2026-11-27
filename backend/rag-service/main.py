@@ -112,7 +112,44 @@ class ReportReq(BaseModel):
     report_type: str = "comprehensive"  # comprehensive | summary | comparison | technical
 
 
+class RerankPassage(BaseModel):
+    id: str = Field(min_length=1, max_length=40)
+    text: str = Field(max_length=4000)
+
+
+class RerankReq(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    passages: List[RerankPassage] = Field(max_length=64)
+
+
+def service_token_ok(request: Request) -> bool:
+    """Backend-to-RAG shared secret. When RAG_SERVICE_TOKEN is set, a request must carry it in
+    X-RAG-Service-Token (constant-time comparison). The value is never logged."""
+    import hmac
+    expected = os.getenv("RAG_SERVICE_TOKEN", "").strip()
+    if not expected:
+        return True
+    supplied = request.headers.get("x-rag-service-token", "")
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
 # ── Routes ────────────────────────────────────────────────────
+
+
+@app.post("/rerank")
+async def rerank(req: RerankReq, request: Request):
+    """Cross-encoder scores for report evidence candidates (stateless; nothing stored or logged but counts)."""
+    if not service_token_ok(request):
+        raise HTTPException(401, "unauthorized")
+    if not engine.reranker_ready:
+        raise HTTPException(503, "reranker unavailable")
+    t0 = time.time()
+    texts = [p.text for p in req.passages]
+    scores = await asyncio.to_thread(engine.rerank_scores, req.query, texts)
+    elapsed = round((time.time() - t0) * 1000)
+    _record_rag_event(request, "rerank", "ok", elapsed, {"candidate_count": len(texts)})
+    return {"scores": {p.id: s for p, s in zip(req.passages, scores)}, "model": os.getenv(
+        "HF_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2"), "elapsed_ms": elapsed}
 
 @app.get("/ping")
 @app.head("/ping")

@@ -68,9 +68,22 @@ def build_run_summary(meta: dict, *, tier: str, stages: dict | None = None) -> d
         "charts": {"candidates": charts.get("candidates"), "planned": charts.get("planned"), "used": charts.get("used")},
         "sections": {"written": sum(1 for s in sections if s.get("ok")), "planned": len(sections),
                      "short": length.get("shortSections") or [], "failed": length.get("failedSections") or []},
+        "retrieval": _retrieval(meta),
         "words": meta.get("words"), "estimatedPages": meta.get("estimatedPages"),
         "lengthStatus": length.get("status"),
     }
+
+
+def _retrieval(meta: dict) -> dict:
+    """Evidence reranking (leaves reranked / on BM25, why, seconds) and the evidence each section call received."""
+    rerank = ((meta.get("outline") or {}).get("meta") or {}).get("evidenceRerank") or {}
+    calls = [c for s in meta.get("sections") or [] for c in (s.get("evidence") or [])]
+    return {"rerank": {k: rerank.get(k) for k in ("enabled", "leaves", "reranked", "fallback", "fallbackReasons",
+                                                  "pairs", "seconds")} if rerank else {},
+            "sectionCalls": len(calls),
+            "evidenceTokensMax": max((c.get("tokens", 0) for c in calls), default=0),
+            "callsTrimmed": sum(1 for c in calls if c.get("dropped")),
+            "passagesTrimmed": sum(int(c.get("dropped") or 0) for c in calls)}
 
 
 def _requests_brief(req: dict) -> dict:
@@ -98,5 +111,9 @@ def summary_line(summary: dict) -> str:
             f"breaker {llm.get('circuitBreakerTrips')} concurrency {(llm.get('concurrency') or {}).get('lowest')}-"
             f"{(llm.get('concurrency') or {}).get('final')} | "
             f"claims {claims.get('byStatus')} corrected {claims.get('corrected')} removed {claims.get('removed')} | "
-            f"charts {(summary.get('charts') or {}).get('used')} | words {summary.get('words')} "
+            f"charts {(summary.get('charts') or {}).get('used')} | rerank "
+            f"{((summary.get('retrieval') or {}).get('rerank') or {}).get('reranked')}/"
+            f"{((summary.get('retrieval') or {}).get('rerank') or {}).get('leaves')} leaves "
+            f"{((summary.get('retrieval') or {}).get('rerank') or {}).get('seconds')}s, evidence trimmed in "
+            f"{(summary.get('retrieval') or {}).get('callsTrimmed')} calls | words {summary.get('words')} "
             f"pages {summary.get('estimatedPages')} ({summary.get('lengthStatus')})")

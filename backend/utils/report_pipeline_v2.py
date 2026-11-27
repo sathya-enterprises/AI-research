@@ -1459,6 +1459,7 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
         "sections": [{"id": d.section_id, "title": d.title, "ok": d.ok, "error": d.error, "words": d.words, "calls": d.calls,
                       "budget": getattr(d, "budget", 0), "models": list(getattr(d, "models", []) or []),
                       "extended": bool(getattr(d, "extended", False)),
+                      "evidence": list(getattr(d, "evidence", []) or []),
                       "short": bool(getattr(d, "budget", 0) and d.ok and d.words < 0.6 * d.budget),
                       "citedPassages": len(d.cited_passages), "invalidCitations": d.invalid_citations,
                       "repairedCitations": d.repaired_citations,

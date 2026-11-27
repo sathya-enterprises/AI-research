@@ -353,3 +353,31 @@ async def rag_diagnostics() -> dict:
         return payload if isinstance(payload, dict) else {"reachable": True, "status": "invalid_response", "recentEvents": []}
     except Exception as exc:
         return {"reachable": False, "status": "unreachable", "errorType": type(exc).__name__, "recentEvents": []}
+
+
+def rag_service_headers() -> dict:
+    """Headers for every backend -> RAG service call: the trace id, and the shared secret when
+    RAG_SERVICE_TOKEN is set (never logged)."""
+    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
+    token = os.getenv("RAG_SERVICE_TOKEN", "").strip()
+    if token:
+        headers["X-RAG-Service-Token"] = token
+    return headers
+
+
+async def rag_rerank(query: str, passages: list[dict], timeout: float = 20.0) -> dict | None:
+    """Cross-encoder scores {passage id: score} for report evidence candidates, or None when the RAG service is
+    unreachable, refuses (401/503) or errors - the caller then keeps its BM25 ranking. Does not wake a sleeping
+    service: a cold start would cost more than reranking saves."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=timeout, write=10, pool=5)) as c:
+            res = await c.post(f"{RAG_URL}/rerank", json={"query": query, "passages": passages},
+                               headers=rag_service_headers())
+        if not res.is_success:
+            log.info("RAG rerank unavailable: HTTP %s", res.status_code)
+            return None
+        scores = res.json().get("scores")
+        return {str(k): float(v) for k, v in scores.items()} if isinstance(scores, dict) else None
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        log.info("RAG rerank unavailable: %s", type(exc).__name__)
+        return None

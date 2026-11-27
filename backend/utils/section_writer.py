@@ -88,6 +88,7 @@ class SectionDraft:
     budget: int = 0                                          # words planned for the section
     models: list[str] = field(default_factory=list)          # model that wrote each part (fallback visibility)
     extended: bool = False                                   # an evidence-driven extension was added
+    evidence: list = field(default_factory=list)             # per call: passages and tokens sent, passages trimmed
 
 
 def _normalize_number(token: str) -> str:
@@ -829,11 +830,21 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     subs = [s for s in section.subsections if s.status == "keep"]
     groups = _chunks(subs) if subs else [[]]
     draft.budget = max(150, int(section.word_budget * budget_scale))
+    from utils.evidence_rerank import fit_evidence, section_evidence_budget
+    evidence_budget = section_evidence_budget()
+    scores: dict[str, float] = {}
+    for node in [section, *section.leaves()]:
+        for pid, value in (getattr(node, "passage_scores", None) or {}).items():
+            scores[pid] = max(scores.get(pid, 0.0), float(value))
     bodies, summaries = [], []
     for gi, group in enumerate(groups):
         group_passage_ids = set(pid for s in group for pid in s.passage_ids) or allowed_passages
         group_passages = [p for p in passages if p.passage_id in group_passage_ids] or passages
         group_figures = [f for f in figures if not group or set(f.passage_ids) & group_passage_ids or gi == 0]
+        # per-call evidence budget: whole passages, least relevant first; a figure's own passages always stay
+        group_passages, fit = fit_evidence(group_passages, scores=scores, budget=evidence_budget,
+                                           keep={pid for f in group_figures for pid in f.passage_ids})
+        draft.evidence.append({"call": f"{section.section_id}#{gi + 1}", **fit})
         budget = sum(s.word_budget for s in group) if group else section.word_budget
         budget = max(150, int(budget * budget_scale))
         group_facts = numbered_facts(group_passages)
@@ -880,6 +891,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
     words_so_far = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", CITE_RE.sub(" ", body_so_far)))
     cited_so_far = {t.strip().upper() for g in CITE_RE.findall(body_so_far) for t in re.split(r"\s*[,;]\s*", g)}
     unused = [p for p in passages if p.passage_id not in cited_so_far]
+    unused, fit_ext = fit_evidence(unused, scores=scores, budget=evidence_budget, keep=set())
     if allow_extension and body_so_far and words_so_far < 0.7 * section.word_budget * budget_scale and len(unused) >= 3:
         remaining = max(250, section.word_budget - words_so_far)
         prompt = (
@@ -898,6 +910,7 @@ async def write_section(gateway, store, section, figures: list, *, question: str
                                         prompt=prompt, max_tokens=min(12288, int(remaining * 2.2) + 800),
                                         temperature=0.25, timeout=150, retries=1, min_words=int(remaining * 0.5))
         draft.calls += 1
+        draft.evidence.append({"call": f"{section.section_id}#ext", **fit_ext})
         if result.ok and not re.match(r"^\s*<<<SUMMARY>>>\s*NONE", result.text.strip()):
             extra = SectionDraft(section_id=draft.section_id, title=draft.title)
             postprocess(extra, result.text, allowed_passages={p.passage_id for p in unused} | cited_so_far,
