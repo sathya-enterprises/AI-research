@@ -23,6 +23,9 @@ class _Engine:
 def client(monkeypatch):
     stubs = {"rag_engine": types.SimpleNamespace(RAGEngine=_Engine),
              "okf_store": types.SimpleNamespace(), "pgvector_store": types.SimpleNamespace(storage_backend=lambda: "stub")}
+    # main.py loads .env files into the process environment; tests must never pick up a real local secret
+    monkeypatch.setitem(sys.modules, "dotenv", types.SimpleNamespace(load_dotenv=lambda *a, **k: None,
+                                                                     dotenv_values=lambda *a, **k: {}))
     for name, module in stubs.items():
         monkeypatch.setitem(sys.modules, name, module)
     # load rag-service/main.py by path: in the full suite "main" would be the backend's own main.py
@@ -37,6 +40,7 @@ BODY = {"query": "electric two-wheeler registrations", "passages": [{"id": "S1.1
 
 def test_rerank_returns_a_score_per_passage(client, monkeypatch):
     monkeypatch.delenv("RAG_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("RAG_ALLOW_UNAUTHENTICATED", "1")   # local-development opt-out (fail closed otherwise)
     http, _ = client
     res = http.post("/rerank", json=BODY)
     assert res.status_code == 200 and res.json()["scores"] == {"S1.1": 3.0, "S2.1": 6.0}
@@ -53,6 +57,7 @@ def test_rerank_requires_the_shared_secret_when_one_is_configured(client, monkey
 
 def test_rerank_is_503_without_a_reranker_and_rejects_oversized_requests(client, monkeypatch):
     monkeypatch.delenv("RAG_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("RAG_ALLOW_UNAUTHENTICATED", "1")
     http, main = client
     monkeypatch.setattr(main.engine, "reranker_ready", False, raising=False)
     assert http.post("/rerank", json=BODY).status_code == 503

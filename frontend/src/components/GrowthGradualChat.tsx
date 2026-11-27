@@ -391,7 +391,8 @@ export default function GrowthGradualChat() {
           try {
             const response = await fetch('/api/rag/index', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Request-ID': attachmentTraceId },
+              // signed-in uploads carry the user's token so the session is tied to their account
+              headers: { 'Content-Type': 'application/json', 'X-Request-ID': attachmentTraceId, ...(await authHeader()) },
               body: JSON.stringify({ session_id: sessionId, documents, images, binaryFiles }),
             });
             const data = await response.json().catch(() => ({}));
@@ -744,7 +745,7 @@ export default function GrowthGradualChat() {
         // live web research and several provider/validation passes execute.
         const started = await fetch('/api/chat/report/edit/start', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
           body: JSON.stringify({
             report: reportData.report,
             reportId: reportData.reportId || reportMsgId,
@@ -1528,7 +1529,7 @@ export default function GrowthGradualChat() {
         };
         const started = await fetch('/api/chat/report/start', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
           body: JSON.stringify(startPayload),
         });
         const startContentType = String(started.headers.get('content-type') || '').toLowerCase();
@@ -1666,7 +1667,7 @@ export default function GrowthGradualChat() {
                 setStatusMsg('The report server restarted and lost this job — starting the report again…');
                 const restarted = await fetch('/api/chat/report/start', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
                   body: JSON.stringify({ ...startPayload, clientRequestId: `${clientRequestId}:restart` }),
                 });
                 const restartedData = await restarted.json().catch(() => null) as { jobId?: string } | null;

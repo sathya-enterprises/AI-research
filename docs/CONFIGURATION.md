@@ -97,6 +97,29 @@ How retrieval behaves:
 - `runSummary.retrieval` reports the subsections reranked and the reasons for any BM25 fallback, the seconds
   spent, and the section calls whose evidence was trimmed by the budget.
 
+## Uploaded-document (RAG) session security
+
+| Variable | Where | Meaning | Default |
+|---|---|---|---|
+| `RAG_SERVICE_TOKEN` | backend **and** RAG service (same value) | Shared secret, sent as `X-RAG-Service-Token` and compared in constant time. The RAG service refuses every endpoint except `/ping` and `/health` without it. | none. The RAG service then refuses requests (fail closed). |
+| `RAG_ALLOW_UNAUTHENTICATED` | RAG service, local development only | `1` with no token set allows unauthenticated calls. Never set it in production. | off |
+| `GG_RAG_FAILED_LOOKUPS_PER_10MIN` | backend | Failed session lookups allowed per caller per 10 minutes before `429`. A failed lookup is an unknown, not-yours or malformed session ID. The caller is the signed-in user, or the forwarded client address for anonymous callers. | `60` |
+| `RESEARCH_DATABASE_URL` | RAG service (recommended) | Lets ownership changes run as atomic Postgres transactions. | unset (REST path) |
+
+Rules:
+
+- **Identity.** The caller's identity comes only from a verified Supabase access token. It is never taken from the
+  request body or a client header.
+- **Session IDs.** They must be UUIDs. The browser creates them with `crypto.randomUUID()`.
+- **Signed-in sessions** are usable only by that user:
+  - another account, or an anonymous caller, gets exactly the response for a session that does not exist;
+  - this covers query, report, info, download (`/session/{id}/okf`), upload and delete.
+- **Anonymous sessions** are usable by whoever holds the session ID, as before. When a signed-in user uploads to an
+  anonymous session, it moves to their account.
+- **No takeover.** A session owned by one account is never moved to another.
+- **Logs** show a session only as a one-way tag (`s:` + 10 hex characters). Secrets, tokens and user IDs are never
+  logged. Session paths are also masked in `httpx` request logs.
+
 ## 2. Claim verification (`utils/claim_check.py`)
 
 | Variable | Meaning | Default |

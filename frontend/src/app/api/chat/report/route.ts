@@ -12,6 +12,12 @@ export const maxDuration = 900; // 15 min hard ceiling for genuinely long Deep R
 const log = createLogger('api/chat/report');
 const BACKEND = getBackendBaseUrl();
 
+// The user's Supabase token, when signed in: the backend ties uploaded-document sessions to the verified account.
+function forwardedAuth(req: NextRequest): Record<string, string> {
+  const authorization = req.headers.get('authorization');
+  return authorization ? { Authorization: authorization } : {};
+}
+
 export async function POST(req: NextRequest) {
   const done = logRequest(log, 'POST', '/api/chat/report');
   const body = await req.arrayBuffer();
@@ -20,7 +26,7 @@ export async function POST(req: NextRequest) {
   try {
     upstream = await fetch(`${BACKEND}/api/chat/report`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...forwardedAuth(req) },
       body,
       // Bound this explicitly to just under maxDuration so we always return
       // a clean JSON error in-band. Without this, a slow upstream (Gemini

@@ -52,6 +52,11 @@ HF_RERANK_BATCH_SIZE = max(1, int(os.getenv("HF_RERANK_BATCH_SIZE", "16")))
 
 
 
+
+def _session_tag(session_id) -> str:
+    """Session ids never appear in logs: a one-way tag (same as session_access.tag)."""
+    return "s:" + hashlib.sha256(f"gg-rag-session:{session_id}".encode("utf-8")).hexdigest()[:10]
+
 class SessionIndex:
     """Session metadata/text cache. Embeddings live only in Postgres pgvector."""
 
@@ -247,7 +252,7 @@ class RAGEngine:
                 if chunks:
                     session.load_chunks(chunks)
                     self._restore_states[sid] = "restored_from_pgvector"
-                    log.info("Loaded pgvector session metadata: session=%s chunks=%d", sid[:8], len(chunks))
+                    log.info("Loaded pgvector session metadata: session=%s chunks=%d", _session_tag(sid), len(chunks))
                     return self._restore_states[sid]
 
                 # One-time migration path for previously saved OKF documents whose
@@ -261,11 +266,11 @@ class RAGEngine:
                 state = "migrated_okf_to_pgvector" if result.get("chunks_added", 0) else "empty_or_unavailable"
                 self._restore_states[sid] = state
                 if state == "migrated_okf_to_pgvector":
-                    log.info("Migrated legacy OKF session to pgvector: session=%s docs=%d chunks=%d", sid[:8], len(documents), result["chunks_added"])
+                    log.info("Migrated legacy OKF session to pgvector: session=%s docs=%d chunks=%d", _session_tag(sid), len(documents), result["chunks_added"])
                 return self._restore_states[sid]
             except Exception as exc:
                 self._restore_states[sid] = "restore_failed"
-                log.error("pgvector session load failed: session=%s error=%s", sid[:8], str(exc)[:300])
+                log.error("pgvector session load failed: session=%s error=%s", _session_tag(sid), str(exc)[:300])
                 raise RuntimeError(f"RAG pgvector storage is unavailable: {exc}") from exc
 
     async def delete_session(self, sid: str):
@@ -275,7 +280,7 @@ class RAGEngine:
             self._sessions.pop(sid, None)
             self._restore_states.pop(sid, None)
             self._restore_locks.pop(sid, None)
-        log.info("Deleted pgvector rows and cleared metadata cache for session %s; OKF originals retained", sid[:8])
+        log.info("Deleted pgvector rows and cleared metadata cache for session %s; OKF originals retained", _session_tag(sid))
 
     # ── Indexing ────────────────────────────────────────────────
 

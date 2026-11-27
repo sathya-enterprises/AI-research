@@ -214,6 +214,7 @@ from utils.presentation_schema import (
 )
 
 router = APIRouter()
+from utils.rag_access import session_tag as _rag_session_tag
 log = logging.getLogger("report")
 
 # Deep Research can legitimately take several minutes because it performs
@@ -366,7 +367,7 @@ def _run_action_job_in_thread(job_id: str, body: dict) -> None:
 
 
 def _submit_action_job(job_id: str, body: dict) -> None:
-    _ACTION_EXECUTOR.submit(_run_action_job_in_thread, job_id, body)
+    _ACTION_EXECUTOR.submit(_contextvars.copy_context().run, _run_action_job_in_thread, job_id, body)
 
 
 def _action_audit_blockers(deterministic_audits: dict) -> set[str]:
@@ -752,13 +753,14 @@ def _run_report_job_in_thread(job_id: str, body: dict) -> None:
 
 
 def _submit_report_job(job_id: str, body: dict) -> None:
-    _REPORT_EXECUTOR.submit(_run_report_job_in_thread, job_id, body)
+    # The job runs in a copy of the request's context: the verified RAG principal (utils.rag_access) follows it.
+    _REPORT_EXECUTOR.submit(_contextvars.copy_context().run, _run_report_job_in_thread, job_id, body)
 
 
 async def _run_report_job(job_id: str, body: dict) -> None:
     """Awaitable compatibility wrapper for tests/internal callers."""
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_REPORT_EXECUTOR, _run_report_job_in_thread, job_id, body)
+    await loop.run_in_executor(_REPORT_EXECUTOR, _contextvars.copy_context().run, _run_report_job_in_thread, job_id, body)
 
 # ── OKF context fetcher ────────────────────────────────────────────────────────
 import os as _os
@@ -22954,7 +22956,7 @@ async def generate_report(request: Request):
                 sources = [dict(s) for s in cached_sources if isinstance(s, dict)]
                 log.info(
                     "Report: recovered %d sources from backend research context for follow-up session %s",
-                    len(sources), session_id[:8],
+                    len(sources), _rag_session_tag(session_id),
                 )
         except Exception as exc:
             log.warning("Report: research-context recovery failed: %s", exc)
@@ -23009,7 +23011,7 @@ async def generate_report(request: Request):
         if not session_id:
             rag_status.update({"status": "missing_session_id", "message": "RAG was requested but no document session was supplied."})
         else:
-            log.info("Report: query-relevant OKF retrieval requested for session %s", session_id[:8])
+            log.info("Report: query-relevant OKF retrieval requested for session %s", _rag_session_tag(session_id))
             rag_result = await _rag_report(session_id=session_id, report_spec=question, report_type=report_tier)
             evidence_rows = [row for row in (rag_result.get("evidence") or []) if isinstance(row, dict) and str(row.get("text") or "").strip()]
             returned_sources = [str(value) for value in (rag_result.get("source_files") or []) if str(value).strip()]
@@ -24802,7 +24804,7 @@ async def generate_report(request: Request):
             okf_context = await _fetch_okf_context(session_id, current_filenames=current_filenames)
             if okf_context:
                 log.info("Report: injecting OKF structured context (%d chars) for session %s",
-                         len(okf_context), session_id[:8])
+                         len(okf_context), _rag_session_tag(session_id))
         except Exception as _exc:
             log.warning("Report: OKF context fetch failed (non-fatal): %s", _exc)
 

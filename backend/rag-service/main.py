@@ -6,7 +6,8 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -34,6 +35,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 from rag_engine import RAGEngine
 import okf_store
 import pgvector_store
+import session_access
 engine = RAGEngine()
 
 
@@ -122,15 +124,75 @@ class RerankReq(BaseModel):
     passages: List[RerankPassage] = Field(max_length=64)
 
 
+def _configured_token() -> str:
+    return os.getenv("RAG_SERVICE_TOKEN", "").strip()
+
+
+def _unauthenticated_allowed() -> bool:
+    """Local development only: RAG_ALLOW_UNAUTHENTICATED=1 with no token configured. Without either, every
+    data endpoint refuses requests (fail closed) - authentication is never silently off."""
+    return not _configured_token() and os.getenv("RAG_ALLOW_UNAUTHENTICATED", "").strip() == "1"
+
+
 def service_token_ok(request: Request) -> bool:
-    """Backend-to-RAG shared secret. When RAG_SERVICE_TOKEN is set, a request must carry it in
-    X-RAG-Service-Token (constant-time comparison). The value is never logged."""
+    """Backend-to-RAG shared secret in X-RAG-Service-Token, compared in constant time. Never logged."""
     import hmac
-    expected = os.getenv("RAG_SERVICE_TOKEN", "").strip()
+    expected = _configured_token()
     if not expected:
-        return True
+        return _unauthenticated_allowed()
     supplied = request.headers.get("x-rag-service-token", "")
     return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+_PUBLIC_PATHS = {"/ping", "/health"}
+if not _configured_token() and not _unauthenticated_allowed():
+    log.error("RAG_SERVICE_TOKEN is not set: every endpoint except /ping and /health refuses requests")
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if not _configured_token() and not _unauthenticated_allowed():
+        return JSONResponse({"detail": "service authentication is not configured"}, status_code=503)
+    if not service_token_ok(request):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+# ── Session ownership (session_access.py) ────────────────────
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+# Never indexed (index refuses it): answers for refused sessions are produced from this empty session, so a
+# refused session and a nonexistent one get the same response.
+_EMPTY_SESSION = "00000000-0000-4000-8000-000000000000"
+_SESSION_LOCKS: Dict[tuple, asyncio.Lock] = {}
+_MISS = "miss"
+
+
+def _session_lock(session_id: str) -> asyncio.Lock:
+    """Serialises uploads and deletes of one session within this event loop. Across processes the ownership
+    move itself is atomic (session_access.migrate_to), which is what decides a race."""
+    return _SESSION_LOCKS.setdefault((id(asyncio.get_running_loop()), session_id), asyncio.Lock())
+
+
+def _usable_id(session_id: str) -> bool:
+    return bool(_UUID_RE.match(session_id or "")) and session_id != _EMPTY_SESSION
+
+
+async def _access(session_id: str, request: Request) -> tuple:
+    """(state, owner, principal). The principal header is trusted only because the middleware has already
+    verified the backend's shared secret."""
+    principal = session_access.parse_principal(request.headers.get("x-rag-principal"))
+    if not _usable_id(session_id):
+        return session_access.CONFLICT, None, principal  # malformed: refused like an unknown session
+    owners = await asyncio.to_thread(session_access.read_owners, session_id)
+    state, owner = session_access.effective_owner(owners)
+    return state, owner, principal
+
+
+def _readable(state: str, owner, principal: str) -> bool:
+    # NONE proceeds as before: nothing to read, or a legacy OKF-only session that is restored on demand
+    return state == session_access.NONE or session_access.may_read(state, owner, principal)
 
 
 # ── Routes ────────────────────────────────────────────────────
@@ -154,18 +216,16 @@ async def rerank(req: RerankReq, request: Request):
 @app.get("/ping")
 @app.head("/ping")
 async def ping():
-    """Lightweight liveness/readiness endpoint."""
-    return {
-        "pong": True,
-        "model": engine.model_name,
-        "embedding_dimension": engine._dim,
-        "reranker_loaded": engine._reranker is not None,
-        "vector_store": pgvector_store.storage_backend(),
-    }
+    """Public liveness endpoint: no configuration, session or document information."""
+    return {"pong": True}
 
 @app.get("/health")
 @app.head("/health")
-async def health():
+async def health(request: Request):
+    """Public: status and readiness only. Details (model, storage, session counts) only for the backend."""
+    if not (_configured_token() or _unauthenticated_allowed()) or not service_token_ok(request):
+        ready = engine._model is not None
+        return {"status": "ok" if ready else "degraded", "ready": ready}
     sessions = engine.list_sessions()
     vector_storage = pgvector_store.health_check()
     ready = engine._model is not None and bool(vector_storage.get("ready"))
@@ -193,12 +253,28 @@ async def health():
 @app.post("/index")
 async def index_docs(req: IndexReq, request: Request):
     t0 = time.time()
+    not_found = JSONResponse({"detail": "session not found"}, status_code=404, headers={"X-RAG-Lookup": _MISS})
+    if not _usable_id(req.session_id):
+        return not_found
     try:
-        result = await engine.index(req.session_id, [d.dict() for d in req.documents])
+        async with _session_lock(req.session_id):
+            state, owner, principal = await _access(req.session_id, request)
+            plan = session_access.index_plan(state, owner, principal)
+            if plan == "deny":
+                log.info("Index refused: %s is not this caller's session", session_access.tag(req.session_id))
+                return not_found
+            if plan == "migrate":
+                state, owner = await asyncio.to_thread(session_access.migrate_to, req.session_id, principal)
+                if (state, owner) != (session_access.USER, principal):
+                    log.warning("Ownership move refused for %s (state %s)", session_access.tag(req.session_id), state)
+                    return not_found
+                log.info("Anonymous session %s moved to its signed-in user", session_access.tag(req.session_id))
+            documents = session_access.stamp_documents([d.dict() for d in req.documents], principal)
+            result = await engine.index(req.session_id, documents)
         elapsed = round((time.time() - t0) * 1000)
         diag = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
         _record_rag_event(request, "index_complete", "ok" if (result.get("chunks_added", 0) or result.get("total_chunks", 0)) else "no_match", elapsed, {"mode": "index", "documents": len(req.documents), "input_chars": diag.get("input_chars", 0), "chunks_added": result.get("chunks_added", 0), "total_chunks": result.get("total_chunks", 0), "stages": diag.get("stages", {}), "embedding_dimension": diag.get("embedding_dimension"), "vector_store": pgvector_store.storage_backend(), "persistence_status": (result.get("persistence") or {}).get("status")})
-        log.info(f"Indexed session={req.session_id[:8]} docs={len(req.documents)} "
+        log.info(f"Indexed session={session_access.tag(req.session_id)} docs={len(req.documents)} "
                  f"chunks={result['chunks_added']} ({elapsed}ms)")
         return {**result, "session_id": req.session_id, "elapsed_ms": elapsed}
     except Exception as e:
@@ -207,10 +283,13 @@ async def index_docs(req: IndexReq, request: Request):
 
 
 @app.post("/query")
-async def query(req: QueryReq, request: Request):
+async def query(req: QueryReq, request: Request, response: Response):
     t0 = time.time()
     try:
-        restore_status = await engine.ensure_session_loaded(req.session_id)
+        state, owner, principal = await _access(req.session_id, request)
+        readable = _readable(state, owner, principal)
+        target = req.session_id if readable else _EMPTY_SESSION
+        restore_status = await engine.ensure_session_loaded(target)
         # Let rag_engine's scope detection handle top_k — only override if
         # caller explicitly set a high value or is_general is forced True
         top_k = req.top_k
@@ -218,12 +297,12 @@ async def query(req: QueryReq, request: Request):
 
         if req.is_general:
             # Caller explicitly flagged as general — pull everything
-            top_k = max(1, min(30, engine.get_session_info(req.session_id).get("chunk_count", 30) or 30))
+            top_k = max(1, min(30, engine.get_session_info(target).get("chunk_count", 30) or 30))
             min_score = 0.0
 
         result = await asyncio.to_thread(
             engine.retrieve,
-            session_id=req.session_id,
+            session_id=target,
             question=req.question,
             top_k=top_k,
             min_score=min_score,
@@ -231,8 +310,10 @@ async def query(req: QueryReq, request: Request):
         elapsed = round((time.time() - t0) * 1000)
         diag = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
         _record_rag_event(request, "query_complete", "ok" if result.get("has_content") else "no_match", elapsed, {"mode": "query", "candidate_count": diag.get("candidate_count", 0), "eligible_count": diag.get("eligible_count", 0), "retrieved_count": result.get("retrieved", 0), "source_count": len(result.get("source_files") or []), "context_chars": diag.get("context_chars", 0), "reranker_ran": result.get("reranker_ran", False), "scope": diag.get("scope"), "stages": diag.get("stages", {})})
-        log.info(f"Q&A session={req.session_id[:8]} chunks={result['retrieved']} "
+        log.info(f"Q&A session={session_access.tag(req.session_id)} chunks={result['retrieved']} "
                  f"found={result['has_content']} ({elapsed}ms)")
+        if not result.get("has_content") and (not readable or state == session_access.NONE):
+            response.headers["X-RAG-Lookup"] = _MISS
         return {
             **result,
             "restore_status": restore_status,
@@ -248,21 +329,26 @@ async def query(req: QueryReq, request: Request):
 
 
 @app.post("/report")
-async def generate_report(req: ReportReq, request: Request):
+async def generate_report(req: ReportReq, request: Request, response: Response):
     """Full-coverage retrieval for report generation — no threshold filtering."""
     t0 = time.time()
     try:
-        restore_status = await engine.ensure_session_loaded(req.session_id)
+        state, owner, principal = await _access(req.session_id, request)
+        readable = _readable(state, owner, principal)
+        target = req.session_id if readable else _EMPTY_SESSION
+        restore_status = await engine.ensure_session_loaded(target)
         result = await asyncio.to_thread(
             engine.retrieve_for_report,
-            session_id=req.session_id,
+            session_id=target,
             report_spec=req.report_spec,
             report_type=req.report_type,
         )
         elapsed = round((time.time() - t0) * 1000)
         diag = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
         _record_rag_event(request, "report_retrieval_complete", "ok" if result.get("has_content") else "no_match", elapsed, {"mode": "report", "candidate_count": diag.get("candidate_count", 0), "eligible_count": diag.get("eligible_count", 0), "retrieved_count": result.get("retrieved", 0), "source_count": len(result.get("source_files") or []), "context_chars": diag.get("context_chars", 0), "reranker_ran": result.get("reranker_ran", False), "stages": diag.get("stages", {})})
-        log.info(f"Report session={req.session_id[:8]} chunks={result['retrieved']} ({elapsed}ms)")
+        log.info(f"Report session={session_access.tag(req.session_id)} chunks={result['retrieved']} ({elapsed}ms)")
+        if not result.get("has_content") and (not readable or state == session_access.NONE):
+            response.headers["X-RAG-Lookup"] = _MISS
         return {
             **result,
             "restore_status": restore_status,
@@ -279,19 +365,33 @@ async def generate_report(req: ReportReq, request: Request):
 
 
 @app.delete("/session/{session_id}")
-async def delete_session(session_id: str):
-    await engine.delete_session(session_id)
+async def delete_session(session_id: str, request: Request):
+    """Only the owner deletes (an anonymous session: whoever holds its id). An unknown session and another
+    account's session get the same 404, and nothing is deleted."""
+    not_found = JSONResponse({"detail": "session not found"}, status_code=404, headers={"X-RAG-Lookup": _MISS})
+    if not _usable_id(session_id):
+        return not_found
+    async with _session_lock(session_id):
+        state, owner, principal = await _access(session_id, request)
+        if not session_access.may_read(state, owner, principal):
+            return not_found
+        await engine.delete_session(session_id)
     return {"success": True, "session_id": session_id, "vector_store": pgvector_store.storage_backend()}
 
 
 @app.get("/session/{session_id}/info")
-async def session_info(session_id: str):
-    restore_status = await engine.ensure_session_loaded(session_id)
-    return {**engine.get_session_info(session_id), "restore_status": restore_status}
+async def session_info(session_id: str, request: Request, response: Response):
+    state, owner, principal = await _access(session_id, request)
+    target = session_id if _readable(state, owner, principal) else _EMPTY_SESSION
+    restore_status = await engine.ensure_session_loaded(target)
+    info = {**engine.get_session_info(target), "session_id": session_id, "restore_status": restore_status}
+    if not info.get("chunk_count"):
+        response.headers["X-RAG-Lookup"] = _MISS
+    return info
 
 
 @app.get("/session/{session_id}/okf")
-async def session_okf_bundle(session_id: str):
+async def session_okf_bundle(session_id: str, request: Request):
     """Download the session's OKF bundle (all indexed documents as markdown
     concept files with YAML frontmatter) as a zip. Files are fetched from
     Supabase Storage — the rag-service's own container filesystem on HF
@@ -300,9 +400,11 @@ async def session_okf_bundle(session_id: str):
     from fastapi.responses import Response
     import okf_store
 
-    files = await okf_store.get_session_bundle_files(session_id)
+    state, owner, principal = await _access(session_id, request)
+    files = await okf_store.get_session_bundle_files(session_id) if _readable(state, owner, principal) else []
     if not files:
-        raise HTTPException(404, "No OKF bundle found for this session")
+        return JSONResponse({"detail": "No OKF bundle found for this session"}, status_code=404,
+                            headers={"X-RAG-Lookup": _MISS})
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

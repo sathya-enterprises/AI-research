@@ -17,6 +17,7 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
 from utils.rag_client import rag_index, rag_query, rag_delete_session, rag_health_details
+from utils.rag_access import LOOKUPS, session_tag, valid_session_id
 
 router = APIRouter()
 log = logging.getLogger("rag_route")
@@ -107,6 +108,10 @@ async def index_documents(request: Request):
     images = body.get("images", [])
     binary_files = body.get("binaryFiles", [])
 
+    if session_id and not valid_session_id(session_id):
+        return JSONResponse({"error": "invalid session id"}, status_code=400)
+    if session_id and LOOKUPS.blocked():
+        return JSONResponse({"error": "too many failed session lookups; try again later"}, status_code=429)
     if not session_id:
         return JSONResponse({"error": "session_id required"}, status_code=400)
     if not isinstance(documents, list) or not isinstance(images, list) or not isinstance(binary_files, list):
@@ -216,10 +221,14 @@ async def index_documents(request: Request):
         }, status_code=422)
 
     log.info("RAG /index: session=%s docs=%d extracted_images=%d extraction_errors=%d",
-             session_id[:8], len(normalized_documents), len(extracted_documents), len(extraction_errors))
+             session_tag(session_id), len(normalized_documents), len(extracted_documents), len(extraction_errors))
     result = await rag_index(session_id, normalized_documents)
     if not isinstance(result, dict):
         result = {"error": "RAG service returned an invalid response"}
+    if result.get("http_status") in (400, 404, 429):
+        # 404: the session belongs to another account (answered exactly like an unknown session)
+        return JSONResponse({"error": result.get("error"), "chunks_added": 0, "index_status": "failed"},
+                            status_code=int(result["http_status"]))
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     document_statuses = diagnostics.get("documents") if isinstance(diagnostics.get("documents"), list) else []
     persisted = result.get("vector_persistence") if isinstance(result.get("vector_persistence"), dict) else {}
@@ -261,12 +270,26 @@ async def query_rag(request: Request):
         return JSONResponse({"error": "session_id and question required"}, status_code=400)
 
     result = await rag_query(session_id, question, top_k, min_score, is_general)
+    if result.get("http_status") == 429:
+        return JSONResponse({"error": "too many failed session lookups; try again later"}, status_code=429)
+    result.pop("http_status", None)
+    if result.get("error") == "session_not_found":
+        result.pop("error", None)  # a malformed id answers like any unknown session: no content
     return JSONResponse(result)
 
 
 @router.delete("/session/{session_id}")
 async def delete_rag_session(session_id: str):
-    await rag_delete_session(session_id)
+    """Only the session's owner may delete it (an anonymous session: whoever holds its id). An unknown session
+    and another account's session get the same 404."""
+    outcome = await rag_delete_session(session_id)
+    status = int(outcome.get("http_status") or 502)
+    if status == 429:
+        return JSONResponse({"error": "too many failed session lookups; try again later"}, status_code=429)
+    if status == 404:
+        return JSONResponse({"error": "session not found"}, status_code=404)
+    if not outcome.get("deleted"):
+        return JSONResponse({"error": "RAG session could not be deleted"}, status_code=502)
     return JSONResponse({"success": True, "session_id": session_id})
 
 

@@ -27,6 +27,7 @@ from utils.keys import (
 )
 
 router = APIRouter()
+from utils.rag_access import session_tag as _rag_session_tag
 log = logging.getLogger("chat")
 from datetime import datetime as _dt
 from datetime import timezone as _tz
@@ -265,7 +266,7 @@ async def _store_image_extractions(
                     )
                     if ins.is_success:
                         log.info("Supabase files: upserted image record hash=%s session=%s",
-                                 h[:8], session_id[:8])
+                                 h[:8], _rag_session_tag(session_id))
                     else:
                         log.warning("Supabase files upsert %d: %s",
                                     ins.status_code, ins.text[:200])
@@ -2613,7 +2614,7 @@ async def chat(request: Request):
                     context=orch.context(),
                     query=last_user_msg,
                 )
-                log.info("Chat: saved research context for session %s (%d sources)", session_id[:8], len(orch.sources))
+                log.info("Chat: saved research context for session %s (%d sources)", _rag_session_tag(session_id), len(orch.sources))
             except Exception as exc:
                 log.warning("Chat: could not cache research context: %s", exc)
 

@@ -150,6 +150,13 @@ async def log_requests(request: Request, call_next):
     request.state.trace_id = trace_id
     token = set_trace_id(trace_id)
     log.info("→ %s %s trace=%s", method, safe_path, trace_id[:12])
+    if path.startswith(("/api/rag", "/api/chat")):
+        # Who owns uploaded-document sessions: decided only from a verified Supabase token, never from the
+        # request body. Report and action jobs inherit it (they run in a copy of this context).
+        from utils.auth import get_user_id
+        from utils.rag_access import client_key_from, set_request_identity
+        user_id = await get_user_id(request) if request.headers.get("authorization") else None
+        set_request_identity(user_id, client_key_from(request.headers, request.client.host if request.client else ""))
     try:
         response = await call_next(request)
         elapsed = (time.perf_counter() - start) * 1000

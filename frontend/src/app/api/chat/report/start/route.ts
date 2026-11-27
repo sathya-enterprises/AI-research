@@ -14,13 +14,19 @@ export const maxDuration = 30;
 const log = createLogger('api/chat/report/start');
 const BACKEND = getBackendBaseUrl();
 
+// The user's Supabase token, when signed in: the backend ties uploaded-document sessions to the verified account.
+function forwardedAuth(req: NextRequest): Record<string, string> {
+  const authorization = req.headers.get('authorization');
+  return authorization ? { Authorization: authorization } : {};
+}
+
 export async function POST(req: NextRequest) {
   const done = logRequest(log, 'POST', '/api/chat/report/start');
   try {
     const body = await req.arrayBuffer();
     const upstream = await fetch(`${BACKEND}/api/chat/report/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...forwardedAuth(req) },
       body,
       signal: AbortSignal.timeout(15_000),
     });

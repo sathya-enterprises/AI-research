@@ -60,7 +60,7 @@ async def test_docx_is_extracted_and_confirmed_in_pgvector(monkeypatch):
 
     monkeypatch.setattr(rag_route, "rag_index", fake_index)
     response = await rag_route.index_documents(_request({
-        "session_id": "test-session",
+        "session_id": "5f0c2a9e-1d3b-4c7a-9e21-6b8d4f3a2c10",
         "binaryFiles": [{
             "name": "sales.docx",
             "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -93,7 +93,7 @@ async def test_image_ocr_text_is_indexed_and_returned_for_report_context(monkeyp
     monkeypatch.setattr(report_route, "extract_data_from_images", fake_ocr)
     monkeypatch.setattr(rag_route, "rag_index", fake_index)
     response = await rag_route.index_documents(_request({
-        "session_id": "test-session",
+        "session_id": "5f0c2a9e-1d3b-4c7a-9e21-6b8d4f3a2c10",
         "images": [{
             "name": "revenue.png", "documentName": "revenue.png",
             "mimeType": "image/png", "data": base64.b64encode(b"image bytes").decode("ascii"),
@@ -172,7 +172,7 @@ async def test_all_workbook_sheets_and_csv_rows_are_handed_to_vector_indexing(mo
     )
     csv_text = "Period,China capacity (GW)\n2022,75.0\n2023,86.4\n2024,91.2"
     response = await rag_route.index_documents(_request({
-        "session_id": "multi-sheet-session",
+        "session_id": "7a1e3c5b-2f4d-4e6a-8b9c-0d1e2f3a4b5c",
         "documents": [
             {"name": "PMSPRFFEB2026.xlsx", "file_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text": workbook_text},
             {"name": "china-solar.csv", "file_type": "text/csv", "text": csv_text},
@@ -201,7 +201,7 @@ async def test_empty_or_unreadable_attachments_do_not_report_success(monkeypatch
 
     monkeypatch.setattr(rag_route, "rag_index", fake_index)
     response = await rag_route.index_documents(_request({
-        "session_id": "test-session",
+        "session_id": "5f0c2a9e-1d3b-4c7a-9e21-6b8d4f3a2c10",
         "documents": [{"name": "empty.csv", "text": ""}],
     }))
     payload = json.loads(response.body)
@@ -218,7 +218,7 @@ async def test_vector_store_failure_is_returned_as_failed_index(monkeypatch):
 
     monkeypatch.setattr(rag_route, "rag_index", failed_index)
     response = await rag_route.index_documents(_request({
-        "session_id": "test-session",
+        "session_id": "5f0c2a9e-1d3b-4c7a-9e21-6b8d4f3a2c10",
         "documents": [{"name": "source.csv", "text": "header,value\nNorth,125"}],
     }))
     payload = json.loads(response.body)

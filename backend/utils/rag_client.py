@@ -20,8 +20,30 @@ import unicodedata
 import httpx
 
 from utils.observability import get_trace_id, record_event
+from utils.rag_access import ANON, LOOKUPS, current_principal, session_tag, valid_session_id
 
 log = logging.getLogger("rag_client")
+
+
+class RedactSessionIds(logging.Filter):
+    """httpx logs every request URL at INFO ("HTTP Request: DELETE http://rag/session/<uuid>"): mask the session
+    path so a session id - the credential of an anonymous session - never reaches the logs."""
+    _RE = re.compile(r"(/session/)[^/\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = self._RE.sub(r"\1[session]", message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+for _logger_name in ("httpx", "httpcore"):
+    if not any(isinstance(f, RedactSessionIds) for f in logging.getLogger(_logger_name).filters):
+        logging.getLogger(_logger_name).addFilter(RedactSessionIds())
 
 RAG_URL = os.environ.get(
     "RAG_SERVICE_URL",
@@ -170,9 +192,13 @@ async def _wake_rag_service(max_wait: float = 100.0, poll_interval: float = 5.0)
 
 async def rag_index(session_id: str, documents: list[dict]) -> dict:
     """Index extracted attachment text in RAG and record safe stage metadata."""
+    if not valid_session_id(session_id):
+        return {"error": "invalid session id", "chunks_added": 0, "http_status": 400}
+    if LOOKUPS.blocked():
+        return {"error": "too many failed session lookups; try again later", "chunks_added": 0, "http_status": 429}
     started = asyncio.get_running_loop().time()
     input_chars = sum(len(str(doc.get("text") or "")) for doc in documents)
-    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
+    headers = rag_service_headers()
     try:
         woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
@@ -191,12 +217,15 @@ async def rag_index(session_id: str, documents: list[dict]) -> dict:
                 "persistence_status": (data.get("persistence") or {}).get("status"),
             })
             log.info("RAG index: session=%s docs=%d chunks_added=%s total=%s duration_ms=%.0f",
-                     session_id[:8], len(documents), data.get("chunks_added"), data.get("total_chunks"), elapsed)
+                     session_tag(session_id), len(documents), data.get("chunks_added"), data.get("total_chunks"), elapsed)
             return data
         record_event("rag-client", "index", "error", duration_ms=elapsed, details={
             "documents": len(documents), "input_chars": input_chars,
             "http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke,
         })
+        if res.status_code == 404:  # another account's session: the same answer as an unknown one
+            LOOKUPS.failure()
+            return {"error": "session not found", "chunks_added": 0, "http_status": 404}
         safe_error = _safe_index_http_error(res)
         log.warning("RAG index HTTP %d: %s", res.status_code, safe_error)
         return {"error": safe_error, "chunks_added": 0, "http_status": res.status_code}
@@ -220,8 +249,11 @@ async def rag_query(
     Retrieve grounded context + system prompt for a chat question.
     Returns dict with: system_prompt, context, retrieved, source_files, has_content
     """
+    refused = _lookup_refusal(session_id)
+    if refused is not None:
+        return refused
     started = asyncio.get_running_loop().time()
-    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
+    headers = rag_service_headers()
     try:
         woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
@@ -233,6 +265,8 @@ async def rag_query(
                 "is_general": is_general,
             }, headers=headers)
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        if res.headers.get("x-rag-lookup") == "miss":
+            LOOKUPS.failure()  # unknown or not this caller's session (the service answers both alike)
         if res.is_success:
             data = res.json()
             diag = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
@@ -244,7 +278,7 @@ async def rag_query(
                 "candidate_count": diag.get("candidate_count"), "scope": diag.get("scope"),
             })
             log.info("RAG query: session=%s retrieved=%s has_content=%s duration_ms=%.0f",
-                     session_id[:8], data.get("retrieved"), data.get("has_content"), elapsed)
+                     session_tag(session_id), data.get("retrieved"), data.get("has_content"), elapsed)
             return data
         record_event("rag-client", "query", "error", duration_ms=elapsed, details={
             "query_chars": len(question), "http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke,
@@ -269,8 +303,11 @@ async def rag_report(
     Full-coverage retrieval for report generation.
     Returns dict with: system_prompt, context, retrieved, source_files, has_content
     """
+    refused = _lookup_refusal(session_id)
+    if refused is not None:
+        return refused
     started = asyncio.get_running_loop().time()
-    headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
+    headers = rag_service_headers()
     try:
         woke = await _wake_rag_service()
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
@@ -280,6 +317,8 @@ async def rag_report(
                 "report_type": report_type,
             }, headers=headers)
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        if res.headers.get("x-rag-lookup") == "miss":
+            LOOKUPS.failure()  # unknown or not this caller's session (the service answers both alike)
         if res.is_success:
             data = res.json()
             diag = data.get("diagnostics") if isinstance(data.get("diagnostics"), dict) else {}
@@ -288,7 +327,7 @@ async def rag_report(
                 "reranker_ran": bool(data.get("reranker_ran")), "cold_start_wake_ok": woke,
                 "rag_stages": diag.get("stages", {}), "candidate_count": diag.get("candidate_count"),
             })
-            log.info("RAG report: session=%s retrieved=%s duration_ms=%.0f", session_id[:8], data.get("retrieved"), elapsed)
+            log.info("RAG report: session=%s retrieved=%s duration_ms=%.0f", session_tag(session_id), data.get("retrieved"), elapsed)
             return data
         record_event("rag-client", "report_retrieval", "error", duration_ms=elapsed, details={"http_status": res.status_code, "error_type": "HTTPError", "cold_start_wake_ok": woke})
         log.warning("RAG report HTTP %d: %s", res.status_code, res.text[:200])
@@ -300,14 +339,23 @@ async def rag_report(
         return {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": [], "error_type": type(exc).__name__}
 
 
-async def rag_delete_session(session_id: str) -> None:
-    """Clean up RAG index when user starts a new chat."""
+async def rag_delete_session(session_id: str) -> dict:
+    """Delete a session's indexed chunks. Only its owner may (an anonymous session: whoever holds its id).
+    Returns {"deleted": bool, "http_status": int}; an unknown and a not-yours session both give 404."""
+    refused = _lookup_refusal(session_id)
+    if refused is not None:
+        return {"deleted": False, "http_status": refused["http_status"]}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as c:
-            await c.delete(f"{RAG_URL}/session/{session_id}")
-        log.info("RAG session deleted: %s", session_id[:8])
+            res = await c.delete(f"{RAG_URL}/session/{session_id}", headers=rag_service_headers())
+        if res.status_code == 404:
+            LOOKUPS.failure()
+            return {"deleted": False, "http_status": 404}
+        log.info("RAG session delete: %s HTTP %d", session_tag(session_id), res.status_code)
+        return {"deleted": res.is_success, "http_status": res.status_code}
     except Exception as exc:
         log.debug("RAG delete session (non-critical): %s", _exc_str(exc))
+        return {"deleted": False, "http_status": 502}
 
 
 async def rag_health() -> bool:
@@ -320,7 +368,7 @@ async def rag_health_details() -> dict:
     """Return sanitized readiness details; never echo the configured URL."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as c:
-            res = await c.get(f"{RAG_URL}/health")
+            res = await c.get(f"{RAG_URL}/health", headers=rag_service_headers())
         if not res.is_success:
             try:
                 payload = res.json()
@@ -346,7 +394,7 @@ async def rag_diagnostics() -> dict:
     """Fetch recent RAG-service operational events without exposing its base URL."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(8)) as c:
-            res = await c.get(f"{RAG_URL}/diagnostics")
+            res = await c.get(f"{RAG_URL}/diagnostics", headers=rag_service_headers())
         if not res.is_success:
             return {"reachable": True, "status": "http_error", "httpStatus": res.status_code, "recentEvents": []}
         payload = res.json()
@@ -355,10 +403,24 @@ async def rag_diagnostics() -> dict:
         return {"reachable": False, "status": "unreachable", "errorType": type(exc).__name__, "recentEvents": []}
 
 
+_NO_CONTENT = {"has_content": False, "system_prompt": "", "context": "", "retrieved": 0, "source_files": []}
+
+
+def _lookup_refusal(session_id: str) -> dict | None:
+    """A rate-limited caller or a malformed session id never reaches the service."""
+    if LOOKUPS.blocked():
+        return {**_NO_CONTENT, "error": "rate_limited", "http_status": 429}
+    if not valid_session_id(session_id):
+        LOOKUPS.failure()
+        return {**_NO_CONTENT, "error": "session_not_found", "http_status": 404}
+    return None
+
+
 def rag_service_headers() -> dict:
-    """Headers for every backend -> RAG service call: the trace id, and the shared secret when
-    RAG_SERVICE_TOKEN is set (never logged)."""
+    """Headers for every backend -> RAG service call: the trace id, the shared secret when RAG_SERVICE_TOKEN is
+    set (never logged), and the caller's principal - decided only from a verified Supabase token."""
     headers = {"X-Request-ID": get_trace_id()} if get_trace_id() else {}
+    headers["X-RAG-Principal"] = current_principal()
     token = os.getenv("RAG_SERVICE_TOKEN", "").strip()
     if token:
         headers["X-RAG-Service-Token"] = token

@@ -9,6 +9,12 @@ const BACKEND = getBackendBaseUrl();
 // rag-service the backend reads from. Set RAG_SERVICE_URL to your deployed rag-service in production.
 const RAG_URL = (process.env.RAG_SERVICE_URL ?? 'http://127.0.0.1:7860').replace(/\/$/, '');
 
+// The user's Supabase token, when signed in: the backend ties uploaded-document sessions to the verified account.
+function forwardedAuth(req: NextRequest): Record<string, string> {
+  const authorization = req.headers.get('authorization');
+  return authorization ? { Authorization: authorization } : {};
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -24,7 +30,7 @@ export async function POST(req: NextRequest) {
 
     const indexPromise = fetch(`${BACKEND}/api/rag/index`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...forwardedAuth(req) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(270_000), // 4.5 min — generous for cold HF Space
     });
