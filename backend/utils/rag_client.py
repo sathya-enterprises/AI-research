@@ -176,7 +176,7 @@ async def _wake_rag_service(max_wait: float = 100.0, poll_interval: float = 5.0)
     while True:
         attempt += 1
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=10, write=10, pool=10)) as c:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=min(10.0, max_wait), read=min(10.0, max_wait), write=10, pool=10)) as c:
                 res = await c.get(f"{RAG_URL}/ping")
             if res.is_success:
                 if attempt > 1:
@@ -298,6 +298,7 @@ async def rag_report(
     session_id:  str,
     report_spec: str,
     report_type: str = "comprehensive",
+    wake_wait: float = 100.0,
 ) -> dict:
     """
     Full-coverage retrieval for report generation.
@@ -309,7 +310,12 @@ async def rag_report(
     started = asyncio.get_running_loop().time()
     headers = rag_service_headers()
     try:
-        woke = await _wake_rag_service()
+        woke = await _wake_rag_service(max_wait=wake_wait)
+        if not woke and wake_wait < 100.0:
+            # bounded callers (report edits) do not wait on a service that did not wake: they continue with the
+            # evidence they already have
+            record_event("rag-client", "report_retrieval", "error", details={"error_type": "service_unavailable"})
+            return {**_NO_CONTENT, "reason": "service_unavailable"}
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             res = await c.post(f"{RAG_URL}/report", json={
                 "session_id": session_id,

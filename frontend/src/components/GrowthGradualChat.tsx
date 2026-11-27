@@ -753,6 +753,12 @@ export default function GrowthGradualChat() {
             reportTier: reportData.reportTier || 'detailed',
             reportStyle: reportData.reportStyle,
             styleVariant: reportData.styleVariant,
+            // the same inputs as the PDF export, so "page 30" in an edit means page 30 of the PDF the user sees
+            keyStats: reportData.keyStats || [],
+            summary: reportData.summary || '',
+            theme: reportData.theme ?? null,
+            kicker: reportData.kicker ?? '',
+            publicationOutcome: reportData.publicationOutcome ?? undefined,
             editInstruction: instruction,
             title: reportData.title || '',
             charts: reportData.charts || [],

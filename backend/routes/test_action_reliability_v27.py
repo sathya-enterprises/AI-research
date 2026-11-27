@@ -108,17 +108,34 @@ def test_action_start_returns_quickly_and_queues_job(monkeypatch):
 
 
 def test_action_start_rejects_duplicate_running_job_with_clear_message(monkeypatch):
+    # A second edit of the SAME report while one runs would start from the same text and silently undo the first:
+    # refused with a clear message (409). Edits of other reports (other users) are no longer blocked.
     report_module._ACTION_JOBS.clear()
-    report_module._ACTION_JOBS["existing"] = {"status": "running", "createdAt": 0}
+    report_module._ACTION_JOBS["existing"] = {"status": "running", "createdAt": 0, "reportKey": "report-1"}
     try:
         response = asyncio.run(report_module.start_action_edit_job(FakeRequest({
-            "report": "## Target\nExisting content [S1].",
+            "report": "## Target\nExisting content [S1].", "reportId": "report-1",
             "editInstruction": "Update Target.",
         })))
         payload = json.loads(response.body.decode("utf-8"))
-        assert response.status_code == 429
+        assert response.status_code == 409
         assert "still running" in payload["error"].lower()
         assert payload["preserved"] is True
+    finally:
+        report_module._ACTION_JOBS.clear()
+
+
+def test_action_start_does_not_block_an_unrelated_report(monkeypatch):
+    report_module._ACTION_JOBS.clear()
+    report_module._ACTION_JOBS["existing"] = {"status": "running", "createdAt": 0, "reportKey": "report-1"}
+    submitted = []
+    monkeypatch.setattr(report_module, "_submit_action_job", lambda job_id, body: submitted.append(job_id))
+    try:
+        response = asyncio.run(report_module.start_action_edit_job(FakeRequest({
+            "report": "## Target\nOther content [S1].", "reportId": "report-2",
+            "editInstruction": "Update Target.",
+        })))
+        assert response.status_code == 202 and len(submitted) == 1
     finally:
         report_module._ACTION_JOBS.clear()
 

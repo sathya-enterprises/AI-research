@@ -120,6 +120,18 @@ Rules:
 - **Logs** show a session only as a one-way tag (`s:` + 10 hex characters). Secrets, tokens and user IDs are never
   logged. Session paths are also masked in `httpx` request logs.
 
+## Follow-up report editing
+
+All settings, the edit flow and rollback are in `docs/REPORT_EDITING.md`. The defaults are:
+
+- planning, page and element targeting on (`GG_EDIT_ENGINE=1`);
+- 3 edit jobs at once (`GG_ACTION_WORKERS=3`);
+- edit model calls through the Phase 2 scheduler (`GG_ACTION_GATEWAY=1`);
+- source re-verification limited to what the edit changed, with saved evidence reused for up to 7 days
+  (`GG_ACTION_AUDIT_SCOPE=changed`, `GG_ACTION_EVIDENCE_MAX_AGE_DAYS=7`);
+- the uploaded-document service waited on for at most 6 s (`GG_ACTION_RAG_WAKE_S=6`);
+- chart rules and claim checks applied to what an edit adds (`GG_EDIT_CHART_LINT=1`, `GG_EDIT_CLAIM_CHECK=1`).
+
 ## 2. Claim verification (`utils/claim_check.py`)
 
 | Variable | Meaning | Default |

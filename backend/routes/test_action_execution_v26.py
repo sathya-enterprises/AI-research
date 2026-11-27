@@ -288,10 +288,12 @@ def test_multi_section_action_rejects_overlapping_parent_and_child_before_llm(mo
 def test_action_can_add_an_additional_chart_without_replacing_existing_chart(monkeypatch):
     original = "## Growth Trend\n\nGrowth was 10%, 11%, and 12% [S1].\n\n[CHART_1]\n"
     candidate = "## Growth Trend\n\nGrowth values were 10%, 11%, and 12% [S1].\n\n[CHART_1]\n"
+    # The existing chart shows a different measure: an added chart that only repeated its points would be a
+    # duplicate, which edits now refuse (see test_edit_engine.py).
     existing_chart = {
-        "type": "bar", "title": "Existing growth", "xLabel": "Year", "yLabel": "%",
-        "series": [{"name": "Growth", "data": [
-            {"label": "FY24", "value": 10}, {"label": "FY25", "value": 11}, {"label": "FY26", "value": 12}
+        "type": "bar", "title": "Existing margin", "xLabel": "Year", "yLabel": "%",
+        "series": [{"name": "Margin", "data": [
+            {"label": "FY24", "value": 20}, {"label": "FY25", "value": 21}, {"label": "FY26", "value": 23}
         ]}],
     }
     additional_chart = {

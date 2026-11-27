@@ -305,7 +305,36 @@ _REPORT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gg-repo
 _ACTION_JOBS: dict[str, dict] = {}
 _ACTION_JOB_TTL_SECONDS = 60 * 60
 _ACTION_JOB_MAX = 16
-_ACTION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gg-action")
+def _action_workers() -> int:
+    """Edit jobs that may run at once (GG_ACTION_WORKERS, default 3, at most 8). Each job's model calls go through
+    its own Phase 2 gateway (2 at once), so Gemini load stays bounded; edits of the SAME report never run together
+    (start_action_edit_job refuses them)."""
+    try:
+        return max(1, min(8, int(os.getenv("GG_ACTION_WORKERS", "3"))))
+    except ValueError:
+        return 3
+
+
+_ACTION_EXECUTOR = ThreadPoolExecutor(max_workers=_action_workers(), thread_name_prefix="gg-action")
+# last committed revision per report id (in-process): an edit started from an older revision is refused instead of
+# silently overwriting a newer one
+_ACTION_REPORT_REVISIONS: dict[str, int] = {}
+# the running edit's gateway and metrics (set by _run_action_job_async; absent for report generation and tests)
+_ACTION_GATEWAY: _contextvars.ContextVar = _contextvars.ContextVar("gg_action_gateway", default=None)
+_ACTION_METRICS: _contextvars.ContextVar = _contextvars.ContextVar("gg_action_metrics", default=None)
+# source ids whose publisher evidence the current edit re-fetched (stamped evidenceVerifiedAt in the result)
+_ACTION_VERIFIED_IDS: _contextvars.ContextVar = _contextvars.ContextVar("gg_action_verified_ids", default=None)
+
+
+def _action_metric(name: str, seconds: float = 0.0, count: int = 0) -> None:
+    metrics = _ACTION_METRICS.get()
+    if metrics is None:
+        return
+    timing = metrics.setdefault("seconds", {})
+    timing[name] = round(timing.get(name, 0.0) + float(seconds), 3)
+    if count:
+        counts = metrics.setdefault("counts", {})
+        counts[name] = counts.get(name, 0) + int(count)
 
 
 def _prune_action_jobs() -> None:
@@ -331,7 +360,18 @@ async def _run_action_job_async(job_id: str, body: dict) -> None:
     job = _ACTION_JOBS.get(job_id)
     if not job:
         return
-    job.update({"status": "running", "startedAt": time.time(), "phase": "research_and_edit"})
+    started = time.time()
+    job.update({"status": "running", "startedAt": started, "phase": "research_and_edit"})
+    metrics: dict = {"queueSeconds": round(started - float(job.get("createdAt", started)), 3)}
+    gateway = None
+    if os.getenv("GG_ACTION_GATEWAY", "1").strip() != "0":
+        from utils.llm_gateway import LLMGateway
+        gateway = LLMGateway(_sys.modules[__name__], str(body.get("reportTier") or "detailed"), capture=False,
+                             budget=int(os.getenv("GG_ACTION_LLM_BUDGET", "24") or 24),
+                             concurrency=int(os.getenv("GG_ACTION_LLM_CONCURRENCY", "2") or 2),
+                             report_id=str(body.get("reportId") or ""))
+    gateway_token = _ACTION_GATEWAY.set(gateway)
+    metrics_token = _ACTION_METRICS.set(metrics)
     try:
         response = await edit_report_section(_ReportJobRequest(body))
         status_code = int(getattr(response, "status_code", 200) or 200)
@@ -350,6 +390,9 @@ async def _run_action_job_async(job_id: str, body: dict) -> None:
             })
         else:
             job.update({"status": "done", "statusCode": status_code, "result": payload})
+            report_id = str(payload.get("reportId") or body.get("reportId") or "")
+            if report_id and isinstance(payload.get("revision"), int):
+                _ACTION_REPORT_REVISIONS[report_id] = max(_ACTION_REPORT_REVISIONS.get(report_id, 0), payload["revision"])
     except Exception as exc:
         log.exception("Action job %s failed unexpectedly: %s", job_id[:8], type(exc).__name__)
         job.update({
@@ -359,6 +402,22 @@ async def _run_action_job_async(job_id: str, body: dict) -> None:
         })
     finally:
         job["finishedAt"] = time.time()
+        metrics["totalSeconds"] = round(job["finishedAt"] - started, 3)
+        if gateway is not None:
+            llm = gateway.stats.to_dict()
+            req = llm.get("requestSummary") or {}
+            metrics["llm"] = {"calls": llm.get("calls"), "failed": llm.get("failed"), "models": llm.get("models"),
+                              "requests": req.get("requests"), "latencySeconds": req.get("latencySeconds"),
+                              "fallbacks": llm.get("fallbacks"), "tokensIn": llm.get("tokensIn"),
+                              "tokensOut": llm.get("tokensOut"), "secondsByPurpose": llm.get("secondsByPurpose")}
+        job["metrics"] = metrics
+        if isinstance(job.get("result"), dict):
+            job["result"]["editMetrics"] = metrics
+        log.info("Action job %s %s in %.1fs (queue %.1fs) metrics=%s", job_id[:8], job.get("status"),
+                 metrics["totalSeconds"], metrics["queueSeconds"],
+                 {k: v for k, v in metrics.items() if k in {"seconds", "counts"}})
+        _ACTION_GATEWAY.reset(gateway_token)
+        _ACTION_METRICS.reset(metrics_token)
         _prune_action_jobs()
 
 
@@ -416,6 +475,44 @@ def _action_audit_blockers(deterministic_audits: dict) -> set[str]:
     return blockers
 
 
+_ACTION_CITE_GROUP_RE = re.compile(r"\[((?:S\d+(?:\.\d+)?\s*[,;]?\s*)+)\]")
+
+
+def _action_changed_citation_ids(original_report: str, candidate_report: str) -> set[str]:
+    """Source ids cited in lines the edit added or changed (lines compared verbatim: reports often separate
+    paragraphs with a single newline, so a blank-line block can hold many unrelated paragraphs)."""
+    before = {p.strip() for p in str(original_report or "").splitlines() if p.strip()}
+    changed = [p for p in str(candidate_report or "").splitlines() if p.strip() and p.strip() not in before]
+    out: set[str] = set()
+    for paragraph in changed:
+        for group in _ACTION_CITE_GROUP_RE.findall(paragraph):
+            out.update(c.strip().upper().split(".")[0] for c in re.split(r"\s*[,;]\s*", group) if c.strip())
+    return out
+
+
+def _action_has_saved_evidence(item: dict) -> bool:
+    return any(str(item.get(k) or "").strip() for k in ("evidenceExcerpt", "pageContent", "page_content",
+                                                        "fullContent", "full_content", "evidenceContent"))
+
+
+def _action_saved_evidence_fresh(item: dict) -> bool:
+    """True when the source carries saved page evidence fetched recently enough to reuse."""
+    if not _action_has_saved_evidence(item):
+        return False
+    stamp = str(item.get("evidenceVerifiedAt") or item.get("fetchedAt") or item.get("retrievedAt") or "").strip()
+    if not stamp:
+        return True  # saved with the report; no timestamp to age it by
+    try:
+        from datetime import datetime, timezone
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        max_days = float(os.getenv("GG_ACTION_EVIDENCE_MAX_AGE_DAYS", "7") or 7)
+        return (datetime.now(timezone.utc) - when).total_seconds() <= max_days * 86400
+    except (ValueError, TypeError):
+        return True
+
+
 async def _audit_action_candidate(
     *, original_report: str, candidate_report: str, title: str,
     original_charts: list, candidate_charts: list, original_images: list,
@@ -469,6 +566,23 @@ async def _audit_action_candidate(
         if str(item.get("id") or "").upper() in cited_ids
         and str(item.get("url") or "").startswith(("http://", "https://"))
     ]
+    reused = 0
+    if os.getenv("GG_ACTION_AUDIT_SCOPE", "changed").strip().casefold() != "full":
+        # Only what the edit can have affected is fetched again: sources cited in changed paragraphs, sources new
+        # to this edit, and sources with no saved evidence or evidence older than GG_ACTION_EVIDENCE_MAX_AGE_DAYS.
+        # Untouched text keeps its saved evidence; it yields the same findings before and after the edit, so the
+        # new-blocker comparison below is unaffected.
+        changed_ids = _action_changed_citation_ids(original_report, candidate_report)
+        original_ids = {str(x.get("id") or "").strip().upper() for x in (original_sources or []) if isinstance(x, dict)}
+        # An untouched source WITHOUT saved evidence (its page could not be fetched for the report) is not fetched
+        # again: it gives the same findings before and after the edit, so it cannot change the outcome.
+        selected = [item for item in fetchable
+                    if str(item.get("id") or "").upper() in changed_ids
+                    or str(item.get("id") or "").upper() not in original_ids
+                    or (_action_has_saved_evidence(item) and not _action_saved_evidence_fresh(item))]
+        reused = len(fetchable) - len(selected)
+        fetchable = selected
+    _fetch_started = time.perf_counter()
     enriched = list(await asyncio.gather(*[
         _enrich_report_source(item, index, question, None, max_chars=6000, semaphore=semaphore)
         for index, item in enumerate(fetchable)
@@ -486,6 +600,12 @@ async def _audit_action_candidate(
         if source_id:
             evidence_by_id[source_id] = {**evidence_by_id.get(source_id, {}), **item}
     enriched_for_audit = list(evidence_by_id.values())
+    _action_metric("sourceVerification", time.perf_counter() - _fetch_started, count=len(fetchable))
+    _verified = _ACTION_VERIFIED_IDS.get()
+    if _verified is not None:
+        _verified.update(str(item.get("id") or "").upper() for item in enriched
+                         if str(item.get("page_fetch_status") or item.get("pageFetchStatus") or "").lower() == "ok")
+    _action_metric("sourcesReused", 0.0, count=reused)
     original_sources = _attach_audit_source_evidence(manifest, enriched_for_audit, original_report)
     candidate_sources = _attach_audit_source_evidence(manifest, enriched_for_audit, candidate_report)
 
@@ -547,6 +667,59 @@ def _numeric_blocker_already_published(blocker: str, original_report: str) -> bo
     return True
 
 
+async def _action_claim_check(original_report: str, candidate_report: str, body: dict) -> tuple[str, dict | None]:
+    """Check the NEW facts an edit introduces with the report pipeline's claim checker (utils.claim_check).
+
+    New facts: sentences that are not in the original report and state a number the report has not already
+    published (reworded existing claims were verified when the report was generated), plus new sentences without
+    numbers. Evidence: the cited sources' saved excerpts, the research and uploaded-document passages this edit
+    used. A wrong percentage change is corrected; a claim the judge finds unsupported is removed, as in report
+    generation. Without a gateway (no edit job) only the code checks run and nothing is removed."""
+    if os.getenv("GG_EDIT_CLAIM_CHECK", "1").strip() == "0":
+        return candidate_report, None
+    from types import SimpleNamespace
+    from utils import claim_check as CC
+    published = set(re.findall(r"\d[\d,]*(?:\.\d+)?", original_report))
+    before = {p.strip() for p in re.split(r"\n\s*\n|\n", original_report) if p.strip()}
+    new_sentences = []
+    for paragraph in re.split(r"\n\s*\n|\n", candidate_report):
+        para = paragraph.strip()
+        if not para or para in before or para.startswith(("|", "#", "[CHART_", "[WEB_IMG_", "[FILE_IMG_")):
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", para):
+            if sentence.strip() and sentence.strip() not in original_report:
+                numbers = set(re.findall(r"\d[\d,]*(?:\.\d+)?", CC.CITE_RE.sub(" ", sentence)))
+                if not numbers or not numbers <= published:
+                    new_sentences.append(sentence.strip())
+    if not new_sentences:
+        return candidate_report, None
+    texts: dict[str, str] = {}
+    for source in (body.get("sources") or []):
+        if isinstance(source, dict) and source.get("id"):
+            text = " ".join(str(source.get(k) or "") for k in ("evidenceExcerpt", "chartEvidenceExcerpt", "evidenceContent")).strip()
+            if text:
+                texts[str(source["id"]).upper()] = text
+    for row in (body.get("_actionAuditEvidenceSources") or []):
+        if isinstance(row, dict) and row.get("id") and row.get("evidenceContent"):
+            texts[str(row["id"]).upper()] = str(row["evidenceContent"])
+    for sid, text in (body.get("_actionWebEvidence") or {}).items():
+        texts[str(sid).upper()] = (texts.get(str(sid).upper(), "") + "\n" + str(text)).strip()
+    draft = SimpleNamespace(body=" ".join(new_sentences), section_id="edit")
+    started = time.perf_counter()
+    entry = await CC.check_section(_ACTION_GATEWAY.get(), draft, texts)
+    _action_metric("claimCheck", time.perf_counter() - started, count=int(entry.get("checked") or 0))
+    revised = candidate_report
+    for fix in entry.get("corrected") or []:
+        if fix.get("before") and fix["before"] in revised:
+            revised = revised.replace(fix["before"], fix["after"], 1)
+    removed = [r["sentence"] for r in entry.get("removed") or [] if r.get("sentence")]
+    if removed:
+        revised = CC.remove_sentences(revised, removed)
+    summary = {"checked": entry.get("checked"), "byStatus": entry.get("byStatus"), "removed": entry.get("removed"),
+               "corrected": entry.get("corrected"), "judged": entry.get("judged")}
+    return revised, summary
+
+
 async def _finalize_action_response(response: JSONResponse, body: dict) -> JSONResponse:
     """Audit a candidate Action before the frontend is allowed to commit it."""
     if int(getattr(response, "status_code", 500)) >= 300:
@@ -558,6 +731,12 @@ async def _finalize_action_response(response: JSONResponse, body: dict) -> JSONR
     if not isinstance(payload, dict) or not str(payload.get("report") or "").strip():
         return JSONResponse({"error": "The Action returned no report; the original report remains unchanged.", "preserved": True}, status_code=502)
 
+    if isinstance(body.get("_editPlacement"), dict):
+        payload["report"] = _apply_edit_placement(str(body.get("report") or ""), str(payload["report"]),
+                                                  body["_editPlacement"])
+    payload["report"], claim_summary = await _action_claim_check(str(body.get("report") or ""), str(payload["report"]), body)
+    if claim_summary is not None:
+        payload["claimCheck"] = claim_summary
     original_charts = [x for x in (body.get("charts") or []) if isinstance(x, dict)]
     candidate_charts = payload.get("charts") if isinstance(payload.get("charts"), list) else original_charts
     original_images = [x for x in (body.get("images") or []) if isinstance(x, dict)]
@@ -566,18 +745,30 @@ async def _finalize_action_response(response: JSONResponse, body: dict) -> JSONR
     candidate_sources = payload.get("sources") if isinstance(payload.get("sources"), list) else original_sources
     audit_only_sources = [x for x in (body.get("_actionAuditEvidenceSources") or []) if isinstance(x, dict)]
     candidate_sources_for_audit = list(candidate_sources) + audit_only_sources
-    audits, audited_sources, new_blockers = await _audit_action_candidate(
-        original_report=str(body.get("report") or ""),
-        candidate_report=str(payload["report"]),
-        title=str(payload.get("title") or body.get("title") or ""),
-        original_charts=original_charts,
-        candidate_charts=candidate_charts,
-        original_images=original_images,
-        candidate_images=candidate_images,
-        original_sources=original_sources,
-        candidate_sources=candidate_sources_for_audit,
-        report_tier=str(body.get("reportTier") or "detailed"),
-    )
+    verified_ids: set = set()
+    verified_token = _ACTION_VERIFIED_IDS.set(verified_ids)
+    try:
+        audits, audited_sources, new_blockers = await _audit_action_candidate(
+            original_report=str(body.get("report") or ""),
+            candidate_report=str(payload["report"]),
+            title=str(payload.get("title") or body.get("title") or ""),
+            original_charts=original_charts,
+            candidate_charts=candidate_charts,
+            original_images=original_images,
+            candidate_images=candidate_images,
+            original_sources=original_sources,
+            candidate_sources=candidate_sources_for_audit,
+            report_tier=str(body.get("reportTier") or "detailed"),
+        )
+    finally:
+        _ACTION_VERIFIED_IDS.reset(verified_token)
+    if verified_ids:
+        from datetime import datetime as _dt, timezone as _tz
+        stamp = _dt.now(_tz.utc).isoformat(timespec="seconds")
+        for source in audited_sources:
+            if isinstance(source, dict) and str(source.get("id") or "").upper() in verified_ids:
+                source["evidenceVerifiedAt"] = stamp  # the next edit reuses this evidence while it is fresh
+
     if new_blockers:
         return JSONResponse({
             "error": "The requested edit introduced a new publication or evidence finding. The previous report revision was preserved.",
@@ -605,7 +796,270 @@ async def _finalize_action_response(response: JSONResponse, body: dict) -> JSONR
     })
     if isinstance(body.get("_actionRagStatus"), dict):
         payload["ragStatus"] = body["_actionRagStatus"]
+    if body.get("_editPagesMapped") and os.getenv("GG_EDIT_REMAP_PAGES", "1").strip() != "0":
+        # page references are never reused after an edit: re-render and say where the change now is
+        placement = await _action_page_after_edit(payload, body)
+        if placement:
+            payload["pagePlacement"] = placement
+    if isinstance(body.get("_editEvidence"), dict) and "evidence" not in payload:
+        payload["evidence"] = body["_editEvidence"]
+    if isinstance(body.get("_editPlan"), dict) and "editPlan" not in payload:
+        payload["editPlan"] = body["_editPlan"]
     return JSONResponse(_decode_leaked_unicode_escapes(payload), status_code=response.status_code)
+
+
+# ─── Edit engine: plan, element/page targeting, element-level edits ──────────────────────────────────────────
+# utils.edit_plan decides the route; utils.report_elements / pdf_page_map / edit_location find the place;
+# utils.edit_evidence decides what evidence exists and what must be researched; utils.chart_explain grounds chart
+# explanations in the chart's own data. Element-level edits generate ONE new block and splice it in; everything
+# else goes to the existing section editor, pointed at the resolved section. GG_EDIT_ENGINE=0 turns this off.
+_EDIT_PAGE_RE = re.compile(r"\bpage\s*(?:no\.?|number)?\s*\d", re.I)
+
+
+async def _action_render_current_pdf(body: dict) -> bytes | None:
+    """The PDF exactly as the export route renders it for this report version (same handler, same inputs)."""
+    from routes.pdf import generate_pdf
+    pdf_body = {key: body.get(key) for key in (
+        "report", "title", "question", "summary", "keyStats", "charts", "images", "fileImages", "sources", "theme",
+        "presentation", "reportTier", "reportStyle", "styleVariant", "kicker", "publicationOutcome") if key in body}
+    pdf_body["draftExport"] = True  # map what the user sees, even for a draft
+    started = time.perf_counter()
+    try:
+        response = await generate_pdf(_ReportJobRequest(pdf_body))
+    except Exception as exc:
+        log.warning("Edit engine: PDF render for page mapping failed: %s", type(exc).__name__)
+        return None
+    finally:
+        _action_metric("pdf", time.perf_counter() - started, count=1)
+    data = getattr(response, "body", b"")
+    return data if isinstance(data, (bytes, bytearray)) and bytes(data[:4]) == b"%PDF" else None
+
+
+def _edit_section_heading(elements: list, element) -> object:
+    from utils.report_elements import by_id
+    if element.kind == "heading":
+        return element
+    return by_id(elements, element.section_id) if element.section_id else None
+
+
+async def _edit_evidence(body: dict, plan, query: str, section_title: str) -> tuple[dict, list, dict]:
+    """Evidence for an element-level edit: reuse what the report already holds; research only missing facts.
+    Returns (source id -> passage text, updated source manifest, sufficiency summary)."""
+    from utils import edit_evidence as EV
+    sources = [x for x in (body.get("sources") or []) if isinstance(x, dict)]
+    extra = [{"id": x.get("id"), "title": x.get("title"), "text": x.get("evidenceContent") or "", "origin": "upload"}
+             for x in (body.get("_actionAuditEvidenceSources") or []) if isinstance(x, dict)]
+    store = EV.build_store(str(body.get("report") or ""), sources, list(body.get("charts") or []), extra)
+    sufficiency = EV.assess(store, plan.needs)
+    evidence: dict[str, str] = {}
+    for passage in EV.passages_for(store, query, k=10, budget_tokens=int(os.getenv("GG_EDIT_EVIDENCE_TOKENS", "6000"))):
+        evidence.setdefault(passage.source_id, passage.text)
+    summary = {**sufficiency.to_dict(), "reusedPassages": len(evidence), "researched": False}
+    if plan.explicit_research or sufficiency.missing:
+        started = time.perf_counter()
+        request = sufficiency.research_instruction(plan.instruction) if sufficiency.missing else plan.instruction
+        context, sources = await _action_web_research(request, section_title, str(body.get("title") or ""), sources)
+        _action_metric("research", time.perf_counter() - started, count=1)
+        for block in _action_evidence_blocks(context):
+            evidence[block["id"]] = block["evidence"]
+        summary["researched"] = True
+        summary["newSources"] = [b["id"] for b in _action_evidence_blocks(context)]
+        if sufficiency.missing:
+            fresh = EV.build_store("", [], [], [{"id": b["id"], "text": b["evidence"], "origin": "web"}
+                                               for b in _action_evidence_blocks(context)])
+            summary["stillMissing"] = [n.describe() for n in EV.assess(fresh, sufficiency.missing).missing]
+    else:
+        _action_metric("researchSkipped", 0.0, count=1)
+    body["_actionWebEvidence"] = dict(evidence)
+    return evidence, sources, summary
+
+
+def _edit_evidence_prompt(evidence: dict) -> str:
+    return "\n\n".join(f"[{sid}] {text.strip()[:1800]}" for sid, text in evidence.items()) or "(no evidence passages)"
+
+
+_EXPLAIN_SYSTEM = (
+    "You write one passage that interprets a chart in a research report, from the chart's data and the evidence "
+    "given. Say what it shows, the most important observations (largest and smallest values, the main changes, "
+    "notable differences between series) and what they imply, with limitations where relevant. Do not list every "
+    "value. Use only numbers from CHART DATA, OBSERVATIONS or EVIDENCE. Describe patterns as observed; give a cause "
+    "only if an evidence passage states it, and cite that passage as [S#] in the same sentence. Never claim "
+    "causation from the chart alone. Cite only the [S#] ids given. Output only the passage in markdown, no heading.")
+_INSERT_SYSTEM = (
+    "You write one new block of text for a research report, to be inserted at a precise place. Follow the user's "
+    "instruction. Base every factual statement on the EVIDENCE passages and cite them as [S#]; use only numbers "
+    "that appear in the evidence or the surrounding text; keep dates, units and periods exactly as stated; never "
+    "present a forecast as a fact. If the evidence does not support something the instruction asks for, say plainly "
+    "that it is not supported instead of inventing it. Match the report's tone. Output only the new block.")
+
+
+async def _edit_generate_checked(system: str, user: str, check) -> tuple[str, list[str]]:
+    """Generate, check, and allow one repair with the problems listed; returns (text, remaining problems)."""
+    text = (await _call_llm_plain(system, user)).strip()
+    if not text:
+        return "", ["the model returned nothing"]
+    problems = check(text)
+    if problems:
+        repair = (user + "\n\nYOUR DRAFT:\n" + text + "\n\nFIX THESE PROBLEMS (remove or source each one; do not "
+                  "add new numbers):\n- " + "\n- ".join(problems[:12]))
+        fixed = (await _call_llm_plain(system, repair)).strip()
+        if fixed:
+            text, problems = fixed, check(fixed)
+    return text, problems
+
+
+def _edit_context(elements: list, element, radius: int = 2) -> str:
+    idx = next((i for i, e in enumerate(elements) if e is element), 0)
+    near = elements[max(0, idx - radius): idx + radius + 1]
+    return "\n".join(e.text for e in near)[:4000]
+
+
+async def _action_explain_element(body: dict, plan, elements: list) -> JSONResponse:
+    from utils import chart_explain as CE
+    from utils.report_elements import splice
+    report = str(body.get("report") or "")
+    charts = [x for x in (body.get("charts") or [])]
+    element = plan.location.element
+    heading = _edit_section_heading(elements, element)
+    if element.kind == "chart":
+        spec = charts[element.index - 1] if 0 < element.index <= len(charts) and isinstance(charts[element.index - 1], dict) else {}
+        if not spec.get("series"):
+            return JSONResponse({"error": "That chart has no underlying data I can explain from. The report is unchanged.",
+                                 "preserved": True}, status_code=422)
+        facts = CE.chart_facts(spec)
+        data_text = "CHART DATA:\n" + CE.facts_text(facts)
+        query = f"{spec.get('title', '')} {plan.instruction}"
+    else:  # a table: its own cells are the data
+        spec, facts = {}, {"series": []}
+        data_text = "TABLE:\n" + element.text
+        query = f"{element.text[:300]} {plan.instruction}"
+    evidence, sources, sufficiency = await _edit_evidence(body, plan, query, heading.title if heading else "")
+    if element.kind == "table":
+        evidence.setdefault("TABLE", element.text)
+    user = (f"INSTRUCTION: {plan.instruction}\n\n{data_text}\n\nSURROUNDING TEXT:\n{_edit_context(elements, element)}"
+            f"\n\nEVIDENCE:\n{_edit_evidence_prompt(evidence)}")
+    started = time.perf_counter()
+    text, problems = await _edit_generate_checked(_EXPLAIN_SYSTEM, user,
+                                                  lambda t: CE.check_explanation(t, spec, facts, evidence))
+    _action_metric("generation", time.perf_counter() - started)
+    if problems:
+        return JSONResponse({"error": "The explanation could not be fully supported by the chart data and evidence, so "
+                             "nothing was added. The report is unchanged.", "preserved": True, "details": problems[:8]},
+                            status_code=422)
+    mode = "before" if plan.location.relation == "before" else "after"
+    return JSONResponse({"report": splice(report, element, text, mode=mode), "title": body.get("title", ""),
+                         "charts": charts, "images": body.get("images") or [], "sources": sources,
+                         "presentation": body.get("presentation"), "editedSection": heading.title if heading else "",
+                         "editedElement": element.id, "explanationAdded": True, "editPlan": plan.to_dict(),
+                         "evidence": sufficiency})
+
+
+async def _action_insert_element(body: dict, plan, elements: list) -> JSONResponse:
+    from utils import chart_explain as CE
+    from utils.report_elements import splice
+    report = str(body.get("report") or "")
+    element = plan.location.element
+    heading = _edit_section_heading(elements, element)
+    context = _edit_context(elements, element)
+    evidence, sources, sufficiency = await _edit_evidence(body, plan, f"{heading.title if heading else ''} {plan.instruction}",
+                                                          heading.title if heading else "")
+    evidence.setdefault("CONTEXT", context)
+    user = (f"INSTRUCTION: {plan.instruction}\n\nINSERT {plan.location.relation.upper()} THIS TEXT:\n{element.text[:1500]}"
+            f"\n\nSURROUNDING TEXT:\n{context}\n\nEVIDENCE:\n{_edit_evidence_prompt({k: v for k, v in evidence.items() if k != 'CONTEXT'})}")
+    started = time.perf_counter()
+    text, problems = await _edit_generate_checked(_INSERT_SYSTEM, user, lambda t: CE.check_explanation(t, {}, {}, evidence))
+    _action_metric("generation", time.perf_counter() - started)
+    if problems:
+        return JSONResponse({"error": "The new text could not be fully supported by the available evidence, so nothing "
+                             "was added. The report is unchanged.", "preserved": True, "details": problems[:8],
+                             "evidence": sufficiency}, status_code=422)
+    mode = "before" if plan.location.relation == "before" else ("replace" if plan.location.relation == "replace" else "after")
+    return JSONResponse({"report": splice(report, element, text, mode=mode), "title": body.get("title", ""),
+                         "charts": body.get("charts") or [], "images": body.get("images") or [], "sources": sources,
+                         "presentation": body.get("presentation"), "editedSection": heading.title if heading else "",
+                         "editedElement": element.id, "editPlan": plan.to_dict(), "evidence": sufficiency})
+
+
+async def _plan_and_route_edit(body: dict, instruction: str) -> JSONResponse | None:
+    """A response (a question, or a finished element-level candidate) or None to continue with the section editor
+    - possibly retargeted to the resolved section, with a placement for any new chart or table."""
+    if os.getenv("GG_EDIT_ENGINE", "1").strip() == "0":
+        return None
+    from utils import edit_location as EL, edit_plan as EP, report_elements as RE
+    report = str(body.get("report") or "")
+    charts = [x for x in (body.get("charts") or [])]
+    elements = RE.parse(report)
+    if _EDIT_PAGE_RE.search(instruction):
+        pdf_bytes = await _action_render_current_pdf(body)
+        if pdf_bytes:
+            from utils import pdf_page_map
+            pdf_page_map.build(pdf_bytes, elements, charts)
+            body["_editPagesMapped"] = True
+    plan = EP.plan(instruction, elements, charts, resolve_location=EL.resolve)
+    body["_editPlan"] = plan.to_dict()
+    log.info("Edit plan: route=%s ops=%s outputs=%s location=%s", plan.route, plan.operations, plan.outputs,
+             (plan.to_dict().get("location") or {}).get("element"))
+    if plan.question:
+        candidates = [EL.describe(c, charts) for c in getattr(plan.location, "candidates", [])[:8]]
+        return JSONResponse({"error": plan.question, "clarification": True, "candidates": candidates,
+                             "preserved": True}, status_code=422)
+    if plan.route == "explain_element":
+        return await _finalize_action_response(await _action_explain_element(body, plan, elements), body)
+    if plan.route == "insert_element":
+        return await _finalize_action_response(await _action_insert_element(body, plan, elements), body)
+    loc = plan.location
+    if loc is not None and loc.element is not None and not _explicit_action_target(instruction):
+        heading = _edit_section_heading(elements, loc.element)
+        if heading is not None:
+            body["editInstruction"] = f'Target section: "{heading.title}"\n{instruction}'
+            if loc.element.kind != "heading" or loc.relation == "before":
+                body["_editPlacement"] = {"anchor": loc.element.text, "relation": loc.relation,
+                                          "kind": loc.element.kind}
+    return None
+
+
+def _apply_edit_placement(original_report: str, candidate_report: str, placement: dict) -> str:
+    """Move chart markers / tables the edit ADDED next to the requested anchor (the section editor appends them)."""
+    import re as _re
+    new_markers = [m for m in _re.findall(r"(?m)^\s*\[CHART_\d+\]\s*$", candidate_report)
+                   if m.strip() not in original_report]
+    original_tables = set(_re.findall(r"(?m)^\|.*\|\s*$", original_report))
+    blocks, candidate = [], candidate_report
+    for marker in new_markers:
+        candidate = candidate.replace(marker + "\n", "", 1) if marker + "\n" in candidate else candidate.replace(marker, "", 1)
+        blocks.append(marker.strip())
+    table_runs = _re.findall(r"(?m)(?:^\|.*\|\s*\n?)+", candidate)
+    for run in table_runs:
+        rows = [r for r in run.splitlines() if r.strip()]
+        if rows and all(r not in original_tables for r in rows):
+            candidate = candidate.replace(run, "", 1)
+            blocks.append(run.strip())
+    anchor = str(placement.get("anchor") or "")
+    at = candidate.find(anchor) if anchor else -1
+    if not blocks or at < 0:
+        return candidate_report
+    insert = "\n\n" + "\n\n".join(blocks) + "\n"
+    if placement.get("relation") == "before":
+        return candidate[:at] + insert.lstrip("\n") + "\n" + candidate[at:]
+    end = at + len(anchor)
+    return candidate[:end] + "\n" + insert + candidate[end:].lstrip("\n")
+
+
+async def _action_page_after_edit(payload: dict, body: dict) -> dict | None:
+    """Where the edited element is in the re-rendered PDF (page references are never reused after an edit)."""
+    from utils import pdf_page_map, report_elements as RE
+    element_id = payload.get("editedElement")
+    if not element_id and payload.get("editedSection"):
+        heading = next((e for e in RE.parse(str(payload.get("report") or "")) if e.kind == "heading"
+                        and e.title.strip().casefold() == str(payload["editedSection"]).strip().casefold()), None)
+        element_id = heading.id if heading else None
+    pdf_bytes = await _action_render_current_pdf({**body, **{k: payload[k] for k in ("report", "charts", "sources") if k in payload}})
+    if not pdf_bytes:
+        return None
+    elements = RE.parse(str(payload.get("report") or ""))
+    pages = pdf_page_map.build(pdf_bytes, elements, list(payload.get("charts") or []))
+    page = pages.page_of.get(element_id) if element_id else None
+    return {"pages": pages.pages, "editedElementPage": page}
 
 
 async def _attach_action_okf_evidence(body: dict, instruction: str) -> None:
@@ -638,12 +1092,18 @@ async def _attach_action_okf_evidence(body: dict, instruction: str) -> None:
         "Report title: " + str(body.get("title") or "")[:200],
         "Selected report section and current claim: " + section_excerpt,
     ) if x.strip())
+    _rag_started = time.perf_counter()
     try:
-        result = await _rag_report(session_id=session_id, report_spec=query, report_type="action")
+        # An edit never waits long for the optional document service: a sleeping or unreachable service would
+        # otherwise hold the edit for up to 100 s (the wake loop) before anything else happened.
+        result = await _rag_report(session_id=session_id, report_spec=query, report_type="action",
+                                   wake_wait=float(os.getenv("GG_ACTION_RAG_WAKE_S", "6") or 6))
     except Exception as exc:
         body["_actionRagStatus"].update({"status": "retrieval_failed", "errorType": type(exc).__name__})
         log.warning("Action OKF retrieval failed: %s", type(exc).__name__)
+        _action_metric("rag", time.perf_counter() - _rag_started)
         return
+    _action_metric("rag", time.perf_counter() - _rag_started, count=1)
     rows = [row for row in (result.get("evidence") or []) if isinstance(row, dict) and str(row.get("text") or "").strip()]
     if not result.get("has_content") or not rows:
         body["_actionRagStatus"].update({"status": "unavailable_or_empty", "restoreStatus": result.get("restore_status"), "reason": result.get("reason")})
@@ -19708,6 +20168,16 @@ BODY TO REFORMAT:
     return result, summary
 
 
+async def _action_gateway_plain(gateway, system_prompt: str, user_prompt: str) -> str:
+    """One scheduled call through the Phase 2 gateway (project-aware Gemini, breaker, telemetry; Groq only as the
+    gateway's own fallback) instead of four parallel copies of the same prompt."""
+    t0 = time.perf_counter()
+    result = await gateway.generate(purpose="action_edit", system=system_prompt, prompt=user_prompt,
+                                    max_tokens=8192, temperature=0.25, timeout=60.0, retries=1)
+    _action_metric("llm", time.perf_counter() - t0, count=1)
+    return str(result.text or "").strip() if result.ok else ""
+
+
 async def _call_llm_plain(system_prompt: str, user_prompt: str) -> str:
     """Reliable provider pool for surgical Action edits.
 
@@ -19717,6 +20187,9 @@ async def _call_llm_plain(system_prompt: str, user_prompt: str) -> str:
     A successful non-empty response is returned immediately; no provider is
     intentionally retried after a transient failure on the same pair.
     """
+    gateway = _ACTION_GATEWAY.get()
+    if gateway is not None:
+        return await _action_gateway_plain(gateway, system_prompt, user_prompt)
     started = time.monotonic()
     # Actions may follow a bounded live web search, so give the provider pool
     # enough time for several key/model waves. The UI uses a background job and
@@ -20117,6 +20590,17 @@ async def _call_llm_json(
     request timeout when providers are unavailable. 401/403 keys are cooled
     down so subsequent requests do not repeatedly probe the same bad key.
     """
+    gateway = _ACTION_GATEWAY.get()
+    if gateway is not None:
+        t0 = time.perf_counter()
+        result = await gateway.generate(purpose="action_json", system=system_prompt, prompt=user_prompt,
+                                        max_tokens=4096, temperature=0.1, json_mode=True, timeout=45.0, retries=1)
+        _action_metric("llm", time.perf_counter() - t0, count=1)
+        parsed = result.json() if result.ok else None
+        if isinstance(parsed, dict):
+            return parsed
+        # Gemini could not answer: the Groq JSON path below is the fallback, without a second Gemini round
+        max_gemini_attempts = 0
     groq_attempts = 0
     # A Groq 413 is a request-size problem that no key can fix. The Deep Research
     # planner prompt is ~45k chars, which is always over Groq's per-request token
@@ -21331,16 +21815,34 @@ async def start_action_edit_job(request: Request):
         return JSONResponse({"error": "No edit instruction provided."}, status_code=400)
 
     _prune_action_jobs()
-    active = sum(1 for job in _ACTION_JOBS.values() if job.get("status") in {"queued", "running"})
-    if active >= 1:
+    report_key = str(body.get("reportId") or "").strip() or ("text:" + hashlib.sha256(
+        str(body.get("report") or "").encode("utf-8")).hexdigest()[:24])
+    running = [job for job in _ACTION_JOBS.values() if job.get("status") in {"queued", "running"}]
+    if any(job.get("reportKey") == report_key for job in running):
+        # two edits of one report would each start from the same text and the second would silently undo the first
         return JSONResponse({
-            "error": "Another Action is still running. Wait for it to finish before starting a second edit; your current report has not been changed.",
+            "error": "Another edit to this report is still running. Wait for it to finish; your current report has not been changed.",
+            "preserved": True, "conflict": "edit_in_progress",
+        }, status_code=409)
+    try:
+        incoming_revision = int(body.get("revision") or 0)
+    except (TypeError, ValueError):
+        incoming_revision = 0
+    committed = _ACTION_REPORT_REVISIONS.get(str(body.get("reportId") or ""), 0)
+    if incoming_revision and committed > incoming_revision:
+        return JSONResponse({
+            "error": "This report was changed by a newer edit. Reload the latest version before editing; nothing was changed.",
+            "preserved": True, "conflict": "stale_revision", "latestRevision": committed,
+        }, status_code=409)
+    if len(running) >= 2 * _action_workers():
+        return JSONResponse({
+            "error": "The editor is busy with other requests. Please retry in a moment; your current report has not been changed.",
             "preserved": True,
         }, status_code=429)
 
     job_id = uuid.uuid4().hex
     _ACTION_JOBS[job_id] = {
-        "status": "queued", "createdAt": time.time(), "phase": "queued",
+        "status": "queued", "createdAt": time.time(), "phase": "queued", "reportKey": report_key,
     }
     try:
         _submit_action_job(job_id, body)
@@ -21416,6 +21918,10 @@ async def _edit_report_section_impl(request: Request):
     _set_style_variant(body.get("styleVariant"))
 
     await _attach_action_okf_evidence(body, instruction)
+    routed = await _plan_and_route_edit(body, instruction)
+    if routed is not None:
+        return routed
+    instruction = (body.get("editInstruction") or instruction or "").strip()
 
     # A chart-title target is unambiguous and can be applied without choosing
     # or rewriting a prose section. This lets a user remove or repair one
@@ -21588,6 +22094,42 @@ async def _edit_report_section_impl(request: Request):
     return await _finalize_action_response(final_response, body)
 
 
+def _action_new_chart_ok(spec: dict, existing: list) -> bool:
+    """A chart an edit adds passes the same checks as report charts: spec validity, chart_lint's quality rules
+    (metadata, page text, unnamed measures, ...), no duplicate of a chart already in the report, and comparable
+    series (a multi-series time chart whose series cover different periods is refused). The title is then fixed
+    by the same rules as report charts. GG_EDIT_CHART_LINT=0 keeps only the spec validation."""
+    if not _validate_chart_spec(spec):
+        return False
+    if os.getenv("GG_EDIT_CHART_LINT", "1").strip() == "0":
+        return True
+    try:
+        from utils.chart_lint import contained_charts, fix_chart, quality_reason
+        reason = quality_reason(spec, "", [])
+        # The report pipeline drops charts of fewer than 3 distinct values that it extracts on its own; a chart the
+        # user explicitly asks for may legitimately compare two things ("India vs China, 2025"), so that one rule
+        # does not apply here (at least 2 points are still required by the spec validation).
+        if reason and not reason.startswith("fewer than 3 distinct values"):
+            log.info("Action chart refused: %s", reason[:120])
+            return False
+        series = [s for s in (spec.get("series") or []) if isinstance(s, dict)]
+        label_sets = [{str(p.get("label")) for p in (s.get("data") or [])} for s in series]
+        if len(label_sets) > 1 and all(re.match(r"^(?:FY\s*)?(?:19|20)\d{2}", lab) for ls in label_sets for lab in ls if lab):
+            if not set.intersection(*label_sets):
+                log.info("Action chart refused: its series cover different periods")
+                return False
+        others = [c for c in (existing or []) if isinstance(c, dict)]
+        if (len(others) + 1) in contained_charts(others + [spec]):  # 1-based: the new chart repeats an existing one
+            log.info("Action chart refused: it repeats a chart already in the report")
+            return False
+        fixed, _changes = fix_chart(dict(spec))
+        if isinstance(fixed, dict) and fixed.get("title"):
+            spec["title"] = fixed["title"]
+    except Exception as exc:  # lint must never break an edit; the spec validation above still applies
+        log.warning("Action chart lint skipped: %s", type(exc).__name__)
+    return True
+
+
 async def _edit_report_section_single_body(body: dict):
     """Apply one surgical Action edit to one target section.
 
@@ -21671,10 +22213,33 @@ async def _edit_report_section_single_body(body: dict):
                 sources.append(record)
                 existing_source_urls.add(key)
         action_context += "\n\nPERSISTENT STORED WEB RESEARCH (reusable evidence collected by Growth Gradual):\n" + stored_web_context
-    if _action_requires_web_research(instruction, section_text, okf_available=bool(action_okf_sources)):
+    research_wanted = _action_requires_web_research(instruction, section_text, okf_available=bool(action_okf_sources))
+    research_request = instruction
+    if research_wanted and os.getenv("GG_EDIT_ENGINE", "1").strip() != "0" and not _ACTION_EXPLICIT_WEB_RE.search(instruction):
+        # Keywords asked for research; first check whether the facts the instruction names are already in the
+        # report's evidence (cited statements, saved source excerpts, chart data, uploads, stored research).
+        from utils import edit_evidence as _EV, edit_plan as _EP
+        _needs = _EP.evidence_needs(instruction)
+        if _needs:
+            _extra = [{"id": x.get("id"), "title": x.get("title"), "text": x.get("evidenceContent") or "", "origin": "upload"}
+                      for x in action_okf_sources]
+            if stored_web_context:
+                _extra.append({"id": "STORED", "title": "stored web research", "text": stored_web_context, "origin": "stored"})
+            _suff = _EV.assess(_EV.build_store(report_text, sources, charts, _extra), _needs)
+            body["_editEvidence"] = {**_suff.to_dict(), "researched": not _suff.sufficient}
+            if _suff.sufficient:
+                research_wanted = False
+                _action_metric("researchSkipped", 0.0, count=1)
+                log.info("Action: existing evidence covers %d requested fact(s); no web search", len(_needs))
+            else:
+                research_request = _suff.research_instruction(instruction)
+    if research_wanted:
+        _research_started = time.perf_counter()
         action_web_context, sources = await _action_web_research(
-            instruction, target["heading"], title, sources
+            research_request, target["heading"], title, sources
         )
+        _action_metric("research", time.perf_counter() - _research_started, count=1)
+        body["_actionWebEvidence"] = {b["id"]: b["evidence"] for b in _action_evidence_blocks(action_web_context)}
         if action_web_context:
             action_context = (
                 action_context
@@ -22270,7 +22835,7 @@ async def _edit_report_section_single_body(body: dict):
             "Keep the chart title and takeaway aligned to the selected section."
         )
         new_chart = await _call_llm_json(new_chart_system_prompt, new_chart_user_prompt)
-        if new_chart and "error" not in new_chart and _validate_chart_spec(new_chart):
+        if new_chart and "error" not in new_chart and _action_new_chart_ok(new_chart, charts):
             charts.append(new_chart)
             newly_added_chart_index = len(charts)
             newly_added_chart_indices.append(newly_added_chart_index)
@@ -22301,7 +22866,7 @@ async def _edit_report_section_single_body(body: dict):
             f"SUPPORTED EVIDENCE CONTEXT:\n{action_context}"
         )
         additional_chart = await _call_llm_json(add_chart_system_prompt, add_chart_user_prompt)
-        if additional_chart and "error" not in additional_chart and _validate_chart_spec(additional_chart):
+        if additional_chart and "error" not in additional_chart and _action_new_chart_ok(additional_chart, charts):
             charts.append(additional_chart)
             newly_added_chart_index = len(charts)
             newly_added_chart_indices.append(newly_added_chart_index)
@@ -22349,7 +22914,7 @@ async def _edit_report_section_single_body(body: dict):
             f"{action_context}"
         )
         extra_chart = await _call_llm_json(extra_chart_system_prompt, extra_chart_user_prompt)
-        if not extra_chart or "error" in extra_chart or not _validate_chart_spec(extra_chart):
+        if not extra_chart or "error" in extra_chart or not _action_new_chart_ok(extra_chart, charts):
             break
         charts.append(extra_chart)
         new_index = len(charts)
