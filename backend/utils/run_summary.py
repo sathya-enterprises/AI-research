@@ -56,6 +56,12 @@ def build_run_summary(meta: dict, *, tier: str, stages: dict | None = None) -> d
             "quotaWaitSeconds": llm.get("quotaWaitSeconds"),
             "fallbacks": llm.get("fallbacks"), "groqBeforeWait": llm.get("groqBeforeWait"),
             "shortFallbacksRetried": llm.get("shortFallbacksRetried"),
+            "fallbacksWithoutCitations": llm.get("fallbacksWithoutCitations"),
+            "projectMode": llm.get("projectMode"),
+            "requests": _requests_brief(llm.get("requestSummary") or {}),
+            "circuitBreakerTrips": len(llm.get("circuitBreaker") or []),
+            "quotaLimitsReported": llm.get("quotaLimitsReported") or [],
+            "concurrency": llm.get("concurrency") or {},
         },
         "sources": {"cited": citations.get("sourcesCited"), "passagesCited": citations.get("passagesCited")},
         "claims": {"byStatus": claims, "corrected": corrected, "removed": removed},
@@ -67,13 +73,30 @@ def build_run_summary(meta: dict, *, tier: str, stages: dict | None = None) -> d
     }
 
 
+def _requests_brief(req: dict) -> dict:
+    """Per-request totals for the summary: success/retry rates, latency percentiles and per-project counts."""
+    if not req.get("requests"):
+        return {}
+    return {k: req.get(k) for k in ("requests", "logicalCalls", "successRate", "geminiSuccessRate", "retryRate",
+                                    "http429", "http429Daily", "http503", "latencySeconds", "groqFallbackShare",
+                                    "projectsUsed", "byProvider")} | {
+        "byProject": {p: {k: v for k, v in item.items() if k in {"requests", "ok", "http429", "http503", "p50s", "p95s",
+                                                                  "peakRequestsPerMinute", "peakUtilisation"}}
+                      for p, item in (req.get("byProject") or {}).items()}}
+
+
 def summary_line(summary: dict) -> str:
     llm = summary.get("llm") or {}
     stages = ", ".join(f"{k} {v:.0f}s" for k, v in (summary.get("stageSeconds") or {}).items())
     claims = summary.get("claims") or {}
     return (f"run summary: {summary.get('tier')} {summary.get('elapsedSeconds')}s [{stages}] | "
             f"calls {llm.get('calls')} ({llm.get('failed')} failed) tokens {llm.get('tokensIn')}/{llm.get('tokensOut')} "
-            f"429x{llm.get('http429')} 503x{llm.get('http503')} fallbacks {llm.get('fallbacks')} | "
+            f"429x{llm.get('http429')} 503x{llm.get('http503')} fallbacks {llm.get('fallbacks')} "
+            f"projects {(llm.get('requests') or {}).get('projectsUsed')} ({llm.get('projectMode')}) "
+            f"p50/p95 {((llm.get('requests') or {}).get('latencySeconds') or {}).get('p50')}/"
+            f"{((llm.get('requests') or {}).get('latencySeconds') or {}).get('p95')}s "
+            f"breaker {llm.get('circuitBreakerTrips')} concurrency {(llm.get('concurrency') or {}).get('lowest')}-"
+            f"{(llm.get('concurrency') or {}).get('final')} | "
             f"claims {claims.get('byStatus')} corrected {claims.get('corrected')} removed {claims.get('removed')} | "
             f"charts {(summary.get('charts') or {}).get('used')} | words {summary.get('words')} "
             f"pages {summary.get('estimatedPages')} ({summary.get('lengthStatus')})")

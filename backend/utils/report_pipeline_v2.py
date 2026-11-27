@@ -516,6 +516,11 @@ async def run_pipeline_v2(*, runtime, question: str, tier: str, store, manifest:
     if store is None or len(store.passages) < 10:
         raise PipelineV2Error(f"evidence store too small ({0 if store is None else len(store.passages)} passages)")
     gateway = gateway or LLMGateway(runtime, tier)
+    if hasattr(gateway, "report_id") and not gateway.report_id:  # request telemetry carries the report job id
+        try:
+            gateway.report_id = str(getattr(runtime, "_CURRENT_REPORT_JOB_ID").get() or "")
+        except Exception:
+            pass
     # Stage F: what the question asks for (window, why/what/how, lists, audience, comparisons).
     from datetime import date as _asks_date
     from utils.question_asks import parse_asks

@@ -16,7 +16,9 @@ one allowance, so rotating them adds no capacity. This module
 Configuration (environment, JSON where noted):
 
 GG_GEMINI_KEY_PROJECTS   project of each key, in the order of the GEMINI_API_KEY pool, comma-separated
-                         ("proj-a,proj-a,proj-b,..."), or JSON {"<last 6 characters of the key>": "<project>"}.
+                         ("proj-a,proj-a,proj-b,..."), or JSON {"<last 6 characters of the key>": "<project>"},
+                         or ``per_key``: every key is its own project, named gemini_project_01, _02, ... in pool
+                         order (use only when each key was created in a different Google Cloud project).
                          Keys not listed belong to the "shared" pool.
 GG_GEMINI_QUOTAS         JSON limits: {"default": {"rpm": 10, "tpm": 250000, "rpd": 250},
                                        "proj-b": {"*": {"rpm": 1000, "tpm": 4000000},
@@ -81,6 +83,24 @@ def parse_retry_delay(headers=None, body: object = None) -> float | None:
     return float(match.group(1)) if match else None
 
 
+def quota_violations(body: object = None) -> list[dict]:
+    """Google's QuotaFailure details from a 429 body: which quota was hit and its limit (quotaId, quotaMetric,
+    quotaValue, model). These are Google's own numbers for the project, safe to log (no credentials)."""
+    if not isinstance(body, dict):
+        return []
+    out = []
+    for detail in (body.get("error") or {}).get("details") or []:
+        if not isinstance(detail, dict) or "QuotaFailure" not in str(detail.get("@type") or ""):
+            continue
+        for v in detail.get("violations") or []:
+            if isinstance(v, dict):
+                dims = v.get("quotaDimensions") or {}
+                out.append({"quotaId": str(v.get("quotaId") or "")[:120], "quotaMetric": str(v.get("quotaMetric") or "")[:160],
+                            "quotaValue": str(v.get("quotaValue") or "")[:20],
+                            "model": str(dims.get("model") or "")[:60] if isinstance(dims, dict) else ""})
+    return out
+
+
 def is_daily_quota(body: object = None) -> bool:
     """A 429 for a per-day quota (it does not clear in a minute)."""
     text = (body if isinstance(body, str) else json.dumps(body or {})).casefold()
@@ -96,13 +116,32 @@ class QuotaManager:
         self._project_cache: tuple[str, str, dict] | None = None
         self._limits_cache: tuple[str, object] | None = None
         self.stats = {"cooled": 0, "dailyExhausted": 0, "waitsSuggested": 0}
+        self._inflight: dict[str, int] = {}
+        self._outcomes: dict[str, deque] = {}
 
     # ── configuration ─────────────────────────────────────────────────────────
+    def project_aware(self) -> bool:
+        """True when keys are mapped to projects (a 429 then cools only its own project and model)."""
+        return bool(os.getenv("GG_GEMINI_KEY_PROJECTS", "").strip())
+
+    def alias_of(self, key: str, pool: list[str] | None = None) -> str:
+        """A safe name for a key in logs and telemetry: its project, or its position in the pool when every key
+        is in the shared pool (gemini_key_03). Never contains any part of the key."""
+        project = self.project_of(key, pool)
+        if project != SHARED_PROJECT:
+            return project
+        pool = pool if pool is not None else _gemini_pool()
+        index = next((i for i, k in enumerate(pool) if k == key), -1)
+        return f"gemini_key_{index + 1:02d}" if index >= 0 else "gemini_key_unlisted"
+
     def project_of(self, key: str, pool: list[str] | None = None) -> str:
         raw = os.getenv("GG_GEMINI_KEY_PROJECTS", "").strip()
         if not raw or not key:
             return SHARED_PROJECT
         pool = pool if pool is not None else _gemini_pool()
+        if raw.casefold() == "per_key":
+            index = next((i for i, k in enumerate(pool) if k == key), -1)
+            return f"gemini_project_{index + 1:02d}" if index >= 0 else SHARED_PROJECT
         signature = (raw, "|".join(k[-6:] for k in pool))
         if self._project_cache is None or self._project_cache[:2] != signature:
             mapping: dict[str, str] = {}
@@ -194,6 +233,34 @@ class QuotaManager:
             hours = float(os.getenv("GG_GEMINI_DAILY_RESET_HOURS", "6") or 6)
             return self.cool(project, model, max(delay or 0.0, hours * 3600), "daily quota exhausted")
         return self.cool(project, model, delay if delay else 60.0, "per-minute quota")
+
+    # ── health and load (request distribution) ────────────────────────────────
+    def begin(self, project: str) -> None:
+        with self._lock:
+            self._inflight[project] = self._inflight.get(project, 0) + 1
+
+    def end(self, project: str) -> None:
+        with self._lock:
+            self._inflight[project] = max(0, self._inflight.get(project, 0) - 1)
+
+    def outcome(self, project: str, model: str, ok: bool) -> None:
+        """Result of one request; the last 20 per project feed its health."""
+        with self._lock:
+            recent = self._outcomes.setdefault(project, deque(maxlen=20))
+            recent.append(bool(ok))
+
+    def load(self, project: str, model: str, now: float | None = None) -> float:
+        """How busy and how unhealthy a project is for this model (lower is better). In-flight requests weigh
+        most, then requests in the last minute; recent failures add up to 5. A project with no history is
+        neutral (0 failures counted), not assumed healthy beyond that."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._prune((project, model), now)
+            inflight = self._inflight.get(project, 0)
+            minute = len(self._requests.get((project, model), ()))
+            recent = self._outcomes.get(project, ())
+            failure_rate = (sum(1 for ok in recent if not ok) / len(recent)) if recent else 0.0
+        return inflight * 2.0 + minute + failure_rate * 5.0
 
     def snapshot(self) -> dict:
         now = time.time()

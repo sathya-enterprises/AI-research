@@ -17,7 +17,7 @@ project share one allowance, so rotating them adds no capacity and only spreads 
 | Variable | Meaning | Default |
 |---|---|---|
 | `GEMINI_API_KEY` | The key pool (existing setting, comma-separated). | — |
-| `GG_GEMINI_KEY_PROJECTS` | The project of each key, in pool order (`proj-a,proj-a,proj-b`), or JSON `{"<last 6 chars of key>": "<project>"}`. | Unset: every key belongs to one `shared` pool, the safe assumption. |
+| `GG_GEMINI_KEY_PROJECTS` | The project of each key, in pool order (`proj-a,proj-a,proj-b`), or JSON `{"<last 6 chars of key>": "<project>"}`, or `per_key`: each key is its own project, named `gemini_project_01` … `gemini_project_16` in pool order. Use `per_key` only when every key was created in a different Google Cloud project. | Unset: every key belongs to one `shared` pool, the safe assumption. |
 | `GG_GEMINI_QUOTAS` | JSON limits per project and model: `{"default": {"rpm": 10, "tpm": 250000, "rpd": 250}, "proj-b": {"*": {"rpm": 1000}}}` | Unset: nothing is enforced in advance, and only Google's 429s cool a pool. |
 | `GG_GEMINI_DAILY_RESET_HOURS` | How long a pool stays cooled after a per-day-quota 429 when Google gives no delay. | `6` |
 
@@ -28,15 +28,37 @@ How to fill these in:
    models in use (`gemini-3-flash-preview`, `gemini-3.6-flash`, the lite models).
 3. Set `GG_GEMINI_KEY_PROJECTS` and `GG_GEMINI_QUOTAS` with those numbers.
 
-What the gateway does with them:
+The Gemini API itself does not tell a client which project a key belongs to, so check the mapping in AI Studio
+(*Get API key* lists each key with its project) or the Cloud console before you set it.
 
-- It sends a request only to a pool that has room for its estimated tokens.
-- On a 429 it cools the whole project and model pool for the delay Google asks for (the `Retry-After` header or
-  the `RetryInfo` in the body), plus jitter, so waiting calls don't all retry in the same second.
+What the gateway does with them (when keys are mapped to projects, `per_key` included):
+
+- It sends a request only to a pool that has room for its estimated tokens, choosing the least busy and
+  healthiest project (requests in flight, requests in the last minute, recent failures). Within one attempt
+  plan each model goes to a different project, so a retry never lands on the project that just failed.
+- On a 429 it cools only that project and model, for the delay Google asks for (the `Retry-After` header or
+  the `RetryInfo` in the body), plus jitter. The project's other models and the other projects keep serving.
 - A daily-quota 429 cools the pool for the configured hours.
-- A 503 is upstream overload: the call retries after Google's delay, if one is given.
-- A fallback (Groq) answer shorter than half the requested words is held back while Gemini is retried, and is
-  used only if Gemini never answers.
+- Google's own limit is read from the 429 body (`QuotaFailure`: quota id and value) and reported in
+  `runSummary.llm.quotaLimitsReported`. Use those numbers to fill `GG_GEMINI_QUOTAS`.
+- A 503 is model-serving capacity, not quota. It cools only that project and model for
+  `GG_GEMINI_503_PROJECT_COOLDOWN_S` (20 s, or longer if Google gives a delay).
+- **Circuit breaker.** When `GG_GEMINI_503_BREAKER_PROJECTS` (2) different projects get a 503 on the same model
+  within a minute, or `GG_GEMINI_429_BREAKER_PROJECTS` (3) get a 429, the model is cooled for every project:
+  30 s for 503 and 60 s for 429 (`GG_GEMINI_503_BREAKER_S` / `GG_GEMINI_429_BREAKER_S`), doubling on each trip
+  in a row up to 5 minutes, with jitter. After that, one probe request at a time is let through until the
+  model answers again.
+- A fallback (Groq) answer shorter than half the requested words, or a section answer without the `[S…]`
+  citations its prompt asked for, is held back while Gemini is retried, and is used only if Gemini never
+  answers.
+
+With no mapping (the `shared` pool) the earlier behaviour is unchanged: one 503 cools the model, and 429s on two
+keys within a minute cool the model.
+
+**Adaptive concurrency.** The gateway starts at `GG_V2_SECTION_CONCURRENCY` (5). A 429 or a breaker trip lowers
+it by one, at most once per `GG_V2_CONCURRENCY_DECREASE_EVERY_S` (30 s), never below `GG_V2_CONCURRENCY_MIN` (3).
+After `GG_V2_CONCURRENCY_INCREASE_AFTER` (10) successes in a row it rises by one, never above
+`GG_V2_CONCURRENCY_MAX`. That defaults to the starting value, so more keys never raise concurrency on their own.
 
 Other gateway settings (existing):
 
@@ -44,7 +66,10 @@ Other gateway settings (existing):
 - `GG_V2_HEDGE=1`: hedged calls (off by default, because hedging added 429/503s in live runs).
 - `GG_V2_LLM_CALL_BUDGET_DETAILED` / `_IN_DEPTH`: call budgets per report.
 
-Logs and telemetry show at most the last 4 characters of a key.
+Logs and telemetry name a key only by its alias (`gemini_project_03`, or `gemini_key_03` in the shared pool);
+no part of a key is logged. Every HTTP attempt is logged as `V2 LLM request <id> <purpose>/<section> <provider>
+<model> <alias> status=… <category> <seconds> tokens=in/out attempt=n`. Per-project and per-model totals (requests,
+429/503, p50/p95/p99 latency, peak requests and tokens per minute, Groq share) are in `runSummary.llm.requests`.
 
 ## 2. Claim verification (`utils/claim_check.py`)
 
